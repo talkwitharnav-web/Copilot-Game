@@ -12,6 +12,11 @@ enum class BlockId : std::uint8_t {
     Dirt,
     Grass,
     Sand,
+    Cobblestone,
+    Gravel,
+    Snow,
+    Planks,
+    Bricks,
 };
 
 constexpr bool isSolid(BlockId id) {
@@ -38,6 +43,11 @@ enum class TextureLayer : std::uint32_t {
     /// Flat white, for geometry that carries its own colour instead of a
     /// material: the targeting cage and the crosshair.
     White = 5,
+    Cobblestone = 6,
+    Gravel = 7,
+    Snow = 8,
+    Planks = 9,
+    Bricks = 10,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
@@ -59,6 +69,16 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::GrassTop);
     case BlockId::Sand:
         return static_cast<float>(TextureLayer::Sand);
+    case BlockId::Cobblestone:
+        return static_cast<float>(TextureLayer::Cobblestone);
+    case BlockId::Gravel:
+        return static_cast<float>(TextureLayer::Gravel);
+    case BlockId::Snow:
+        return static_cast<float>(TextureLayer::Snow);
+    case BlockId::Planks:
+        return static_cast<float>(TextureLayer::Planks);
+    case BlockId::Bricks:
+        return static_cast<float>(TextureLayer::Bricks);
     case BlockId::Air:
         break;
     }

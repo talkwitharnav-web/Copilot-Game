@@ -99,6 +99,30 @@ $dirtWeights  = @(3, 5, 6, 4, 2)
 $grassPalette = @('4F7F31', '5A8C38', '65993F', '70A646', '7BB34D')
 $grassWeights = @(2, 4, 6, 4, 2)
 
+# Loose rubble carries far more contrast than bedrock-smooth stone.
+$cobblePalette = @('4F4F53', '646468', '78787D', '8E8E93', 'A6A6AB')
+$cobbleWeights = @(3, 5, 5, 4, 3)
+
+# Gravel mixes warm and cool greys rather than staying neutral.
+$gravelPalette = @('575250', '6A625D', '7C736C', '8D847C', '9F958C')
+$gravelWeights = @(3, 5, 5, 4, 3)
+
+# Snow is almost flat with a faint blue cast; real contrast reads as dirty snow.
+$snowPalette = @('DFE7EF', 'E9EFF5', 'F2F6FA', 'F9FBFD', 'FFFFFF')
+$snowWeights = @(1, 2, 5, 7, 5)
+
+$planksPalette = @('9A7C4B', 'A78855', 'B4945F', 'BE9F6A', 'C9AB76')
+$planksWeights = @(3, 5, 6, 4, 2)
+$plankSeamColor = '6A5330'
+
+$brickPalette = @('6B3729', '7D4234', '8E4D3D', '9F5847', 'B0664F', 'C0765E')
+$brickWeights = @(3, 5, 6, 5, 4, 2)
+
+# Mortar is not a flat fill: it carries as much grain as the brick faces, which
+# is most of what stops the texture reading as vector art.
+$mortarPalette = @('978D86', 'A39992', 'AEA49C', 'B9AEA6', 'C4B8AF')
+$mortarWeights = @(2, 4, 6, 4, 2)
+
 $sandPalette  = @('CFC59A', 'D6CCA3', 'DCD2AB', 'E2D8B3', 'E8DEBB')
 $sandWeights  = @(2, 4, 6, 4, 2)
 
@@ -189,11 +213,110 @@ function New-GrassSideTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'grass_side'
 }
 
+# Rubble reads as lumps rather than grain, so the palette index is chosen per
+# clump of pixels with only slight per-pixel jitter on top.
+function New-ClumpedTexture {
+    param([string]$Name, [string[]]$Palette, [int[]]$Weights, [int]$Salt, [int]$Clump)
+
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $cx = [Math]::Floor($x / $Clump)
+            $cy = [Math]::Floor($y / $Clump)
+            $roll = Get-Hash01 -x $cx -y $cy -salt $Salt
+            $jitter = (Get-Hash01 -x $x -y $y -salt ($Salt + 77)) * 0.22 - 0.11
+            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll + $jitter))
+            $index = Get-WeightedIndex -Roll $roll -Weights $Weights
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $Palette[$index]))
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name $Name
+}
+
+# Four boards, each with a hard dark seam beneath it and horizontal grain within.
+function New-PlanksTexture {
+    $boardHeight = 4
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    for ($y = 0; $y -lt $size; $y++) {
+        $board = [Math]::Floor($y / $boardHeight)
+        $rowInBoard = $y % $boardHeight
+
+        $previous = 0
+        for ($x = 0; $x -lt $size; $x++) {
+            if ($rowInBoard -eq ($boardHeight - 1)) {
+                $bitmap.SetPixel($x, $y, (ConvertTo-Color $plankSeamColor))
+                continue
+            }
+
+            # Grain runs along the board, so a pixel usually repeats the one to
+            # its left. Salting by board keeps each plank distinct.
+            if ($x -gt 0 -and (Get-Hash01 -x $x -y $y -salt (600 + $board)) -lt 0.55) {
+                $index = $previous
+            } else {
+                $roll = Get-Hash01 -x $x -y ($board * 4 + $rowInBoard) -salt 91
+                $index = Get-WeightedIndex -Roll $roll -Weights $planksWeights
+            }
+            $previous = $index
+
+            $color = ConvertTo-Color $planksPalette[$index]
+            if ((Get-Hash01 -x $x -y $y -salt 313) -gt 0.965) {
+                $color = ConvertTo-Color $plankSeamColor
+            }
+            $bitmap.SetPixel($x, $y, $color)
+        }
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'planks'
+}
+
+# Running bond: every other row is offset by half a brick.
+function New-BricksTexture {
+    $rowHeight = 4
+    $brickWidth = 8
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    for ($y = 0; $y -lt $size; $y++) {
+        $row = [Math]::Floor($y / $rowHeight)
+        $offset = if ($row % 2 -eq 0) { 0 } else { $brickWidth / 2 }
+
+        for ($x = 0; $x -lt $size; $x++) {
+            # Mortar occupies the last row of each course and the last column of
+            # each brick.
+            $shifted = ($x + $offset) % $size
+            $isMortar = ($y % $rowHeight) -eq ($rowHeight - 1) -or ($shifted % $brickWidth) -eq ($brickWidth - 1)
+
+            if ($isMortar) {
+                $roll = Get-Hash01 -x $x -y $y -salt 157
+                $index = Get-WeightedIndex -Roll $roll -Weights $mortarWeights
+                $bitmap.SetPixel($x, $y, (ConvertTo-Color $mortarPalette[$index]))
+                continue
+            }
+
+            # A base shade per brick, then strong per-pixel variation on top:
+            # without the latter each brick reads as a flat rectangle.
+            $brickX = [Math]::Floor($shifted / $brickWidth)
+            $roll = Get-Hash01 -x $brickX -y $row -salt 131
+            $jitter = (Get-Hash01 -x $x -y $y -salt 202) * 0.62 - 0.31
+            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll * 0.55 + 0.22 + $jitter))
+            $index = Get-WeightedIndex -Roll $roll -Weights $brickWeights
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $brickPalette[$index]))
+        }
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'bricks'
+}
+
 New-StoneTexture
 New-DirtTexture
 New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
 New-GrassSideTexture
 New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53
+New-ClumpedTexture -Name 'cobblestone' -Palette $cobblePalette -Weights $cobbleWeights -Salt 71 -Clump 2
+New-ClumpedTexture -Name 'gravel' -Palette $gravelPalette -Weights $gravelWeights -Salt 83 -Clump 1
+New-FlatTexture -Name 'snow' -Palette $snowPalette -Weights $snowWeights -Salt 97
+New-PlanksTexture
+New-BricksTexture
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.

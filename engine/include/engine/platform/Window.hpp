@@ -26,10 +26,17 @@ enum class Key {
     LeftShift,
     LeftControl,
     Escape,
+    // Kept contiguous and in order: game code maps a hotbar slot by subtracting
+    // Num1 from the key.
     Num1,
     Num2,
     Num3,
     Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
     F1,
     F2,
     F3,
@@ -103,6 +110,10 @@ public:
     /// Cursor movement since the last call. Clears the accumulator.
     CursorDelta consumeCursorDelta();
 
+    /// Mouse wheel movement since the last call, in notches. Positive is away
+    /// from the user. Clears the accumulator.
+    float consumeScrollDelta();
+
     /// Captured means the cursor is hidden and locked to this window, which is
     /// what mouse-look needs. Releasing it hands the pointer back to the OS.
     void setCursorCaptured(bool captured);
@@ -120,6 +131,9 @@ public:
     /// Called by the platform cursor callback. Not intended for game code.
     void recordCursorPosition(double x, double y);
 
+    /// Called by the platform scroll callback. Not intended for game code.
+    void recordScroll(double amount) { m_scrollDelta += static_cast<float>(amount); }
+
     GLFWwindow* handle() const { return m_handle; }
 
 private:
@@ -134,6 +148,7 @@ private:
     double m_lastCursorX = 0.0;
     double m_lastCursorY = 0.0;
     CursorDelta m_cursorDelta;
+    float m_scrollDelta = 0.0f;
 };
 
 } // namespace engine

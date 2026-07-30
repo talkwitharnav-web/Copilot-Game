@@ -44,6 +44,16 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_3;
     case Key::Num4:
         return GLFW_KEY_4;
+    case Key::Num5:
+        return GLFW_KEY_5;
+    case Key::Num6:
+        return GLFW_KEY_6;
+    case Key::Num7:
+        return GLFW_KEY_7;
+    case Key::Num8:
+        return GLFW_KEY_8;
+    case Key::Num9:
+        return GLFW_KEY_9;
     case Key::F1:
         return GLFW_KEY_F1;
     case Key::F2:
@@ -96,6 +106,21 @@ bool fromGlfwKey(int glfwKey, Key& out) {
         return true;
     case GLFW_KEY_4:
         out = Key::Num4;
+        return true;
+    case GLFW_KEY_5:
+        out = Key::Num5;
+        return true;
+    case GLFW_KEY_6:
+        out = Key::Num6;
+        return true;
+    case GLFW_KEY_7:
+        out = Key::Num7;
+        return true;
+    case GLFW_KEY_8:
+        out = Key::Num8;
+        return true;
+    case GLFW_KEY_9:
+        out = Key::Num9;
         return true;
     case GLFW_KEY_F1:
         out = Key::F1;
@@ -176,6 +201,13 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
         }
     });
 
+    glfwSetScrollCallback(m_handle, [](GLFWwindow* handle, double, double y) {
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+        if (self != nullptr) {
+            self->recordScroll(y);
+        }
+    });
+
     // Losing focus means any release event goes to another window, which would
     // leave a button or the cursor stuck in this one.
     glfwSetWindowFocusCallback(m_handle, [](GLFWwindow* handle, int focused) {
@@ -247,6 +279,7 @@ void Window::clearInputState() {
     m_mouseButtonDown.fill(false);
     m_mouseButtonPresses.clear();
     m_keyPresses.clear();
+    m_scrollDelta = 0.0f;
 }
 
 std::vector<MouseButton> Window::consumeMouseButtonPresses() {
@@ -255,8 +288,7 @@ std::vector<MouseButton> Window::consumeMouseButtonPresses() {
     return presses;
 }
 
-void Window::recordCursorPosition(double x, double y) {
-    // The first sample after capture has no previous position to compare
+void Window::recordCursorPosition(double x, double y) {    // The first sample after capture has no previous position to compare
     // against; using it would produce one enormous jump in view direction.
     if (m_hasLastCursorPosition) {
         m_cursorDelta.x += static_cast<float>(x - m_lastCursorX);
@@ -270,6 +302,12 @@ void Window::recordCursorPosition(double x, double y) {
 CursorDelta Window::consumeCursorDelta() {
     const CursorDelta delta = m_cursorDelta;
     m_cursorDelta = CursorDelta{};
+    return delta;
+}
+
+float Window::consumeScrollDelta() {
+    const float delta = m_scrollDelta;
+    m_scrollDelta = 0.0f;
     return delta;
 }
 

@@ -7,6 +7,7 @@
 #include <engine/render/VulkanContext.hpp>
 
 #include "hud/Crosshair.hpp"
+#include "hud/Hotbar.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
@@ -85,6 +86,16 @@ const char* describeBlock(game::BlockId block) {
         return "Grass";
     case game::BlockId::Sand:
         return "Sand";
+    case game::BlockId::Cobblestone:
+        return "Cobblestone";
+    case game::BlockId::Gravel:
+        return "Gravel";
+    case game::BlockId::Snow:
+        return "Snow";
+    case game::BlockId::Planks:
+        return "Planks";
+    case game::BlockId::Bricks:
+        return "Bricks";
     default:
         return "Air";
     }
@@ -101,8 +112,10 @@ int main() {
         // TextureLayer in Block.hpp.
         const std::filesystem::path textureDir = engine::executableDirectory() / "assets" / "textures" / "blocks";
         const std::vector<std::filesystem::path> blockTextures{
-            textureDir / "stone.png", textureDir / "dirt.png",  textureDir / "grass_top.png",
-            textureDir / "grass_side.png", textureDir / "sand.png", textureDir / "white.png"};
+            textureDir / "stone.png",       textureDir / "dirt.png",   textureDir / "grass_top.png",
+            textureDir / "grass_side.png",  textureDir / "sand.png",   textureDir / "white.png",
+            textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
+            textureDir / "planks.png",      textureDir / "bricks.png"};
 
         engine::Renderer renderer(context, window, blockTextures);
 
@@ -154,7 +167,6 @@ int main() {
         const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
-        renderer.setScreenMesh(game::makeCrosshair());
         renderer.setVerticalFov(kDefaultFov);
 
         game::Player player;
@@ -181,7 +193,7 @@ int main() {
         engine::logInfo("Field of view: " + std::to_string(static_cast<int>(kDefaultFov)) +
                         " (F3 narrower, F4 wider)");
         engine::logInfo("Move: WASD. Space jump, Left Shift sneak, Left Ctrl sprint.");
-        engine::logInfo("Left click breaks, right click places. 1-4 pick the block to place.");
+        engine::logInfo("Left click breaks, right click places. 1-9 or scroll pick a block.");
         engine::logInfo("Double-tap Space to fly. Descend onto the ground to land.");
         engine::logInfo("Escape releases the mouse; click to recapture.");
         engine::logInfo("Entering main loop. Close the window to exit.");
@@ -191,10 +203,31 @@ int main() {
         auto lastReportTime = previousTime;
         int framesSinceReport = 0;
 
-        game::BlockId heldBlock = game::BlockId::Stone;
         float breakTimer = 0.0f;
         float placeTimer = 0.0f;
         float secondsSinceSpacePress = kDoubleTapSeconds;
+
+        constexpr std::array<game::BlockId, game::kHotbarSlots> hotbar{
+            game::BlockId::Grass,       game::BlockId::Dirt,   game::BlockId::Stone,
+            game::BlockId::Cobblestone, game::BlockId::Sand,   game::BlockId::Gravel,
+            game::BlockId::Snow,        game::BlockId::Planks, game::BlockId::Bricks};
+        std::size_t selectedSlot = 0;
+        bool hudDirty = true;
+
+        // Crosshair and hotbar share one screen mesh, rebuilt only when the
+        // selection changes.
+        const auto rebuildHud = [&] {
+            engine::MeshData hud = game::makeCrosshair();
+            const engine::MeshData bar = game::makeHotbar(hotbar, selectedSlot);
+
+            const auto base = static_cast<std::uint32_t>(hud.vertices.size());
+            hud.vertices.insert(hud.vertices.end(), bar.vertices.begin(), bar.vertices.end());
+            for (const std::uint32_t index : bar.indices) {
+                hud.indices.push_back(base + index);
+            }
+
+            renderer.setScreenMesh(hud);
+        };
 
         while (!window.shouldClose()) {
             window.pollEvents();
@@ -222,13 +255,9 @@ int main() {
                     }
                     continue;
                 }
-                if (key == engine::Key::Num1 || key == engine::Key::Num2 || key == engine::Key::Num3 ||
-                    key == engine::Key::Num4) {
-                    heldBlock = key == engine::Key::Num1   ? game::BlockId::Stone
-                                : key == engine::Key::Num2 ? game::BlockId::Dirt
-                                : key == engine::Key::Num3 ? game::BlockId::Grass
-                                                           : game::BlockId::Sand;
-                    engine::logInfo(std::string("Holding: ") + describeBlock(heldBlock));
+                if (key >= engine::Key::Num1 && key <= engine::Key::Num9) {
+                    selectedSlot = static_cast<std::size_t>(key) - static_cast<std::size_t>(engine::Key::Num1);
+                    hudDirty = true;
                     continue;
                 }
                 if (key == engine::Key::F3 || key == engine::Key::F4) {
@@ -256,6 +285,25 @@ int main() {
             const bool hadCursor = window.isCursorCaptured();
             if (!hadCursor && clicked) {
                 window.setCursorCaptured(true);
+            }
+
+            // Scrolling away from the user moves right along the bar, and the
+            // selection wraps at both ends.
+            const float scroll = window.consumeScrollDelta();
+            if (const int notches = static_cast<int>(scroll); notches != 0) {
+                const auto slots = static_cast<int>(game::kHotbarSlots);
+                int next = (static_cast<int>(selectedSlot) - notches) % slots;
+                if (next < 0) {
+                    next += slots;
+                }
+                selectedSlot = static_cast<std::size_t>(next);
+                hudDirty = true;
+            }
+
+            if (hudDirty) {
+                rebuildHud();
+                engine::logInfo(std::string("Holding: ") + describeBlock(hotbar[selectedSlot]));
+                hudDirty = false;
             }
 
             const engine::CursorDelta look = window.consumeCursorDelta();
@@ -317,7 +365,7 @@ int main() {
             } else {
                 placeTimer -= deltaSeconds;
                 if (placeTimer <= 0.0f && target.hit && !game::playerOverlapsBlock(player, target.adjacent)) {
-                    world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, heldBlock);
+                    world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, hotbar[selectedSlot]);
                     placeTimer = kPlaceRepeatSeconds;
                 }
             }

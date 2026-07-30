@@ -267,12 +267,13 @@ std::size_t Renderer::meshCount() const {
 }
 
 void Renderer::setOverlayMesh(const MeshData& mesh) {
-    vkDeviceWaitIdle(m_context.device());
     uploadInto(m_overlayMesh, mesh);
 }
 
+// No device wait: retiring the old buffers already defers their destruction
+// past every in-flight frame, so this is cheap enough to call whenever the HUD
+// changes.
 void Renderer::setScreenMesh(const MeshData& mesh) {
-    vkDeviceWaitIdle(m_context.device());
     uploadInto(m_screenMesh, mesh);
 }
 
