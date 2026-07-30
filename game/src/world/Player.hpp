@@ -34,7 +34,15 @@ constexpr float kStepHeight = 0.6f;
 constexpr float kWalkSpeed = 4.317f;
 constexpr float kSprintSpeed = 5.612f;
 constexpr float kSneakSpeed = 1.295f;
-constexpr float kFlySpeed = 22.0f;
+constexpr float kFlySpeed = 11.0f;
+/// Flying with sprint held. Fast enough to cross terrain quickly, but opt-in
+/// rather than the default, which made ordinary flying uncontrollable.
+constexpr float kFlySprintSpeed = 22.0f;
+
+/// Flight eases into and out of motion rather than snapping to full speed.
+/// Deceleration is the gentler of the two, which is what reads as gliding.
+constexpr float kFlyAcceleration = 38.0f;
+constexpr float kFlyDeceleration = 16.0f;
 
 constexpr float kGravity = 32.0f;
 constexpr float kTerminalVelocity = 78.4f;

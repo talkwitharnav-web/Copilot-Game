@@ -55,6 +55,10 @@ constexpr float kFovStep = 5.0f;
 constexpr float kMinFov = 50.0f;
 constexpr float kMaxFov = 110.0f;
 
+// Two Space presses closer together than this toggle flight. Long enough to be
+// comfortable, short enough that ordinary repeated jumping does not trigger it.
+constexpr float kDoubleTapSeconds = 0.3f;
+
 // Time allowed per frame for generating and meshing chunks. Anything left over
 // waits for the next frame, so a burst of new terrain slows the horizon down
 // instead of freezing the game.
@@ -178,7 +182,8 @@ int main() {
                         " (F3 narrower, F4 wider)");
         engine::logInfo("Move: WASD. Space jump, Left Shift sneak, Left Ctrl sprint.");
         engine::logInfo("Left click breaks, right click places. 1-4 pick the block to place.");
-        engine::logInfo("F toggles fly mode. Escape releases the mouse; click to recapture.");
+        engine::logInfo("Double-tap Space to fly. Descend onto the ground to land.");
+        engine::logInfo("Escape releases the mouse; click to recapture.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
         using Clock = std::chrono::steady_clock;
@@ -189,19 +194,32 @@ int main() {
         game::BlockId heldBlock = game::BlockId::Stone;
         float breakTimer = 0.0f;
         float placeTimer = 0.0f;
+        float secondsSinceSpacePress = kDoubleTapSeconds;
 
         while (!window.shouldClose()) {
             window.pollEvents();
+
+            const auto now = Clock::now();
+            const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
+            previousTime = now;
+            secondsSinceSpacePress += deltaSeconds;
 
             for (const engine::Key key : window.consumeKeyPresses()) {
                 if (key == engine::Key::Escape) {
                     window.setCursorCaptured(false);
                     continue;
                 }
-                if (key == engine::Key::F) {
-                    player.flying = !player.flying;
-                    player.velocity = glm::vec3{0.0f};
-                    engine::logInfo(player.flying ? "Fly mode ON" : "Fly mode OFF");
+                if (key == engine::Key::Space) {
+                    if (secondsSinceSpacePress < kDoubleTapSeconds) {
+                        player.flying = !player.flying;
+                        player.velocity = glm::vec3{0.0f};
+                        engine::logInfo(player.flying ? "Fly mode ON" : "Fly mode OFF");
+                        // Reset, so a third tap starts a fresh pair rather than
+                        // toggling again immediately.
+                        secondsSinceSpacePress = kDoubleTapSeconds;
+                    } else {
+                        secondsSinceSpacePress = 0.0f;
+                    }
                     continue;
                 }
                 if (key == engine::Key::Num1 || key == engine::Key::Num2 || key == engine::Key::Num3 ||
@@ -230,10 +248,6 @@ int main() {
                 frameLimiter.setTargetFps(kFpsCapOptions[capIndex]);
                 engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]));
             }
-
-            const auto now = Clock::now();
-            const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
-            previousTime = now;
 
             // Drained every frame even when unused, so the queue cannot grow
             // without bound. It only exists to notice a click while the cursor

@@ -11,9 +11,13 @@ namespace {
 
 // Units are relative to window height, so the crosshair is the same size on any
 // display. The renderer corrects for aspect ratio.
-constexpr float kArmLength = 0.016f;
-constexpr float kArmThickness = 0.0018f;
-constexpr float kBorder = 0.0012f;
+//
+// Long and thin on purpose: a reticle marks a point, so anything heavy enough to
+// notice as a shape is covering the thing being aimed at. The border is only
+// just wide enough to keep it visible against sand and sky.
+constexpr float kArmLength = 0.021f;
+constexpr float kArmThickness = 0.0013f;
+constexpr float kBorder = 0.0006f;
 
 /// Nearer than anything the world can draw, so the crosshair is never occluded.
 constexpr float kInnerDepth = 0.0f;

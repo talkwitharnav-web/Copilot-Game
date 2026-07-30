@@ -119,7 +119,8 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     const float maxEyeChange = kEyeAdjustSpeed * dt;
     player.eyeOffset += std::clamp(targetEye - player.eyeOffset, -maxEyeChange, maxEyeChange);
 
-    const float speed = player.flying ? kFlySpeed
+    const float flySpeed = input.sprint ? kFlySprintSpeed : kFlySpeed;
+    const float speed = player.flying   ? flySpeed
                         : player.sneaking ? kSneakSpeed
                         : input.sprint    ? kSprintSpeed
                                           : kWalkSpeed;
@@ -130,13 +131,22 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         wish = glm::normalize(wish);
     }
 
-    player.velocity.x = wish.x * speed;
-    player.velocity.z = wish.z * speed;
-
     if (player.flying) {
-        player.velocity.y = input.verticalWish * kFlySpeed;
+        // Eased as a single vector rather than per axis, so changing direction
+        // curves through the turn instead of stopping one axis and starting
+        // another.
+        const glm::vec3 target{wish.x * speed, input.verticalWish * flySpeed, wish.z * speed};
+        const glm::vec3 difference = target - player.velocity;
+        const float distance = glm::length(difference);
+        const float rate = glm::dot(target, target) > 0.0f ? kFlyAcceleration : kFlyDeceleration;
+        const float maxStep = rate * dt;
+
+        player.velocity = distance <= maxStep ? target : player.velocity + difference * (maxStep / distance);
         player.onGround = false;
     } else {
+        player.velocity.x = wish.x * speed;
+        player.velocity.z = wish.z * speed;
+
         if (input.jump && player.onGround) {
             player.velocity.y = kJumpVelocity;
             player.onGround = false;
@@ -165,6 +175,13 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         if (moveAxis(player.position, world, 1, stepDelta.y, height)) {
             player.onGround = movingDown;
             player.velocity.y = 0.0f;
+
+            // Descending onto solid ground ends flight. Only a downward landing
+            // counts: clipping a wall while flying sideways leaves you airborne,
+            // and hovering still has no vertical movement to collide at all.
+            if (player.flying && movingDown) {
+                player.flying = false;
+            }
         } else if (stepDelta.y != 0.0f) {
             player.onGround = false;
         }
