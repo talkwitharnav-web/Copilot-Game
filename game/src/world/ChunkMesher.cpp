@@ -34,7 +34,32 @@ constexpr std::array<Face, 6> kFaces{{
 
 } // namespace
 
-engine::MeshData meshChunk(const Chunk& chunk, const glm::vec3& originOffset) {
+engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours, const glm::vec3& originOffset) {
+    // Face offsets only ever move along a single axis, so at most one coordinate
+    // can fall outside the chunk and the neighbour lookup stays unambiguous.
+    const auto blockAt = [&](int x, int y, int z) -> BlockId {
+        constexpr int last = Chunk::kSize - 1;
+        if (x < 0) {
+            return neighbours.negativeX != nullptr ? neighbours.negativeX->at(last, y, z) : BlockId::Air;
+        }
+        if (x >= Chunk::kSize) {
+            return neighbours.positiveX != nullptr ? neighbours.positiveX->at(0, y, z) : BlockId::Air;
+        }
+        if (y < 0) {
+            return neighbours.negativeY != nullptr ? neighbours.negativeY->at(x, last, z) : BlockId::Air;
+        }
+        if (y >= Chunk::kSize) {
+            return neighbours.positiveY != nullptr ? neighbours.positiveY->at(x, 0, z) : BlockId::Air;
+        }
+        if (z < 0) {
+            return neighbours.negativeZ != nullptr ? neighbours.negativeZ->at(x, y, last) : BlockId::Air;
+        }
+        if (z >= Chunk::kSize) {
+            return neighbours.positiveZ != nullptr ? neighbours.positiveZ->at(x, y, 0) : BlockId::Air;
+        }
+        return chunk.at(x, y, z);
+    };
+
     engine::MeshData mesh;
 
     for (int y = 0; y < Chunk::kSize; ++y) {
@@ -51,8 +76,8 @@ engine::MeshData meshChunk(const Chunk& chunk, const glm::vec3& originOffset) {
                 for (const Face& face : kFaces) {
                     // The whole optimisation: a face buried against another
                     // solid block can never be seen, so it is never created.
-                    if (isSolid(chunk.at(x + face.neighbourOffset.x, y + face.neighbourOffset.y,
-                                         z + face.neighbourOffset.z))) {
+                    if (isSolid(blockAt(x + face.neighbourOffset.x, y + face.neighbourOffset.y,
+                                        z + face.neighbourOffset.z))) {
                         continue;
                     }
 

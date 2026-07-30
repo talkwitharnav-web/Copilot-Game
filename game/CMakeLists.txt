@@ -1,5 +1,7 @@
 add_executable(game
     src/Main.cpp
+    src/world/Noise.cpp
+    src/world/TerrainGenerator.cpp
     src/world/ChunkMesher.cpp
 )
 

@@ -36,10 +36,10 @@ public:
     Renderer(Renderer&&) = delete;
     Renderer& operator=(Renderer&&) = delete;
 
-    /// Replaces the geometry drawn every frame. Blocks until the GPU has
-    /// finished with the previous mesh, so call it at load time, not per frame.
-    /// An empty mesh simply draws nothing.
-    void uploadMesh(const MeshData& mesh);
+    /// Replaces every mesh drawn each frame. Blocks until the GPU has finished
+    /// with the previous set, so call it at load time, not per frame. Empty
+    /// meshes in the list are skipped.
+    void uploadMeshes(const std::vector<MeshData>& meshes);
 
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
@@ -61,14 +61,19 @@ private:
     /// How many frames the CPU is allowed to work on before waiting for the GPU.
     static constexpr std::uint32_t kFramesInFlight = 2;
 
+    /// One uploaded mesh. Both buffers are owned here and freed together.
+    struct GpuMesh {
+        std::unique_ptr<Buffer> vertexBuffer;
+        std::unique_ptr<Buffer> indexBuffer;
+        std::uint32_t indexCount = 0;
+    };
+
     const VulkanContext& m_context;
     Window& m_window;
     Swapchain m_swapchain;
     std::unique_ptr<DepthImage> m_depthImage;
     GraphicsPipeline m_trianglePipeline;
-    std::unique_ptr<Buffer> m_vertexBuffer;
-    std::unique_ptr<Buffer> m_indexBuffer;
-    std::uint32_t m_indexCount = 0;
+    std::vector<GpuMesh> m_meshes;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;

@@ -7,6 +7,7 @@
 
 #include "world/Chunk.hpp"
 #include "world/ChunkMesher.hpp"
+#include "world/TerrainGenerator.hpp"
 
 #include <glm/glm.hpp>
 
@@ -16,8 +17,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -25,8 +28,16 @@ constexpr std::uint32_t kWindowWidth = 1280;
 constexpr std::uint32_t kWindowHeight = 720;
 constexpr engine::ClearColor kBackgroundColor{0.45f, 0.62f, 0.80f, 1.0f};
 
-constexpr float kMoveMetresPerSecond = 12.0f;
+constexpr float kMoveMetresPerSecond = 22.0f;
 constexpr float kLookRadiansPerPixel = 0.0025f;
+
+// Change this and the entire world changes, reproducibly.
+constexpr std::uint32_t kWorldSeed = 1337u;
+
+// A fixed patch of world. Endless streaming is M8.
+constexpr int kWorldChunksX = 6;
+constexpr int kWorldChunksY = 2;
+constexpr int kWorldChunksZ = 6;
 
 // Selectable frame caps, lowest to highest. 0 means uncapped.
 // Temporary keyboard-driven stand-in until there is a real settings screen.
@@ -37,51 +48,8 @@ std::string describeCap(double fps) {
     return fps > 0.0 ? std::to_string(static_cast<int>(fps)) + " fps" : "uncapped";
 }
 
-/// Hand-written surface shape, not procedural generation. Seeded noise is M5;
-/// this exists only so the first chunk is interesting enough to fly around.
-int surfaceHeight(int x, int z) {
-    const auto fx = static_cast<float>(x);
-    const auto fz = static_cast<float>(z);
-    const float hills = 4.0f * std::sin(fx * 0.22f) * std::cos(fz * 0.19f);
-    const float ridge = 2.5f * std::sin((fx + fz) * 0.11f);
-    return static_cast<int>(14.0f + hills + ridge);
-}
-
-game::Chunk buildChunk() {
-    game::Chunk chunk;
-
-    for (int z = 0; z < game::Chunk::kSize; ++z) {
-        for (int x = 0; x < game::Chunk::kSize; ++x) {
-            const int surface = surfaceHeight(x, z);
-
-            for (int y = 0; y <= surface && y < game::Chunk::kSize; ++y) {
-                if (y == surface) {
-                    chunk.set(x, y, z, surface > 16 ? game::BlockId::Grass : game::BlockId::Sand);
-                } else if (y > surface - 4) {
-                    chunk.set(x, y, z, game::BlockId::Dirt);
-                } else {
-                    chunk.set(x, y, z, game::BlockId::Stone);
-                }
-            }
-        }
-    }
-
-    // Carve a hollow so there are interior surfaces to look at. If face culling
-    // were wrong, a cave is where it would be obvious.
-    constexpr glm::vec3 caveCenter{16.0f, 8.0f, 16.0f};
-    constexpr float caveRadius = 5.5f;
-    for (int y = 0; y < game::Chunk::kSize; ++y) {
-        for (int z = 0; z < game::Chunk::kSize; ++z) {
-            for (int x = 0; x < game::Chunk::kSize; ++x) {
-                const glm::vec3 p{x, y, z};
-                if (glm::length(p - caveCenter) < caveRadius) {
-                    chunk.set(x, y, z, game::BlockId::Air);
-                }
-            }
-        }
-    }
-
-    return chunk;
+std::size_t chunkIndex(int x, int y, int z) {
+    return static_cast<std::size_t>((y * kWorldChunksZ + z) * kWorldChunksX + x);
 }
 
 } // namespace
@@ -96,19 +64,84 @@ int main() {
         engine::FrameLimiter frameLimiter(kFpsCapOptions[capIndex]);
 
         engine::Camera camera;
-        camera.position = {48.0f, 30.0f, 48.0f};
-        camera.yaw = -2.36f;
-        camera.pitch = -0.34f;
+        camera.position = {96.0f, 78.0f, 250.0f};
+        camera.yaw = -1.57f;
+        camera.pitch = -0.35f;
         window.setCursorCaptured(true);
 
-        const game::Chunk chunk = buildChunk();
-        const engine::MeshData chunkMesh = game::meshChunk(chunk, glm::vec3{0.0f});
-        renderer.uploadMesh(chunkMesh);
+        const auto generateStart = std::chrono::steady_clock::now();
 
-        // A solid 32-cubed chunk holds 32768 blocks; drawing every face would be
-        // 196608 of them. Only the ones touching air are ever created.
-        engine::logInfo("Chunk meshed: " + std::to_string(chunkMesh.indices.size() / 6) + " faces, " +
-                        std::to_string(chunkMesh.vertices.size()) + " vertices");
+        std::vector<game::Chunk> chunks(static_cast<std::size_t>(kWorldChunksX * kWorldChunksY * kWorldChunksZ));
+        for (int y = 0; y < kWorldChunksY; ++y) {
+            for (int z = 0; z < kWorldChunksZ; ++z) {
+                for (int x = 0; x < kWorldChunksX; ++x) {
+                    chunks[chunkIndex(x, y, z)] = game::generateChunk(kWorldSeed, game::ChunkCoord{x, y, z});
+                }
+            }
+        }
+
+        const auto generateEnd = std::chrono::steady_clock::now();
+
+        // Determinism is this milestone's acceptance criterion, so it is checked
+        // rather than assumed: regenerating a chunk must reproduce it byte for byte.
+        const game::Chunk repeat = game::generateChunk(kWorldSeed, game::ChunkCoord{2, 0, 3});
+        const bool deterministic =
+            std::memcmp(&repeat, &chunks[chunkIndex(2, 0, 3)], sizeof(game::Chunk)) == 0;
+        if (deterministic) {
+            engine::logInfo("Determinism check passed: same seed reproduces the same chunk.");
+        } else {
+            engine::logError("Determinism check FAILED: generation is not a pure function of (seed, coord).");
+        }
+
+        std::vector<engine::MeshData> meshes;
+        meshes.reserve(chunks.size());
+        std::size_t totalFaces = 0;
+
+        for (int y = 0; y < kWorldChunksY; ++y) {
+            for (int z = 0; z < kWorldChunksZ; ++z) {
+                for (int x = 0; x < kWorldChunksX; ++x) {
+                    game::ChunkNeighbours neighbours;
+                    if (x > 0) {
+                        neighbours.negativeX = &chunks[chunkIndex(x - 1, y, z)];
+                    }
+                    if (x + 1 < kWorldChunksX) {
+                        neighbours.positiveX = &chunks[chunkIndex(x + 1, y, z)];
+                    }
+                    if (y > 0) {
+                        neighbours.negativeY = &chunks[chunkIndex(x, y - 1, z)];
+                    }
+                    if (y + 1 < kWorldChunksY) {
+                        neighbours.positiveY = &chunks[chunkIndex(x, y + 1, z)];
+                    }
+                    if (z > 0) {
+                        neighbours.negativeZ = &chunks[chunkIndex(x, y, z - 1)];
+                    }
+                    if (z + 1 < kWorldChunksZ) {
+                        neighbours.positiveZ = &chunks[chunkIndex(x, y, z + 1)];
+                    }
+
+                    const glm::vec3 origin{static_cast<float>(x * game::Chunk::kSize),
+                                           static_cast<float>(y * game::Chunk::kSize),
+                                           static_cast<float>(z * game::Chunk::kSize)};
+
+                    engine::MeshData mesh = game::meshChunk(chunks[chunkIndex(x, y, z)], neighbours, origin);
+                    totalFaces += mesh.indices.size() / 6;
+                    meshes.push_back(std::move(mesh));
+                }
+            }
+        }
+
+        const auto meshEnd = std::chrono::steady_clock::now();
+        renderer.uploadMeshes(meshes);
+
+        const auto ms = [](auto from, auto to) {
+            return std::to_string(std::chrono::duration<float, std::milli>(to - from).count());
+        };
+        engine::logInfo("World: " + std::to_string(chunks.size()) + " chunks, seed " + std::to_string(kWorldSeed) +
+                        ", " + std::to_string(kWorldChunksX * game::Chunk::kSize) + " blocks across");
+        engine::logInfo("Generated in " + ms(generateStart, generateEnd) + " ms, meshed in " +
+                        ms(generateEnd, meshEnd) + " ms");
+        engine::logInfo("Visible faces: " + std::to_string(totalFaces));
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Move: WASD, Space up, Left Shift down. Look: mouse.");

@@ -88,32 +88,40 @@ void Renderer::createCommandResources() {
             "vkAllocateCommandBuffers");
 }
 
-void Renderer::uploadMesh(const MeshData& mesh) {
+void Renderer::uploadMeshes(const std::vector<MeshData>& meshes) {
     // Replacing buffers the GPU may still be reading from is undefined behaviour.
     // Waiting is free at load time and this is not a per-frame path.
     vkDeviceWaitIdle(m_context.device());
 
-    if (mesh.empty()) {
-        m_vertexBuffer.reset();
-        m_indexBuffer.reset();
-        m_indexCount = 0;
-        return;
+    // Clearing first releases the previous buffers before new ones are allocated,
+    // so peak VRAM is one world's worth rather than two.
+    m_meshes.clear();
+    m_meshes.reserve(meshes.size());
+
+    for (const MeshData& mesh : meshes) {
+        if (mesh.empty()) {
+            continue;
+        }
+
+        const VkDeviceSize vertexBytes = mesh.vertices.size() * sizeof(Vertex);
+        const VkDeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
+
+        GpuMesh uploaded;
+        uploaded.vertexBuffer =
+            std::make_unique<Buffer>(m_context, vertexBytes,
+                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        uploaded.indexBuffer =
+            std::make_unique<Buffer>(m_context, indexBytes,
+                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        uploaded.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+
+        uploadBufferData(m_context, m_commandPool, *uploaded.vertexBuffer, mesh.vertices.data(), vertexBytes);
+        uploadBufferData(m_context, m_commandPool, *uploaded.indexBuffer, mesh.indices.data(), indexBytes);
+
+        m_meshes.push_back(std::move(uploaded));
     }
-
-    const VkDeviceSize vertexBytes = mesh.vertices.size() * sizeof(Vertex);
-    const VkDeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
-
-    m_vertexBuffer = std::make_unique<Buffer>(m_context, vertexBytes,
-                                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    m_indexBuffer = std::make_unique<Buffer>(m_context, indexBytes,
-                                             VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    uploadBufferData(m_context, m_commandPool, *m_vertexBuffer, mesh.vertices.data(), vertexBytes);
-    uploadBufferData(m_context, m_commandPool, *m_indexBuffer, mesh.indices.data(), indexBytes);
-
-    m_indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 }
 
 void Renderer::createSyncObjects() {
@@ -267,12 +275,12 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdPushConstants(commandBuffer, m_trianglePipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(MeshPushConstants), &push);
 
-    if (m_indexCount > 0) {
-        const VkBuffer vertexBuffers[] = {m_vertexBuffer->handle()};
+    for (const GpuMesh& mesh : m_meshes) {
+        const VkBuffer vertexBuffers[] = {mesh.vertexBuffer->handle()};
         const VkDeviceSize vertexOffsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
-        vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+        vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
     }
 
     vkCmdEndRendering(commandBuffer);
