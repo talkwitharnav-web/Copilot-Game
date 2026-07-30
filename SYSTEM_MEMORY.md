@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1 (toolchain proof), 2 (shader pipeline, first triangle) and 3a (geometry from GPU buffers) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M3b (matrices, perspective, cube) is next.
+> **Status:** Milestones 1–3 complete (toolchain, shader pipeline, geometry, matrices, depth, free-fly camera). A 3D scene of shaded boxes on a ground plane renders and can be flown around. No voxels, chunks, or gameplay yet, by design. `TIMELINE.md` M4 (first chunk) is next.
 
 ---
 
@@ -142,7 +142,10 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
 | `Vertex` | `engine/render/Vertex.hpp` | **The single definition of a vertex**, together with its Vulkan binding/attribute descriptions. The shader's `layout(location = ...)` inputs must match it. Change the format here and in the shader, nowhere else. |
+| `MeshPushConstants` | `engine/render/PushConstants.hpp` | The per-draw data block. Must match the shader's `layout(push_constant)` block field for field. |
 | `Buffer` | `engine/render/Buffer.hpp` | A `VkBuffer` plus the `VkDeviceMemory` backing it, released together. Copy and move are deleted. `uploadBufferData()` fills device-local buffers via a temporary staging buffer. |
+| `DepthImage` | `engine/render/DepthImage.hpp` | The depth attachment. Picks the best supported format (`D32_SFLOAT` preferred) and is rebuilt with the swapchain, since it must match the colour target's size. |
+| `Camera` | `engine/render/Camera.hpp` | Position, yaw, pitch, and the view matrix. Pitch clamps just short of vertical, where the up vector becomes ambiguous and the view flips. **Which keys move it is game code's decision, not the engine's.** |
 | `GraphicsPipeline` | `engine/render/GraphicsPipeline.hpp` | One complete draw configuration: both shader stages plus all fixed-function state. Loads SPIR-V from disk. Viewport and scissor are dynamic state, so resizing never rebuilds it. |
 | `Renderer` | `engine/render/Renderer.hpp` | Command pool, command buffers, per-frame synchronization, and the per-frame record/submit/present cycle. |
 
@@ -183,7 +186,34 @@ This requires two things that must not be removed:
 - `VkPhysicalDeviceVulkan13Features::dynamicRendering` enabled at device creation.
 - Physical-device selection rejects anything reporting less than `VK_API_VERSION_1_3`, so an unsuitable GPU produces a clear "no suitable GPU" error rather than a confusing failure inside `vkCreateDevice`.
 
-The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`.
+The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`. The depth image is transitioned `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL` at `EARLY_FRAGMENT_TESTS` and cleared to `1.0` (the far plane) each frame; its contents are never needed after the frame, so `storeOp` is `DONT_CARE`.
+
+### Winding and culling — do not "fix" this by reasoning
+
+Geometry is wound **counter-clockwise seen from outside**, and the pipeline uses `VK_CULL_MODE_BACK_BIT` with **`VK_FRONT_FACE_COUNTER_CLOCKWISE`**, despite the projection flipping Y. This combination was established by looking at the screen, not derived — a hand derivation argued for `CLOCKWISE` and was wrong. Getting it backwards renders every closed object as a hollow shell viewed from inside, and **produces no validation error and no warning of any kind**. If this is ever touched, verify against a closed box viewed from outside. See `CLAUDE.md`.
+
+### Camera and projection
+
+Projection is built by the renderer from the **swapchain's** extent, not the window's, so the aspect ratio cannot disagree with what is actually drawn. Vertical FOV is 45°; wider than about 60° visibly warps nearby geometry. `projection[1][1] *= -1` converts GLM's OpenGL-style Y-up clip space to Vulkan's Y-down. `GLM_FORCE_DEPTH_ZERO_TO_ONE` is defined **PUBLIC** on the engine target because every translation unit doing matrix maths must agree on the depth convention.
+
+Scene geometry is supplied in world space, so `Renderer::drawFrame` takes only a view matrix.
+
+---
+
+## Controls
+
+Temporary, until there is a real settings and input-binding screen (`TIMELINE.md` M34).
+
+| Input | Action |
+|---|---|
+| Mouse | Look (raw motion, bypassing OS pointer acceleration) |
+| `W` `A` `S` `D` | Move horizontally, relative to facing |
+| `Space` / `Left Shift` | Move up / down |
+| `Escape` | Release the mouse cursor |
+| Left click | Recapture the cursor |
+| `F1` / `F2` | Lower / raise the frame cap |
+
+Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement.
 
 ---
 
@@ -224,6 +254,7 @@ Verified 2026-07-30 on this machine.
 - **Compile:** clean build, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build (`triangle.vert.spv` 1512 bytes, `triangle.frag.spv` 572 bytes).
 - **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
 - **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
+- **M3 result:** six shaded boxes on a ground plane, 144 vertices / 72 triangles, render solid with correct mutual occlusion from every angle. Free-fly camera confirmed smooth with no ghosting or artifacting. Resizing rebuilds both swapchain and depth image cleanly.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

@@ -1,12 +1,15 @@
 #pragma once
 
 #include "engine/render/Buffer.hpp"
+#include "engine/render/DepthImage.hpp"
 #include "engine/render/GraphicsPipeline.hpp"
 #include "engine/render/Swapchain.hpp"
 
+#include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace engine {
@@ -33,7 +36,12 @@ public:
     Renderer& operator=(Renderer&&) = delete;
 
     /// Renders and presents a single frame. Does nothing while the window is minimized.
-    void drawFrame(const ClearColor& color);
+    ///
+    /// Scene geometry is already in world space, so the caller supplies only
+    /// where it is viewed from. Projection is built here, from the render
+    /// target's own dimensions, so the aspect ratio can never disagree with what
+    /// is actually drawn.
+    void drawFrame(const ClearColor& color, const glm::mat4& view);
 
 private:
     void createCommandResources();
@@ -41,7 +49,9 @@ private:
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();
-    void recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color) const;
+    glm::mat4 projectionMatrix() const;
+    void recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color,
+                        const glm::mat4& modelViewProjection) const;
 
     /// How many frames the CPU is allowed to work on before waiting for the GPU.
     static constexpr std::uint32_t kFramesInFlight = 2;
@@ -49,9 +59,10 @@ private:
     const VulkanContext& m_context;
     Window& m_window;
     Swapchain m_swapchain;
+    std::unique_ptr<DepthImage> m_depthImage;
     GraphicsPipeline m_trianglePipeline;
-    Buffer m_vertexBuffer;
-    Buffer m_indexBuffer;
+    std::unique_ptr<Buffer> m_vertexBuffer;
+    std::unique_ptr<Buffer> m_indexBuffer;
     std::uint32_t m_indexCount = 0;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;

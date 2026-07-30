@@ -1,5 +1,6 @@
 #include "engine/render/GraphicsPipeline.hpp"
 
+#include "engine/render/PushConstants.hpp"
 #include "engine/render/Vertex.hpp"
 #include "render/VulkanCheck.hpp"
 
@@ -67,7 +68,8 @@ private:
 } // namespace
 
 GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path& vertexSpirv,
-                                   const std::filesystem::path& fragmentSpirv, VkFormat colorFormat)
+                                   const std::filesystem::path& fragmentSpirv, VkFormat colorFormat,
+                                   VkFormat depthFormat)
     : m_device(device) {
     const ScopedShaderModule vertexModule(device, vertexSpirv);
     const ScopedShaderModule fragmentModule(device, fragmentSpirv);
@@ -108,7 +110,12 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode = VK_CULL_MODE_NONE; // Backface culling arrives with real geometry.
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    // Geometry is wound counter-clockwise seen from outside, and this value is
+    // what actually renders boxes solid rather than hollow. Verified on screen,
+    // not derived: a hand derivation through the Y-flip argued for CLOCKWISE and
+    // was simply wrong. If this is ever changed, check a closed box from outside
+    // before trusting the reasoning.
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
 
@@ -126,15 +133,32 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &blendAttachment;
 
+    // Keep a fragment only if nothing nearer has already been drawn there, and
+    // record its distance so later fragments are tested against it.
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.minDepthBounds = 0.0f;
+    depthStencil.maxDepthBounds = 1.0f;
+
     const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamicState{};
     dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamicState.dynamicStateCount = static_cast<std::uint32_t>(std::size(dynamicStates));
     dynamicState.pDynamicStates = dynamicStates;
 
-    // Empty for now: nothing is passed to the shaders beyond their own constants.
+    // A single matrix, small enough for push constants, so no descriptor sets yet.
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(MeshPushConstants);
+
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
     vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_layout), "vkCreatePipelineLayout");
 
     // Dynamic rendering: describes the attachment formats directly instead of
@@ -143,6 +167,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachmentFormats = &colorFormat;
+    renderingInfo.depthAttachmentFormat = depthFormat;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -154,6 +179,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     pipelineInfo.pViewportState = &viewportState;
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_layout;

@@ -129,7 +129,7 @@ Vertex and index buffers in device-local memory, uploaded through a staging buff
 
 **Done when:** *(met 2026-07-30)* the triangle is identical to M2's, driven entirely by buffer data, with zero validation errors and no leaked Vulkan objects at shutdown.
 
-#### ▶ M3b — Matrices, perspective, and a cube
+#### ✅ M3b — Matrices, perspective, and a cube
 
 GLM arrives. Model/view/projection matrix delivered by push constants, cube geometry, backface culling enabled. The cube rotates on its own so its three-dimensionality is visible.
 
@@ -139,25 +139,25 @@ GLM arrives. Model/view/projection matrix delivered by push constants, cube geom
 
 **You can:** watch a correctly-shaped cube rotate in perspective.
 
-**Done when:** the cube is right-way-up, correctly proportioned at any window size, and no interior faces show through.
+**Done when:** *(met 2026-07-30)* the cube is right-way-up, correctly proportioned at any window size, and no interior faces show through.
 
-#### ⬜ M3c — Depth buffer
+#### ✅ M3c — Depth buffer
 
-A depth image and depth testing, recreated alongside the swapchain on resize. Verified by adding a **second, overlapping cube** — a scene that cannot possibly render correctly without a working depth test.
+A depth image and depth testing, recreated alongside the swapchain on resize. Verified against a scene of six boxes at different depths — geometry that cannot render correctly without a working depth test.
 
 **Isolates:** depth format selection, attachment setup, and resize recreation.
 
-**Done when:** two overlapping cubes occlude each other correctly from every angle, and resizing does not break it.
+**Done when:** *(met 2026-07-30)* boxes occlude each other correctly from every angle, and resizing does not break it.
 
-#### ⬜ M3d — Free-fly camera
+#### ✅ M3d — Free-fly camera
 
-Camera position and orientation, mouse-look with cursor capture, WASD plus vertical movement, all scaled by delta time. `Escape` releases the mouse.
+Camera position and orientation, mouse-look with cursor capture and raw motion, WASD plus vertical movement, all scaled by delta time. `Escape` releases the mouse; clicking recaptures it.
 
 **Isolates:** input handling and frame-rate-independent movement.
 
-**You can:** fly around the scene. First build you genuinely control.
+**You can:** fly around the scene. First build genuinely under player control.
 
-**Done when:** movement speed is identical at 30 fps and 240 fps, and looking around has no drift or snapping.
+**Done when:** *(met 2026-07-30)* movement is frame-rate independent, diagonal movement is not faster than straight, and looking around has no drift or snapping.
 
 ---
 
@@ -167,7 +167,7 @@ Camera position and orientation, mouse-look with cursor capture, WASD plus verti
 
 > **This phase exists because of sequencing rule 1.** An earlier draft put first playability at M9, behind texturing and chunk streaming. That was reordered on user request so real playtesting starts as early as possible. Each milestone here is deliberately small.
 
-### ⬜ M4 — First chunk · **Core**
+### ▶ M4 — First chunk · **Core**
 
 Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits only faces exposed to air. **Flat colours per block type — no textures yet.**
 

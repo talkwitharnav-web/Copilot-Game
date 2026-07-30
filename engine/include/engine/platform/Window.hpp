@@ -16,8 +16,26 @@ struct Extent2D {
 /// Keys the game currently binds. Grows as the game needs more; deliberately
 /// not a full keyboard map yet.
 enum class Key {
+    W,
+    A,
+    S,
+    D,
+    Space,
+    LeftShift,
+    Escape,
     F1,
     F2,
+};
+
+enum class MouseButton {
+    Left,
+    Right,
+};
+
+/// Cursor movement since the previous frame, in pixels.
+struct CursorDelta {
+    float x = 0.0f;
+    float y = 0.0f;
 };
 
 /// Owns a single OS window and the windowing library's lifetime.
@@ -52,11 +70,28 @@ public:
     /// Auto-repeat is ignored, so holding a key yields exactly one press.
     std::vector<Key> consumeKeyPresses();
 
+    /// Whether a key is held right now. Use this for continuous movement, and
+    /// `consumeKeyPresses` for one-shot actions.
+    bool isKeyDown(Key key) const;
+
+    bool isMouseButtonDown(MouseButton button) const;
+
+    /// Cursor movement since the last call. Clears the accumulator.
+    CursorDelta consumeCursorDelta();
+
+    /// Captured means the cursor is hidden and locked to this window, which is
+    /// what mouse-look needs. Releasing it hands the pointer back to the OS.
+    void setCursorCaptured(bool captured);
+    bool isCursorCaptured() const { return m_cursorCaptured; }
+
     /// Called by the platform resize callback. Not intended for game code.
     void markResized() { m_resized = true; }
 
     /// Called by the platform key callback. Not intended for game code.
     void recordKeyPress(Key key) { m_keyPresses.push_back(key); }
+
+    /// Called by the platform cursor callback. Not intended for game code.
+    void recordCursorPosition(double x, double y);
 
     GLFWwindow* handle() const { return m_handle; }
 
@@ -64,6 +99,12 @@ private:
     GLFWwindow* m_handle = nullptr;
     bool m_resized = false;
     std::vector<Key> m_keyPresses;
+
+    bool m_cursorCaptured = false;
+    bool m_hasLastCursorPosition = false;
+    double m_lastCursorX = 0.0;
+    double m_lastCursorY = 0.0;
+    CursorDelta m_cursorDelta;
 };
 
 } // namespace engine

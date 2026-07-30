@@ -5,9 +5,12 @@ add_library(engine STATIC
     src/platform/Window.cpp
     src/render/VulkanCheck.cpp
     src/render/VulkanContext.cpp
+    src/render/GpuMemory.cpp
     src/render/Swapchain.cpp
+    src/render/DepthImage.cpp
     src/render/Buffer.cpp
     src/render/Vertex.cpp
+    src/render/Camera.cpp
     src/render/GraphicsPipeline.cpp
     src/render/Renderer.cpp
 )
@@ -20,10 +23,19 @@ target_include_directories(engine
 )
 
 # Vulkan is PUBLIC because Vulkan types appear in the engine's public headers.
+# GLM is PUBLIC for the same reason: the game passes matrices to the renderer.
 # GLFW is PRIVATE: the game never talks to GLFW directly.
 target_link_libraries(engine
-    PUBLIC  Vulkan::Vulkan
+    PUBLIC  Vulkan::Vulkan glm::glm
     PRIVATE glfw
+)
+
+# GLM defaults to OpenGL's conventions. Vulkan's depth range is 0..1, not -1..1.
+# PUBLIC because every translation unit that touches a matrix must agree on this;
+# defining it in only some of them produces silently inconsistent maths.
+target_compile_definitions(engine PUBLIC
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    GLM_FORCE_RADIANS
 )
 
 # Validation layers are Vulkan's built-in error checker. They cost real

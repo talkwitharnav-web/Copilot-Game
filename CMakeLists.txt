@@ -35,6 +35,16 @@ FetchContent_Declare(glfw
 )
 FetchContent_MakeAvailable(glfw)
 
+# GLM: vector and matrix maths. Header-only. Needed from the moment anything is
+# drawn in 3D, because a perspective camera is matrix multiplication and hand
+# rolling it is tedious and easy to get subtly, invisibly wrong.
+FetchContent_Declare(glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG        1.0.1
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(glm)
+
 # Vulkan is installed system-wide via the LunarG SDK, so it is found, not fetched.
 find_package(Vulkan REQUIRED)
 

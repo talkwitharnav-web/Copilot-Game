@@ -14,6 +14,65 @@ void glfwErrorCallback(int code, const char* description) {
     logError("GLFW error " + std::to_string(code) + ": " + (description ? description : "unknown"));
 }
 
+/// The one place engine key names are translated to the windowing library's.
+int toGlfwKey(Key key) {
+    switch (key) {
+    case Key::W:
+        return GLFW_KEY_W;
+    case Key::A:
+        return GLFW_KEY_A;
+    case Key::S:
+        return GLFW_KEY_S;
+    case Key::D:
+        return GLFW_KEY_D;
+    case Key::Space:
+        return GLFW_KEY_SPACE;
+    case Key::LeftShift:
+        return GLFW_KEY_LEFT_SHIFT;
+    case Key::Escape:
+        return GLFW_KEY_ESCAPE;
+    case Key::F1:
+        return GLFW_KEY_F1;
+    case Key::F2:
+        return GLFW_KEY_F2;
+    }
+    return GLFW_KEY_UNKNOWN;
+}
+
+bool fromGlfwKey(int glfwKey, Key& out) {
+    switch (glfwKey) {
+    case GLFW_KEY_W:
+        out = Key::W;
+        return true;
+    case GLFW_KEY_A:
+        out = Key::A;
+        return true;
+    case GLFW_KEY_S:
+        out = Key::S;
+        return true;
+    case GLFW_KEY_D:
+        out = Key::D;
+        return true;
+    case GLFW_KEY_SPACE:
+        out = Key::Space;
+        return true;
+    case GLFW_KEY_LEFT_SHIFT:
+        out = Key::LeftShift;
+        return true;
+    case GLFW_KEY_ESCAPE:
+        out = Key::Escape;
+        return true;
+    case GLFW_KEY_F1:
+        out = Key::F1;
+        return true;
+    case GLFW_KEY_F2:
+        out = Key::F2;
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 Window::Window(std::uint32_t width, std::uint32_t height, const std::string& title) {
@@ -48,15 +107,16 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
         if (self == nullptr) {
             return;
         }
-        switch (key) {
-        case GLFW_KEY_F1:
-            self->recordKeyPress(Key::F1);
-            break;
-        case GLFW_KEY_F2:
-            self->recordKeyPress(Key::F2);
-            break;
-        default:
-            break;
+        Key mapped{};
+        if (fromGlfwKey(key, mapped)) {
+            self->recordKeyPress(mapped);
+        }
+    });
+
+    glfwSetCursorPosCallback(m_handle, [](GLFWwindow* handle, double x, double y) {
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+        if (self != nullptr) {
+            self->recordCursorPosition(x, y);
         }
     });
 
@@ -100,6 +160,50 @@ std::vector<Key> Window::consumeKeyPresses() {
     std::vector<Key> presses;
     presses.swap(m_keyPresses);
     return presses;
+}
+
+bool Window::isKeyDown(Key key) const {
+    return glfwGetKey(m_handle, toGlfwKey(key)) == GLFW_PRESS;
+}
+
+bool Window::isMouseButtonDown(MouseButton button) const {
+    const int glfwButton = button == MouseButton::Left ? GLFW_MOUSE_BUTTON_LEFT : GLFW_MOUSE_BUTTON_RIGHT;
+    return glfwGetMouseButton(m_handle, glfwButton) == GLFW_PRESS;
+}
+
+void Window::recordCursorPosition(double x, double y) {
+    // The first sample after capture has no previous position to compare
+    // against; using it would produce one enormous jump in view direction.
+    if (m_hasLastCursorPosition) {
+        m_cursorDelta.x += static_cast<float>(x - m_lastCursorX);
+        m_cursorDelta.y += static_cast<float>(y - m_lastCursorY);
+    }
+    m_lastCursorX = x;
+    m_lastCursorY = y;
+    m_hasLastCursorPosition = true;
+}
+
+CursorDelta Window::consumeCursorDelta() {
+    const CursorDelta delta = m_cursorDelta;
+    m_cursorDelta = CursorDelta{};
+    return delta;
+}
+
+void Window::setCursorCaptured(bool captured) {
+    if (captured == m_cursorCaptured) {
+        return;
+    }
+    m_cursorCaptured = captured;
+    glfwSetInputMode(m_handle, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+
+    // Raw motion skips the OS pointer acceleration curve, which is what makes
+    // mouse-look feel consistent rather than mushy.
+    if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
+        glfwSetInputMode(m_handle, GLFW_RAW_MOUSE_MOTION, captured ? GLFW_TRUE : GLFW_FALSE);
+    }
+
+    m_hasLastCursorPosition = false;
+    m_cursorDelta = CursorDelta{};
 }
 
 } // namespace engine

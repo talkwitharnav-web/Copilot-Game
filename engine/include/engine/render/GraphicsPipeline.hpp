@@ -14,10 +14,10 @@ namespace engine {
 /// window does not require rebuilding the pipeline.
 class GraphicsPipeline {
 public:
-    /// `colorFormat` must match the format of the images this pipeline renders
-    /// into; dynamic rendering validates the two against each other.
+    /// `colorFormat` and `depthFormat` must match the attachments this pipeline
+    /// renders into; dynamic rendering validates them against each other.
     GraphicsPipeline(VkDevice device, const std::filesystem::path& vertexSpirv,
-                     const std::filesystem::path& fragmentSpirv, VkFormat colorFormat);
+                     const std::filesystem::path& fragmentSpirv, VkFormat colorFormat, VkFormat depthFormat);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;
