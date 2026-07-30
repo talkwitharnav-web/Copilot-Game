@@ -241,6 +241,13 @@ void VulkanContext::selectPhysicalDevice() {
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(candidate, &properties);
 
+        // Dynamic rendering is a core 1.3 feature and the renderer depends on it.
+        // Rejecting here gives a clear "no suitable GPU" error instead of a
+        // confusing failure inside vkCreateDevice.
+        if (properties.apiVersion < VK_API_VERSION_1_3) {
+            continue;
+        }
+
         // This machine has both a discrete NVIDIA GPU and an integrated Intel one.
         // Without an explicit preference Vulkan may hand us the slower of the two.
         int score = 0;
@@ -288,8 +295,17 @@ void VulkanContext::createLogicalDevice() {
 
     VkPhysicalDeviceFeatures features{}; // Nothing beyond the baseline is needed yet.
 
+    // Dynamic rendering (core in Vulkan 1.3) lets us begin rendering by naming
+    // the target images directly, instead of building VkRenderPass and
+    // VkFramebuffer objects up front. Fewer objects, and they no longer have to
+    // be kept in sync with the swapchain.
+    VkPhysicalDeviceVulkan13Features features13{};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.dynamicRendering = VK_TRUE;
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = &features13;
     createInfo.queueCreateInfoCount = static_cast<std::uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.pEnabledFeatures = &features;

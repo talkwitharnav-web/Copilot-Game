@@ -1,6 +1,7 @@
 #include "engine/render/Renderer.hpp"
 
 #include "engine/core/Log.hpp"
+#include "engine/core/Paths.hpp"
 #include "engine/platform/Window.hpp"
 #include "engine/render/VulkanContext.hpp"
 #include "render/VulkanCheck.hpp"
@@ -34,7 +35,9 @@ VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayou
 } // namespace
 
 Renderer::Renderer(const VulkanContext& context, Window& window)
-    : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())) {
+    : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
+      m_trianglePipeline(context.device(), executableDirectory() / "shaders" / "triangle.vert.spv",
+                         executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat()) {
     createCommandResources();
     createSyncObjects();
 }
@@ -121,44 +124,66 @@ void Renderer::recreateSwapchain() {
     m_currentFrame = 0;
 }
 
-void Renderer::recordClearCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex,
-                                   const ClearColor& color) const {
+void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex,
+                              const ClearColor& color) const {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkCheck(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer");
 
     const VkImage image = m_swapchain.images()[imageIndex];
+    const VkExtent2D extent = m_swapchain.extent();
 
     // An image's "layout" is how the GPU has it arranged in memory. It has to be
     // moved into a layout that permits the operation we are about to perform, and
     // then into the layout presentation requires. UNDEFINED as the old layout
     // means "I don't care what was in here", which is true: we overwrite it all.
-    const VkImageMemoryBarrier toTransferDst = makeColorImageBarrier(
-        image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
-                         nullptr, 0, nullptr, 1, &toTransferDst);
+    const VkImageMemoryBarrier toColorAttachment =
+        makeColorImageBarrier(image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &toColorAttachment);
 
-    VkClearColorValue clearValue{};
-    clearValue.float32[0] = color.r;
-    clearValue.float32[1] = color.g;
-    clearValue.float32[2] = color.b;
-    clearValue.float32[3] = color.a;
+    VkRenderingAttachmentInfo colorAttachment{};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.imageView = m_swapchain.imageViews()[imageIndex];
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.clearValue.color = VkClearColorValue{{color.r, color.g, color.b, color.a}};
 
-    VkImageSubresourceRange range{};
-    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    range.baseMipLevel = 0;
-    range.levelCount = 1;
-    range.baseArrayLayer = 0;
-    range.layerCount = 1;
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea.extent = extent;
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
 
-    vkCmdClearColorImage(commandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1, &range);
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+    // Supplied per frame rather than baked into the pipeline, so a window resize
+    // does not require rebuilding it.
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline.handle());
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    vkCmdEndRendering(commandBuffer);
 
     const VkImageMemoryBarrier toPresent =
-        makeColorImageBarrier(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                              VK_ACCESS_TRANSFER_WRITE_BIT, 0);
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0,
-                         nullptr, 0, nullptr, 1, &toPresent);
+        makeColorImageBarrier(image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0);
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
     vkCheck(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
 }
@@ -189,9 +214,11 @@ void Renderer::drawFrame(const ClearColor& color) {
 
     const VkCommandBuffer commandBuffer = m_commandBuffers[m_currentFrame];
     vkCheck(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer");
-    recordClearCommands(commandBuffer, imageIndex, color);
+    recordCommands(commandBuffer, imageIndex, color);
 
-    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    // We now write the image as a colour attachment rather than a transfer
+    // target, so the wait happens at the stage that actually does that writing.
+    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;

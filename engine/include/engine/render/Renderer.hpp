@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/render/GraphicsPipeline.hpp"
 #include "engine/render/Swapchain.hpp"
 
 #include <vulkan/vulkan.h>
@@ -38,7 +39,7 @@ private:
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();
-    void recordClearCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color) const;
+    void recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color) const;
 
     /// How many frames the CPU is allowed to work on before waiting for the GPU.
     static constexpr std::uint32_t kFramesInFlight = 2;
@@ -46,6 +47,7 @@ private:
     const VulkanContext& m_context;
     Window& m_window;
     Swapchain m_swapchain;
+    GraphicsPipeline m_trianglePipeline;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;
