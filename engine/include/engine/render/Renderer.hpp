@@ -63,6 +63,13 @@ public:
     /// frame. Uploaded once; moving it costs nothing.
     void setOverlayMesh(const MeshData& mesh);
 
+    /// Flat geometry drawn last, in screen space, ignoring the camera entirely.
+    ///
+    /// Coordinates run -1 to 1 over the window *height* on both axes, so a
+    /// square stays square: the renderer divides X by the aspect ratio. Z should
+    /// be near zero to sit in front of the world.
+    void setScreenMesh(const MeshData& mesh);
+
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
     /// Scene geometry is already in world space, so the caller supplies only
@@ -73,6 +80,13 @@ public:
     /// The overlay is drawn only when a transform is given.
     void drawFrame(const ClearColor& color, const glm::mat4& view,
                    const std::optional<glm::mat4>& overlayTransform = std::nullopt);
+
+    /// Vertical field of view in degrees. Wider shows more of the world and
+    /// exaggerates perspective; narrower feels zoomed in. Clamped to a sane
+    /// range, because past roughly 130 the distortion at screen edges makes the
+    /// game unplayable rather than merely ugly.
+    void setVerticalFov(float degrees);
+    float verticalFov() const { return m_verticalFovDegrees; }
 
     std::size_t meshCount() const;
 
@@ -134,6 +148,7 @@ private:
     std::vector<GpuMesh> m_meshes;
     std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
+    GpuMesh m_screenMesh;
 
     struct RetiredMesh {
         GpuMesh mesh;
@@ -141,6 +156,7 @@ private:
     };
     std::vector<RetiredMesh> m_retired;
     std::uint64_t m_frameIndex = 0;
+    float m_verticalFovDegrees = 70.0f;
 
     std::vector<VkCommandBuffer> m_commandBuffers;
 

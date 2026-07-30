@@ -194,3 +194,13 @@ New-DirtTexture
 New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
 New-GrassSideTexture
 New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53
+
+# Flat white, for geometry that supplies its own colour: the targeting cage, the
+# crosshair, and anything else that must not pick up a material.
+$white = New-Object System.Drawing.Bitmap $size, $size
+for ($y = 0; $y -lt $size; $y++) {
+    for ($x = 0; $x -lt $size; $x++) {
+        $white.SetPixel($x, $y, [System.Drawing.Color]::White)
+    }
+}
+Save-Bitmap -Bitmap $white -Name 'white'

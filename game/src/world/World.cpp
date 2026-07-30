@@ -30,7 +30,23 @@ int chebyshevDistance(const ChunkCoord& a, const ChunkCoord& b) {
 
 } // namespace
 
-World::World(std::uint32_t seed) : m_seed(seed) {}
+World::World(std::uint32_t seed, std::filesystem::path saveRoot)
+    : m_seed(seed), m_store(std::move(saveRoot), seed) {}
+
+void World::saveIfModified(const ChunkCoord& coord, ChunkSlot& slot) {
+    if (!slot.modified) {
+        return;
+    }
+    m_store.save(coord, slot.blocks);
+    slot.modified = false;
+    ++m_savedChunkCount;
+}
+
+void World::saveAll() {
+    for (auto& [coord, slot] : m_chunks) {
+        saveIfModified(coord, slot);
+    }
+}
 
 const Chunk* World::chunkAt(const ChunkCoord& coord) const {
     const auto it = m_chunks.find(coord);
@@ -92,6 +108,7 @@ void World::setBlock(int x, int y, int z, BlockId block) {
         return;
     }
     it->second.blocks.set(lx, ly, lz, block);
+    it->second.modified = true;
 
     markDirty(coord);
 
@@ -188,6 +205,10 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         // Unload first so memory is released before anything new is allocated.
         for (auto it = m_chunks.begin(); it != m_chunks.end();) {
             if (chebyshevDistance(it->first, centre) > kUnloadRadiusChunks) {
+                // Must happen before the erase, or an edited chunk is lost the
+                // moment the player walks away from it.
+                saveIfModified(it->first, it->second);
+
                 if (it->second.meshed) {
                     updates.push_back(ChunkMeshUpdate{it->first, {}, true});
                 }
@@ -220,7 +241,13 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
             continue;
         }
 
-        m_chunks.emplace(coord, ChunkSlot{generateChunk(m_seed, coord), false});
+        // A saved chunk replaces generation entirely: it already contains the
+        // generated terrain plus whatever the player did to it.
+        if (std::optional<Chunk> stored = m_store.load(coord)) {
+            m_chunks.emplace(coord, ChunkSlot{std::move(*stored), false, false});
+        } else {
+            m_chunks.emplace(coord, ChunkSlot{generateChunk(m_seed, coord), false, false});
+        }
 
         // The new chunk and its neighbours may all have gained or lost visible
         // faces along the shared border.

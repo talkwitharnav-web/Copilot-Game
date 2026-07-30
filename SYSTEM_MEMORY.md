@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–8 complete. The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, and breaks and places blocks. Still untextured flat colours and single-threaded, both by design. `TIMELINE.md` M9 (textures and block types) is next.
+> **Status:** Milestones 1–9 complete. The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, and breaks and places textured blocks. Still single-threaded and unlit, both by design. `TIMELINE.md` M10 (world persistence) is next.
 
 ---
 
@@ -141,7 +141,8 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | `Window` | `engine/platform/Window.hpp` | Owns the GLFW window and its lifetime. Reports whether a close was requested, pumps OS events, and exposes a queue of key presses via the engine-level `Key` enum so the game never includes GLFW. |
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
-| `Vertex` | `engine/render/Vertex.hpp` | **The single definition of a vertex**, together with its Vulkan binding/attribute descriptions. The shader's `layout(location = ...)` inputs must match it. Change the format here and in the shader, nowhere else. |
+| `Vertex` | `engine/render/Vertex.hpp` | **The single definition of a vertex**, together with its Vulkan binding/attribute descriptions. Position, face shade, texture coordinate, and texture array layer. The shader's `layout(location = ...)` inputs must match it. Change the format here and in the shader, nowhere else. |
+| `TextureArray` | `engine/render/TextureArray.hpp` | A stack of same-sized images in one GPU resource, sampled by layer index, with a generated mip chain and its own sampler. |
 | `MeshPushConstants` | `engine/render/PushConstants.hpp` | The per-draw data block. Must match the shader's `layout(push_constant)` block field for field. |
 | `Buffer` | `engine/render/Buffer.hpp` | A `VkBuffer` plus the `VkDeviceMemory` backing it, released together. Copy and move are deleted. `uploadBufferData()` fills device-local buffers via a temporary staging buffer. |
 | `DepthImage` | `engine/render/DepthImage.hpp` | The depth attachment. Picks the best supported format (`D32_SFLOAT` preferred) and is rebuilt with the swapchain, since it must match the colour target's size. |
@@ -267,6 +268,46 @@ Movement is also **split into steps of at most 0.4 m**. The resolver snaps out o
 **Crouching** drops the box to 1.5 m and the eyes to 1.27 m, shrinking from the top so the feet stay put. It is held on the player rather than read from the key each frame, because standing up is refused when there is no headroom. The collision box switches instantly; only the camera is eased, at 8 m/s.
 
 While crouched and supported, any step that would leave nothing underfoot is undone. This is checked per axis, so an edge can still be slid along, plus once more at the end of the whole step as a backstop — auto step-up resolves its own position and would otherwise skip the per-axis checks entirely.
+
+---
+
+## Block Textures
+
+Blocks are drawn from a **2D texture array**, one 16×16 layer per material, not from an atlas. Mipmapping an atlas averages across tile boundaries, so distant stone picks up the colour of whatever was packed beside it. Array layers share no edges, so mip generation is simply correct. The cost is that every layer must be the same size, which for block textures is wanted anyway.
+
+| Setting | Value | Why |
+|---|---|---|
+| Format | `R8G8B8A8_SRGB` | The swapchain is `B8G8R8A8_SRGB`, so the hardware applies the sRGB curve on write. Sampling must undo it or everything looks washed out. |
+| Magnification | `NEAREST` | Keeps a texel a crisp square up close. This *is* the blocky look. |
+| Mip mode | `LINEAR` | Blends between mip levels, which stops distant terrain shimmering while moving. |
+| Mips | Full chain, blitted | Built with `vkCmdBlitImage`, halving each level. |
+
+A vertex carries a texture coordinate and a layer index. The layer is declared `flat` in the shaders — interpolating it would make a triangle sample a blend of two different textures across its surface.
+
+`Vertex::color` is no longer material colour; it is **face shading** multiplied with the sampled texel, so white leaves a texture untouched.
+
+### Adding a block type
+
+1. Put a 16×16 PNG in `assets/textures/blocks/`.
+2. Add its filename to the texture list in `game/src/Main.cpp`, in layer order.
+3. Add an entry to `TextureLayer` in `game/src/world/Block.hpp`.
+4. Return it from `blockTextureLayer()`.
+
+Blocks whose faces differ are handled by the `BlockFace` parameter rather than by special cases in the mesher. Grass is the worked example: top, bottom and sides all resolve to different layers.
+
+### Authoring
+
+`tools/make-block-textures.ps1` generates the current set. The rules it follows, taken from real block-texture reference:
+
+- **No interpolation, blending or gradients.** Every pixel is one palette entry chosen outright. Smooth noise reads as melted blobs even after quantization, and looks uncanny.
+- **Tight value ranges.** Stone spans only a few near greys. Wide contrast makes terrain look like static.
+- **Weighted palette selection**, so most pixels land on middle tones and extremes stay sparse.
+- **Short horizontal runs**, never large patches.
+- **Accent pixels**, such as the grey pebbles in soil, which are what stop brown reading as a blanket.
+
+The PNGs are ordinary files and may be edited by hand instead; the script is a starting point, not a pipeline step. `tools/preview-textures.ps1` magnifies textures into a labelled sheet, because 16×16 cannot be judged at actual size.
+
+Third-party textures kept for visual reference live in `reference/`, which is gitignored and deliberately outside `assets/` so the build cannot copy them into the game.
 
 ---
 

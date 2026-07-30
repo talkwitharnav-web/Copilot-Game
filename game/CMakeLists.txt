@@ -1,7 +1,9 @@
 add_executable(game
     src/Main.cpp
+    src/hud/Crosshair.cpp
     src/world/Noise.cpp
     src/world/World.cpp
+    src/world/WorldStore.cpp
     src/world/Player.cpp
     src/world/Raycast.cpp
     src/world/BlockOutline.cpp

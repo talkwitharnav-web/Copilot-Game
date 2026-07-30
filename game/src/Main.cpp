@@ -6,6 +6,7 @@
 #include <engine/render/Renderer.hpp>
 #include <engine/render/VulkanContext.hpp>
 
+#include "hud/Crosshair.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
@@ -16,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -44,6 +46,14 @@ constexpr float kReach = 12.0f;
 // does not need one click per block.
 constexpr float kBreakRepeatSeconds = 0.15f;
 constexpr float kPlaceRepeatSeconds = 0.18f;
+
+// Field of view in degrees, vertical. 70 matches the genre default; the range
+// is wide enough to be useful without the edge distortion that makes very high
+// values unplayable. Keyboard-adjustable until there is a settings screen.
+constexpr float kDefaultFov = 70.0f;
+constexpr float kFovStep = 5.0f;
+constexpr float kMinFov = 50.0f;
+constexpr float kMaxFov = 110.0f;
 
 // Time allowed per frame for generating and meshing chunks. Anything left over
 // waits for the next frame, so a burst of new terrain slows the horizon down
@@ -87,8 +97,8 @@ int main() {
         // TextureLayer in Block.hpp.
         const std::filesystem::path textureDir = engine::executableDirectory() / "assets" / "textures" / "blocks";
         const std::vector<std::filesystem::path> blockTextures{
-            textureDir / "stone.png", textureDir / "dirt.png", textureDir / "grass_top.png",
-            textureDir / "grass_side.png", textureDir / "sand.png"};
+            textureDir / "stone.png", textureDir / "dirt.png",  textureDir / "grass_top.png",
+            textureDir / "grass_side.png", textureDir / "sand.png", textureDir / "white.png"};
 
         engine::Renderer renderer(context, window, blockTextures);
 
@@ -101,7 +111,7 @@ int main() {
         window.setCursorCaptured(true);
 
         const auto buildStart = std::chrono::steady_clock::now();
-        game::World world(kWorldSeed);
+        game::World world(kWorldSeed, engine::executableDirectory() / "saves");
 
         // Spawn is chosen before any chunk exists, so the surface height comes
         // straight from the generator rather than from loaded blocks.
@@ -140,20 +150,32 @@ int main() {
         const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
+        renderer.setScreenMesh(game::makeCrosshair());
+        renderer.setVerticalFov(kDefaultFov);
 
         game::Player player;
-        player.position = spawn;
-        player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
+        if (const std::optional<game::SavedPlayer> saved = world.store().loadPlayer()) {
+            player.position = saved->position;
+            camera.yaw = saved->yaw;
+            camera.pitch = saved->pitch;
+            engine::logInfo("Resumed from the last saved position.");
+        } else {
+            player.position = spawn;
+            player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
+        }
 
         const auto ms = [](auto from, auto to) {
             return std::to_string(std::chrono::duration<float, std::milli>(to - from).count());
         };
         engine::logInfo("World seed " + std::to_string(kWorldSeed) + ", load radius " +
                         std::to_string(game::kLoadRadiusChunks) + " chunks");
+        engine::logInfo("Saves: " + (engine::executableDirectory() / "saves").string());
         engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks in " +
                         ms(buildStart, worldReady) + " ms");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
+        engine::logInfo("Field of view: " + std::to_string(static_cast<int>(kDefaultFov)) +
+                        " (F3 narrower, F4 wider)");
         engine::logInfo("Move: WASD. Space jump, Left Shift sneak, Left Ctrl sprint.");
         engine::logInfo("Left click breaks, right click places. 1-4 pick the block to place.");
         engine::logInfo("F toggles fly mode. Escape releases the mouse; click to recapture.");
@@ -189,6 +211,13 @@ int main() {
                                 : key == engine::Key::Num3 ? game::BlockId::Grass
                                                            : game::BlockId::Sand;
                     engine::logInfo(std::string("Holding: ") + describeBlock(heldBlock));
+                    continue;
+                }
+                if (key == engine::Key::F3 || key == engine::Key::F4) {
+                    const float step = key == engine::Key::F3 ? -kFovStep : kFovStep;
+                    renderer.setVerticalFov(
+                        std::clamp(renderer.verticalFov() + step, kMinFov, kMaxFov));
+                    engine::logInfo("Field of view: " + std::to_string(static_cast<int>(renderer.verticalFov())));
                     continue;
                 }
                 if (key == engine::Key::F1 && capIndex > 0) {
@@ -307,7 +336,10 @@ int main() {
             frameLimiter.waitForNextFrame();
         }
 
-        engine::logInfo("Window closed. Shutting down.");
+        engine::logInfo("Window closed. Saving world.");
+        world.saveAll();
+        world.store().savePlayer(game::SavedPlayer{player.position, camera.yaw, camera.pitch});
+        engine::logInfo("Saved " + std::to_string(world.savedChunkCount()) + " modified chunks. Shutting down.");
     } catch (const std::exception& error) {
         engine::logError(std::string("Fatal: ") + error.what());
         return EXIT_FAILURE;

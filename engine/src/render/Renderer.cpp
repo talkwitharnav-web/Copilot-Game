@@ -20,7 +20,6 @@ namespace {
 
 // 60 degrees or wider makes anything close to the camera visibly warp at the
 // frame edges, the same way an ultrawide phone lens does. 45 reads as natural.
-constexpr float kVerticalFovDegrees = 45.0f;
 constexpr float kNearPlane = 0.1f;
 constexpr float kFarPlane = 500.0f;
 
@@ -79,6 +78,7 @@ Renderer::~Renderer() {
     m_meshes.clear();
     m_freeSlots.clear();
     m_overlayMesh = GpuMesh{};
+    m_screenMesh = GpuMesh{};
 
     // Before the pool: freeing the pool invalidates the set allocated from it.
     m_trianglePipeline.reset();
@@ -258,6 +258,10 @@ void Renderer::removeMesh(MeshHandle handle) {
     m_freeSlots.push_back(handle);
 }
 
+void Renderer::setVerticalFov(float degrees) {
+    m_verticalFovDegrees = std::clamp(degrees, 30.0f, 130.0f);
+}
+
 std::size_t Renderer::meshCount() const {
     return m_meshes.size() - m_freeSlots.size();
 }
@@ -265,6 +269,11 @@ std::size_t Renderer::meshCount() const {
 void Renderer::setOverlayMesh(const MeshData& mesh) {
     vkDeviceWaitIdle(m_context.device());
     uploadInto(m_overlayMesh, mesh);
+}
+
+void Renderer::setScreenMesh(const MeshData& mesh) {
+    vkDeviceWaitIdle(m_context.device());
+    uploadInto(m_screenMesh, mesh);
 }
 
 void Renderer::createSyncObjects() {
@@ -327,7 +336,8 @@ glm::mat4 Renderer::projectionMatrix() const {
     const float width = static_cast<float>(extent.width);
     const float height = static_cast<float>(extent.height > 0 ? extent.height : 1);
 
-    glm::mat4 projection = glm::perspective(glm::radians(kVerticalFovDegrees), width / height, kNearPlane, kFarPlane);
+    glm::mat4 projection =
+        glm::perspective(glm::radians(m_verticalFovDegrees), width / height, kNearPlane, kFarPlane);
 
     // GLM builds this for OpenGL, whose Y axis points the opposite way to
     // Vulkan's. Without this flip the whole scene renders upside down, and
@@ -439,6 +449,15 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
 
     if (overlayTransform.has_value()) {
         drawMesh(m_overlayMesh, viewProjection * *overlayTransform);
+    }
+
+    // Screen space: no view, no projection. Only an aspect correction, so
+    // geometry authored in height-relative units is not stretched horizontally.
+    if (m_screenMesh.indexCount != 0) {
+        const float aspect = extent.height == 0
+                                 ? 1.0f
+                                 : static_cast<float>(extent.width) / static_cast<float>(extent.height);
+        drawMesh(m_screenMesh, glm::scale(glm::mat4{1.0f}, glm::vec3{1.0f / aspect, 1.0f, 1.0f}));
     }
 
     vkCmdEndRendering(commandBuffer);

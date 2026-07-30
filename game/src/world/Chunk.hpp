@@ -34,6 +34,11 @@ public:
         }
     }
 
+    /// Raw storage, for bulk operations such as saving and loading. One byte per
+    /// block, so the array is exactly `kBlockCount` bytes.
+    BlockId* data() { return m_blocks.data(); }
+    const BlockId* data() const { return m_blocks.data(); }
+
 private:
     static constexpr std::size_t index(int x, int y, int z) {
         return static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * kSize +

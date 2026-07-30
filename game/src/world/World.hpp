@@ -2,12 +2,14 @@
 
 #include "world/Chunk.hpp"
 #include "world/TerrainGenerator.hpp"
+#include "world/WorldStore.hpp"
 
 #include <engine/render/MeshData.hpp>
 
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
 
@@ -44,7 +46,7 @@ struct ChunkMeshUpdate {
 /// writes.
 class World {
 public:
-    explicit World(std::uint32_t seed);
+    World(std::uint32_t seed, std::filesystem::path saveRoot);
 
     /// Anything not currently loaded reads as air.
     BlockId blockAt(int x, int y, int z) const;
@@ -71,10 +73,23 @@ public:
     std::size_t loadedChunkCount() const { return m_chunks.size(); }
     std::size_t pendingChunkCount() const { return m_pendingLoad.size() + m_pendingMesh.size(); }
 
+    /// Writes every modified chunk still in memory. Call before shutting down;
+    /// chunks that unload during play are saved as they go.
+    void saveAll();
+
+    /// Persistence for anything that is not block data, such as where the player
+    /// was standing.
+    const WorldStore& store() const { return m_store; }
+
+    std::size_t savedChunkCount() const { return m_savedChunkCount; }
+
 private:
     struct ChunkSlot {
         Chunk blocks;
         bool meshed = false;
+        /// Set the moment a block is changed. Only these chunks are ever
+        /// written: everything else regenerates from the seed.
+        bool modified = false;
     };
 
     const Chunk* chunkAt(const ChunkCoord& coord) const;
@@ -83,8 +98,10 @@ private:
     void markDirty(const ChunkCoord& coord);
     void refreshQueues(const ChunkCoord& centre);
     engine::MeshData meshOne(const ChunkCoord& coord) const;
+    void saveIfModified(const ChunkCoord& coord, ChunkSlot& slot);
 
     std::uint32_t m_seed;
+    WorldStore m_store;
     std::unordered_map<ChunkCoord, ChunkSlot> m_chunks;
 
     // Deliberately vectors rather than sets: they are rebuilt whenever the
@@ -95,6 +112,7 @@ private:
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;
+    std::size_t m_savedChunkCount = 0;
 };
 
 } // namespace game

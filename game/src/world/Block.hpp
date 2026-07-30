@@ -35,6 +35,9 @@ enum class TextureLayer : std::uint32_t {
     GrassTop = 2,
     GrassSide = 3,
     Sand = 4,
+    /// Flat white, for geometry that carries its own colour instead of a
+    /// material: the targeting cage and the crosshair.
+    White = 5,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
