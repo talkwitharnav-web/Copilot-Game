@@ -2,7 +2,7 @@
 
 Narrative decisions, rejected approaches, debugging lessons, and machine-specific guardrails for future coding sessions on this voxel sandbox project.
 
-Read `SYSTEM_MEMORY.md` first for the current project structure, build commands, and technical truth. **This file explains _why_ settled choices exist** so a future session does not re-litigate them or repeat a mistake that has already been paid for once.
+Read `SYSTEM_MEMORY.md` first for the current project structure, build commands, and technical truth. **This file explains _why_ settled choices exist** so a future session does not re-litigate them or repeat a mistake that has already been paid for once. `TIMELINE.md` holds the milestone route and what the finished game is meant to be.
 
 ---
 
@@ -12,7 +12,8 @@ Read `SYSTEM_MEMORY.md` first for the current project structure, build commands,
 - **Stop at milestone boundaries.** The user explicitly asked (2026-07-30) that work stop at the end of each milestone and wait for instruction. Do not roll straight from "the window renders" into "now let's add chunks." Finishing early and asking is correct behavior here, not laziness.
 - **The user is an experienced vibe coder but NOT an experienced C++/graphics-engine programmer.** They understand concepts when explained simply. Do not assume familiarity with low-level graphics or systems terminology.
 - **Use the real term, then immediately explain it in plain English.** Direct user instruction, 2026-07-30: _"remember i'm just a vibe coder i don't understand all this complex terminology so use the terminology, then explain it in simple human terms so i learn over time."_ This is a learning-over-time request, not a request to dumb things down — do not silently substitute vague language for the correct word, and do not drop the plain-English half either.
-- **Do not build ahead of the current milestone.** No voxel terrain, physics, ray tracing, procedural generation, multiplayer, PBR, weather, or job systems until explicitly asked. The long-term ambition is real, but building toward it speculatively is the fastest way to a codebase nobody can finish.
+- **Do not build ahead of the current milestone.** No voxel terrain, physics, ray tracing, procedural generation, PBR, weather, or job systems until explicitly asked. The long-term ambition is real, but building toward it speculatively is the fastest way to a codebase nobody can finish. `TIMELINE.md` records the intended order and why.
+- **Multiplayer is permanently cut, not deferred.** User decision, 2026-07-30: _"no multiplayer btw."_ This is a **design freedom, not a limitation** — treat single-player as a licence to avoid client/server splits, server-authoritative simulation, replication hooks, and determinism constraints that exist only to serve netcode. Do not add abstractions "in case multiplayer happens later." An earlier draft of the vision listed multiplayer as long-term; that was explicitly overridden.
 - **This machine's Windows account is a standard user, not an administrator.** See "The `.141`-Equivalent Machine Facts" below. Never ask the user to type a password or PIN into anything the model can read.
 - **Windows PowerShell 5.1 only. Never use `&&`** — chain with `;`. **Never send multi-line scripts to the terminal** (see Lessons).
 - **This is not being built inside Unity, Unreal, or Godot, and that is not up for casual reconsideration.** The whole point is a custom engine. If a task feels like it "would be easier in Unreal," that is expected and not a signal to switch.
@@ -109,6 +110,7 @@ Deliberate boundary: `FrameLimiter` knows only a target number. The list of sele
 
 ## Architecture Rules
 
+- **The goal is an original game, not a Minecraft clone.** The genre conventions (exploration, building, crafting, survival) are the target; Minecraft's specific mechanics, content, recipe trees, tool tiers, creatures, and biomes are not. From Phase 5 of `TIMELINE.md` onward, "how does Minecraft do it?" is a reasonable *engineering* question and a bad *design* one — the finished game must have its own identity.
 - **`engine/` must not know that `game/` exists.** The engine is a library; the game is an executable that uses it. If engine code ever needs to reference a game concept (blocks, chunks, the player), that is a signal the abstraction is in the wrong place — the engine should expose a mechanism and let the game supply the policy. This one rule is what makes it possible to eventually have tools/editors/servers reusing the same engine.
 - **Prefer plain data and explicit ownership over inheritance hierarchies.** No `GameObject` base class, no virtual-everything. The moment this becomes a deep class tree, both multithreading and cache performance become impossible to recover.
 - **Structure for future multithreading without doing it now.** Concretely: keep expensive work (world generation, meshing, physics) in functions that take their inputs as parameters and return results, rather than reaching into global state and mutating it in place. A pure-ish function is trivial to hand to a job system later; a method that mutates five globals is a rewrite. This is the _only_ concession being made to future threading right now.

@@ -2,9 +2,9 @@
 
 Current technical truth for this voxel sandbox project: what exists, where it lives, what version it is, and how to build and run it.
 
-Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
+Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestone 1 (toolchain proof). No gameplay, no voxels, no world generation exists yet, by design.
+> **Status:** Milestone 1 (toolchain proof) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M2 (shader pipeline and first triangle) is next.
 
 ---
 
@@ -62,6 +62,7 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 ├── .gitattributes          Line-ending normalization (Windows/CRLF safety)
 ├── CLAUDE.md               Why decisions were made (narrative)
 ├── SYSTEM_MEMORY.md        What currently exists (this file)
+├── TIMELINE.md             Where this is going and in what order
 ├── .vscode/                Editor config + recommended extensions
 ├── tools/
 │   └── dev-env.ps1         Loads the MSVC environment into the current shell
