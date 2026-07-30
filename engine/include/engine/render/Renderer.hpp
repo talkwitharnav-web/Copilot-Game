@@ -3,6 +3,7 @@
 #include "engine/render/Buffer.hpp"
 #include "engine/render/DepthImage.hpp"
 #include "engine/render/GraphicsPipeline.hpp"
+#include "engine/render/MeshData.hpp"
 #include "engine/render/Swapchain.hpp"
 
 #include <glm/glm.hpp>
@@ -35,6 +36,11 @@ public:
     Renderer(Renderer&&) = delete;
     Renderer& operator=(Renderer&&) = delete;
 
+    /// Replaces the geometry drawn every frame. Blocks until the GPU has
+    /// finished with the previous mesh, so call it at load time, not per frame.
+    /// An empty mesh simply draws nothing.
+    void uploadMesh(const MeshData& mesh);
+
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
     /// Scene geometry is already in world space, so the caller supplies only
@@ -45,7 +51,6 @@ public:
 
 private:
     void createCommandResources();
-    void createGeometry();
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();

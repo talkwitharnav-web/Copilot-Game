@@ -21,79 +21,7 @@ namespace {
 // frame edges, the same way an ultrawide phone lens does. 45 reads as natural.
 constexpr float kVerticalFovDegrees = 45.0f;
 constexpr float kNearPlane = 0.1f;
-constexpr float kFarPlane = 200.0f;
-
-struct MeshData {
-    std::vector<Vertex> vertices;
-    std::vector<std::uint32_t> indices;
-};
-
-/// Face order everywhere in this file: front(+Z), back(-Z), left(-X), right(+X),
-/// top(+Y), bottom(-Y).
-using FaceColors = std::array<glm::vec3, 6>;
-
-/// Appends an axis-aligned box, four vertices per face.
-///
-/// Sharing corners between faces would force them to share a colour there, which
-/// blurs away the very edges that make a box look like a box. Per-face vertices
-/// also match what voxel meshing will need, since normals and texture
-/// coordinates differ per face at a shared corner too.
-void appendBox(MeshData& mesh, const glm::vec3& center, const glm::vec3& halfExtents, const FaceColors& faceColors) {
-    const glm::vec3 c = center;
-    const glm::vec3 h = halfExtents;
-
-    const glm::vec3 corners[8] = {
-        {c.x - h.x, c.y - h.y, c.z + h.z}, {c.x + h.x, c.y - h.y, c.z + h.z},
-        {c.x + h.x, c.y + h.y, c.z + h.z}, {c.x - h.x, c.y + h.y, c.z + h.z},
-        {c.x - h.x, c.y - h.y, c.z - h.z}, {c.x + h.x, c.y - h.y, c.z - h.z},
-        {c.x + h.x, c.y + h.y, c.z - h.z}, {c.x - h.x, c.y + h.y, c.z - h.z},
-    };
-
-    // Each row is one face's four corners, counter-clockwise seen from outside.
-    // Reverse a row and that face disappears once backface culling is on.
-    const int faceCorners[6][4] = {
-        {0, 1, 2, 3}, {5, 4, 7, 6}, {4, 0, 3, 7}, {1, 5, 6, 2}, {3, 2, 6, 7}, {4, 5, 1, 0},
-    };
-
-    for (int face = 0; face < 6; ++face) {
-        const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
-        const glm::vec3& color = faceColors[static_cast<std::size_t>(face)];
-
-        for (int corner = 0; corner < 4; ++corner) {
-            const glm::vec3& p = corners[faceCorners[face][corner]];
-            mesh.vertices.push_back(Vertex{{p.x, p.y, p.z}, {color.r, color.g, color.b}});
-        }
-
-        mesh.indices.insert(mesh.indices.end(),
-                            {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
-    }
-}
-
-/// One colour per face, brighter on top and darker underneath, so the shape of a
-/// box is readable without any actual lighting yet.
-FaceColors shadedFaces(const glm::vec3& base) {
-    return FaceColors{
-        base * 0.80f, base * 0.65f, base * 0.72f, base * 0.72f, base * 1.00f, base * 0.45f,
-    };
-}
-
-MeshData buildScene() {
-    MeshData mesh;
-
-    // A wide, thin box as the ground, so there is a fixed reference to judge the
-    // camera against.
-    appendBox(mesh, {0.0f, -0.55f, 0.0f}, {14.0f, 0.25f, 14.0f}, shadedFaces({0.42f, 0.47f, 0.40f}));
-
-    // Boxes at different heights and depths. If the depth test is broken, these
-    // will visibly punch through each other as the camera moves.
-    appendBox(mesh, {0.0f, 0.5f, 0.0f}, {0.5f, 0.5f, 0.5f}, shadedFaces({0.30f, 0.62f, 0.92f}));
-    appendBox(mesh, {2.4f, 1.0f, -1.8f}, {1.0f, 1.0f, 1.0f}, shadedFaces({0.90f, 0.42f, 0.36f}));
-    appendBox(mesh, {-2.6f, 0.2f, 1.4f}, {0.7f, 0.7f, 0.7f}, shadedFaces({0.45f, 0.80f, 0.45f}));
-    appendBox(mesh, {-1.8f, 1.6f, -2.8f}, {0.6f, 1.6f, 0.6f}, shadedFaces({0.86f, 0.74f, 0.34f}));
-    appendBox(mesh, {3.6f, 0.3f, 2.6f}, {0.8f, 0.3f, 0.8f}, shadedFaces({0.72f, 0.52f, 0.86f}));
-
-    return mesh;
-}
+constexpr float kFarPlane = 500.0f;
 
 VkExtent2D toVkExtent(Extent2D extent) {
     return VkExtent2D{extent.width, extent.height};
@@ -127,7 +55,6 @@ Renderer::Renderer(const VulkanContext& context, Window& window)
                          executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat(),
                          m_depthImage->format()) {
     createCommandResources();
-    createGeometry();
     createSyncObjects();
 }
 
@@ -161,9 +88,17 @@ void Renderer::createCommandResources() {
             "vkAllocateCommandBuffers");
 }
 
-void Renderer::createGeometry() {
-    const MeshData mesh = buildScene();
-    m_indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+void Renderer::uploadMesh(const MeshData& mesh) {
+    // Replacing buffers the GPU may still be reading from is undefined behaviour.
+    // Waiting is free at load time and this is not a per-frame path.
+    vkDeviceWaitIdle(m_context.device());
+
+    if (mesh.empty()) {
+        m_vertexBuffer.reset();
+        m_indexBuffer.reset();
+        m_indexCount = 0;
+        return;
+    }
 
     const VkDeviceSize vertexBytes = mesh.vertices.size() * sizeof(Vertex);
     const VkDeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
@@ -178,8 +113,7 @@ void Renderer::createGeometry() {
     uploadBufferData(m_context, m_commandPool, *m_vertexBuffer, mesh.vertices.data(), vertexBytes);
     uploadBufferData(m_context, m_commandPool, *m_indexBuffer, mesh.indices.data(), indexBytes);
 
-    logInfo("Scene uploaded: " + std::to_string(mesh.vertices.size()) + " vertices, " +
-            std::to_string(mesh.indices.size() / 3) + " triangles");
+    m_indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 }
 
 void Renderer::createSyncObjects() {
@@ -333,12 +267,13 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdPushConstants(commandBuffer, m_trianglePipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(MeshPushConstants), &push);
 
-    const VkBuffer vertexBuffers[] = {m_vertexBuffer->handle()};
-    const VkDeviceSize vertexOffsets[] = {0};
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
-    vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
-
-    vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+    if (m_indexCount > 0) {
+        const VkBuffer vertexBuffers[] = {m_vertexBuffer->handle()};
+        const VkDeviceSize vertexOffsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+    }
 
     vkCmdEndRendering(commandBuffer);
 

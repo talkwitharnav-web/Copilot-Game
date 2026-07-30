@@ -5,10 +5,14 @@
 #include <engine/render/Renderer.hpp>
 #include <engine/render/VulkanContext.hpp>
 
+#include "world/Chunk.hpp"
+#include "world/ChunkMesher.hpp"
+
 #include <glm/glm.hpp>
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -19,9 +23,9 @@ namespace {
 
 constexpr std::uint32_t kWindowWidth = 1280;
 constexpr std::uint32_t kWindowHeight = 720;
-constexpr engine::ClearColor kBackgroundColor{0.05f, 0.08f, 0.14f, 1.0f};
+constexpr engine::ClearColor kBackgroundColor{0.45f, 0.62f, 0.80f, 1.0f};
 
-constexpr float kMoveMetresPerSecond = 6.0f;
+constexpr float kMoveMetresPerSecond = 12.0f;
 constexpr float kLookRadiansPerPixel = 0.0025f;
 
 // Selectable frame caps, lowest to highest. 0 means uncapped.
@@ -31,6 +35,53 @@ constexpr std::size_t kDefaultFpsCapIndex = 3;
 
 std::string describeCap(double fps) {
     return fps > 0.0 ? std::to_string(static_cast<int>(fps)) + " fps" : "uncapped";
+}
+
+/// Hand-written surface shape, not procedural generation. Seeded noise is M5;
+/// this exists only so the first chunk is interesting enough to fly around.
+int surfaceHeight(int x, int z) {
+    const auto fx = static_cast<float>(x);
+    const auto fz = static_cast<float>(z);
+    const float hills = 4.0f * std::sin(fx * 0.22f) * std::cos(fz * 0.19f);
+    const float ridge = 2.5f * std::sin((fx + fz) * 0.11f);
+    return static_cast<int>(14.0f + hills + ridge);
+}
+
+game::Chunk buildChunk() {
+    game::Chunk chunk;
+
+    for (int z = 0; z < game::Chunk::kSize; ++z) {
+        for (int x = 0; x < game::Chunk::kSize; ++x) {
+            const int surface = surfaceHeight(x, z);
+
+            for (int y = 0; y <= surface && y < game::Chunk::kSize; ++y) {
+                if (y == surface) {
+                    chunk.set(x, y, z, surface > 16 ? game::BlockId::Grass : game::BlockId::Sand);
+                } else if (y > surface - 4) {
+                    chunk.set(x, y, z, game::BlockId::Dirt);
+                } else {
+                    chunk.set(x, y, z, game::BlockId::Stone);
+                }
+            }
+        }
+    }
+
+    // Carve a hollow so there are interior surfaces to look at. If face culling
+    // were wrong, a cave is where it would be obvious.
+    constexpr glm::vec3 caveCenter{16.0f, 8.0f, 16.0f};
+    constexpr float caveRadius = 5.5f;
+    for (int y = 0; y < game::Chunk::kSize; ++y) {
+        for (int z = 0; z < game::Chunk::kSize; ++z) {
+            for (int x = 0; x < game::Chunk::kSize; ++x) {
+                const glm::vec3 p{x, y, z};
+                if (glm::length(p - caveCenter) < caveRadius) {
+                    chunk.set(x, y, z, game::BlockId::Air);
+                }
+            }
+        }
+    }
+
+    return chunk;
 }
 
 } // namespace
@@ -45,10 +96,19 @@ int main() {
         engine::FrameLimiter frameLimiter(kFpsCapOptions[capIndex]);
 
         engine::Camera camera;
-        camera.position = {6.5f, 5.5f, 9.0f};
-        camera.yaw = -2.15f;
-        camera.pitch = -0.42f;
+        camera.position = {48.0f, 30.0f, 48.0f};
+        camera.yaw = -2.36f;
+        camera.pitch = -0.34f;
         window.setCursorCaptured(true);
+
+        const game::Chunk chunk = buildChunk();
+        const engine::MeshData chunkMesh = game::meshChunk(chunk, glm::vec3{0.0f});
+        renderer.uploadMesh(chunkMesh);
+
+        // A solid 32-cubed chunk holds 32768 blocks; drawing every face would be
+        // 196608 of them. Only the ones touching air are ever created.
+        engine::logInfo("Chunk meshed: " + std::to_string(chunkMesh.indices.size() / 6) + " faces, " +
+                        std::to_string(chunkMesh.vertices.size()) + " vertices");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Move: WASD, Space up, Left Shift down. Look: mouse.");
