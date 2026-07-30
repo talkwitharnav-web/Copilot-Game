@@ -2,7 +2,9 @@
 
 #include "world/Chunk.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace game {
 
@@ -11,6 +13,10 @@ struct ChunkCoord {
     int x = 0;
     int y = 0;
     int z = 0;
+
+    friend bool operator==(const ChunkCoord& a, const ChunkCoord& b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    }
 };
 
 /// Builds a chunk from nothing but the seed and where the chunk sits.
@@ -30,3 +36,15 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord);
 int surfaceHeightAt(std::uint32_t seed, int worldX, int worldZ);
 
 } // namespace game
+
+template <>
+struct std::hash<game::ChunkCoord> {
+    std::size_t operator()(const game::ChunkCoord& c) const noexcept {
+        // Large odd multipliers keep neighbouring chunks, which differ by one on
+        // a single axis, from landing in the same bucket.
+        std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(c.x)) * 0x9E3779B1u;
+        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(c.y)) * 0x85EBCA77u;
+        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(c.z)) * 0xC2B2AE3Du;
+        return h ^ (h >> 16);
+    }
+};

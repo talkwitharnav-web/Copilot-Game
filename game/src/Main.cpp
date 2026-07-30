@@ -9,6 +9,7 @@
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
+#include "world/TerrainGenerator.hpp"
 #include "world/World.hpp"
 
 #include <glm/glm.hpp>
@@ -23,7 +24,7 @@
 #include <exception>
 #include <optional>
 #include <string>
-#include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -42,14 +43,13 @@ constexpr float kReach = 12.0f;
 constexpr float kBreakRepeatSeconds = 0.15f;
 constexpr float kPlaceRepeatSeconds = 0.18f;
 
+// Time allowed per frame for generating and meshing chunks. Anything left over
+// waits for the next frame, so a burst of new terrain slows the horizon down
+// instead of freezing the game.
+constexpr float kStreamingBudgetSeconds = 0.003f;
+
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
-
-// A fixed patch of world. Endless streaming is M8.
-constexpr int kWorldChunksX = 6;
-constexpr int kWorldChunksY = 2;
-constexpr int kWorldChunksZ = 6;
-
 // Selectable frame caps, lowest to highest. 0 means uncapped.
 // Temporary keyboard-driven stand-in until there is a real settings screen.
 constexpr std::array<double, 8> kFpsCapOptions{30.0, 60.0, 90.0, 120.0, 144.0, 165.0, 240.0, 0.0};
@@ -91,37 +91,57 @@ int main() {
         window.setCursorCaptured(true);
 
         const auto buildStart = std::chrono::steady_clock::now();
-        game::World world(kWorldSeed, kWorldChunksX, kWorldChunksY, kWorldChunksZ);
-        const auto generateEnd = std::chrono::steady_clock::now();
+        game::World world(kWorldSeed);
 
-        const std::vector<engine::MeshData> meshes = world.buildMeshes();
-        const auto meshEnd = std::chrono::steady_clock::now();
+        // Spawn is chosen before any chunk exists, so the surface height comes
+        // straight from the generator rather than from loaded blocks.
+        const int spawnX = 8;
+        const int spawnZ = 8;
+        const glm::vec3 spawn{static_cast<float>(spawnX) + 0.5f,
+                              static_cast<float>(game::surfaceHeightAt(kWorldSeed, spawnX, spawnZ) + 1),
+                              static_cast<float>(spawnZ) + 0.5f};
 
-        renderer.uploadMeshes(meshes);
+        std::unordered_map<game::ChunkCoord, engine::MeshHandle> chunkMeshes;
+
+        // Applies mesh changes and is the only place handles are created or
+        // released. Anything that removes a chunk without going through here
+        // would leak its GPU buffers for the rest of the session.
+        const auto applyUpdates = [&](const std::vector<game::ChunkMeshUpdate>& updates) {
+            for (const game::ChunkMeshUpdate& update : updates) {
+                const auto existing = chunkMeshes.find(update.coord);
+
+                if (update.removed) {
+                    if (existing != chunkMeshes.end()) {
+                        renderer.removeMesh(existing->second);
+                        chunkMeshes.erase(existing);
+                    }
+                    continue;
+                }
+
+                if (existing != chunkMeshes.end()) {
+                    renderer.updateMesh(existing->second, update.mesh);
+                } else {
+                    chunkMeshes.emplace(update.coord, renderer.addMesh(update.mesh));
+                }
+            }
+        };
+
+        applyUpdates(world.loadImmediately(spawn));
+        const auto worldReady = std::chrono::steady_clock::now();
+
         renderer.setOverlayMesh(game::makeBlockOutline());
 
-        std::size_t totalFaces = 0;
-        for (const engine::MeshData& mesh : meshes) {
-            totalFaces += mesh.indices.size() / 6;
-        }
-
-        // Drop the player onto the surface at the middle of the world rather
-        // than at a fixed height, which would either bury them or drop them far.
         game::Player player;
-        const int spawnX = world.blocksX() / 2;
-        const int spawnZ = world.blocksZ() / 2;
-        player.position = {static_cast<float>(spawnX) + 0.5f,
-                           static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1),
-                           static_cast<float>(spawnZ) + 0.5f};
+        player.position = spawn;
+        player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
 
         const auto ms = [](auto from, auto to) {
             return std::to_string(std::chrono::duration<float, std::milli>(to - from).count());
         };
-        engine::logInfo("World: " + std::to_string(world.chunkCount()) + " chunks, seed " +
-                        std::to_string(kWorldSeed) + ", " + std::to_string(world.blocksX()) + " blocks across");
-        engine::logInfo("Generated in " + ms(buildStart, generateEnd) + " ms, meshed in " +
-                        ms(generateEnd, meshEnd) + " ms");
-        engine::logInfo("Visible faces: " + std::to_string(totalFaces));
+        engine::logInfo("World seed " + std::to_string(kWorldSeed) + ", load radius " +
+                        std::to_string(game::kLoadRadiusChunks) + " chunks");
+        engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks in " +
+                        ms(buildStart, worldReady) + " ms");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Move: WASD. Space jump, Left Shift sneak, Left Ctrl sprint.");
@@ -137,18 +157,6 @@ int main() {
         game::BlockId heldBlock = game::BlockId::Stone;
         float breakTimer = 0.0f;
         float placeTimer = 0.0f;
-
-        const auto applyEdit = [&](const std::vector<std::size_t>& dirtyChunks) {
-            if (dirtyChunks.empty()) {
-                return;
-            }
-            std::vector<std::pair<std::size_t, engine::MeshData>> updates;
-            updates.reserve(dirtyChunks.size());
-            for (const std::size_t index : dirtyChunks) {
-                updates.emplace_back(index, world.buildChunkMesh(index));
-            }
-            renderer.updateMeshes(updates);
-        };
 
         while (!window.shouldClose()) {
             window.pollEvents();
@@ -246,7 +254,7 @@ int main() {
             } else {
                 breakTimer -= deltaSeconds;
                 if (breakTimer <= 0.0f && target.hit) {
-                    applyEdit(world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air));
+                    world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air);
                     breakTimer = kBreakRepeatSeconds;
                 }
             }
@@ -256,10 +264,14 @@ int main() {
             } else {
                 placeTimer -= deltaSeconds;
                 if (placeTimer <= 0.0f && target.hit && !game::playerOverlapsBlock(player, target.adjacent)) {
-                    applyEdit(world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, heldBlock));
+                    world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, heldBlock);
                     placeTimer = kPlaceRepeatSeconds;
                 }
             }
+
+            // Streaming runs after edits so a broken block is re-meshed in the
+            // same frame it changed, and shares the same budget.
+            applyUpdates(world.update(player.position, kStreamingBudgetSeconds));
 
             std::optional<glm::mat4> highlight;
             if (target.hit) {
@@ -270,7 +282,14 @@ int main() {
 
             ++framesSinceReport;
             if (now - lastReportTime >= std::chrono::seconds(1)) {
-                engine::logInfo(std::to_string(framesSinceReport) + " fps");
+                // Chunk, mesh and retired counts are reported together because a
+                // streaming leak shows up as one of them climbing without bound
+                // while the others hold steady.
+                engine::logInfo(std::to_string(framesSinceReport) + " fps | chunks " +
+                                std::to_string(world.loadedChunkCount()) + " | meshes " +
+                                std::to_string(renderer.meshCount()) + " | pending " +
+                                std::to_string(world.pendingChunkCount()) + " | retired " +
+                                std::to_string(renderer.retiredMeshCount()));
                 framesSinceReport = 0;
                 lastReportTime = now;
             }

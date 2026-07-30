@@ -10,6 +10,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <vector>
@@ -62,6 +63,14 @@ Renderer::~Renderer() {
     // The GPU may still be reading resources we are about to free.
     vkDeviceWaitIdle(m_context.device());
 
+    // Explicit rather than left to member destruction order: everything here
+    // owns Vulkan handles that must die while the device is still alive, and
+    // the retired list in particular is easy to forget.
+    m_retired.clear();
+    m_meshes.clear();
+    m_freeSlots.clear();
+    m_overlayMesh = GpuMesh{};
+
     destroySyncObjects();
 
     if (m_commandPool != VK_NULL_HANDLE) {
@@ -88,12 +97,41 @@ void Renderer::createCommandResources() {
             "vkAllocateCommandBuffers");
 }
 
-void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
-    // Release first: the old buffers are dead weight while the new ones are
-    // allocated, and holding both doubles peak device memory.
+void Renderer::retire(GpuMesh& slot) {
+    if (slot.vertexBuffer != nullptr || slot.indexBuffer != nullptr) {
+        RetiredMesh retired;
+        retired.mesh.vertexBuffer = std::move(slot.vertexBuffer);
+        retired.mesh.indexBuffer = std::move(slot.indexBuffer);
+        retired.mesh.indexCount = slot.indexCount;
+        retired.retiredOnFrame = m_frameIndex;
+        m_retired.push_back(std::move(retired));
+    }
+
     slot.vertexBuffer.reset();
     slot.indexBuffer.reset();
     slot.indexCount = 0;
+}
+
+void Renderer::freeRetiredMeshes() {
+    if (m_retired.empty()) {
+        return;
+    }
+
+    // A mesh retired on frame N may still be referenced by frames N and N-1.
+    // Once that many frames have been started since, nothing can touch it.
+    constexpr std::uint64_t framesToHold = kFramesInFlight + 1;
+
+    const auto expired = [&](const RetiredMesh& retired) {
+        return m_frameIndex - retired.retiredOnFrame >= framesToHold;
+    };
+
+    m_retired.erase(std::remove_if(m_retired.begin(), m_retired.end(), expired), m_retired.end());
+}
+
+void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
+    // Retire first: the old buffers are dead weight while the new ones are
+    // allocated, and holding both doubles peak device memory.
+    retire(slot);
 
     if (mesh.empty()) {
         return;
@@ -117,34 +155,41 @@ void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
     slot.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 }
 
-void Renderer::uploadMeshes(const std::vector<MeshData>& meshes) {
-    // Replacing buffers the GPU may still be reading from is undefined behaviour.
-    // Waiting is free at load time and this is not a per-frame path.
-    vkDeviceWaitIdle(m_context.device());
+MeshHandle Renderer::addMesh(const MeshData& mesh) {
+    MeshHandle handle = kInvalidMesh;
 
-    m_meshes.clear();
-    m_meshes.resize(meshes.size());
-
-    for (std::size_t i = 0; i < meshes.size(); ++i) {
-        uploadInto(m_meshes[i], meshes[i]);
+    if (!m_freeSlots.empty()) {
+        handle = m_freeSlots.back();
+        m_freeSlots.pop_back();
+    } else {
+        handle = static_cast<MeshHandle>(m_meshes.size());
+        m_meshes.emplace_back();
     }
+
+    uploadInto(m_meshes[handle], mesh);
+    m_meshes[handle].inUse = true;
+    return handle;
 }
 
-void Renderer::updateMeshes(const std::vector<std::pair<std::size_t, MeshData>>& updates) {
-    if (updates.empty()) {
+void Renderer::updateMesh(MeshHandle handle, const MeshData& mesh) {
+    if (handle >= m_meshes.size() || !m_meshes[handle].inUse) {
         return;
     }
+    uploadInto(m_meshes[handle], mesh);
+    m_meshes[handle].inUse = true;
+}
 
-    // The slots' current buffers may still be referenced by frames in flight.
-    // Destroying them without this wait is a use-after-free the validation
-    // layers will not always catch.
-    vkDeviceWaitIdle(m_context.device());
-
-    for (const auto& [index, mesh] : updates) {
-        if (index < m_meshes.size()) {
-            uploadInto(m_meshes[index], mesh);
-        }
+void Renderer::removeMesh(MeshHandle handle) {
+    if (handle >= m_meshes.size() || !m_meshes[handle].inUse) {
+        return;
     }
+    retire(m_meshes[handle]);
+    m_meshes[handle].inUse = false;
+    m_freeSlots.push_back(handle);
+}
+
+std::size_t Renderer::meshCount() const {
+    return m_meshes.size() - m_freeSlots.size();
 }
 
 void Renderer::setOverlayMesh(const MeshData& mesh) {
@@ -336,6 +381,11 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
 
 void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
                          const std::optional<glm::mat4>& overlayTransform) {
+    // Before any early return, so a minimized or resizing window still releases
+    // retired buffers instead of accumulating them.
+    ++m_frameIndex;
+    freeRetiredMeshes();
+
     if (m_window.isMinimized()) {
         return;
     }

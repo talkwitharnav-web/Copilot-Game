@@ -27,6 +27,12 @@ struct ClearColor {
     float a = 1.0f;
 };
 
+/// Identifies one mesh for the renderer's lifetime. Slots are reused after
+/// removal, so a stale handle refers to whatever took its place — drop handles
+/// when you remove them.
+using MeshHandle = std::uint32_t;
+inline constexpr MeshHandle kInvalidMesh = ~MeshHandle{0};
+
 /// Drives one frame of GPU work: acquire an image, record commands, submit, present.
 class Renderer {
 public:
@@ -38,21 +44,15 @@ public:
     Renderer(Renderer&&) = delete;
     Renderer& operator=(Renderer&&) = delete;
 
-    /// Replaces every mesh drawn each frame. Blocks until the GPU has finished
-    /// with the previous set, so call it at load time, not per frame.
-    ///
-    /// One slot is kept per entry, including empty ones, so an index into
-    /// `meshes` stays valid for `updateMesh` afterwards.
-    void uploadMeshes(const std::vector<MeshData>& meshes);
+    /// Uploads a new mesh and returns its handle. An empty mesh is valid and
+    /// occupies a slot without any GPU memory.
+    MeshHandle addMesh(const MeshData& mesh);
 
-    /// Replaces meshes in place, keeping every other slot untouched. An empty
-    /// mesh releases its slot's buffers rather than leaving stale geometry.
-    ///
-    /// Takes a batch because one world edit usually invalidates several chunks,
-    /// and each call has to stall until the GPU is idle. Doing that once per
-    /// batch instead of once per chunk is the difference between a hitch and no
-    /// hitch.
-    void updateMeshes(const std::vector<std::pair<std::size_t, MeshData>>& updates);
+    /// Replaces a mesh's contents, keeping its handle.
+    void updateMesh(MeshHandle handle, const MeshData& mesh);
+
+    /// Releases a mesh and frees its slot for reuse.
+    void removeMesh(MeshHandle handle);
 
     /// Geometry drawn after the world with its own transform, supplied per
     /// frame. Uploaded once; moving it costs nothing.
@@ -69,6 +69,13 @@ public:
     void drawFrame(const ClearColor& color, const glm::mat4& view,
                    const std::optional<glm::mat4>& overlayTransform = std::nullopt);
 
+    std::size_t meshCount() const;
+
+    /// Buffers freed but still held back until in-flight frames finish with
+    /// them. Should hover near zero; sustained growth means the release logic
+    /// has stopped running.
+    std::size_t retiredMeshCount() const { return m_retired.size(); }
+
 private:
     void createCommandResources();
     void createSyncObjects();
@@ -82,11 +89,23 @@ private:
         std::unique_ptr<Buffer> vertexBuffer;
         std::unique_ptr<Buffer> indexBuffer;
         std::uint32_t indexCount = 0;
+        /// Distinguishes a live-but-empty mesh from a free slot. Without it a
+        /// double remove would push the same handle onto the free list twice and
+        /// hand it to two different chunks.
+        bool inUse = false;
     };
 
-    /// Allocates and fills a slot's buffers. Any previous contents are released
+    /// Allocates and fills a slot's buffers. Any previous contents are retired
     /// first, so peak memory is one copy rather than two.
     void uploadInto(GpuMesh& slot, const MeshData& mesh);
+
+    /// Hands a mesh's buffers to the delayed-destruction list.
+    ///
+    /// Frames already submitted may still be reading them, and streaming
+    /// replaces meshes far too often to stall the GPU each time. Holding them
+    /// for a few frames costs a little memory and removes the stall entirely.
+    void retire(GpuMesh& slot);
+    void freeRetiredMeshes();
 
     void recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color,
                         const glm::mat4& viewProjection, const std::optional<glm::mat4>& overlayTransform) const;
@@ -100,7 +119,15 @@ private:
     std::unique_ptr<DepthImage> m_depthImage;
     GraphicsPipeline m_trianglePipeline;
     std::vector<GpuMesh> m_meshes;
+    std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
+
+    struct RetiredMesh {
+        GpuMesh mesh;
+        std::uint64_t retiredOnFrame = 0;
+    };
+    std::vector<RetiredMesh> m_retired;
+    std::uint64_t m_frameIndex = 0;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;

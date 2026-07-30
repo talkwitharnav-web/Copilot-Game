@@ -115,7 +115,7 @@ The Vulkan graphics pipeline, vertex and fragment shaders, and shader compilatio
 
 **Done when:** *(met 2026-07-30)* a coloured triangle renders; editing a `.glsl` file and rebuilding changes what is on screen.
 
-### ▶ M3 — 3D scene: camera, depth, cube · **Core**
+### ✅ M3 — 3D scene: camera, depth, cube · **Core**
 
 **Split into four parts at user request** (2026-07-30) — the combined milestone was roughly triple the size of M2, and each part below fails in a distinct, recognisable way. Doing them separately means a bug is attributable on sight rather than by bisection.
 
@@ -167,7 +167,7 @@ Camera position and orientation, mouse-look with cursor capture and raw motion, 
 
 > **This phase exists because of sequencing rule 1.** An earlier draft put first playability at M9, behind texturing and chunk streaming. That was reordered on user request so real playtesting starts as early as possible. Each milestone here is deliberately small.
 
-### ▶ M4 — First chunk · **Core**
+### ✅ M4 — First chunk · **Core**
 
 Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits only faces exposed to air. **Flat colours per block type — no textures yet.**
 
@@ -179,6 +179,8 @@ Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits 
 
 **Done when:** a hand-filled chunk renders as solid geometry with interior faces correctly absent.
 
+**Result:** *(met 2026-07-30)* a 32³ chunk emitted 5098 faces where naive per-block meshing would emit 196608 — 97.4% discarded before reaching the GPU.
+
 ### ✅ M5 — Terrain generation · **Core**
 
 Deterministic seeded generation. Noise-driven heightmap terrain across a modest fixed area — **not** infinite streaming yet. A generation architecture that can later accept caves, biomes, and structures.
@@ -188,6 +190,8 @@ Deterministic seeded generation. Noise-driven heightmap terrain across a modest 
 **You can:** fly over generated hills and valleys. Change the seed, get a different world.
 
 **Done when:** the same seed always produces identical terrain.
+
+**Result:** *(met 2026-07-30)* value-noise fBm heightmap, 5 octaves. A 72-chunk test area generated in ~27 ms and meshed in ~156 ms. Determinism verified by regenerating a chunk and comparing it byte for byte.
 
 ### ✅ M6 — Walking and collision · **Core**
 
@@ -199,7 +203,7 @@ AABB collision against voxels, gravity, jumping, step-up. First-person player co
 
 **Result:** player is a 0.6 × 1.8 × 0.6 m box with eyes at 1.62 m, spawned on the surface at the world centre. Movement resolves one axis at a time against solid blocks; ledges up to 0.6 m are stepped automatically. Gravity 32 m/s², terminal velocity 78.4 m/s, jump apex ~1.25 blocks. Walk 4.317 / sprint 5.612 / sneak 1.295 m/s. `F` toggles free-fly. Steady 120 fps, clean shutdown, no validation errors.
 
-### ▶ M7 — Break and place blocks · **Core** · 🎮 **FIRST PLAYABLE**
+### ✅ M7 — Break and place blocks · **Core** · 🎮 **FIRST PLAYABLE**
 
 Voxel raycasting, block breaking and placing, a highlight on the targeted block, and correct re-meshing of only the affected chunks.
 
@@ -209,13 +213,15 @@ Voxel raycasting, block breaking and placing, a highlight on the targeted block,
 
 **Done when:** breaking and placing update instantly, including across chunk boundaries, with no holes or stale geometry.
 
+**Result:** 12 m reach, hold-to-repeat breaking (0.15 s) and placing (0.18 s), a wireframe cage on the targeted block, and keys 1–4 to choose the block placed. Playtesting immediately surfaced a stuck-mouse-button bug and a movement tunnelling bug — exactly the point of shipping something playable this early.
+
 ---
 
 # Phase 2 — A World Worth Staying In
 
 *Goal: turn the playable slice into a world that is endless, looks like something, and remembers what you did.*
 
-### ⬜ M8 — Chunk streaming · **Core**
+### ✅ M8 — Chunk streaming · **Core**
 
 World-space chunk coordinates, neighbour-aware meshing so chunk seams are not solid walls, and load/unload around the player. **Still single-threaded** — deliberately.
 
@@ -225,7 +231,9 @@ World-space chunk coordinates, neighbour-aware meshing so chunk seams are not so
 
 **Done when:** moving in any direction loads and unloads chunks continuously, with no seams and no memory leaks, and no single frame stalls badly enough to feel like a hitch.
 
-### ⬜ M9 — Textures and block types · **Core**
+**Result:** chunks live in a hash map keyed by world chunk coordinate, load radius 6, unload radius 8, world 3 chunks (96 blocks) tall. A 3 ms per-frame budget meters generation and meshing. Verified over a 135-second flight: chunk and mesh counts oscillated in a bounded band (594–663 and 441–555), pending work returned to zero every time, retired GPU buffers stayed at zero, and the frame rate held 119–121 fps throughout with no hitches.
+
+### ▶ M9 — Textures and block types · **Core**
 
 Image loading, Vulkan images and samplers, a texture atlas or array, and the first real set of block types.
 
@@ -425,9 +433,9 @@ Listed so future sessions know roughly when each becomes justifiable — **not**
 
 | Milestone | Likely dependency | For |
 |---|---|---|
-| M3b | GLM | Vectors, matrices, projection |
-| M4+ | Vulkan Memory Allocator | Practical GPU memory management |
-| M5 | A noise library | Terrain generation |
+| M3b | GLM — **added** | Vectors, matrices, projection |
+| M4+ | Vulkan Memory Allocator — *not yet needed* | Practical GPU memory management. One `vkAllocateMemory` per buffer is still well inside the driver's allocation limit; revisit if that limit is ever approached. |
+| M5 | A noise library — **not taken** | Value-noise fBm was ~60 lines written in-house. A dependency was not justifiable for that. |
 | M9 | stb_image | Loading texture files |
 | M11 | Dear ImGui | Debug overlay and tools |
 | M13 | meshoptimizer | Mesh optimization, LOD |
@@ -443,8 +451,9 @@ Things deliberately not decided yet. Do not silently resolve these — raise the
 
 - **The project name.** `VoxelGame` is a placeholder. Needed before M35, harmless until then.
 - **Creative direction.** Required before Phase 5 begins. See that phase's note.
-- **Chunk dimensions.** Decided at M5; affects memory, meshing cost, and streaming granularity.
-- **Art direction.** Whether blocks are stylized, realistic, or something else drives M4, M17, and all of Phase 6.
+- **Art direction.** Whether blocks are stylized, realistic, or something else drives M9, M17, and all of Phase 6.
+
+**Resolved:** chunk dimensions are 32³, settled at M4 and confirmed by M8's streaming behaviour.
 
 ---
 

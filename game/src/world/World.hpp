@@ -5,61 +5,96 @@
 
 #include <engine/render/MeshData.hpp>
 
+#include <glm/glm.hpp>
+
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace game {
 
-/// Owns every chunk and answers questions in world block coordinates.
+/// How tall the world is, in chunks. Terrain never reaches the top, so the
+/// upper chunks exist purely as building room.
+constexpr int kWorldHeightChunks = 3;
+
+/// Chunks stay loaded within this many chunks of the player, horizontally.
+constexpr int kLoadRadiusChunks = 6;
+
+/// A chunk is only meshed once its four horizontal neighbours exist, so the
+/// visible radius is one less than the loaded radius. Meshing against a missing
+/// neighbour emits a wall of faces at the frontier that then has to be undone.
+constexpr int kVisibleRadiusChunks = kLoadRadiusChunks - 1;
+
+/// Unload only past this, so pacing back and forth across the boundary does not
+/// thrash chunks in and out.
+constexpr int kUnloadRadiusChunks = kLoadRadiusChunks + 2;
+
+/// A chunk's drawable geometry has changed. `removed` means the chunk left the
+/// world and its mesh should be released.
+struct ChunkMeshUpdate {
+    ChunkCoord coord;
+    engine::MeshData mesh;
+    bool removed = false;
+};
+
+/// Owns every loaded chunk and streams them in and out around the player.
 ///
 /// **This is the single owner of block data, and only the main thread mutates
 /// it.** Physics, raycasting and meshing all read through here; none of them
-/// writes. That ownership rule is what keeps the M12 job system a migration
-/// rather than a rewrite.
+/// writes.
 class World {
 public:
-    World(std::uint32_t seed, int chunksX, int chunksY, int chunksZ);
+    explicit World(std::uint32_t seed);
 
-    /// Anything outside the generated volume reads as air.
+    /// Anything not currently loaded reads as air.
     BlockId blockAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
-    bool inBounds(int x, int y, int z) const;
 
-    /// Changes one block and reports which chunk meshes are now stale.
-    ///
-    /// Editing a block on a chunk border exposes or hides a face belonging to
-    /// the *neighbouring* chunk's mesh, so more than one chunk usually has to be
-    /// rebuilt. Missing those neighbours leaves holes in the world.
-    ///
-    /// Returns an empty list if the coordinate is out of bounds or the block was
-    /// already what was asked for.
-    std::vector<std::size_t> setBlock(int x, int y, int z, BlockId block);
-
-    /// Highest solid block in a column, or -1 if the column is empty. Used to
-    /// place the player without dropping them inside terrain.
+    /// Highest solid block in a column, or -1 if empty or not loaded.
     int highestSolid(int x, int z) const;
 
-    /// One mesh per chunk, each meshed with its real neighbours so no faces are
-    /// generated between two solid blocks across a chunk boundary.
-    std::vector<engine::MeshData> buildMeshes() const;
+    /// Changes one block and marks every affected chunk for re-meshing.
+    void setBlock(int x, int y, int z, BlockId block);
 
-    /// Rebuilds a single chunk's mesh. The index matches `buildMeshes()` order.
-    engine::MeshData buildChunkMesh(std::size_t index) const;
+    /// Loads, unloads and re-meshes around the player, stopping once the time
+    /// budget is spent. Returns only what changed this call.
+    ///
+    /// Unloading is always finished because it frees memory and is cheap; only
+    /// generation and meshing are metered.
+    std::vector<ChunkMeshUpdate> update(const glm::vec3& playerPosition, float budgetSeconds);
 
-    int blocksX() const { return m_chunksX * Chunk::kSize; }
-    int blocksY() const { return m_chunksY * Chunk::kSize; }
-    int blocksZ() const { return m_chunksZ * Chunk::kSize; }
-    std::size_t chunkCount() const { return m_chunks.size(); }
+    /// Generates and meshes everything visible around a point with no budget.
+    /// Used once at startup so the player does not spawn into an empty world.
+    std::vector<ChunkMeshUpdate> loadImmediately(const glm::vec3& position);
+
     std::uint32_t seed() const { return m_seed; }
+    std::size_t loadedChunkCount() const { return m_chunks.size(); }
+    std::size_t pendingChunkCount() const { return m_pendingLoad.size() + m_pendingMesh.size(); }
 
 private:
-    const Chunk* chunkAt(int cx, int cy, int cz) const;
-    std::size_t chunkIndex(int cx, int cy, int cz) const;
+    struct ChunkSlot {
+        Chunk blocks;
+        bool meshed = false;
+    };
+
+    const Chunk* chunkAt(const ChunkCoord& coord) const;
+    bool hasChunk(const ChunkCoord& coord) const;
+    bool neighboursLoaded(const ChunkCoord& coord) const;
+    void markDirty(const ChunkCoord& coord);
+    void refreshQueues(const ChunkCoord& centre);
+    engine::MeshData meshOne(const ChunkCoord& coord) const;
+
     std::uint32_t m_seed;
-    int m_chunksX;
-    int m_chunksY;
-    int m_chunksZ;
-    std::vector<Chunk> m_chunks;
+    std::unordered_map<ChunkCoord, ChunkSlot> m_chunks;
+
+    // Deliberately vectors rather than sets: they are rebuilt whenever the
+    // player crosses a chunk boundary, and keeping them ordered by distance is
+    // what makes the world fill in from the player outwards.
+    std::vector<ChunkCoord> m_pendingLoad;
+    std::vector<ChunkCoord> m_pendingMesh;
+
+    ChunkCoord m_centre{0, 0, 0};
+    bool m_hasCentre = false;
 };
 
 } // namespace game

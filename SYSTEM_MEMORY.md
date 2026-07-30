@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–6 complete (toolchain, shader pipeline, geometry, matrices, depth, free-fly camera, first chunk, seeded terrain, walking and collision). A 72-chunk seeded world renders and can be walked, jumped and sprinted across, with free-fly on a debug toggle. No block editing yet, by design. `TIMELINE.md` M7 (break and place blocks — first playable) is next.
+> **Status:** Milestones 1–8 complete. The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, and breaks and places blocks. Still untextured flat colours and single-threaded, both by design. `TIMELINE.md` M9 (textures and block types) is next.
 
 ---
 
@@ -147,7 +147,7 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | `DepthImage` | `engine/render/DepthImage.hpp` | The depth attachment. Picks the best supported format (`D32_SFLOAT` preferred) and is rebuilt with the swapchain, since it must match the colour target's size. |
 | `Camera` | `engine/render/Camera.hpp` | Position, yaw, pitch, and the view matrix. Pitch clamps just short of vertical, where the up vector becomes ambiguous and the view flips. **Which keys move it is game code's decision, not the engine's.** |
 | `GraphicsPipeline` | `engine/render/GraphicsPipeline.hpp` | One complete draw configuration: both shader stages plus all fixed-function state. Loads SPIR-V from disk. Viewport and scissor are dynamic state, so resizing never rebuilds it. |
-| `Renderer` | `engine/render/Renderer.hpp` | Command pool, command buffers, per-frame synchronization, and the per-frame record/submit/present cycle. |
+| `Renderer` | `engine/render/Renderer.hpp` | Command pool, command buffers, per-frame synchronization, and the per-frame record/submit/present cycle. Owns mesh slots addressed by `MeshHandle`, with a free list so removed chunks release their slot for reuse. |
 
 **Vulkan vocabulary, briefly:**
 - **Instance** — the connection between the program and the Vulkan library.
@@ -171,7 +171,9 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 | `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion. An integer hash, so it is reproducible on any machine without storing anything. |
 | `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what makes background generation a migration rather than a rewrite. |
 | `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a chunk plus its six neighbours into mesh data, emitting only faces that touch air. Neighbours are passed in rather than looked up, which keeps meshing pure too. |
-| `World` | `world/World.hpp` | Owns the chunk grid and answers block queries in world coordinates. The single owner of world state. |
+| `World` | `world/World.hpp` | Owns every loaded chunk in a hash map keyed by chunk coordinate, and streams them in and out around the player. The single owner of block state. |
+| `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
+| `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. |
 | `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
 
 ---
@@ -228,8 +230,11 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `Left Shift` | Sneak (walking) / descend (flying) |
 | `Left Ctrl` | Sprint |
 | `F` | Toggle free-fly debug mode |
+| Left click | Break the targeted block (hold to repeat) |
+| Right click | Place against the targeted face (hold to repeat) |
+| `1` `2` `3` `4` | Choose stone / dirt / grass / sand |
 | `Escape` | Release the mouse cursor |
-| Left click | Recapture the cursor |
+| Left click | Recapture the cursor when released |
 | `F1` / `F2` | Lower / raise the frame cap |
 
 Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
@@ -256,6 +261,49 @@ These are tuning numbers, not part of the game's identity, and are expected to c
 `updatePlayer` **clamps its own delta time to 50 ms**. A long stall must not let the player travel far enough in one step to pass straight through a wall; the collision test only looks at blocks the box overlaps, so it cannot see anything it skipped over.
 
 A 1 mm skin is kept between the box and surfaces it rests against, so a resolved contact does not immediately re-report as a collision.
+
+Movement is also **split into steps of at most 0.4 m**. The resolver snaps out of at most one block of penetration, and flying (22 m/s) or a long fall (up to ~64 m/s) covers more than a block per frame at low frame rates — the snap would then land on the far side of the wall.
+
+**Crouching** drops the box to 1.5 m and the eyes to 1.27 m, shrinking from the top so the feet stay put. It is held on the player rather than read from the key each frame, because standing up is refused when there is no headroom. The collision box switches instantly; only the camera is eased, at 8 m/s.
+
+While crouched and supported, any step that would leave nothing underfoot is undone. This is checked per axis, so an edge can still be slid along, plus once more at the end of the whole step as a backstop — auto step-up resolves its own position and would otherwise skip the per-axis checks entirely.
+
+---
+
+## Chunk Streaming
+
+Chunks live in a `std::unordered_map` keyed by world chunk coordinate. The world is **3 chunks (96 blocks) tall** and streams horizontally only.
+
+| Radius | Chunks | Meaning |
+|---|---|---|
+| Load | 6 | Generated and kept in memory |
+| Visible | 5 | Meshed and drawn |
+| Unload | 8 | Erased past this |
+
+**Visible is one less than load on purpose.** A chunk is only meshed once its four horizontal neighbours exist; meshing against a missing neighbour emits a full sheet of faces at the frontier that has to be thrown away when the neighbour arrives. **Unload is larger than load** so pacing back and forth across the boundary does not thrash chunks in and out.
+
+Generation and meshing share a **3 ms per-frame budget**. Whatever does not fit waits for the next frame, so a burst of new terrain slows the horizon down instead of freezing the game. Unloading is never metered — it frees memory and is nearly free.
+
+The load queue is sorted farthest-first and drained from the back, so the nearest chunk is always the cheapest to remove and the world fills in from the player outwards.
+
+**Chunks that exist but were never meshed are re-queued whenever the player crosses a chunk boundary.** Without that, a chunk dropped from the queue — because a neighbour was missing, or because it was outside the visible radius at the time — would never be picked up again, leaving a permanent hole.
+
+### Not stalling the GPU
+
+Replacing or freeing a mesh's buffers while a submitted frame may still be reading them is a use-after-free. Waiting for the GPU to go idle each time is correct but unusable at streaming rates.
+
+Instead, buffers are **retired**: moved to a list tagged with the current frame index and destroyed once `kFramesInFlight + 1` frames have started, at which point no in-flight frame can reference them. The release pass runs at the very top of `drawFrame`, **before any early return**, so a minimized or resizing window still frees them.
+
+Mesh slots carry an explicit `inUse` flag. Removing the same chunk twice would otherwise push its handle onto the free list twice and hand one slot to two different chunks — corrupting geometry and leaking buffers at the same time.
+
+### Watching for leaks
+
+The per-second log line reports `chunks | meshes | pending | retired`. Each catches a different failure:
+
+- **chunks** — unbounded growth means chunks are not being erased.
+- **meshes** — must track chunks; divergence means slots are not reclaimed.
+- **pending** — must return to zero when standing still; otherwise queues refill faster than they drain.
+- **retired** — must sit at zero; sustained growth means the release pass stopped running.
 
 ---
 
@@ -298,8 +346,10 @@ Verified 2026-07-30 on this machine.
 - **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
 - **M3 result:** six shaded boxes on a ground plane, 144 vertices / 72 triangles, render solid with correct mutual occlusion from every angle. Free-fly camera confirmed smooth with no ghosting or artifacting. Resizing rebuilds both swapchain and depth image cleanly.
 - **M4 result:** a single 32³ chunk emits 5098 faces where naive per-block meshing would emit 196608 — 97.4% of the work discarded before it reaches the GPU.
-- **M5 result:** 72 chunks (6×2×6), 192 blocks across, seed 1337. Generated in ~27 ms, meshed in ~156 ms, 109082 visible faces. Determinism check passes: regenerating a chunk reproduces it byte for byte.
+- **M5 result:** value-noise fBm heightmap, 5 octaves, seed 1337. Determinism check passes: regenerating a chunk reproduces it byte for byte. Measured on the pre-streaming fixed area, ~27 ms to generate and ~156 ms to mesh 72 chunks.
 - **M6 result:** player spawns on the surface at the world centre and walks, jumps, sprints and sneaks across terrain without clipping into blocks or falling through the world. Steady 120–122 fps against a 120 fps cap with collision running every frame.
+- **M7 result:** breaking and placing work across chunk boundaries with no holes or stale geometry, at 12 m reach with hold-to-repeat.
+- **M8 result:** verified over a continuous 135-second flight. Loaded chunks oscillated in a bounded 594–663 band and mesh slots 441–555, tracking each other; pending work spiked to 78 and returned to zero every time; retired GPU buffers stayed at zero throughout. Frame rate held **119–121 fps** with no hitch at any point. Initial load is ~970 ms for 507 chunks, taken as a deliberate one-off stall at startup rather than pop-in.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

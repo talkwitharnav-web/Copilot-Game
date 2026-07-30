@@ -109,6 +109,16 @@ The keyboard binding is a **temporary stand-in for a settings screen**, and is d
 
 Deliberate boundary: `FrameLimiter` knows only a target number. The list of selectable caps and the key bindings live in `game/src/Main.cpp`, because which frame rates a player may pick is a game decision, not an engine capability.
 
+### Retired GPU buffers, not `vkDeviceWaitIdle`, once chunks stream
+
+Up to M7, every mesh replacement called `vkDeviceWaitIdle` before freeing the old buffers. That is the simplest correct answer to "the GPU may still be reading this" and was the right call while edits were occasional.
+
+M8 made it untenable: chunks load and unload continuously, and stalling the entire GPU several times a second is a permanent stutter. Buffers are now moved to a retirement list tagged with the frame index and destroyed once `kFramesInFlight + 1` frames have started.
+
+**Do not simplify this back to a device wait.** It will look like a harmless cleanup and will reintroduce a stutter that only shows up while moving. The release pass must also stay at the very top of `drawFrame`, **before the minimized early-return** — otherwise a minimized window accumulates retired buffers forever.
+
+The visible counters (`chunks | meshes | pending | retired` in the per-second log) exist specifically so this class of bug is observable rather than inferred. `retired` sitting above zero while standing still means the release pass has stopped running.
+
 ---
 
 ## Architecture Rules
@@ -156,7 +166,7 @@ Do not add interfaces, virtual base classes, "manager" objects, template general
 
 ## Milestone Log
 
-> Three of the four bugs found during M3 were caught by the user playing the build, not by reasoning about the code: the cube reading as a blob, the wide-angle distortion, and inverted backface culling. None produced a validation error or a warning. This is the concrete evidence behind the "ship something playable at every milestone" rule above.
+> Three of the four bugs found during M3 were caught by the user playing the build, not by reasoning about the code: the cube reading as a blob, the wide-angle distortion, and inverted backface culling. None produced a validation error or a warning. **M7 repeated the pattern with worse bugs** — a latched trackpad button, and movement fast enough to tunnel through walls at low frame rates — neither of which any amount of code review had surfaced. This is the concrete evidence behind the "ship something playable at every milestone" rule above.
 
 ### Milestone 1 — Prove the toolchain (2026-07-30)
 
@@ -188,6 +198,8 @@ Environment setup notes for this milestone are in the "The Machine" section abov
 - **`Get-LocalGroupMember` can silently return nothing for a non-admin caller**, which makes an "is this user an admin?" check produce a false negative for the wrong reason. `net localgroup Administrators` works from a standard account and gives the real answer.
 - **PowerShell prints a native program's stderr as a red `NativeCommandError`, which is not a failure.** `cl.exe`, `code --install-extension`, and `vulkaninfo` all write informational banners and warnings to stderr and still succeed. Check the exit code and the actual text before reporting a problem.
 - **Say what success is supposed to look like before showing it.** The user reasonably asked whether "it just shows a shade of blue, that's it" was a problem — it is precisely the milestone's goal, but that had not been stated plainly enough up front. When a deliberately minimal result could be mistaken for a broken one, name it in advance.
+- **A stuck input looks exactly like a physics bug, and the reported symptom was three layers away from the cause.** On 2026-07-30 the user reported that crouching at a block edge sometimes let them fall off, but only after holding Shift + Ctrl and breaking blocks for a while. Two theories were pursued and both were wrong: first that auto step-up bypassed the sneak edge guard (a real hole, fixed, but not this bug), then that some subtle ordering in the guard was at fault. The actual cause was that `glfwGetMouseButton` had latched to "pressed" — the user's trackpad double-tap generated a press whose release was never delivered — so the game was silently mining whatever the crosshair touched, **including the ground under the player's own feet**. The edge guard was working perfectly; there was genuinely nothing left to stand on. **Two lessons.** Polled hardware state you cannot reset is a liability: track button state from press/release events in our own `Window` and clear it on focus loss, so there is always a way out. And when a physics symptom only appears in combination with an *input* action, suspect the input before rewriting the physics — the tell was that the second report ("blocks break wherever I look, whether or not I'm touching the trackpad") was the *same bug* stated plainly, and it arrived only after two failed fixes to unrelated code.
+- **Do not claim a bug is fixed when the cause was never actually found.** During the same session a fix was shipped for the "first click after switching block types does nothing" report with an honest admission that the root cause could not be located by reading the code, only that the suspect mechanism (a press queue) had been removed. That framing was correct and should be the default: state what was changed, state what remains unverified, and ask for a re-test. Claiming a confident diagnosis that later proves wrong costs far more trust than admitting uncertainty up front.
 
 ---
 

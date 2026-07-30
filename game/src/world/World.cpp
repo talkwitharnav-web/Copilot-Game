@@ -2,10 +2,15 @@
 
 #include "world/ChunkMesher.hpp"
 
-#include <glm/glm.hpp>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <iterator>
 
 namespace game {
 namespace {
+
+using Clock = std::chrono::steady_clock;
 
 /// Floor division, correct for negative coordinates. Plain integer division
 /// truncates toward zero, which puts blocks at -1 and 0 in the same chunk.
@@ -19,34 +24,26 @@ int floorMod(int value, int divisor) {
     return remainder < 0 ? remainder + divisor : remainder;
 }
 
+int chebyshevDistance(const ChunkCoord& a, const ChunkCoord& b) {
+    return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
+}
+
 } // namespace
 
-World::World(std::uint32_t seed, int chunksX, int chunksY, int chunksZ)
-    : m_seed(seed), m_chunksX(chunksX), m_chunksY(chunksY), m_chunksZ(chunksZ) {
-    m_chunks.resize(static_cast<std::size_t>(chunksX * chunksY * chunksZ));
+World::World(std::uint32_t seed) : m_seed(seed) {}
 
-    for (int y = 0; y < m_chunksY; ++y) {
-        for (int z = 0; z < m_chunksZ; ++z) {
-            for (int x = 0; x < m_chunksX; ++x) {
-                m_chunks[chunkIndex(x, y, z)] = generateChunk(m_seed, ChunkCoord{x, y, z});
-            }
-        }
-    }
+const Chunk* World::chunkAt(const ChunkCoord& coord) const {
+    const auto it = m_chunks.find(coord);
+    return it == m_chunks.end() ? nullptr : &it->second.blocks;
 }
 
-std::size_t World::chunkIndex(int cx, int cy, int cz) const {
-    return static_cast<std::size_t>((cy * m_chunksZ + cz) * m_chunksX + cx);
-}
-
-const Chunk* World::chunkAt(int cx, int cy, int cz) const {
-    if (cx < 0 || cy < 0 || cz < 0 || cx >= m_chunksX || cy >= m_chunksY || cz >= m_chunksZ) {
-        return nullptr;
-    }
-    return &m_chunks[chunkIndex(cx, cy, cz)];
+bool World::hasChunk(const ChunkCoord& coord) const {
+    return m_chunks.find(coord) != m_chunks.end();
 }
 
 BlockId World::blockAt(int x, int y, int z) const {
-    const Chunk* chunk = chunkAt(floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize));
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const Chunk* chunk = chunkAt(coord);
     if (chunk == nullptr) {
         return BlockId::Air;
     }
@@ -57,56 +54,8 @@ bool World::isSolid(int x, int y, int z) const {
     return game::isSolid(blockAt(x, y, z));
 }
 
-bool World::inBounds(int x, int y, int z) const {
-    return x >= 0 && y >= 0 && z >= 0 && x < blocksX() && y < blocksY() && z < blocksZ();
-}
-
-std::vector<std::size_t> World::setBlock(int x, int y, int z, BlockId block) {
-    if (!inBounds(x, y, z) || blockAt(x, y, z) == block) {
-        return {};
-    }
-
-    const int cx = floorDiv(x, Chunk::kSize);
-    const int cy = floorDiv(y, Chunk::kSize);
-    const int cz = floorDiv(z, Chunk::kSize);
-    const int lx = floorMod(x, Chunk::kSize);
-    const int ly = floorMod(y, Chunk::kSize);
-    const int lz = floorMod(z, Chunk::kSize);
-
-    m_chunks[chunkIndex(cx, cy, cz)].set(lx, ly, lz, block);
-
-    std::vector<std::size_t> dirty{chunkIndex(cx, cy, cz)};
-
-    // Only a block touching a chunk face can affect a neighbour's mesh.
-    const auto addNeighbour = [&](int nx, int ny, int nz) {
-        if (chunkAt(nx, ny, nz) != nullptr) {
-            dirty.push_back(chunkIndex(nx, ny, nz));
-        }
-    };
-    if (lx == 0) {
-        addNeighbour(cx - 1, cy, cz);
-    }
-    if (lx == Chunk::kSize - 1) {
-        addNeighbour(cx + 1, cy, cz);
-    }
-    if (ly == 0) {
-        addNeighbour(cx, cy - 1, cz);
-    }
-    if (ly == Chunk::kSize - 1) {
-        addNeighbour(cx, cy + 1, cz);
-    }
-    if (lz == 0) {
-        addNeighbour(cx, cy, cz - 1);
-    }
-    if (lz == Chunk::kSize - 1) {
-        addNeighbour(cx, cy, cz + 1);
-    }
-
-    return dirty;
-}
-
 int World::highestSolid(int x, int z) const {
-    for (int y = blocksY() - 1; y >= 0; --y) {
+    for (int y = kWorldHeightChunks * Chunk::kSize - 1; y >= 0; --y) {
         if (isSolid(x, y, z)) {
             return y;
         }
@@ -114,34 +63,207 @@ int World::highestSolid(int x, int z) const {
     return -1;
 }
 
-engine::MeshData World::buildChunkMesh(std::size_t index) const {
-    const int cx = static_cast<int>(index) % m_chunksX;
-    const int cz = (static_cast<int>(index) / m_chunksX) % m_chunksZ;
-    const int cy = static_cast<int>(index) / (m_chunksX * m_chunksZ);
-
-    ChunkNeighbours neighbours;
-    neighbours.negativeX = chunkAt(cx - 1, cy, cz);
-    neighbours.positiveX = chunkAt(cx + 1, cy, cz);
-    neighbours.negativeY = chunkAt(cx, cy - 1, cz);
-    neighbours.positiveY = chunkAt(cx, cy + 1, cz);
-    neighbours.negativeZ = chunkAt(cx, cy, cz - 1);
-    neighbours.positiveZ = chunkAt(cx, cy, cz + 1);
-
-    const glm::vec3 origin{static_cast<float>(cx * Chunk::kSize), static_cast<float>(cy * Chunk::kSize),
-                           static_cast<float>(cz * Chunk::kSize)};
-
-    return meshChunk(m_chunks[index], neighbours, origin);
+void World::markDirty(const ChunkCoord& coord) {
+    const auto it = m_chunks.find(coord);
+    if (it == m_chunks.end()) {
+        return;
+    }
+    if (std::find(m_pendingMesh.begin(), m_pendingMesh.end(), coord) == m_pendingMesh.end()) {
+        m_pendingMesh.push_back(coord);
+    }
 }
 
-std::vector<engine::MeshData> World::buildMeshes() const {
-    std::vector<engine::MeshData> meshes;
-    meshes.reserve(m_chunks.size());
-
-    for (std::size_t i = 0; i < m_chunks.size(); ++i) {
-        meshes.push_back(buildChunkMesh(i));
+void World::setBlock(int x, int y, int z, BlockId block) {
+    if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
+        return;
     }
 
-    return meshes;
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const auto it = m_chunks.find(coord);
+    if (it == m_chunks.end()) {
+        return;
+    }
+
+    const int lx = floorMod(x, Chunk::kSize);
+    const int ly = floorMod(y, Chunk::kSize);
+    const int lz = floorMod(z, Chunk::kSize);
+
+    if (it->second.blocks.at(lx, ly, lz) == block) {
+        return;
+    }
+    it->second.blocks.set(lx, ly, lz, block);
+
+    markDirty(coord);
+
+    // Only a block on a chunk face can change a neighbour's mesh, but missing
+    // those neighbours leaves holes at chunk seams.
+    constexpr int last = Chunk::kSize - 1;
+    if (lx == 0) {
+        markDirty({coord.x - 1, coord.y, coord.z});
+    }
+    if (lx == last) {
+        markDirty({coord.x + 1, coord.y, coord.z});
+    }
+    if (ly == 0) {
+        markDirty({coord.x, coord.y - 1, coord.z});
+    }
+    if (ly == last) {
+        markDirty({coord.x, coord.y + 1, coord.z});
+    }
+    if (lz == 0) {
+        markDirty({coord.x, coord.y, coord.z - 1});
+    }
+    if (lz == last) {
+        markDirty({coord.x, coord.y, coord.z + 1});
+    }
+}
+
+bool World::neighboursLoaded(const ChunkCoord& coord) const {
+    return hasChunk({coord.x - 1, coord.y, coord.z}) && hasChunk({coord.x + 1, coord.y, coord.z}) &&
+           hasChunk({coord.x, coord.y, coord.z - 1}) && hasChunk({coord.x, coord.y, coord.z + 1});
+}
+
+engine::MeshData World::meshOne(const ChunkCoord& coord) const {
+    const Chunk* chunk = chunkAt(coord);
+    if (chunk == nullptr) {
+        return {};
+    }
+
+    ChunkNeighbours neighbours;
+    neighbours.negativeX = chunkAt({coord.x - 1, coord.y, coord.z});
+    neighbours.positiveX = chunkAt({coord.x + 1, coord.y, coord.z});
+    neighbours.negativeY = chunkAt({coord.x, coord.y - 1, coord.z});
+    neighbours.positiveY = chunkAt({coord.x, coord.y + 1, coord.z});
+    neighbours.negativeZ = chunkAt({coord.x, coord.y, coord.z - 1});
+    neighbours.positiveZ = chunkAt({coord.x, coord.y, coord.z + 1});
+
+    const glm::vec3 origin{static_cast<float>(coord.x * Chunk::kSize), static_cast<float>(coord.y * Chunk::kSize),
+                           static_cast<float>(coord.z * Chunk::kSize)};
+
+    return meshChunk(*chunk, neighbours, origin);
+}
+
+void World::refreshQueues(const ChunkCoord& centre) {
+    m_pendingLoad.clear();
+
+    for (int dz = -kLoadRadiusChunks; dz <= kLoadRadiusChunks; ++dz) {
+        for (int dx = -kLoadRadiusChunks; dx <= kLoadRadiusChunks; ++dx) {
+            for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
+                const ChunkCoord coord{centre.x + dx, cy, centre.z + dz};
+                if (!hasChunk(coord)) {
+                    m_pendingLoad.push_back(coord);
+                }
+            }
+        }
+    }
+
+    // Sorted farthest-first so the nearest chunk is at the back, where removing
+    // it is free. Draining from the front would be quadratic.
+    std::sort(m_pendingLoad.begin(), m_pendingLoad.end(), [&](const ChunkCoord& a, const ChunkCoord& b) {
+        return chebyshevDistance(a, centre) > chebyshevDistance(b, centre);
+    });
+
+    // Chunks that exist but were never meshed: they were dropped from the queue
+    // because a neighbour was missing or because they sat outside the visible
+    // radius. Nothing else would ever pick them up again, which shows as a
+    // permanent hole when the player walks back toward them.
+    for (const auto& [coord, slot] : m_chunks) {
+        if (!slot.meshed && chebyshevDistance(coord, centre) <= kVisibleRadiusChunks) {
+            markDirty(coord);
+        }
+    }
+}
+
+std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, float budgetSeconds) {
+    const auto start = Clock::now();
+    std::vector<ChunkMeshUpdate> updates;
+
+    const ChunkCoord centre{floorDiv(static_cast<int>(std::floor(playerPosition.x)), Chunk::kSize), 0,
+                            floorDiv(static_cast<int>(std::floor(playerPosition.z)), Chunk::kSize)};
+
+    if (!m_hasCentre || centre.x != m_centre.x || centre.z != m_centre.z) {
+        m_centre = centre;
+        m_hasCentre = true;
+
+        // Unload first so memory is released before anything new is allocated.
+        for (auto it = m_chunks.begin(); it != m_chunks.end();) {
+            if (chebyshevDistance(it->first, centre) > kUnloadRadiusChunks) {
+                if (it->second.meshed) {
+                    updates.push_back(ChunkMeshUpdate{it->first, {}, true});
+                }
+                it = m_chunks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        // Queued work for chunks that no longer exist or are out of range would
+        // otherwise pile up forever as the player walks.
+        const auto outOfRange = [&](const ChunkCoord& c) {
+            return chebyshevDistance(c, centre) > kUnloadRadiusChunks;
+        };
+        m_pendingMesh.erase(std::remove_if(m_pendingMesh.begin(), m_pendingMesh.end(), outOfRange),
+                            m_pendingMesh.end());
+
+        refreshQueues(centre);
+    }
+
+    const auto budgetSpent = [&] {
+        return std::chrono::duration<float>(Clock::now() - start).count() >= budgetSeconds;
+    };
+
+    while (!m_pendingLoad.empty() && !budgetSpent()) {
+        const ChunkCoord coord = m_pendingLoad.back();
+        m_pendingLoad.pop_back();
+
+        if (hasChunk(coord)) {
+            continue;
+        }
+
+        m_chunks.emplace(coord, ChunkSlot{generateChunk(m_seed, coord), false});
+
+        // The new chunk and its neighbours may all have gained or lost visible
+        // faces along the shared border.
+        markDirty(coord);
+        markDirty({coord.x - 1, coord.y, coord.z});
+        markDirty({coord.x + 1, coord.y, coord.z});
+        markDirty({coord.x, coord.y, coord.z - 1});
+        markDirty({coord.x, coord.y, coord.z + 1});
+    }
+
+    while (!m_pendingMesh.empty() && !budgetSpent()) {
+        const ChunkCoord coord = m_pendingMesh.back();
+        m_pendingMesh.pop_back();
+
+        const auto it = m_chunks.find(coord);
+        if (it == m_chunks.end()) {
+            continue;
+        }
+        if (chebyshevDistance(coord, centre) > kVisibleRadiusChunks || !neighboursLoaded(coord)) {
+            continue;
+        }
+
+        it->second.meshed = true;
+        updates.push_back(ChunkMeshUpdate{coord, meshOne(coord), false});
+    }
+
+    return updates;
+}
+
+std::vector<ChunkMeshUpdate> World::loadImmediately(const glm::vec3& position) {
+    std::vector<ChunkMeshUpdate> all;
+
+    // A budget large enough that nothing is deferred, repeated until both
+    // queues drain. Startup is the one place a stall is preferable to popping.
+    for (int pass = 0; pass < 4; ++pass) {
+        std::vector<ChunkMeshUpdate> batch = update(position, 1000.0f);
+        all.insert(all.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
+        if (m_pendingLoad.empty() && m_pendingMesh.empty()) {
+            break;
+        }
+    }
+
+    return all;
 }
 
 } // namespace game
