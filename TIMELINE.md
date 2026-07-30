@@ -107,23 +107,57 @@ Window, Vulkan instance/device/swapchain, render loop, clear colour, clean shutd
 
 **Done when:** *(met 2026-07-30)* zero warnings at `/W4`, zero validation errors, correct discrete-GPU selection, clean exit. See `SYSTEM_MEMORY.md`'s validation baseline.
 
-### ▶ M2 — Shader pipeline and first triangle · **Core**
+### ✅ M2 — Shader pipeline and first triangle · **Core**
 
 The Vulkan graphics pipeline, vertex and fragment shaders, and shader compilation (`glslc`) wired into the CMake build so shaders rebuild automatically.
 
 **Why now:** every single later rendering feature is a shader. Proving the compile-and-load path on a triangle means a broken shader is never confused with a broken renderer.
 
-**Done when:** a coloured triangle renders; editing a `.glsl` file and rebuilding changes what is on screen.
+**Done when:** *(met 2026-07-30)* a coloured triangle renders; editing a `.glsl` file and rebuilding changes what is on screen.
 
-### ⬜ M3 — 3D scene: camera, depth, cube · **Core**
+### ▶ M3 — 3D scene: camera, depth, cube · **Core**
 
-Perspective projection, depth buffering, uniform/push-constant data, a free-fly camera with mouse-look and WASD.
+**Split into four parts at user request** (2026-07-30) — the combined milestone was roughly triple the size of M2, and each part below fails in a distinct, recognisable way. Doing them separately means a bug is attributable on sight rather than by bisection.
 
-**Why now:** you cannot debug terrain you cannot fly around, and you cannot trust geometry without a depth buffer. This is the last milestone before the world exists.
+#### ▶ M3a — Geometry from GPU buffers
 
-**You can:** fly around a 3D cube with mouse and keyboard. First thing that feels interactive.
+Vertex and index buffers in device-local memory, uploaded through a staging buffer; vertex input layout declared in the pipeline. The shader stops inventing its own corners.
 
-**Done when:** a cube renders correctly from any angle, near faces occlude far ones, and the camera moves smoothly at the frame cap.
+**Isolates:** GPU memory allocation, memory-type selection, and transfer/upload synchronisation.
+
+**You can:** see the same triangle as M2 — but now editing a C++ array changes its shape.
+
+**Done when:** the triangle is identical to M2's, driven entirely by buffer data, with zero validation errors.
+
+#### ⬜ M3b — Matrices, perspective, and a cube
+
+GLM arrives. Model/view/projection matrix delivered by push constants, cube geometry, backface culling enabled. The cube rotates on its own so its three-dimensionality is visible.
+
+**Isolates:** the coordinate-convention traps. Vulkan's Y axis points down and its depth range is 0→1, while GLM defaults to OpenGL's conventions — the single most common source of an upside-down or invisible scene.
+
+**Note:** deliberately **no depth buffer yet.** A single convex cube renders correctly on backface culling alone, so if something looks wrong here it is the matrices, not a missing depth test.
+
+**You can:** watch a correctly-shaped cube rotate in perspective.
+
+**Done when:** the cube is right-way-up, correctly proportioned at any window size, and no interior faces show through.
+
+#### ⬜ M3c — Depth buffer
+
+A depth image and depth testing, recreated alongside the swapchain on resize. Verified by adding a **second, overlapping cube** — a scene that cannot possibly render correctly without a working depth test.
+
+**Isolates:** depth format selection, attachment setup, and resize recreation.
+
+**Done when:** two overlapping cubes occlude each other correctly from every angle, and resizing does not break it.
+
+#### ⬜ M3d — Free-fly camera
+
+Camera position and orientation, mouse-look with cursor capture, WASD plus vertical movement, all scaled by delta time. `Escape` releases the mouse.
+
+**Isolates:** input handling and frame-rate-independent movement.
+
+**You can:** fly around the scene. First build you genuinely control.
+
+**Done when:** movement speed is identical at 30 fps and 240 fps, and looking around has no drift or snapping.
 
 ---
 
@@ -389,7 +423,7 @@ Listed so future sessions know roughly when each becomes justifiable — **not**
 
 | Milestone | Likely dependency | For |
 |---|---|---|
-| M3 | GLM (or hand-rolled math) | Vectors, matrices, projection |
+| M3b | GLM | Vectors, matrices, projection |
 | M4+ | Vulkan Memory Allocator | Practical GPU memory management |
 | M5 | A noise library | Terrain generation |
 | M9 | stb_image | Loading texture files |

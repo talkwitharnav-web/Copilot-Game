@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestone 1 (toolchain proof) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M2 (shader pipeline and first triangle) is next.
+> **Status:** Milestones 1 (toolchain proof) and 2 (shader pipeline, first triangle) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M3a (geometry from GPU buffers) is next.
 
 ---
 
@@ -136,10 +136,12 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | Component | Header | Responsibility |
 |---|---|---|
 | `Log` | `engine/core/Log.hpp` | Minimal timestamped console output at info/warn/error levels. Deliberately trivial — replaced when there is a real need. |
+| `Paths` | `engine/core/Paths.hpp` | `executableDirectory()`. Assets resolve relative to the `.exe`, not the working directory, which differs between terminal and editor launches. |
 | `FrameLimiter` | `engine/core/FrameLimiter.hpp` | Paces the main loop to a target frame rate, adjustable at runtime. A target of `0` means uncapped. |
 | `Window` | `engine/platform/Window.hpp` | Owns the GLFW window and its lifetime. Reports whether a close was requested, pumps OS events, and exposes a queue of key presses via the engine-level `Key` enum so the game never includes GLFW. |
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
+| `GraphicsPipeline` | `engine/render/GraphicsPipeline.hpp` | One complete draw configuration: both shader stages plus all fixed-function state. Loads SPIR-V from disk. Viewport and scissor are dynamic state, so resizing never rebuilds it. |
 | `Renderer` | `engine/render/Renderer.hpp` | Command pool, command buffers, per-frame synchronization, and the per-frame record/submit/present cycle. |
 
 **Vulkan vocabulary, briefly:**
@@ -165,6 +167,24 @@ The limiter is deliberately independent of the swapchain present mode, which is 
 
 ---
 
+## Shaders
+
+Shader source lives in `engine/shaders/` as GLSL. GPUs cannot read GLSL, so `glslc` (from the Vulkan SDK) compiles each file to **SPIR-V** bytecode at build time, writing `<name>.spv` into `build/<preset>/bin/shaders/`. Each shader has its own CMake rule depending on its own source, so editing one shader and rebuilding recompiles only that shader — no C++ rebuild required.
+
+At runtime the pipeline loads them via `executableDirectory() / "shaders"`. **Never load assets by a plain relative path**; the working directory differs between a terminal launch and an editor launch.
+
+## Rendering Approach
+
+**Dynamic rendering, not render passes.** `vkCmdBeginRendering` (core in Vulkan 1.3) names the target images directly, so there are no `VkRenderPass` or `VkFramebuffer` objects to create up front or keep synchronized with the swapchain across resizes.
+
+This requires two things that must not be removed:
+- `VkPhysicalDeviceVulkan13Features::dynamicRendering` enabled at device creation.
+- Physical-device selection rejects anything reporting less than `VK_API_VERSION_1_3`, so an unsuitable GPU produces a clear "no suitable GPU" error rather than a confusing failure inside `vkCreateDevice`.
+
+The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`.
+
+---
+
 ## Runtime Behavior
 
 Milestone 1 program flow:
@@ -185,11 +205,13 @@ The window shows a solid dark blue and nothing else. That is the intended and co
 Verified 2026-07-30 on this machine.
 
 - **Configure:** `cmake --preset debug` succeeds. GLFW 3.4 fetched, `Found Vulkan: 1.4.357` with `glslc` and `glslangValidator` components.
-- **Compile:** clean build of all 31 steps, **zero warnings** at `/W4 /permissive-`.
-- **Runtime:** window opens at 1280x720; validation layers report **no errors** across multiple runs including a continuous 77-second session.
+- **Compile:** clean build, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build (`triangle.vert.spv` 1512 bytes, `triangle.frag.spv` 572 bytes).
+- **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
+- **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
-- **Swapchain:** 1280x720, 3 images, `mailbox` present mode.
-- **Frame pacing:** holds 120–121 fps continuously against a 120 fps target. Uncapped, the same scene runs 400–1600 fps, so the cap is doing real work.
+- **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
+- **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.
+- **GPU load:** ~9 W at ~500 MHz core clock while rendering the triangle, i.e. essentially idle. Third-party overlay tools report an implausible frame rate on this machine; trust the engine's own counter (see the third-party layer note above).
 - **Shutdown:** closing the window logs `Window closed. Shutting down.` and exits through the normal path with no validation errors and no crash.
 
 ---
