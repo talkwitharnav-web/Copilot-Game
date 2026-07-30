@@ -1,0 +1,19 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": false,
+  "C_Cpp.default.cppStandard": "c++20",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+  "git.repositoryScanIgnoredFolders": [
+    "node_modules",
+    "build"
+  ],
+  "files.watcherExclude": {
+    "**/build/**": true
+  },
+  "search.exclude": {
+    "**/build": true
+  },
+  "files.associations": {
+    "*.hpp": "cpp"
+  }
+}

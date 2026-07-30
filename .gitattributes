@@ -1,0 +1,6 @@
+# Normalize line endings so the repo stays clean across machines and platforms.
+* text=auto
+
+*.png binary
+*.jpg binary
+*.spv binary

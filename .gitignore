@@ -1,0 +1,15 @@
+# Build output (always safe to delete)
+build/
+out/
+
+# CMake / editor scratch
+CMakeUserPresets.json
+.cache/
+compile_commands.json
+
+# Visual Studio / MSVC
+*.user
+*.pdb
+*.ilk
+*.idb
+.vs/
