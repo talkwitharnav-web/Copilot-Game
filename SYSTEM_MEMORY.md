@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–3 complete (toolchain, shader pipeline, geometry, matrices, depth, free-fly camera). A 3D scene of shaded boxes on a ground plane renders and can be flown around. No voxels, chunks, or gameplay yet, by design. `TIMELINE.md` M4 (first chunk) is next.
+> **Status:** Milestones 1–6 complete (toolchain, shader pipeline, geometry, matrices, depth, free-fly camera, first chunk, seeded terrain, walking and collision). A 72-chunk seeded world renders and can be walked, jumped and sprinted across, with free-fly on a debug toggle. No block editing yet, by design. `TIMELINE.md` M7 (break and place blocks — first playable) is next.
 
 ---
 
@@ -160,6 +160,22 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 
 ---
 
+## Game Architecture (current)
+
+Everything below lives in `game/` and is invisible to the engine. The engine has no idea what a block is; it only ever receives finished mesh data.
+
+| Component | Header | Responsibility |
+|---|---|---|
+| `Block` | `world/Block.hpp` | The block ID enum, whether an ID is solid, and its flat colour. Colours are placeholders until textures exist. |
+| `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
+| `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion. An integer hash, so it is reproducible on any machine without storing anything. |
+| `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what makes background generation a migration rather than a rewrite. |
+| `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a chunk plus its six neighbours into mesh data, emitting only faces that touch air. Neighbours are passed in rather than looked up, which keeps meshing pure too. |
+| `World` | `world/World.hpp` | Owns the chunk grid and answers block queries in world coordinates. The single owner of world state. |
+| `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
+
+---
+
 ## Frame Pacing
 
 The loop is capped so it does not render frames nobody sees. **Default cap: 120 fps.** `F1` steps the cap down, `F2` steps it up, through `30 / 60 / 90 / 120 / 144 / 165 / 240 / uncapped`. Changes take effect immediately and are logged.
@@ -208,12 +224,38 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 |---|---|
 | Mouse | Look (raw motion, bypassing OS pointer acceleration) |
 | `W` `A` `S` `D` | Move horizontally, relative to facing |
-| `Space` / `Left Shift` | Move up / down |
+| `Space` | Jump (walking) / rise (flying) |
+| `Left Shift` | Sneak (walking) / descend (flying) |
+| `Left Ctrl` | Sprint |
+| `F` | Toggle free-fly debug mode |
 | `Escape` | Release the mouse cursor |
 | Left click | Recapture the cursor |
 | `F1` / `F2` | Lower / raise the frame cap |
 
-Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement.
+Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
+
+---
+
+## Player Physics
+
+The player is an axis-aligned box, **0.6 m wide, 1.8 m tall**, with eyes at **1.62 m**. `Player::position` is the centre of the feet, because that is the natural anchor for standing on a surface. One block is one cubic metre, so these are directly comparable to real human proportions.
+
+| Quantity | Value |
+|---|---|
+| Walk / sprint / sneak | 4.317 / 5.612 / 1.295 m/s |
+| Fly | 22 m/s |
+| Gravity | 32 m/s² |
+| Terminal velocity | 78.4 m/s |
+| Jump apex | ~1.25 blocks |
+| Automatic step-up | 0.6 m |
+
+These are tuning numbers, not part of the game's identity, and are expected to change once there is real content to move through.
+
+**Collision resolves one axis at a time** — vertical first, then X, then Z. Resolving all three simultaneously leaves the maths unable to tell which direction to push out of a corner, which shows up as jitter or as sliding diagonally through walls. Vertical runs first so that "am I on the ground" is settled before the horizontal move decides whether a step-up is permitted.
+
+`updatePlayer` **clamps its own delta time to 50 ms**. A long stall must not let the player travel far enough in one step to pass straight through a wall; the collision test only looks at blocks the box overlaps, so it cannot see anything it skipped over.
+
+A 1 mm skin is kept between the box and surfaces it rests against, so a resolved contact does not immediately re-report as a collision.
 
 ---
 
@@ -255,6 +297,9 @@ Verified 2026-07-30 on this machine.
 - **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
 - **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
 - **M3 result:** six shaded boxes on a ground plane, 144 vertices / 72 triangles, render solid with correct mutual occlusion from every angle. Free-fly camera confirmed smooth with no ghosting or artifacting. Resizing rebuilds both swapchain and depth image cleanly.
+- **M4 result:** a single 32³ chunk emits 5098 faces where naive per-block meshing would emit 196608 — 97.4% of the work discarded before it reaches the GPU.
+- **M5 result:** 72 chunks (6×2×6), 192 blocks across, seed 1337. Generated in ~27 ms, meshed in ~156 ms, 109082 visible faces. Determinism check passes: regenerating a chunk reproduces it byte for byte.
+- **M6 result:** player spawns on the surface at the world centre and walks, jumps, sprints and sneaks across terrain without clipping into blocks or falling through the world. Steady 120–122 fps against a 120 fps cap with collision running every frame.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

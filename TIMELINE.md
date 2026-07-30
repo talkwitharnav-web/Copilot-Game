@@ -179,7 +179,7 @@ Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits 
 
 **Done when:** a hand-filled chunk renders as solid geometry with interior faces correctly absent.
 
-### ⬜ M5 — Terrain generation · **Core**
+### ✅ M5 — Terrain generation · **Core**
 
 Deterministic seeded generation. Noise-driven heightmap terrain across a modest fixed area — **not** infinite streaming yet. A generation architecture that can later accept caves, biomes, and structures.
 
@@ -189,7 +189,7 @@ Deterministic seeded generation. Noise-driven heightmap terrain across a modest 
 
 **Done when:** the same seed always produces identical terrain.
 
-### ⬜ M6 — Walking and collision · **Core**
+### ✅ M6 — Walking and collision · **Core**
 
 AABB collision against voxels, gravity, jumping, step-up. First-person player controller. Free-fly stays available as a debug toggle.
 
@@ -197,7 +197,9 @@ AABB collision against voxels, gravity, jumping, step-up. First-person player co
 
 **Done when:** you can walk and jump across terrain, cannot fall through the world, and cannot clip into solid blocks.
 
-### ⬜ M7 — Break and place blocks · **Core** · 🎮 **FIRST PLAYABLE**
+**Result:** player is a 0.6 × 1.8 × 0.6 m box with eyes at 1.62 m, spawned on the surface at the world centre. Movement resolves one axis at a time against solid blocks; ledges up to 0.6 m are stepped automatically. Gravity 32 m/s², terminal velocity 78.4 m/s, jump apex ~1.25 blocks. Walk 4.317 / sprint 5.612 / sneak 1.295 m/s. `F` toggles free-fly. Steady 120 fps, clean shutdown, no validation errors.
+
+### ▶ M7 — Break and place blocks · **Core** · 🎮 **FIRST PLAYABLE**
 
 Voxel raycasting, block breaking and placing, a highlight on the targeted block, and correct re-meshing of only the affected chunks.
 

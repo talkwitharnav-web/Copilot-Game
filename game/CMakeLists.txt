@@ -1,6 +1,8 @@
 add_executable(game
     src/Main.cpp
     src/world/Noise.cpp
+    src/world/World.cpp
+    src/world/Player.cpp
     src/world/TerrainGenerator.cpp
     src/world/ChunkMesher.cpp
 )
@@ -10,3 +12,4 @@ add_executable(game
 target_include_directories(game PRIVATE src)
 
 target_link_libraries(game PRIVATE engine)
+
