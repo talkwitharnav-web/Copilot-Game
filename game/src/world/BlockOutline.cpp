@@ -34,7 +34,10 @@ void appendBox(engine::MeshData& mesh, const glm::vec3& lo, const glm::vec3& hi)
 
         for (const glm::vec3& corner : face.corners) {
             const glm::vec3 p = glm::mix(lo, hi, corner);
-            mesh.vertices.push_back(engine::Vertex{{p.x, p.y, p.z}, {kColor.r, kColor.g, kColor.b}});
+            // Layer 0 with a near-black tint: the cage reads as a solid dark
+            // frame whatever texture happens to sit on layer 0.
+            mesh.vertices.push_back(
+                engine::Vertex{{p.x, p.y, p.z}, {kColor.r, kColor.g, kColor.b}, {0.5f, 0.5f}, 0.0f});
         }
 
         mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});

@@ -69,7 +69,7 @@ private:
 
 GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path& vertexSpirv,
                                    const std::filesystem::path& fragmentSpirv, VkFormat colorFormat,
-                                   VkFormat depthFormat)
+                                   VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout)
     : m_device(device) {
     const ScopedShaderModule vertexModule(device, vertexSpirv);
     const ScopedShaderModule fragmentModule(device, fragmentSpirv);
@@ -87,7 +87,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     // Geometry now arrives from a vertex buffer, described by the single layout
     // definition in Vertex.hpp.
     const VkVertexInputBindingDescription binding = Vertex::bindingDescription();
-    const std::array<VkVertexInputAttributeDescription, 2> attributes = Vertex::attributeDescriptions();
+    const std::array<VkVertexInputAttributeDescription, 4> attributes = Vertex::attributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -149,7 +149,8 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     dynamicState.dynamicStateCount = static_cast<std::uint32_t>(std::size(dynamicStates));
     dynamicState.pDynamicStates = dynamicStates;
 
-    // A single matrix, small enough for push constants, so no descriptor sets yet.
+    // The matrix stays in push constants; the descriptor set carries sampled
+    // textures, which are too large to push.
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
@@ -157,6 +158,8 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = descriptorSetLayout != VK_NULL_HANDLE ? 1u : 0u;
+    layoutInfo.pSetLayouts = descriptorSetLayout != VK_NULL_HANDLE ? &descriptorSetLayout : nullptr;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_layout), "vkCreatePipelineLayout");

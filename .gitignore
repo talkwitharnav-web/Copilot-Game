@@ -13,3 +13,10 @@ compile_commands.json
 *.ilk
 *.idb
 .vs/
+
+# Third-party art kept purely as visual reference. Not ours, never shipped, and
+# deliberately outside assets/ so the build cannot copy it into the game.
+reference/
+
+# Magnified texture sheets written by tools/preview-textures.ps1
+*-preview.png

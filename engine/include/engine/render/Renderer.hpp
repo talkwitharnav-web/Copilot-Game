@@ -5,11 +5,13 @@
 #include "engine/render/GraphicsPipeline.hpp"
 #include "engine/render/MeshData.hpp"
 #include "engine/render/Swapchain.hpp"
+#include "engine/render/TextureArray.hpp"
 
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -36,7 +38,10 @@ inline constexpr MeshHandle kInvalidMesh = ~MeshHandle{0};
 /// Drives one frame of GPU work: acquire an image, record commands, submit, present.
 class Renderer {
 public:
-    Renderer(const VulkanContext& context, Window& window);
+    /// `blockTextures` are loaded into a texture array in the order given; the
+    /// index into that list is what a vertex's `layer` refers to.
+    Renderer(const VulkanContext& context, Window& window,
+             const std::vector<std::filesystem::path>& blockTextures);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -78,6 +83,7 @@ public:
 
 private:
     void createCommandResources();
+    void createDescriptorResources();
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();
@@ -117,7 +123,14 @@ private:
     Window& m_window;
     Swapchain m_swapchain;
     std::unique_ptr<DepthImage> m_depthImage;
-    GraphicsPipeline m_trianglePipeline;
+
+    VkCommandPool m_commandPool = VK_NULL_HANDLE;
+    std::unique_ptr<TextureArray> m_blockTextures;
+    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
+
+    std::unique_ptr<GraphicsPipeline> m_trianglePipeline;
     std::vector<GpuMesh> m_meshes;
     std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
@@ -129,7 +142,6 @@ private:
     std::vector<RetiredMesh> m_retired;
     std::uint64_t m_frameIndex = 0;
 
-    VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;
 
     // Per frame-in-flight.

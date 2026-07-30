@@ -11,6 +11,7 @@ add_library(engine STATIC
     src/render/Buffer.cpp
     src/render/Vertex.cpp
     src/render/Camera.cpp
+    src/render/TextureArray.cpp
     src/render/GraphicsPipeline.cpp
     src/render/Renderer.cpp
 )
@@ -27,7 +28,7 @@ target_include_directories(engine
 # GLFW is PRIVATE: the game never talks to GLFW directly.
 target_link_libraries(engine
     PUBLIC  Vulkan::Vulkan glm::glm
-    PRIVATE glfw
+    PRIVATE glfw stb_image
 )
 
 # GLM defaults to OpenGL's conventions. Vulkan's depth range is 0..1, not -1..1.

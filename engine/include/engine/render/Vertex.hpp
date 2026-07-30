@@ -13,10 +13,16 @@ namespace engine {
 /// is one edit here plus one in the shader, never a hunt across the renderer.
 struct Vertex {
     float position[3];
+    /// Face shading, not material colour. Multiplied with the sampled texel, so
+    /// white leaves the texture untouched.
     float color[3];
+    float uv[2];
+    /// Which layer of the texture array to sample. A float because vertex
+    /// attributes feed the shader most simply that way.
+    float layer;
 
     static VkVertexInputBindingDescription bindingDescription();
-    static std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions();
+    static std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions();
 };
 
 } // namespace engine

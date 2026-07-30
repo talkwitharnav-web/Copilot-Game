@@ -45,6 +45,18 @@ FetchContent_Declare(glm
 )
 FetchContent_MakeAvailable(glm)
 
+# stb_image: decodes PNG (and most other formats) into raw pixels. A single
+# header with no build system of its own, so it is wrapped in an INTERFACE
+# target by hand rather than through FetchContent_MakeAvailable.
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        f58f558c120e9b32c217290b80bad1a0729fbb2c
+)
+FetchContent_MakeAvailable(stb)
+
+add_library(stb_image INTERFACE)
+target_include_directories(stb_image INTERFACE ${stb_SOURCE_DIR})
+
 # Vulkan is installed system-wide via the LunarG SDK, so it is found, not fetched.
 find_package(Vulkan REQUIRED)
 

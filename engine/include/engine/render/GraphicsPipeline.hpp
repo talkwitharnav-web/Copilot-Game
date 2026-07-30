@@ -16,8 +16,11 @@ class GraphicsPipeline {
 public:
     /// `colorFormat` and `depthFormat` must match the attachments this pipeline
     /// renders into; dynamic rendering validates them against each other.
+    /// `descriptorSetLayout` describes the resources the shaders read, and may
+    /// be null for a pipeline that samples nothing.
     GraphicsPipeline(VkDevice device, const std::filesystem::path& vertexSpirv,
-                     const std::filesystem::path& fragmentSpirv, VkFormat colorFormat, VkFormat depthFormat);
+                     const std::filesystem::path& fragmentSpirv, VkFormat colorFormat, VkFormat depthFormat,
+                     VkDescriptorSetLayout descriptorSetLayout);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;

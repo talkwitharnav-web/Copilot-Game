@@ -1,7 +1,5 @@
 #pragma once
 
-#include <glm/glm.hpp>
-
 #include <cstdint>
 
 namespace game {
@@ -20,22 +18,48 @@ constexpr bool isSolid(BlockId id) {
     return id != BlockId::Air;
 }
 
-/// Placeholder appearance until textures arrive at M9. These are working
-/// materials, not the game's final visual identity.
-inline glm::vec3 blockColor(BlockId id) {
+/// Which face of a block a texture is for. Most blocks use the same image on
+/// every side; grass does not.
+enum class BlockFace : std::uint8_t {
+    Top,
+    Bottom,
+    Side,
+};
+
+/// Layers of the texture array, in the order the game loads the image files.
+/// Adding a block type means adding its image to that list and returning the
+/// new index here.
+enum class TextureLayer : std::uint32_t {
+    Stone = 0,
+    Dirt = 1,
+    GrassTop = 2,
+    GrassSide = 3,
+    Sand = 4,
+};
+
+inline float blockTextureLayer(BlockId id, BlockFace face) {
     switch (id) {
     case BlockId::Stone:
-        return {0.56f, 0.57f, 0.60f};
+        return static_cast<float>(TextureLayer::Stone);
     case BlockId::Dirt:
-        return {0.48f, 0.35f, 0.24f};
+        return static_cast<float>(TextureLayer::Dirt);
     case BlockId::Grass:
-        return {0.36f, 0.62f, 0.30f};
+        // Grass is soil with a living surface, so all three faces differ.
+        switch (face) {
+        case BlockFace::Top:
+            return static_cast<float>(TextureLayer::GrassTop);
+        case BlockFace::Bottom:
+            return static_cast<float>(TextureLayer::Dirt);
+        case BlockFace::Side:
+            return static_cast<float>(TextureLayer::GrassSide);
+        }
+        return static_cast<float>(TextureLayer::GrassTop);
     case BlockId::Sand:
-        return {0.82f, 0.75f, 0.52f};
+        return static_cast<float>(TextureLayer::Sand);
     case BlockId::Air:
         break;
     }
-    return {0.0f, 0.0f, 0.0f};
+    return static_cast<float>(TextureLayer::Stone);
 }
 
 } // namespace game

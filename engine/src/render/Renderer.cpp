@@ -49,13 +49,22 @@ VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayou
 
 } // namespace
 
-Renderer::Renderer(const VulkanContext& context, Window& window)
+Renderer::Renderer(const VulkanContext& context, Window& window,
+                   const std::vector<std::filesystem::path>& blockTextures)
     : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
-      m_depthImage(std::make_unique<DepthImage>(context, m_swapchain.extent())),
-      m_trianglePipeline(context.device(), executableDirectory() / "shaders" / "triangle.vert.spv",
-                         executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat(),
-                         m_depthImage->format()) {
+      m_depthImage(std::make_unique<DepthImage>(context, m_swapchain.extent())) {
     createCommandResources();
+
+    // Order matters: the texture upload needs the command pool, and the pipeline
+    // needs the descriptor set layout that describes it.
+    m_blockTextures = std::make_unique<TextureArray>(context, m_commandPool, blockTextures);
+    createDescriptorResources();
+
+    m_trianglePipeline = std::make_unique<GraphicsPipeline>(
+        context.device(), executableDirectory() / "shaders" / "triangle.vert.spv",
+        executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat(), m_depthImage->format(),
+        m_descriptorSetLayout);
+
     createSyncObjects();
 }
 
@@ -70,6 +79,17 @@ Renderer::~Renderer() {
     m_meshes.clear();
     m_freeSlots.clear();
     m_overlayMesh = GpuMesh{};
+
+    // Before the pool: freeing the pool invalidates the set allocated from it.
+    m_trianglePipeline.reset();
+
+    if (m_descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_context.device(), m_descriptorPool, nullptr);
+    }
+    if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_context.device(), m_descriptorSetLayout, nullptr);
+    }
+    m_blockTextures.reset();
 
     destroySyncObjects();
 
@@ -95,6 +115,56 @@ void Renderer::createCommandResources() {
     allocInfo.commandBufferCount = kFramesInFlight;
     vkCheck(vkAllocateCommandBuffers(m_context.device(), &allocInfo, m_commandBuffers.data()),
             "vkAllocateCommandBuffers");
+}
+
+void Renderer::createDescriptorResources() {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    vkCheck(vkCreateDescriptorSetLayout(m_context.device(), &layoutInfo, nullptr, &m_descriptorSetLayout),
+            "vkCreateDescriptorSetLayout");
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    vkCheck(vkCreateDescriptorPool(m_context.device(), &poolInfo, nullptr, &m_descriptorPool),
+            "vkCreateDescriptorPool");
+
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_descriptorSetLayout;
+    vkCheck(vkAllocateDescriptorSets(m_context.device(), &allocInfo, &m_descriptorSet), "vkAllocateDescriptorSets");
+
+    // The texture never changes, so the set is written once here rather than
+    // per frame.
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageView = m_blockTextures->view();
+    imageInfo.sampler = m_blockTextures->sampler();
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(m_context.device(), 1, &write, 0, nullptr);
 }
 
 void Renderer::retire(GpuMesh& slot) {
@@ -343,14 +413,17 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     scissor.extent = extent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline.handle());
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->handle());
+
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->layout(), 0, 1,
+                            &m_descriptorSet, 0, nullptr);
 
     const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform) {
         if (mesh.indexCount == 0) {
             return;
         }
         const MeshPushConstants push{transform};
-        vkCmdPushConstants(commandBuffer, m_trianglePipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
+        vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(MeshPushConstants), &push);
 
         const VkBuffer vertexBuffers[] = {mesh.vertexBuffer->handle()};

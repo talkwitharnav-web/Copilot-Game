@@ -1,5 +1,6 @@
 #include <engine/core/FrameLimiter.hpp>
 #include <engine/core/Log.hpp>
+#include <engine/core/Paths.hpp>
 #include <engine/platform/Window.hpp>
 #include <engine/render/Camera.hpp>
 #include <engine/render/Renderer.hpp>
@@ -22,6 +23,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -80,7 +82,15 @@ int main() {
     try {
         engine::Window window(kWindowWidth, kWindowHeight, "Voxel Game");
         engine::VulkanContext context(window);
-        engine::Renderer renderer(context, window);
+
+        // Order defines the texture array layer indices, which must match
+        // TextureLayer in Block.hpp.
+        const std::filesystem::path textureDir = engine::executableDirectory() / "assets" / "textures" / "blocks";
+        const std::vector<std::filesystem::path> blockTextures{
+            textureDir / "stone.png", textureDir / "dirt.png", textureDir / "grass_top.png",
+            textureDir / "grass_side.png", textureDir / "sand.png"};
+
+        engine::Renderer renderer(context, window, blockTextures);
 
         std::size_t capIndex = kDefaultFpsCapIndex;
         engine::FrameLimiter frameLimiter(kFpsCapOptions[capIndex]);
