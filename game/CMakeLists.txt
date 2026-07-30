@@ -3,6 +3,8 @@ add_executable(game
     src/world/Noise.cpp
     src/world/World.cpp
     src/world/Player.cpp
+    src/world/Raycast.cpp
+    src/world/BlockOutline.cpp
     src/world/TerrainGenerator.cpp
     src/world/ChunkMesher.cpp
 )

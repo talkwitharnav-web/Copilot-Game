@@ -4,6 +4,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +36,14 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_LEFT_CONTROL;
     case Key::Escape:
         return GLFW_KEY_ESCAPE;
+    case Key::Num1:
+        return GLFW_KEY_1;
+    case Key::Num2:
+        return GLFW_KEY_2;
+    case Key::Num3:
+        return GLFW_KEY_3;
+    case Key::Num4:
+        return GLFW_KEY_4;
     case Key::F1:
         return GLFW_KEY_F1;
     case Key::F2:
@@ -71,6 +80,18 @@ bool fromGlfwKey(int glfwKey, Key& out) {
         return true;
     case GLFW_KEY_ESCAPE:
         out = Key::Escape;
+        return true;
+    case GLFW_KEY_1:
+        out = Key::Num1;
+        return true;
+    case GLFW_KEY_2:
+        out = Key::Num2;
+        return true;
+    case GLFW_KEY_3:
+        out = Key::Num3;
+        return true;
+    case GLFW_KEY_4:
+        out = Key::Num4;
         return true;
     case GLFW_KEY_F1:
         out = Key::F1;
@@ -130,6 +151,31 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
         }
     });
 
+    glfwSetMouseButtonCallback(m_handle, [](GLFWwindow* handle, int button, int action, int) {
+        if (action != GLFW_PRESS && action != GLFW_RELEASE) {
+            return;
+        }
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+        if (self == nullptr) {
+            return;
+        }
+        if (button == GLFW_MOUSE_BUTTON_LEFT) {
+            self->recordMouseButton(MouseButton::Left, action == GLFW_PRESS);
+        } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+            self->recordMouseButton(MouseButton::Right, action == GLFW_PRESS);
+        }
+    });
+
+    // Losing focus means any release event goes to another window, which would
+    // leave a button or the cursor stuck in this one.
+    glfwSetWindowFocusCallback(m_handle, [](GLFWwindow* handle, int focused) {
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+        if (self != nullptr && focused == GLFW_FALSE) {
+            self->clearInputState();
+            self->setCursorCaptured(false);
+        }
+    });
+
     logInfo("Window created (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 }
 
@@ -177,8 +223,26 @@ bool Window::isKeyDown(Key key) const {
 }
 
 bool Window::isMouseButtonDown(MouseButton button) const {
-    const int glfwButton = button == MouseButton::Left ? GLFW_MOUSE_BUTTON_LEFT : GLFW_MOUSE_BUTTON_RIGHT;
-    return glfwGetMouseButton(m_handle, glfwButton) == GLFW_PRESS;
+    return m_mouseButtonDown[static_cast<std::size_t>(button)];
+}
+
+void Window::recordMouseButton(MouseButton button, bool down) {
+    m_mouseButtonDown[static_cast<std::size_t>(button)] = down;
+    if (down) {
+        m_mouseButtonPresses.push_back(button);
+    }
+}
+
+void Window::clearInputState() {
+    m_mouseButtonDown.fill(false);
+    m_mouseButtonPresses.clear();
+    m_keyPresses.clear();
+}
+
+std::vector<MouseButton> Window::consumeMouseButtonPresses() {
+    std::vector<MouseButton> presses;
+    presses.swap(m_mouseButtonPresses);
+    return presses;
 }
 
 void Window::recordCursorPosition(double x, double y) {
@@ -214,6 +278,12 @@ void Window::setCursorCaptured(bool captured) {
 
     m_hasLastCursorPosition = false;
     m_cursorDelta = CursorDelta{};
+
+    // Releasing the cursor is also the escape hatch for a button that somehow
+    // got stuck down.
+    if (!captured) {
+        m_mouseButtonDown.fill(false);
+    }
 }
 
 } // namespace engine

@@ -5,11 +5,14 @@
 #include <engine/render/Renderer.hpp>
 #include <engine/render/VulkanContext.hpp>
 
+#include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
+#include "world/Raycast.hpp"
 #include "world/World.hpp"
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <array>
 #include <chrono>
@@ -18,7 +21,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -28,6 +33,14 @@ constexpr std::uint32_t kWindowHeight = 720;
 constexpr engine::ClearColor kBackgroundColor{0.45f, 0.62f, 0.80f, 1.0f};
 
 constexpr float kLookRadiansPerPixel = 0.0025f;
+
+// How far the player can reach to break or place, in metres.
+constexpr float kReach = 12.0f;
+
+// Holding the button keeps editing at this rate, so dragging across terrain
+// does not need one click per block.
+constexpr float kBreakRepeatSeconds = 0.15f;
+constexpr float kPlaceRepeatSeconds = 0.18f;
 
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
@@ -44,6 +57,21 @@ constexpr std::size_t kDefaultFpsCapIndex = 3;
 
 std::string describeCap(double fps) {
     return fps > 0.0 ? std::to_string(static_cast<int>(fps)) + " fps" : "uncapped";
+}
+
+const char* describeBlock(game::BlockId block) {
+    switch (block) {
+    case game::BlockId::Stone:
+        return "Stone";
+    case game::BlockId::Dirt:
+        return "Dirt";
+    case game::BlockId::Grass:
+        return "Grass";
+    case game::BlockId::Sand:
+        return "Sand";
+    default:
+        return "Air";
+    }
 }
 
 } // namespace
@@ -63,13 +91,14 @@ int main() {
         window.setCursorCaptured(true);
 
         const auto buildStart = std::chrono::steady_clock::now();
-        const game::World world(kWorldSeed, kWorldChunksX, kWorldChunksY, kWorldChunksZ);
+        game::World world(kWorldSeed, kWorldChunksX, kWorldChunksY, kWorldChunksZ);
         const auto generateEnd = std::chrono::steady_clock::now();
 
         const std::vector<engine::MeshData> meshes = world.buildMeshes();
         const auto meshEnd = std::chrono::steady_clock::now();
 
         renderer.uploadMeshes(meshes);
+        renderer.setOverlayMesh(game::makeBlockOutline());
 
         std::size_t totalFaces = 0;
         for (const engine::MeshData& mesh : meshes) {
@@ -96,6 +125,7 @@ int main() {
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Move: WASD. Space jump, Left Shift sneak, Left Ctrl sprint.");
+        engine::logInfo("Left click breaks, right click places. 1-4 pick the block to place.");
         engine::logInfo("F toggles fly mode. Escape releases the mouse; click to recapture.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
@@ -103,6 +133,22 @@ int main() {
         auto previousTime = Clock::now();
         auto lastReportTime = previousTime;
         int framesSinceReport = 0;
+
+        game::BlockId heldBlock = game::BlockId::Stone;
+        float breakTimer = 0.0f;
+        float placeTimer = 0.0f;
+
+        const auto applyEdit = [&](const std::vector<std::size_t>& dirtyChunks) {
+            if (dirtyChunks.empty()) {
+                return;
+            }
+            std::vector<std::pair<std::size_t, engine::MeshData>> updates;
+            updates.reserve(dirtyChunks.size());
+            for (const std::size_t index : dirtyChunks) {
+                updates.emplace_back(index, world.buildChunkMesh(index));
+            }
+            renderer.updateMeshes(updates);
+        };
 
         while (!window.shouldClose()) {
             window.pollEvents();
@@ -116,6 +162,15 @@ int main() {
                     player.flying = !player.flying;
                     player.velocity = glm::vec3{0.0f};
                     engine::logInfo(player.flying ? "Fly mode ON" : "Fly mode OFF");
+                    continue;
+                }
+                if (key == engine::Key::Num1 || key == engine::Key::Num2 || key == engine::Key::Num3 ||
+                    key == engine::Key::Num4) {
+                    heldBlock = key == engine::Key::Num1   ? game::BlockId::Stone
+                                : key == engine::Key::Num2 ? game::BlockId::Dirt
+                                : key == engine::Key::Num3 ? game::BlockId::Grass
+                                                           : game::BlockId::Sand;
+                    engine::logInfo(std::string("Holding: ") + describeBlock(heldBlock));
                     continue;
                 }
                 if (key == engine::Key::F1 && capIndex > 0) {
@@ -133,7 +188,12 @@ int main() {
             const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
             previousTime = now;
 
-            if (!window.isCursorCaptured() && window.isMouseButtonDown(engine::MouseButton::Left)) {
+            // Drained every frame even when unused, so the queue cannot grow
+            // without bound. It only exists to notice a click while the cursor
+            // is free.
+            const bool clicked = !window.consumeMouseButtonPresses().empty();
+            const bool hadCursor = window.isCursorCaptured();
+            if (!hadCursor && clicked) {
                 window.setCursorCaptured(true);
             }
 
@@ -172,7 +232,41 @@ int main() {
             game::updatePlayer(player, move, world, deltaSeconds);
             camera.position = player.eyePosition();
 
-            renderer.drawFrame(kBackgroundColor, camera.viewMatrix());
+            const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kReach);
+
+            // Gated on the cursor state from the start of the frame, so the
+            // click that recaptures the cursor does not also swing at a block.
+            const bool wantBreak = hadCursor && window.isMouseButtonDown(engine::MouseButton::Left);
+            const bool wantPlace = hadCursor && window.isMouseButtonDown(engine::MouseButton::Right);
+
+            // Timers only run down while the button is held, so releasing and
+            // pressing again always acts immediately.
+            if (!wantBreak) {
+                breakTimer = 0.0f;
+            } else {
+                breakTimer -= deltaSeconds;
+                if (breakTimer <= 0.0f && target.hit) {
+                    applyEdit(world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air));
+                    breakTimer = kBreakRepeatSeconds;
+                }
+            }
+
+            if (!wantPlace) {
+                placeTimer = 0.0f;
+            } else {
+                placeTimer -= deltaSeconds;
+                if (placeTimer <= 0.0f && target.hit && !game::playerOverlapsBlock(player, target.adjacent)) {
+                    applyEdit(world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, heldBlock));
+                    placeTimer = kPlaceRepeatSeconds;
+                }
+            }
+
+            std::optional<glm::mat4> highlight;
+            if (target.hit) {
+                highlight = glm::translate(glm::mat4{1.0f}, glm::vec3{target.block});
+            }
+
+            renderer.drawFrame(kBackgroundColor, camera.viewMatrix(), highlight);
 
             ++framesSinceReport;
             if (now - lastReportTime >= std::chrono::seconds(1)) {

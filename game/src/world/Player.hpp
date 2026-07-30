@@ -18,6 +18,15 @@ constexpr float kWidth = 0.6f;
 constexpr float kHeight = 1.8f;
 constexpr float kEyeHeight = 1.62f;
 
+/// Crouching shrinks the box from the top down, so the feet stay put.
+constexpr float kSneakHeight = 1.5f;
+constexpr float kSneakEyeHeight = 1.27f;
+
+/// How fast the camera slides between standing and crouched eye level. The
+/// collision box switches instantly; only the view is eased, because a camera
+/// that teleports vertically reads as a glitch.
+constexpr float kEyeAdjustSpeed = 8.0f;
+
 /// Ledges up to this high are climbed automatically. Without it, every
 /// one-block rise stops you dead and uneven ground is miserable to walk on.
 constexpr float kStepHeight = 0.6f;
@@ -44,8 +53,16 @@ struct Player {
     bool onGround = false;
     bool flying = false;
 
-    glm::vec3 eyePosition() const {
-        return position + glm::vec3{0.0f, player_constants::kEyeHeight, 0.0f};
+    /// Held across frames rather than read from input, because standing back up
+    /// is refused when there is no headroom.
+    bool sneaking = false;
+
+    float eyeOffset = player_constants::kEyeHeight;
+
+    glm::vec3 eyePosition() const { return position + glm::vec3{0.0f, eyeOffset, 0.0f}; }
+
+    float height() const {
+        return sneaking ? player_constants::kSneakHeight : player_constants::kHeight;
     }
 };
 
@@ -67,5 +84,9 @@ struct PlayerInput {
 /// internally, because a long stall must not let the player move far enough in
 /// one step to pass straight through a wall.
 void updatePlayer(Player& player, const PlayerInput& input, const World& world, float deltaSeconds);
+
+/// True if a block at these coordinates would intersect the player's box.
+/// Placing there would seal the player inside solid geometry.
+bool playerOverlapsBlock(const Player& player, const glm::ivec3& block);
 
 } // namespace game

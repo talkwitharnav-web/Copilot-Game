@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,6 +26,10 @@ enum class Key {
     LeftShift,
     LeftControl,
     Escape,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
     F1,
     F2,
 };
@@ -76,7 +81,22 @@ public:
     /// `consumeKeyPresses` for one-shot actions.
     bool isKeyDown(Key key) const;
 
+    /// Whether a mouse button is held right now.
+    ///
+    /// Tracked from press and release events rather than polled from the OS, so
+    /// it can be force-cleared. A button whose release event is never delivered
+    /// — which a touchpad gesture or a focus change can cause — would otherwise
+    /// stay stuck down for the rest of the session.
     bool isMouseButtonDown(MouseButton button) const;
+
+    /// Mouse buttons pressed since the last call, in press order. Clears the
+    /// queue. Use this for one-shot actions; `isMouseButtonDown` reports held
+    /// state and would fire every frame.
+    std::vector<MouseButton> consumeMouseButtonPresses();
+
+    /// Forgets all held buttons and queued presses. Called automatically when
+    /// the window loses focus.
+    void clearInputState();
 
     /// Cursor movement since the last call. Clears the accumulator.
     CursorDelta consumeCursorDelta();
@@ -92,6 +112,9 @@ public:
     /// Called by the platform key callback. Not intended for game code.
     void recordKeyPress(Key key) { m_keyPresses.push_back(key); }
 
+    /// Called by the platform mouse callback. Not intended for game code.
+    void recordMouseButton(MouseButton button, bool down);
+
     /// Called by the platform cursor callback. Not intended for game code.
     void recordCursorPosition(double x, double y);
 
@@ -101,6 +124,8 @@ private:
     GLFWwindow* m_handle = nullptr;
     bool m_resized = false;
     std::vector<Key> m_keyPresses;
+    std::vector<MouseButton> m_mouseButtonPresses;
+    std::array<bool, 2> m_mouseButtonDown{};
 
     bool m_cursorCaptured = false;
     bool m_hasLastCursorPosition = false;

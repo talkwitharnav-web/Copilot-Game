@@ -23,6 +23,17 @@ public:
     /// Anything outside the generated volume reads as air.
     BlockId blockAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
+    bool inBounds(int x, int y, int z) const;
+
+    /// Changes one block and reports which chunk meshes are now stale.
+    ///
+    /// Editing a block on a chunk border exposes or hides a face belonging to
+    /// the *neighbouring* chunk's mesh, so more than one chunk usually has to be
+    /// rebuilt. Missing those neighbours leaves holes in the world.
+    ///
+    /// Returns an empty list if the coordinate is out of bounds or the block was
+    /// already what was asked for.
+    std::vector<std::size_t> setBlock(int x, int y, int z, BlockId block);
 
     /// Highest solid block in a column, or -1 if the column is empty. Used to
     /// place the player without dropping them inside terrain.
@@ -31,6 +42,9 @@ public:
     /// One mesh per chunk, each meshed with its real neighbours so no faces are
     /// generated between two solid blocks across a chunk boundary.
     std::vector<engine::MeshData> buildMeshes() const;
+
+    /// Rebuilds a single chunk's mesh. The index matches `buildMeshes()` order.
+    engine::MeshData buildChunkMesh(std::size_t index) const;
 
     int blocksX() const { return m_chunksX * Chunk::kSize; }
     int blocksY() const { return m_chunksY * Chunk::kSize; }
@@ -41,7 +55,6 @@ public:
 private:
     const Chunk* chunkAt(int cx, int cy, int cz) const;
     std::size_t chunkIndex(int cx, int cy, int cz) const;
-
     std::uint32_t m_seed;
     int m_chunksX;
     int m_chunksY;

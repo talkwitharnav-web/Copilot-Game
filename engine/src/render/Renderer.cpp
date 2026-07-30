@@ -88,40 +88,68 @@ void Renderer::createCommandResources() {
             "vkAllocateCommandBuffers");
 }
 
+void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
+    // Release first: the old buffers are dead weight while the new ones are
+    // allocated, and holding both doubles peak device memory.
+    slot.vertexBuffer.reset();
+    slot.indexBuffer.reset();
+    slot.indexCount = 0;
+
+    if (mesh.empty()) {
+        return;
+    }
+
+    const VkDeviceSize vertexBytes = mesh.vertices.size() * sizeof(Vertex);
+    const VkDeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
+
+    slot.vertexBuffer =
+        std::make_unique<Buffer>(m_context, vertexBytes,
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    slot.indexBuffer =
+        std::make_unique<Buffer>(m_context, indexBytes,
+                                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    uploadBufferData(m_context, m_commandPool, *slot.vertexBuffer, mesh.vertices.data(), vertexBytes);
+    uploadBufferData(m_context, m_commandPool, *slot.indexBuffer, mesh.indices.data(), indexBytes);
+
+    slot.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+}
+
 void Renderer::uploadMeshes(const std::vector<MeshData>& meshes) {
     // Replacing buffers the GPU may still be reading from is undefined behaviour.
     // Waiting is free at load time and this is not a per-frame path.
     vkDeviceWaitIdle(m_context.device());
 
-    // Clearing first releases the previous buffers before new ones are allocated,
-    // so peak VRAM is one world's worth rather than two.
     m_meshes.clear();
-    m_meshes.reserve(meshes.size());
+    m_meshes.resize(meshes.size());
 
-    for (const MeshData& mesh : meshes) {
-        if (mesh.empty()) {
-            continue;
-        }
-
-        const VkDeviceSize vertexBytes = mesh.vertices.size() * sizeof(Vertex);
-        const VkDeviceSize indexBytes = mesh.indices.size() * sizeof(std::uint32_t);
-
-        GpuMesh uploaded;
-        uploaded.vertexBuffer =
-            std::make_unique<Buffer>(m_context, vertexBytes,
-                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        uploaded.indexBuffer =
-            std::make_unique<Buffer>(m_context, indexBytes,
-                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        uploaded.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
-
-        uploadBufferData(m_context, m_commandPool, *uploaded.vertexBuffer, mesh.vertices.data(), vertexBytes);
-        uploadBufferData(m_context, m_commandPool, *uploaded.indexBuffer, mesh.indices.data(), indexBytes);
-
-        m_meshes.push_back(std::move(uploaded));
+    for (std::size_t i = 0; i < meshes.size(); ++i) {
+        uploadInto(m_meshes[i], meshes[i]);
     }
+}
+
+void Renderer::updateMeshes(const std::vector<std::pair<std::size_t, MeshData>>& updates) {
+    if (updates.empty()) {
+        return;
+    }
+
+    // The slots' current buffers may still be referenced by frames in flight.
+    // Destroying them without this wait is a use-after-free the validation
+    // layers will not always catch.
+    vkDeviceWaitIdle(m_context.device());
+
+    for (const auto& [index, mesh] : updates) {
+        if (index < m_meshes.size()) {
+            uploadInto(m_meshes[index], mesh);
+        }
+    }
+}
+
+void Renderer::setOverlayMesh(const MeshData& mesh) {
+    vkDeviceWaitIdle(m_context.device());
+    uploadInto(m_overlayMesh, mesh);
 }
 
 void Renderer::createSyncObjects() {
@@ -194,7 +222,8 @@ glm::mat4 Renderer::projectionMatrix() const {
 }
 
 void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color,
-                              const glm::mat4& modelViewProjection) const {
+                              const glm::mat4& viewProjection,
+                              const std::optional<glm::mat4>& overlayTransform) const {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -271,16 +300,27 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline.handle());
 
-    const MeshPushConstants push{modelViewProjection};
-    vkCmdPushConstants(commandBuffer, m_trianglePipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
-                       sizeof(MeshPushConstants), &push);
+    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform) {
+        if (mesh.indexCount == 0) {
+            return;
+        }
+        const MeshPushConstants push{transform};
+        vkCmdPushConstants(commandBuffer, m_trianglePipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
+                           sizeof(MeshPushConstants), &push);
 
-    for (const GpuMesh& mesh : m_meshes) {
         const VkBuffer vertexBuffers[] = {mesh.vertexBuffer->handle()};
         const VkDeviceSize vertexOffsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+    };
+
+    for (const GpuMesh& mesh : m_meshes) {
+        drawMesh(mesh, viewProjection);
+    }
+
+    if (overlayTransform.has_value()) {
+        drawMesh(m_overlayMesh, viewProjection * *overlayTransform);
     }
 
     vkCmdEndRendering(commandBuffer);
@@ -294,7 +334,8 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCheck(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
 }
 
-void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view) {
+void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
+                         const std::optional<glm::mat4>& overlayTransform) {
     if (m_window.isMinimized()) {
         return;
     }
@@ -320,7 +361,7 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view) {
 
     const VkCommandBuffer commandBuffer = m_commandBuffers[m_currentFrame];
     vkCheck(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer");
-    recordCommands(commandBuffer, imageIndex, color, projectionMatrix() * view);
+    recordCommands(commandBuffer, imageIndex, color, projectionMatrix() * view, overlayTransform);
 
     // We now write the image as a colour attachment rather than a transfer
     // target, so the wait happens at the stage that actually does that writing.

@@ -57,6 +57,54 @@ bool World::isSolid(int x, int y, int z) const {
     return game::isSolid(blockAt(x, y, z));
 }
 
+bool World::inBounds(int x, int y, int z) const {
+    return x >= 0 && y >= 0 && z >= 0 && x < blocksX() && y < blocksY() && z < blocksZ();
+}
+
+std::vector<std::size_t> World::setBlock(int x, int y, int z, BlockId block) {
+    if (!inBounds(x, y, z) || blockAt(x, y, z) == block) {
+        return {};
+    }
+
+    const int cx = floorDiv(x, Chunk::kSize);
+    const int cy = floorDiv(y, Chunk::kSize);
+    const int cz = floorDiv(z, Chunk::kSize);
+    const int lx = floorMod(x, Chunk::kSize);
+    const int ly = floorMod(y, Chunk::kSize);
+    const int lz = floorMod(z, Chunk::kSize);
+
+    m_chunks[chunkIndex(cx, cy, cz)].set(lx, ly, lz, block);
+
+    std::vector<std::size_t> dirty{chunkIndex(cx, cy, cz)};
+
+    // Only a block touching a chunk face can affect a neighbour's mesh.
+    const auto addNeighbour = [&](int nx, int ny, int nz) {
+        if (chunkAt(nx, ny, nz) != nullptr) {
+            dirty.push_back(chunkIndex(nx, ny, nz));
+        }
+    };
+    if (lx == 0) {
+        addNeighbour(cx - 1, cy, cz);
+    }
+    if (lx == Chunk::kSize - 1) {
+        addNeighbour(cx + 1, cy, cz);
+    }
+    if (ly == 0) {
+        addNeighbour(cx, cy - 1, cz);
+    }
+    if (ly == Chunk::kSize - 1) {
+        addNeighbour(cx, cy + 1, cz);
+    }
+    if (lz == 0) {
+        addNeighbour(cx, cy, cz - 1);
+    }
+    if (lz == Chunk::kSize - 1) {
+        addNeighbour(cx, cy, cz + 1);
+    }
+
+    return dirty;
+}
+
 int World::highestSolid(int x, int z) const {
     for (int y = blocksY() - 1; y >= 0; --y) {
         if (isSolid(x, y, z)) {
@@ -66,27 +114,31 @@ int World::highestSolid(int x, int z) const {
     return -1;
 }
 
+engine::MeshData World::buildChunkMesh(std::size_t index) const {
+    const int cx = static_cast<int>(index) % m_chunksX;
+    const int cz = (static_cast<int>(index) / m_chunksX) % m_chunksZ;
+    const int cy = static_cast<int>(index) / (m_chunksX * m_chunksZ);
+
+    ChunkNeighbours neighbours;
+    neighbours.negativeX = chunkAt(cx - 1, cy, cz);
+    neighbours.positiveX = chunkAt(cx + 1, cy, cz);
+    neighbours.negativeY = chunkAt(cx, cy - 1, cz);
+    neighbours.positiveY = chunkAt(cx, cy + 1, cz);
+    neighbours.negativeZ = chunkAt(cx, cy, cz - 1);
+    neighbours.positiveZ = chunkAt(cx, cy, cz + 1);
+
+    const glm::vec3 origin{static_cast<float>(cx * Chunk::kSize), static_cast<float>(cy * Chunk::kSize),
+                           static_cast<float>(cz * Chunk::kSize)};
+
+    return meshChunk(m_chunks[index], neighbours, origin);
+}
+
 std::vector<engine::MeshData> World::buildMeshes() const {
     std::vector<engine::MeshData> meshes;
     meshes.reserve(m_chunks.size());
 
-    for (int y = 0; y < m_chunksY; ++y) {
-        for (int z = 0; z < m_chunksZ; ++z) {
-            for (int x = 0; x < m_chunksX; ++x) {
-                ChunkNeighbours neighbours;
-                neighbours.negativeX = chunkAt(x - 1, y, z);
-                neighbours.positiveX = chunkAt(x + 1, y, z);
-                neighbours.negativeY = chunkAt(x, y - 1, z);
-                neighbours.positiveY = chunkAt(x, y + 1, z);
-                neighbours.negativeZ = chunkAt(x, y, z - 1);
-                neighbours.positiveZ = chunkAt(x, y, z + 1);
-
-                const glm::vec3 origin{static_cast<float>(x * Chunk::kSize), static_cast<float>(y * Chunk::kSize),
-                                       static_cast<float>(z * Chunk::kSize)};
-
-                meshes.push_back(meshChunk(m_chunks[chunkIndex(x, y, z)], neighbours, origin));
-            }
-        }
+    for (std::size_t i = 0; i < m_chunks.size(); ++i) {
+        meshes.push_back(buildChunkMesh(i));
     }
 
     return meshes;

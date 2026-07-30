@@ -15,6 +15,10 @@ using namespace player_constants;
 /// assumption in the collision resolver valid.
 constexpr float kMaxDeltaSeconds = 0.05f;
 
+/// Longest distance any one collision step may cover. Movement is split into
+/// however many steps this requires.
+constexpr float kMaxStepDistance = 0.4f;
+
 /// Keeps the box a hair away from surfaces it is resting against, so a resolved
 /// contact does not immediately re-report as a collision.
 constexpr float kSkin = 0.001f;
@@ -24,9 +28,9 @@ struct Aabb {
     glm::vec3 max{0.0f};
 };
 
-Aabb boxAt(const glm::vec3& feet) {
+Aabb boxAt(const glm::vec3& feet, float height) {
     constexpr float half = kWidth * 0.5f;
-    return Aabb{{feet.x - half, feet.y, feet.z - half}, {feet.x + half, feet.y + kHeight, feet.z + half}};
+    return Aabb{{feet.x - half, feet.y, feet.z - half}, {feet.x + half, feet.y + height, feet.z + half}};
 }
 
 /// True if any solid block overlaps the box. Subtracting the skin from the upper
@@ -51,12 +55,23 @@ bool overlapsSolid(const World& world, const Aabb& box) {
     return false;
 }
 
+/// True if solid ground sits directly under the player's footprint.
+///
+/// Probes a thin slab just below the feet rather than a single point, so
+/// standing with only a corner over a block still counts as supported.
+bool hasGroundBelow(const World& world, const glm::vec3& feet, float probeDepth = 0.1f) {
+    Aabb probe = boxAt(feet, 0.0f);
+    probe.min.y = feet.y - probeDepth;
+    probe.max.y = feet.y;
+    return overlapsSolid(world, probe);
+}
+
 /// Moves along one axis and snaps to the blocking surface if something is hit.
 ///
 /// Axes are resolved one at a time on purpose. Resolving all three together
 /// leaves the maths unable to tell which direction to push out of a corner,
 /// which shows up as jitter or as sliding through walls diagonally.
-bool moveAxis(glm::vec3& position, const World& world, int axis, float amount) {
+bool moveAxis(glm::vec3& position, const World& world, int axis, float amount, float height) {
     if (amount == 0.0f) {
         return false;
     }
@@ -64,14 +79,14 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount) {
     glm::vec3 candidate = position;
     candidate[axis] += amount;
 
-    if (!overlapsSolid(world, boxAt(candidate))) {
+    if (!overlapsSolid(world, boxAt(candidate, height))) {
         position = candidate;
         return false;
     }
 
     // How far the box extends past `position` on this axis, in each direction.
     constexpr float half = kWidth * 0.5f;
-    const float extentAbove = (axis == 1) ? kHeight : half;
+    const float extentAbove = (axis == 1) ? height : half;
     const float extentBelow = (axis == 1) ? 0.0f : half;
 
     if (amount > 0.0f) {
@@ -91,10 +106,23 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount) {
 void updatePlayer(Player& player, const PlayerInput& input, const World& world, float deltaSeconds) {
     const float dt = std::min(deltaSeconds, kMaxDeltaSeconds);
 
+    if (input.sneak) {
+        player.sneaking = true;
+    } else if (player.sneaking && !overlapsSolid(world, boxAt(player.position, kHeight))) {
+        // Standing up inside a low gap would push the head into a block.
+        player.sneaking = false;
+    }
+
+    const float height = player.height();
+
+    const float targetEye = player.sneaking ? kSneakEyeHeight : kEyeHeight;
+    const float maxEyeChange = kEyeAdjustSpeed * dt;
+    player.eyeOffset += std::clamp(targetEye - player.eyeOffset, -maxEyeChange, maxEyeChange);
+
     const float speed = player.flying ? kFlySpeed
-                        : input.sneak ? kSneakSpeed
-                        : input.sprint ? kSprintSpeed
-                                       : kWalkSpeed;
+                        : player.sneaking ? kSneakSpeed
+                        : input.sprint    ? kSprintSpeed
+                                          : kWalkSpeed;
 
     glm::vec3 wish = input.moveDirection;
     wish.y = 0.0f;
@@ -118,39 +146,78 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
 
     // Vertical first, so standing on ground is established before the horizontal
     // move decides whether a step-up is allowed.
-    const bool movingDown = player.velocity.y <= 0.0f;
-    if (moveAxis(player.position, world, 1, player.velocity.y * dt)) {
-        player.onGround = movingDown;
-        player.velocity.y = 0.0f;
-    } else if (player.velocity.y != 0.0f) {
-        player.onGround = false;
-    }
+    const glm::vec3 displacement = player.velocity * dt;
 
-    const glm::vec3 beforeHorizontal = player.position;
+    // The resolver snaps out of at most one block of penetration, so no single
+    // step may cross more than a fraction of a block. Flying and long falls both
+    // exceed a whole block per frame otherwise, and the snap then lands on the
+    // wrong side of the wall.
+    const float longest =
+        std::max({std::abs(displacement.x), std::abs(displacement.y), std::abs(displacement.z)});
+    const int steps = std::max(1, static_cast<int>(std::ceil(longest / kMaxStepDistance)));
+    const glm::vec3 stepDelta = displacement / static_cast<float>(steps);
 
-    const bool blockedX = moveAxis(player.position, world, 0, player.velocity.x * dt);
-    const bool blockedZ = moveAxis(player.position, world, 2, player.velocity.z * dt);
+    bool blockedX = false;
+    bool blockedZ = false;
 
-    if ((blockedX || blockedZ) && player.onGround && !player.flying) {
-        // Retry the same horizontal move from a step higher. Accepted only if it
-        // clears the obstacle and there is something to land on.
-        glm::vec3 stepped = beforeHorizontal;
-        stepped.y += kStepHeight;
+    for (int i = 0; i < steps; ++i) {
+        const bool movingDown = stepDelta.y <= 0.0f;
+        if (moveAxis(player.position, world, 1, stepDelta.y, height)) {
+            player.onGround = movingDown;
+            player.velocity.y = 0.0f;
+        } else if (stepDelta.y != 0.0f) {
+            player.onGround = false;
+        }
 
-        if (!overlapsSolid(world, boxAt(stepped))) {
-            moveAxis(stepped, world, 0, player.velocity.x * dt);
-            moveAxis(stepped, world, 2, player.velocity.z * dt);
+        const glm::vec3 beforeHorizontal = player.position;
 
-            const bool movedFurther = glm::distance(glm::vec2{stepped.x, stepped.z},
-                                                    glm::vec2{beforeHorizontal.x, beforeHorizontal.z}) >
-                                      glm::distance(glm::vec2{player.position.x, player.position.z},
-                                                    glm::vec2{beforeHorizontal.x, beforeHorizontal.z});
+        // Crouching on solid ground refuses any step that would leave nothing
+        // underfoot. Checked per axis, so you can still slide along an edge
+        // instead of being pinned in place.
+        const bool guardEdges = player.sneaking && player.onGround && !player.flying &&
+                                hasGroundBelow(world, player.position);
 
-            if (movedFurther) {
-                // Settle back down onto whatever is under the new position.
-                moveAxis(stepped, world, 1, -kStepHeight);
-                player.position = stepped;
+        const bool hitX = moveAxis(player.position, world, 0, stepDelta.x, height);
+        if (guardEdges && !hasGroundBelow(world, player.position)) {
+            player.position.x = beforeHorizontal.x;
+        }
+
+        const bool hitZ = moveAxis(player.position, world, 2, stepDelta.z, height);
+        if (guardEdges && !hasGroundBelow(world, player.position)) {
+            player.position.z = beforeHorizontal.z;
+        }
+
+        blockedX = blockedX || hitX;
+        blockedZ = blockedZ || hitZ;
+
+        if ((hitX || hitZ) && player.onGround && !player.flying) {
+            // Retry the same horizontal move from a step higher. Accepted only
+            // if it clears the obstacle and there is something to land on.
+            glm::vec3 stepped = beforeHorizontal;
+            stepped.y += kStepHeight;
+
+            if (!overlapsSolid(world, boxAt(stepped, height))) {
+                moveAxis(stepped, world, 0, stepDelta.x, height);
+                moveAxis(stepped, world, 2, stepDelta.z, height);
+
+                const auto travelled = [&](const glm::vec3& p) {
+                    return glm::distance(glm::vec2{p.x, p.z},
+                                         glm::vec2{beforeHorizontal.x, beforeHorizontal.z});
+                };
+
+                if (travelled(stepped) > travelled(player.position)) {
+                    // Settle back down onto whatever is under the new position.
+                    moveAxis(stepped, world, 1, -kStepHeight, height);
+                    player.position = stepped;
+                }
             }
+        }
+
+        // Backstop for every way this step could have moved the player,
+        // including the step-up above, which resolves its own position and
+        // would otherwise skip the per-axis checks entirely.
+        if (guardEdges && !hasGroundBelow(world, player.position)) {
+            player.position = beforeHorizontal;
         }
     }
 
@@ -160,6 +227,15 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     if (blockedZ) {
         player.velocity.z = 0.0f;
     }
+}
+
+bool playerOverlapsBlock(const Player& player, const glm::ivec3& block) {
+    const Aabb box = boxAt(player.position, player.height());
+    const glm::vec3 blockMin{block};
+    const glm::vec3 blockMax = blockMin + 1.0f;
+
+    return box.min.x < blockMax.x && box.max.x > blockMin.x && box.min.y < blockMax.y && box.max.y > blockMin.y &&
+           box.min.z < blockMax.z && box.max.z > blockMin.z;
 }
 
 } // namespace game
