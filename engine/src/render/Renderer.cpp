@@ -4,10 +4,25 @@
 #include "engine/core/Paths.hpp"
 #include "engine/platform/Window.hpp"
 #include "engine/render/VulkanContext.hpp"
+#include "engine/render/Vertex.hpp"
 #include "render/VulkanCheck.hpp"
+
+#include <iterator>
 
 namespace engine {
 namespace {
+
+// Same triangle M2 drew, but the corners now live in GPU memory instead of being
+// invented by the vertex shader. Editing this array changes what is on screen.
+constexpr Vertex kTriangleVertices[] = {
+    {{0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+};
+
+// Indices let several triangles share one vertex. Pointless for a single
+// triangle; essential the moment a cube arrives, where every corner is shared.
+constexpr std::uint32_t kTriangleIndices[] = {0, 1, 2};
 
 VkExtent2D toVkExtent(Extent2D extent) {
     return VkExtent2D{extent.width, extent.height};
@@ -37,8 +52,16 @@ VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayou
 Renderer::Renderer(const VulkanContext& context, Window& window)
     : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
       m_trianglePipeline(context.device(), executableDirectory() / "shaders" / "triangle.vert.spv",
-                         executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat()) {
+                         executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat()),
+      m_vertexBuffer(context, sizeof(kTriangleVertices),
+                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+      m_indexBuffer(context, sizeof(kTriangleIndices),
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+      m_indexCount(static_cast<std::uint32_t>(std::size(kTriangleIndices))) {
     createCommandResources();
+    createGeometry();
     createSyncObjects();
 }
 
@@ -70,6 +93,11 @@ void Renderer::createCommandResources() {
     allocInfo.commandBufferCount = kFramesInFlight;
     vkCheck(vkAllocateCommandBuffers(m_context.device(), &allocInfo, m_commandBuffers.data()),
             "vkAllocateCommandBuffers");
+}
+
+void Renderer::createGeometry() {
+    uploadBufferData(m_context, m_commandPool, m_vertexBuffer, kTriangleVertices, sizeof(kTriangleVertices));
+    uploadBufferData(m_context, m_commandPool, m_indexBuffer, kTriangleIndices, sizeof(kTriangleIndices));
 }
 
 void Renderer::createSyncObjects() {
@@ -175,7 +203,13 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline.handle());
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    const VkBuffer vertexBuffers[] = {m_vertexBuffer.handle()};
+    const VkDeviceSize vertexOffsets[] = {0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
+    vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer.handle(), 0, VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
 
     vkCmdEndRendering(commandBuffer);
 

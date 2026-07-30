@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/render/Buffer.hpp"
 #include "engine/render/GraphicsPipeline.hpp"
 #include "engine/render/Swapchain.hpp"
 
@@ -36,6 +37,7 @@ public:
 
 private:
     void createCommandResources();
+    void createGeometry();
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();
@@ -48,6 +50,9 @@ private:
     Window& m_window;
     Swapchain m_swapchain;
     GraphicsPipeline m_trianglePipeline;
+    Buffer m_vertexBuffer;
+    Buffer m_indexBuffer;
+    std::uint32_t m_indexCount = 0;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;

@@ -6,6 +6,8 @@ add_library(engine STATIC
     src/render/VulkanCheck.cpp
     src/render/VulkanContext.cpp
     src/render/Swapchain.cpp
+    src/render/Buffer.cpp
+    src/render/Vertex.cpp
     src/render/GraphicsPipeline.cpp
     src/render/Renderer.cpp
 )

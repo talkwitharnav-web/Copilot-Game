@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1 (toolchain proof) and 2 (shader pipeline, first triangle) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M3a (geometry from GPU buffers) is next.
+> **Status:** Milestones 1 (toolchain proof), 2 (shader pipeline, first triangle) and 3a (geometry from GPU buffers) complete. No gameplay, no voxels, no world generation exists yet, by design. `TIMELINE.md` M3b (matrices, perspective, cube) is next.
 
 ---
 
@@ -141,6 +141,8 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | `Window` | `engine/platform/Window.hpp` | Owns the GLFW window and its lifetime. Reports whether a close was requested, pumps OS events, and exposes a queue of key presses via the engine-level `Key` enum so the game never includes GLFW. |
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
+| `Vertex` | `engine/render/Vertex.hpp` | **The single definition of a vertex**, together with its Vulkan binding/attribute descriptions. The shader's `layout(location = ...)` inputs must match it. Change the format here and in the shader, nowhere else. |
+| `Buffer` | `engine/render/Buffer.hpp` | A `VkBuffer` plus the `VkDeviceMemory` backing it, released together. Copy and move are deleted. `uploadBufferData()` fills device-local buffers via a temporary staging buffer. |
 | `GraphicsPipeline` | `engine/render/GraphicsPipeline.hpp` | One complete draw configuration: both shader stages plus all fixed-function state. Loads SPIR-V from disk. Viewport and scissor are dynamic state, so resizing never rebuilds it. |
 | `Renderer` | `engine/render/Renderer.hpp` | Command pool, command buffers, per-frame synchronization, and the per-frame record/submit/present cycle. |
 
@@ -182,6 +184,20 @@ This requires two things that must not be removed:
 - Physical-device selection rejects anything reporting less than `VK_API_VERSION_1_3`, so an unsuitable GPU produces a clear "no suitable GPU" error rather than a confusing failure inside `vkCreateDevice`.
 
 The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`.
+
+---
+
+## GPU Memory Ownership
+
+**Every Vulkan allocation has exactly one owning C++ object that releases it in its destructor.** Vulkan reference-counts nothing, so this is the only thing preventing VRAM leaks.
+
+- `Buffer` owns a `VkBuffer` and its `VkDeviceMemory` together. Copy **and move** are deleted — two objects owning one allocation is how double-frees happen. If a buffer ever needs to be returned from a factory, implement move properly rather than reaching for `shared_ptr`.
+- If `vkAllocateMemory` fails after `vkCreateBuffer` succeeded, the constructor destroys the buffer before throwing. Partial construction must not leak.
+- `uploadBufferData()` creates its staging buffer as a scoped local and calls `vkQueueWaitIdle` before returning, because the staging buffer is destroyed the instant it does.
+- Its one-time command buffer is owned by a scoped RAII wrapper, so it is freed even if the upload throws mid-way.
+- One `vkAllocateMemory` per buffer is acceptable at this scale but will not survive thousands of chunks. Sub-allocation (VMA) is planned for M4+; see `TIMELINE.md`.
+
+**How to verify no leaks:** validation layers list every undestroyed Vulkan object when the instance is destroyed. A Debug run that exits silently is the proof. For CPU-side leaks, sample `WorkingSet64`/`HandleCount` over time and confirm they are flat.
 
 ---
 

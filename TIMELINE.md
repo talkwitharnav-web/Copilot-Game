@@ -119,7 +119,7 @@ The Vulkan graphics pipeline, vertex and fragment shaders, and shader compilatio
 
 **Split into four parts at user request** (2026-07-30) — the combined milestone was roughly triple the size of M2, and each part below fails in a distinct, recognisable way. Doing them separately means a bug is attributable on sight rather than by bisection.
 
-#### ▶ M3a — Geometry from GPU buffers
+#### ✅ M3a — Geometry from GPU buffers
 
 Vertex and index buffers in device-local memory, uploaded through a staging buffer; vertex input layout declared in the pipeline. The shader stops inventing its own corners.
 
@@ -127,9 +127,9 @@ Vertex and index buffers in device-local memory, uploaded through a staging buff
 
 **You can:** see the same triangle as M2 — but now editing a C++ array changes its shape.
 
-**Done when:** the triangle is identical to M2's, driven entirely by buffer data, with zero validation errors.
+**Done when:** *(met 2026-07-30)* the triangle is identical to M2's, driven entirely by buffer data, with zero validation errors and no leaked Vulkan objects at shutdown.
 
-#### ⬜ M3b — Matrices, perspective, and a cube
+#### ▶ M3b — Matrices, perspective, and a cube
 
 GLM arrives. Model/view/projection matrix delivered by push constants, cube geometry, backface culling enabled. The cube rotates on its own so its three-dimensionality is visible.
 

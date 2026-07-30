@@ -1,7 +1,9 @@
 #include "engine/render/GraphicsPipeline.hpp"
 
+#include "engine/render/Vertex.hpp"
 #include "render/VulkanCheck.hpp"
 
+#include <array>
 #include <cstdint>
 #include <fstream>
 #include <stdexcept>
@@ -80,10 +82,17 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     stages[1].module = fragmentModule.handle();
     stages[1].pName = "main";
 
-    // No vertex buffers yet: the vertex shader generates its own positions from
-    // gl_VertexIndex, so there is nothing to describe here.
+    // Geometry now arrives from a vertex buffer, described by the single layout
+    // definition in Vertex.hpp.
+    const VkVertexInputBindingDescription binding = Vertex::bindingDescription();
+    const std::array<VkVertexInputAttributeDescription, 2> attributes = Vertex::attributeDescriptions();
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+    vertexInput.pVertexAttributeDescriptions = attributes.data();
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
