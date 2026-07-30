@@ -30,13 +30,57 @@ The bar is deliberately higher than "Minecraft clone with shaders." The renderer
 
 ## How This Sequence Was Chosen
 
-Five rules drove the ordering. When a future session is tempted to reorder something, check it against these first.
+Six rules drove the ordering. When a future session is tempted to reorder something, check it against these first.
 
-1. **Prove the technology before depending on it.** Every milestone that introduces a new piece of tech does so in the smallest program that can demonstrate it, so failures are attributable.
-2. **Correct, then measurable, then fast.** No optimization or multithreading before something works single-threaded and its cost can actually be measured. This is an explicit user instruction, not a style preference.
-3. **Make it a game before making it beautiful.** A gorgeous renderer attached to a world nobody can play in is a tech demo. Gameplay comes before the heavy graphics phases — but *after* the world exists and performs, because gameplay built on a broken foundation gets rewritten.
-4. **Big architectural changes go early within their phase.** Restructuring the renderer for PBR/deferred is far cheaper before ten effects depend on the old structure.
-5. **One milestone, one working build.** The repository always compiles and runs. Never leave it broken between milestones.
+1. **Get it into the user's hands as early as possible, then keep it there.** The user is the project's primary bug-finding resource and has said so explicitly (2026-07-30): _"the best thing for the game is to get playability on early so that i can 'play' the game and report findings back to you. i am the most valuable bug finding resource you can have."_ Real play finds problems in minutes that reasoning about code does not find at all. **From M3 onward, every milestone must end in something runnable that the user can react to** — not a library, not a refactor with nothing to see. If a milestone cannot produce something playable or visible, it is too big and should be split.
+2. **Prove the technology before depending on it.** Every milestone that introduces a new piece of tech does so in the smallest program that can demonstrate it, so failures are attributable.
+3. **Correct, then measurable, then fast.** No optimization or multithreading before something works single-threaded and its cost can actually be measured. This is an explicit user instruction, not a style preference.
+4. **Make it a game before making it beautiful.** A gorgeous renderer attached to a world nobody can play in is a tech demo. Gameplay comes before the heavy graphics phases.
+5. **Big architectural changes go early within their phase.** Restructuring the renderer for PBR/deferred is far cheaper before ten effects depend on the old structure.
+6. **One milestone, one working build.** The repository always compiles and runs. Never leave it broken between milestones.
+
+> **On the source of the vision above:** the long, highly detailed feature lists were drafted with the help of another AI, not written by the user directly (disclosed 2026-07-30). Treat them as a **menu of possibilities and a statement of ambition, not a specification**. Where the user's own plain-language wishes conflict with a bullet in that list, **the user wins.** Do not treat any item there as a commitment, and do not implement something merely because it appears on the list.
+
+---
+
+## What Must Be Right Early, and What Can Be Rewritten Later
+
+Deferring work is only safe when the later work is *additive*. Some things are not, and those must be designed correctly from the first milestone that touches them, even though the payoff arrives much later.
+
+### Multithreading — the constraint is data ownership, not threads
+
+Multithreading arrives at **M12**, but it becomes *impossible* if M4–M10 are written carelessly. The threads are the easy part; untangling shared mutable state afterwards is the rewrite. Minecraft's well-known stutter is largely this problem, and it is a large part of why this engine exists at all.
+
+**Three rules that make M12 a migration instead of a rewrite. They apply from M4 onward, with no exceptions:**
+
+1. **Chunk generation must be a pure function of `(seed, chunkCoord)`.** It may not read the state of neighbouring chunks, global mutable data, wall-clock time, or anything else. If two different threads generate the same chunk they must produce byte-identical results. This also gives determinism for free, which M5 requires anyway.
+2. **Meshing must be a pure function of `(chunk blocks, neighbouring border blocks)` returning vertex data.** It must not touch the live world, not upload to the GPU itself, and not mutate the chunk it is reading. Hand it a snapshot; take back a buffer.
+3. **Only one place mutates the world.** Block edits go through a single owner on the main thread. Workers receive copies and return results; they never write into live chunk storage.
+
+Follow these and M12 is "call these existing functions from a worker pool." Break them and M12 means rewriting the world layer.
+
+**Before M12 lands, single-threaded streaming must still be playable** — so M8 gets a per-frame time budget for generation and meshing (do as much work as fits in a few milliseconds, finish the rest next frame). That converts a hard freeze into a slightly slower horizon, which is testable. It is not a substitute for M12.
+
+### GPU/graphics — deliberately *not* future-proofed
+
+**The renderer will be substantially rewritten at M23, and that is the plan, not a failure.**
+
+Building a deferred, physically based, HDR pipeline before there is a single block on screen would mean carrying enormous complexity through every early milestone for no benefit, and doing it blind — with no real scene, no real content, and no measurements to design against.
+
+What actually changes at M23 is the *rendering path*: passes, shaders, material handling, vertex formats. That is genuinely rewritable in isolation. What does **not** change is the world data, chunk storage, generation, meshing inputs, persistence, physics, and gameplay — the expensive parts to get wrong. Vertex formats will also change at M14 (lighting) and again at M23; that churn is localized inside meshing and is accepted.
+
+So: **no `IRenderBackend` interface, no material abstraction layer, no "PBR-ready" hooks before M23.** Per `CLAUDE.md`, no abstraction without a second implementation actually in sight. The cheap insurance is keeping mesh *generation* separate from mesh *upload* (rule 2 above), which we need for threading regardless.
+
+### Summary
+
+| Area | When | Retrofit risk | Mitigation |
+|---|---|---|---|
+| World data ownership | M4+ | **Severe** | The three purity rules above, enforced from M4 |
+| Determinism | M5 | **Severe** | Generation depends only on seed and coordinates |
+| Job system | M12 | Low, if the above hold | Migration, not rewrite |
+| Mesh optimization / LOD | M13 | Low | Purely additive to meshing |
+| Renderer architecture | M23 | Low, and accepted | Isolated to the rendering path |
+| Ray tracing | M30 | Low | Hybrid; sits on top of M23 |
 
 ---
 
@@ -75,69 +119,91 @@ The Vulkan graphics pipeline, vertex and fragment shaders, and shader compilatio
 
 Perspective projection, depth buffering, uniform/push-constant data, a free-fly camera with mouse-look and WASD.
 
-**Why now:** you cannot debug terrain you cannot fly around and cannot trust geometry without a depth buffer. This is the last milestone before the world exists.
+**Why now:** you cannot debug terrain you cannot fly around, and you cannot trust geometry without a depth buffer. This is the last milestone before the world exists.
 
-**Done when:** a textured-less cube renders correctly from any angle, near/far faces occlude properly, and the camera moves smoothly at the frame cap.
+**You can:** fly around a 3D cube with mouse and keyboard. First thing that feels interactive.
 
-### ⬜ M4 — Textures and materials (basic) · **Core**
-
-Image loading, Vulkan images/samplers, a texture atlas or array suitable for many block types.
-
-**Done when:** the cube has different textures per face, sampled with correct filtering and mipmaps.
+**Done when:** a cube renders correctly from any angle, near faces occlude far ones, and the camera moves smoothly at the frame cap.
 
 ---
 
-# Phase 1 — A Voxel World Exists
+# Phase 1 — The Playable Slice
 
-*Goal: from "a cube" to "an endless streamed world you can fly through."*
+*Goal: the shortest possible route to "I can walk around a world and change it." Everything non-essential to that sentence is deliberately postponed — textures, streaming, saving, lighting, optimization all come after.*
 
-### ⬜ M5 — First chunk · **Core**
+> **This phase exists because of sequencing rule 1.** An earlier draft put first playability at M9, behind texturing and chunk streaming. That was reordered on user request so real playtesting starts as early as possible. Each milestone here is deliberately small.
 
-Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits only faces exposed to air.
+### ⬜ M4 — First chunk · **Core**
 
-**Why now:** the smallest thing that is genuinely *voxel*. Naive meshing on purpose — it becomes the baseline that later optimization is measured against.
+Block storage for a single fixed-size chunk (e.g. 32³), and meshing that emits only faces exposed to air. **Flat colours per block type — no textures yet.**
+
+**Why textures are skipped:** solid colours are enough to see shape, spot meshing bugs, and play. Texturing is a whole milestone that would delay playability without changing whether the game *works*.
+
+**Threading constraint (see "What Must Be Right Early"):** meshing must be a pure function taking block data plus neighbour borders and returning vertex data. It must not upload to the GPU itself and must not mutate what it reads. This costs nothing now and is what makes M12 possible.
+
+**You can:** look at a real chunk of blocks and fly through it.
 
 **Done when:** a hand-filled chunk renders as solid geometry with interior faces correctly absent.
 
-### ⬜ M6 — Chunk streaming · **Core**
+### ⬜ M5 — Terrain generation · **Core**
 
-World-space chunk coordinates, neighbour-aware meshing (so chunk seams are not solid walls), and load/unload around the camera. **Still single-threaded** — deliberately.
+Deterministic seeded generation. Noise-driven heightmap terrain across a modest fixed area — **not** infinite streaming yet. A generation architecture that can later accept caves, biomes, and structures.
 
-**Done when:** flying in any direction loads and unloads chunks continuously with no seams and no leaks.
+**Threading constraint:** generation must be a pure function of `(seed, chunkCoord)` — no reads of neighbouring chunks, no global mutable state, no time. This is simultaneously what makes the world deterministic and what makes M12 a migration rather than a rewrite.
 
-### ⬜ M7 — Procedural terrain · **Core**
+**You can:** fly over generated hills and valleys. Change the seed, get a different world.
 
-Deterministic seeded generation. Noise-driven heightmap terrain to begin with; a generation architecture that can later accept caves, biomes, and structures.
+**Done when:** the same seed always produces identical terrain.
 
-**Why now:** provides effectively infinite world to stress-test streaming, and locks in determinism early — retrofitting a fixed seed into a generator is painful.
+### ⬜ M6 — Walking and collision · **Core**
 
-**Done when:** the same seed always produces byte-identical terrain, and the world is explorable without limit.
+AABB collision against voxels, gravity, jumping, step-up. First-person player controller. Free-fly stays available as a debug toggle.
+
+**You can:** *walk* on the terrain instead of flying through it. This is the first build that feels like a game.
+
+**Done when:** you can walk and jump across terrain, cannot fall through the world, and cannot clip into solid blocks.
+
+### ⬜ M7 — Break and place blocks · **Core** · 🎮 **FIRST PLAYABLE**
+
+Voxel raycasting, block breaking and placing, a highlight on the targeted block, and correct re-meshing of only the affected chunks.
+
+**Why this is the milestone that matters:** it closes the loop. Walk, look, break, build. From here on, **every future milestone should be handed over as something to actually play**, and user bug reports become the main source of truth about what is broken.
+
+**You can:** play. Genuinely — walk around, dig, build. Rough, untextured, small, but a game.
+
+**Done when:** breaking and placing update instantly, including across chunk boundaries, with no holes or stale geometry.
 
 ---
 
-# Phase 2 — It Is Playable
+# Phase 2 — A World Worth Staying In
 
-*Goal: from "a world you fly through" to "a world you interact with."*
+*Goal: turn the playable slice into a world that is endless, looks like something, and remembers what you did.*
 
-### ⬜ M8 — Player physics and collision · **Core**
+### ⬜ M8 — Chunk streaming · **Core**
 
-AABB collision against voxels, gravity, jumping, stepping, swimming placeholder. First-person player controller replacing the free-fly camera (keep free-fly as a debug mode).
+World-space chunk coordinates, neighbour-aware meshing so chunk seams are not solid walls, and load/unload around the player. **Still single-threaded** — deliberately.
 
-**Done when:** you can walk terrain, cannot fall through the world, and cannot clip into solid blocks.
+**Must include a per-frame time budget** for generation and meshing, so a burst of new chunks slows the horizon down instead of freezing the game. Without it this milestone is unpleasant to playtest, which defeats the point.
 
-### ⬜ M9 — Block interaction · **Core**
+**You can:** walk in one direction forever.
 
-Voxel raycasting, block breaking and placing, targeted-block highlight, and correct incremental re-meshing of only the affected chunks.
+**Done when:** moving in any direction loads and unloads chunks continuously, with no seams and no memory leaks, and no single frame stalls badly enough to feel like a hitch.
 
-**Why now:** this is the first moment the project is a *game* rather than a renderer. It also stresses the mesh-invalidation path, which is a common source of subtle bugs — better found now.
+### ⬜ M9 — Textures and block types · **Core**
 
-**Done when:** breaking and placing blocks updates instantly, including across chunk boundaries.
+Image loading, Vulkan images and samplers, a texture atlas or array, and the first real set of block types.
+
+**You can:** see a world that actually looks like a world.
+
+**Done when:** blocks are textured with correct filtering and mipmaps, and adding a new block type is a small, obvious change.
 
 ### ⬜ M10 — World persistence · **Core**
 
-Saving and loading modified chunks to disk with a region-file style format; unmodified chunks regenerate from the seed rather than being stored.
+Saving and loading modified chunks to disk; unmodified chunks regenerate from the seed rather than being stored.
 
-**Done when:** quit and relaunch restores the world exactly, including edits, at reasonable file sizes.
+**You can:** quit, come back, and your build is still there.
+
+**Done when:** relaunching restores the world exactly, including edits, at reasonable file sizes.
 
 ---
 
@@ -155,11 +221,13 @@ Frame-time graph, CPU/GPU timing, chunk counts, draw-call and triangle counts, m
 
 ### ⬜ M12 — Job system and multithreading · **Core**
 
-A general worker-thread job system. Migrate world generation and chunk meshing onto it first, since they are the obvious wins and were written as parameters-in/results-out functions specifically to make this migration cheap (see `CLAUDE.md`'s architecture rules).
+A general worker-thread job system. Migrate world generation and chunk meshing onto it first, since they are the obvious wins and were written as pure parameters-in/results-out functions specifically to make this migration cheap.
 
-**Why now:** the code was structured for this from M1, the cost is measurable from M11, and every later system will be built on top of it.
+**Why now:** the code was structured for this from M4, the cost is measurable from M11, and every later system builds on top of it. **If this milestone turns out to require restructuring the world layer, the purity rules were violated somewhere earlier — find and fix that rather than working around it.**
 
-**Done when:** generation and meshing no longer stall the render thread, main-thread frame time is measurably lower, and results remain deterministic regardless of thread count.
+**You can:** walk fast, in any direction, without the world hitching to catch up.
+
+**Done when:** generation and meshing no longer stall the render thread, main-thread frame time is measurably lower than the M11 baseline, and worlds remain byte-identical regardless of thread count.
 
 ### ⬜ M13 — Mesh and render optimization · **Core**
 
@@ -306,6 +374,7 @@ These are not milestones; they run continuously and are everyone's responsibilit
 
 | Track | Rule |
 |---|---|
+| **Playtesting** | From M7 on, hand the user a runnable build at every milestone and ask what felt wrong. Their reports outrank reasoning about the code — if they say something is broken, it is broken and has not been found yet. |
 | **Performance** | Record a measurement whenever a milestone changes cost. Never optimize without a before-number. |
 | **Validation** | Debug builds must stay at zero Vulkan validation errors. This is an acceptance bar, not an aspiration. |
 | **Tooling** | When something is debugged the hard way twice, build the tool the third time. |
@@ -321,9 +390,9 @@ Listed so future sessions know roughly when each becomes justifiable — **not**
 | Milestone | Likely dependency | For |
 |---|---|---|
 | M3 | GLM (or hand-rolled math) | Vectors, matrices, projection |
-| M4 | stb_image | Loading texture files |
-| M5+ | Vulkan Memory Allocator | Practical GPU memory management |
-| M7 | A noise library | Terrain generation |
+| M4+ | Vulkan Memory Allocator | Practical GPU memory management |
+| M5 | A noise library | Terrain generation |
+| M9 | stb_image | Loading texture files |
 | M11 | Dear ImGui | Debug overlay and tools |
 | M13 | meshoptimizer | Mesh optimization, LOD |
 | M22 | An audio library | Sound |

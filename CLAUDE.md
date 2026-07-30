@@ -9,6 +9,8 @@ Read `SYSTEM_MEMORY.md` first for the current project structure, build commands,
 ## Critical — Read First
 
 - **Never run `git commit`, `git push`, or any history-rewriting command unless explicitly asked.** Direct user correction, 2026-07-30: _"undo those commits. who told you to commit. keep changes that's fine, no committing."_ Three commits had been created unprompted while wrapping up Milestone 1, on the reasoning that the user had asked for "Git-friendly incremental changes" — that phrase describes how changes should be *shaped* (small, reviewable, not giant rewrites), **not** permission to run Git for them. Write files, leave them uncommitted, and let the user decide when and what to commit. `git init` and `.gitignore` were fine; the commits were not.
+- **Ship something playable at every milestone, and treat the user as the primary QA resource.** Direct user instruction, 2026-07-30: _"the best thing for the game is to get playability on early so that i can 'play' the game and report findings back to you. i am the most valuable bug finding resource you can have."_ `TIMELINE.md` was reordered because of this — first playability moved from M9 to M7, textures and chunk streaming were pushed *after* walking and block-breaking. A milestone that produces nothing runnable is too big; split it. When the user reports a bug, **default to "this is real and I haven't found it yet,"** not to explaining why the code looks fine.
+- **The long, highly detailed vision prompts were written by another AI, not by the user.** Disclosed 2026-07-30: _"the bigger and more detailed prompts i gave weren't me, they were another ai helping me get my stuff sorted, so take what it says with a grain of salt."_ Those feature lists are a **statement of ambition and a menu of options, not a specification**. Do not treat any bullet in them as a commitment, do not implement something merely because it is listed, and where they conflict with the user's own plain-language wishes, **the user wins**. Their short, direct messages are the authoritative signal.
 - **Stop at milestone boundaries.** The user explicitly asked (2026-07-30) that work stop at the end of each milestone and wait for instruction. Do not roll straight from "the window renders" into "now let's add chunks." Finishing early and asking is correct behavior here, not laziness.
 - **The user is an experienced vibe coder but NOT an experienced C++/graphics-engine programmer.** They understand concepts when explained simply. Do not assume familiarity with low-level graphics or systems terminology.
 - **Use the real term, then immediately explain it in plain English.** Direct user instruction, 2026-07-30: _"remember i'm just a vibe coder i don't understand all this complex terminology so use the terminology, then explain it in simple human terms so i learn over time."_ This is a learning-over-time request, not a request to dumb things down — do not silently substitute vague language for the correct word, and do not drop the plain-English half either.
@@ -29,6 +31,7 @@ Read `SYSTEM_MEMORY.md` first for the current project structure, build commands,
 - Wants to **understand** what is happening, not just receive working code. Before introducing a new library, tool, architectural concept, or unfamiliar term: say what it is, why we need it _now_, and what happens without it. Keep it to a few sentences — the instruction was explicitly "do not drown me in theory."
 - Prefers that missing tools be **installed**, not merely reported as missing. Only escalate to "you need to do this manually" when there is a genuine hard blocker (admin rights, a license click, a hardware limitation), and even then, automate everything on either side of the blocker.
 - Wants verification, not assumption. "It should work now" is not acceptable — build it and run it.
+- **Is the project's playtester, and a good one.** Give them builds early and often, describe what to try, and ask what felt wrong. Do not save up several milestones' work for one big reveal.
 - Expects Git-friendly incremental change. No giant speculative rewrites.
 
 ---
@@ -113,10 +116,41 @@ Deliberate boundary: `FrameLimiter` knows only a target number. The list of sele
 - **The goal is an original game, not a Minecraft clone.** The genre conventions (exploration, building, crafting, survival) are the target; Minecraft's specific mechanics, content, recipe trees, tool tiers, creatures, and biomes are not. From Phase 5 of `TIMELINE.md` onward, "how does Minecraft do it?" is a reasonable *engineering* question and a bad *design* one — the finished game must have its own identity.
 - **`engine/` must not know that `game/` exists.** The engine is a library; the game is an executable that uses it. If engine code ever needs to reference a game concept (blocks, chunks, the player), that is a signal the abstraction is in the wrong place — the engine should expose a mechanism and let the game supply the policy. This one rule is what makes it possible to eventually have tools/editors/servers reusing the same engine.
 - **Prefer plain data and explicit ownership over inheritance hierarchies.** No `GameObject` base class, no virtual-everything. The moment this becomes a deep class tree, both multithreading and cache performance become impossible to recover.
-- **Structure for future multithreading without doing it now.** Concretely: keep expensive work (world generation, meshing, physics) in functions that take their inputs as parameters and return results, rather than reaching into global state and mutating it in place. A pure-ish function is trivial to hand to a job system later; a method that mutates five globals is a rewrite. This is the _only_ concession being made to future threading right now.
+- **Structure for future multithreading without doing it now.** This is the _only_ concession being made to future threading, and it is non-negotiable from the first chunk milestone (`TIMELINE.md` M4) onward, because it cannot be retrofitted:
+  1. **Chunk generation is a pure function of `(seed, chunkCoord)`** — no neighbour reads, no global mutable state, no wall-clock time.
+  2. **Meshing is a pure function of `(blocks, neighbour borders)` returning vertex data** — it does not upload to the GPU and does not mutate what it reads.
+  3. **Exactly one owner mutates the world**, on the main thread. Workers get copies and return results.
+
+  Threads are the easy part; untangling shared mutable state afterwards is the rewrite. This is also the specific weakness the user wants this engine to beat.
+- **The renderer is deliberately NOT future-proofed, and will be rewritten at `TIMELINE.md` M23.** That is planned, not a failure. Do not add an `IRenderBackend`, a material abstraction, or "PBR-ready" hooks before then — building a deferred HDR pipeline before a single block is on screen means carrying huge complexity, blind, with nothing real to measure against. What must survive untouched is the world data, generation, meshing inputs, persistence, physics, and gameplay. Vertex formats will churn at M14 and M23; that churn is localized inside meshing and is accepted.
 - **Rendering resources are owned by RAII types.** Vulkan requires explicit destruction of nearly everything, in the right order. Tying each Vulkan handle to a C++ object that destroys it in its destructor is what prevents this from becoming a leak-hunting nightmare at scale.
 - **No abstraction without a second implementation in sight.** Do not write a `IRenderBackend` interface "in case we add DirectX." One backend, concrete, until a second one is actually being written.
 - **One milestone, one working build.** Never leave the repository in a state that does not compile and run.
+
+### Coding Habits That Make Later Migration Cheap
+
+User instruction, 2026-07-30: _"coding with multi-threading and graphics and stuff in mind make it easier in the future to migrate to the big guns and you have to think less and i have to worry less about screw ups. time is also saved."_ This is correct, and it is about **how code is shaped**, not about building the future systems early. Apply these by default, in every milestone, without being asked.
+
+**Data and ownership — these make M12 (threading) nearly free:**
+
+- **No global mutable state, no singletons.** Anything a worker might touch should be passed in, not reached for. This one habit prevents most threading rewrites.
+- **Separate "compute the result" from "apply the result."** A function that calculates a mesh, a generation result, or a physics resolution should return it, not install it. The caller applies it. This is what makes work movable to another thread later.
+- **Explicit single ownership.** Prefer a clear owner plus plain references over `shared_ptr` for hot data. Shared ownership makes it genuinely unclear who may mutate what, which is exactly the ambiguity that becomes a data race.
+- **Plain data in contiguous arrays**, not graphs of small heap objects pointing at each other. Good for the CPU cache now, and a prerequisite for handing slices of work to threads later.
+- **Keep allocation out of hot loops.** Reuse buffers. This matters for frame pacing long before it matters for threads.
+- **If you find yourself wanting a mutex, the design is probably wrong.** Prefer giving a worker its own copy and taking a result back.
+
+**Rendering — these make M23 (PBR/deferred) a contained rewrite instead of a sprawling one:**
+
+- **Mesh generation never touches the GPU.** Meshing produces vertex data; a separate step uploads it. Needed for threading anyway, and it means changing the vertex format later touches two places, not twenty.
+- **Vertex layouts live in one place**, not duplicated between shader, mesher, and pipeline setup. They *will* change at M14 and M23.
+- **No Vulkan types in gameplay code.** Game logic says "draw this chunk," never `VkCommandBuffer`.
+- **Think in batches, not individual draws.** Even while drawing one thing, do not bake in assumptions like one-texture-per-draw or one-draw-per-chunk that a batched or indirect renderer would have to unpick.
+- **RAII for every GPU resource**, destroyed in reverse creation order.
+
+**And the counterweight \u2014 what "thinking ahead" must NOT become:**
+
+Do not add interfaces, virtual base classes, "manager" objects, template generality, event buses, or configuration hooks for systems that do not exist yet. Speculative structure is not foresight; it is weight that every later milestone has to carry, and it is the single most common way ambitious engine projects die. The habits above are free because they are about *shape*. Abstractions are not free, and they wait until there is a second real case.
 
 ---
 
