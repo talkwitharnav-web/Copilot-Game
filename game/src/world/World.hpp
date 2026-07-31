@@ -96,12 +96,26 @@ public:
     std::uint32_t seed() const { return m_seed; }
     std::size_t loadedChunkCount() const { return m_chunks.size(); }
 
+    /// How far through filling the load radius the world is, 0 to 1.
+    ///
+    /// Generation is the bulk of the work and meshing trails it, so the two are
+    /// weighted rather than one standing in for both. Reaches 1 only once every
+    /// queue is empty, which is what the loading screen waits on.
+    float initialLoadProgress() const;
+
     /// Everything not yet drawable: queued, running on a worker, or waiting to
     /// be uploaded. Should fall to zero when the player stops moving.
     std::size_t pendingChunkCount() const {
         return m_pendingLoad.size() + m_pendingMesh.size() + m_loadInFlight.size() + m_meshInFlight.size() +
                m_readyMeshes.size();
     }
+
+    /// Nothing outstanding anywhere, light included.
+    ///
+    /// Light is the part that is easy to forget: propagating it dirties chunks,
+    /// which re-meshes them, so a world with empty chunk queues can still have
+    /// geometry about to change.
+    bool isSettled() const;
 
     /// Writes every modified chunk still in memory. Call before shutting down;
     /// chunks that unload during play are saved as they go.

@@ -908,6 +908,39 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
     return updates;
 }
 
+bool World::isSettled() const {
+    return pendingChunkCount() == 0 && m_skyAdditions.empty() && m_blockAdditions.empty() &&
+           m_skyRemovals.empty() && m_blockRemovals.empty() && m_lightDirty.empty() && m_fluidUpdates.empty();
+}
+
+float World::initialLoadProgress() const {
+    const int span = 2 * m_loadRadius + 1;
+    const auto expected = static_cast<float>(span * span * kWorldHeightChunks);
+    if (expected <= 0.0f) {
+        return 1.0f;
+    }
+
+    const float loaded = std::min(1.0f, static_cast<float>(m_chunks.size()) / expected);
+
+    std::size_t meshed = 0;
+    for (const auto& entry : m_chunks) {
+        if (entry.second.meshed) {
+            ++meshed;
+        }
+    }
+    const float meshedFraction =
+        m_chunks.empty() ? 0.0f : static_cast<float>(meshed) / static_cast<float>(m_chunks.size());
+
+    // Generation is most of the work but meshing is what you can actually see,
+    // so the bar splits between them rather than hitting 100% while the world is
+    // still invisible.
+    const float reported = 0.6f * loaded + 0.4f * loaded * meshedFraction;
+
+    // Held short of full until everything has drained, light included, so the
+    // bar cannot finish ahead of the world.
+    return (loaded >= 1.0f && isSettled()) ? 1.0f : std::min(reported, 0.99f);
+}
+
 std::vector<ChunkMeshUpdate> World::loadImmediately(const glm::vec3& position) {
     std::vector<ChunkMeshUpdate> all;
 

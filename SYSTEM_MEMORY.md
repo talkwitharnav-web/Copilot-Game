@@ -378,6 +378,16 @@ Block icons are isometric: three quads (top, front, right) at 30°, using the sa
 
 `Vertex::color` carries alpha and the pipeline blends. World geometry is opaque, so blending is a no-op for it; it exists only so HUD panels can sit over the scene.
 
+### Startup
+
+The world **streams in behind a loading screen** rather than blocking before the first frame. The window is created, then the normal per-frame streaming runs with a wider budget while a progress bar draws, and the game loop starts once `initialLoadProgress()` reaches 1.
+
+This replaced a `loadImmediately` that queued all 2,187 chunks at once with no cap and no budget. That pinned every core, reached peak memory before anything was on screen, and left the window unresponsive long enough for Windows to mark it so. Progressive loading costs roughly a second of wall time and gives all of that back.
+
+`initialLoadProgress()` weights generation against meshing and only returns 1 once **everything** has drained — chunk queues, light, and fluid. Light is the easy one to forget: propagating it dirties chunks, so a world with empty chunk queues can still have geometry about to change.
+
+> The startup triangle count in the log is now a **snapshot**, not a determinism check. It varies by a few hundredths of a percent depending on exactly when it is read. Verifying that generation is independent of thread scheduling needs a different measurement.
+
 ---
 
 ## Terrain Generation

@@ -5,6 +5,7 @@ add_executable(game
     src/hud/DebugOverlay.cpp
     src/hud/HudPrimitives.cpp
     src/hud/Hotbar.cpp
+    src/hud/LoadingScreen.cpp
     src/world/Noise.cpp
     src/world/Biome.cpp
     src/world/Structures.cpp

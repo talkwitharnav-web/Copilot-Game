@@ -11,6 +11,7 @@
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
+#include "hud/LoadingScreen.hpp"
 #include "world/Biome.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
@@ -76,6 +77,15 @@ constexpr auto kOverlayRefreshInterval = std::chrono::milliseconds(50);
 // waits for the next frame, so a burst of new terrain slows the horizon down
 // instead of freezing the game.
 constexpr float kStreamingBudgetSeconds = 0.003f;
+
+/// Streaming budget while the loading screen is up. Larger than the in-game one
+/// because nothing else is competing for the frame, but still a budget: the
+/// point is that the window keeps drawing instead of queuing every chunk at once.
+constexpr float kLoadingBudgetSeconds = 0.016f;
+
+/// How fast the bar catches up to the reported progress, per second. Chunk
+/// counts arrive in coarse steps, and easing is what turns them into movement.
+constexpr float kLoadingBarEase = 6.0f;
 
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
@@ -188,6 +198,11 @@ int main() {
         };
         std::unordered_map<game::ChunkCoord, ChunkHandles> chunkMeshes;
 
+        // Triangles per chunk as currently installed. A snapshot rather than a
+        // determinism check: the world now loads progressively, so the moment it
+        // is read varies by a few hundredths of a percent.
+        std::unordered_map<game::ChunkCoord, std::size_t> trianglesPerChunk;
+
         // Applies mesh changes and is the only place handles are created or
         // released. Anything that removes a chunk without going through here
         // would leak its GPU buffers for the rest of the session.
@@ -221,30 +236,52 @@ int main() {
 
                 apply(handles.opaque, update.mesh, false);
                 apply(handles.translucent, update.translucentMesh, true);
+                trianglesPerChunk[update.coord] = update.mesh.indices.size() / 3;
             }
         };
 
-        // Split so the two costs stay honest: building the world is the part
-        // worker threads divide up, while uploading is main-thread work that no
-        // amount of threading helps.
-        const std::vector<game::ChunkMeshUpdate> initial = world.loadImmediately(spawn);
-        const auto worldBuilt = std::chrono::steady_clock::now();
+        // The world streams in with the window already alive and drawing, rather
+        // than blocking before the first frame. Queuing every chunk at once
+        // pinned all cores, took the peak memory before anything was on screen,
+        // and left the window unresponsive long enough for Windows to say so.
+        {
+            float shown = 0.0f;
+            float lastDrawn = -1.0f;
+            auto lastTick = std::chrono::steady_clock::now();
 
-        // Final triangle count per chunk, not the sum of every update: a chunk
-        // may legitimately be meshed more than once during startup. This must
-        // come out identical at any worker count, which is the check that
-        // generation and meshing really are independent of thread scheduling.
-        std::unordered_map<game::ChunkCoord, std::size_t> trianglesPerChunk;
-        for (const game::ChunkMeshUpdate& update : initial) {
-            trianglesPerChunk[update.coord] = update.mesh.indices.size() / 3;
+            while (!window.shouldClose()) {
+                window.pollEvents();
+
+                const auto now = std::chrono::steady_clock::now();
+                const float delta = std::chrono::duration<float>(now - lastTick).count();
+                lastTick = now;
+
+                const std::vector<game::ChunkMeshUpdate> batch = world.update(spawn, kLoadingBudgetSeconds);
+                applyUpdates(batch);
+
+                // Eased rather than snapped: chunk loading arrives in coarse
+                // steps and an unsmoothed bar jerks between them.
+                const float target = world.initialLoadProgress();
+                shown += (target - shown) * std::min(1.0f, delta * kLoadingBarEase);
+                if (target >= 1.0f && shown > 0.998f) {
+                    break;
+                }
+
+                // Rebuilt only when it would look different: this runs every
+                // frame and each rebuild retires a GPU buffer.
+                if (std::abs(shown - lastDrawn) > 0.001f) {
+                    lastDrawn = shown;
+                    renderer.setScreenMesh(game::hud::makeLoadingScreen(shown, renderer.aspectRatio()));
+                }
+                renderer.drawFrame(engine::ClearColor{0.055f, 0.06f, 0.075f, 1.0f}, camera.viewMatrix());
+            }
         }
+        const auto worldReady = std::chrono::steady_clock::now();
+
         std::size_t initialTriangles = 0;
         for (const auto& [coord, count] : trianglesPerChunk) {
             initialTriangles += count;
         }
-
-        applyUpdates(initial);
-        const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
         float outlineHeight = 1.0f;
@@ -321,10 +358,8 @@ int main() {
                         std::to_string(world.visibleRadius()) + " chunks");
         engine::logInfo("Saves: " + (engine::executableDirectory() / "saves").string());
         engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks, " +
-                        std::to_string(initialTriangles) + " triangles in " + ms(buildStart, worldReady) +
-                        " ms (generate+mesh " + ms(buildStart, worldBuilt) + " ms on " +
-                        std::to_string(jobs.threadCount()) + " workers, upload " + ms(worldBuilt, worldReady) +
-                        " ms)");
+                        std::to_string(initialTriangles) + " triangles in " + ms(buildStart, worldReady) + " ms on " +
+                        std::to_string(jobs.threadCount()) + " workers");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Field of view: " + std::to_string(static_cast<int>(kDefaultFov)) +
