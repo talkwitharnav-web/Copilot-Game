@@ -160,7 +160,8 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     // The matrix stays in push constants; the descriptor set carries sampled
     // textures, which are too large to push.
     VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // The fragment stage needs the sun terms, the vertex stage needs the matrix.
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
     pushRange.size = sizeof(MeshPushConstants);
 

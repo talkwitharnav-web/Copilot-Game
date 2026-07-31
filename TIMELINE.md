@@ -368,13 +368,53 @@ Culling was verified by the fraction of geometry drawn: 29.4% of triangles, agai
 
 *Goal: terrain stops being a heightmap and becomes a place.*
 
-### ⬜ M14 — Voxel lighting · **Core**
+### ✅ M14a — Light propagation · **Core**
 
-Sky light and block light propagation, smooth lighting, and per-vertex ambient occlusion. Incremental updates on block changes.
+Sky light and block light stored per block and flood-filled across chunk boundaries, with incremental updates on block changes.
 
-**Why now:** caves are unreadable without it, and it changes the mesh vertex format — cheaper before mesh formats are depended upon by more systems.
+**Done when:** open ground is fully lit, anything sealed off is dark, and a light source brightens its surroundings.
 
-**Done when:** caves are dark, torches illuminate believably, and lighting updates without visible lag when blocks change.
+**Result:** light is stored per block, one byte — sky in the high nibble, block in the low one — which doubles chunk memory to 64 KB. It has to be stored rather than derived, because light crosses chunk boundaries and so cannot be computed from one chunk's contents.
+
+Propagation runs on the **main thread**, budgeted, for the same reason: it walks freely between chunks and so cannot be handed the self-contained snapshot that generation and meshing get. Adding light is a flood fill; removing it walks back everything the dead source lit, then re-fills from whatever still reaches.
+
+`BlockId::Glowstone` (emission 14) exists so block light is testable at all.
+
+Verified numerically at the spawn column: sky 15 above the surface, 0 at it and below.
+
+**No vertex format change**, contrary to the original plan. Light is folded into the existing per-vertex colour as a brightness multiplier, which also covers M14b.
+
+### ✅ M14b — Smooth lighting and ambient occlusion · **Core**
+
+Per-corner light averaging and per-vertex ambient occlusion.
+
+**Done when:** surfaces shade gradually rather than per-face, and corners darken where geometry crowds them.
+
+**Result:** each face corner averages the light of the open cells touching it, and darkens by how boxed-in it is. Quads split along their darker diagonal, without which occlusion on opposite corners creases flat ground the wrong way.
+
+`ChunkBorder`/`ChunkNeighbours` were replaced by **`ChunkVolume`** — the chunk plus one cell of padding, 34³ in blocks and light. Ambient occlusion samples diagonally, so a face on a chunk edge needs cells from up to three neighbouring chunks at once, which six face borders cannot supply. It also turned every neighbour lookup in the mesher into a plain array index.
+
+| | Triangles | Startup | GPU | FPS |
+|---|---|---|---|---|
+| M13b (unlit) | 486,420 | 719 ms | 0.04 ms | 1903 |
+| M14a (flat light) | 486,534 | 1412 ms | 0.32 ms | 120 (capped) |
+| **M14b (smooth + AO)** | **1,152,956** | **1292 ms** | **0.20 ms** | **121 (capped)** |
+
+**Greedy meshing gave ground, as expected.** A merged quad interpolates its corners across the whole span, which only matches the faces it replaces when every one of them was evenly lit — so merging is now restricted to uniform faces. Geometry rose 2.37×. Flat open terrain still merges; anything near an edge no longer does. GPU time is unaffected at 0.20 ms against an 8.3 ms budget.
+
+### ✅ M14c — Placeholder sun and day cycle · **Inserted**
+
+A visible sun that rises in the east and sets in the west, a directional light term, and a sky colour that follows it.
+
+**Why inserted here:** M14's lighting model is Minecraft's, and that model has **no direction** — sky light only answers "can this cell see the sky?". The result read as flat, correctly. Real sun and cast shadows are M24 and depend on the renderer restructure at M23, which is a long way off; this is the cheap placeholder that stops the world looking wrong in the meantime.
+
+**Result:** the sun is a billboarded quad drawn with the existing pipeline, using a texture layer in the block array so no new binding was needed. Surfaces take a Lambert term against the sun direction.
+
+**No vertex format change.** The fragment shader recovers a face normal from how world position changes across the triangle (`dFdx`/`dFdy`), which is exact for flat faces and keeps normals out of the vertex format entirely. Sun direction and lighting parameters ride in the push constants, with a per-draw flag so HUD and sky geometry stay unlit.
+
+`day_length_seconds` in `settings.cfg` controls the cycle; short values are useful for watching it.
+
+**Explicitly not done:** cast shadows. Nothing occludes the sun — a wall is lit by its facing, not by whether something stands between it and the sun. That needs shadow maps and stays at M24.
 
 ### ⬜ M15 — Caves, biomes, and 3D terrain · **Core**
 

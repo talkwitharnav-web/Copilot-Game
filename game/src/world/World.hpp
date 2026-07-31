@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -87,6 +88,10 @@ public:
     /// Used once at startup so the player does not spawn into an empty world.
     std::vector<ChunkMeshUpdate> loadImmediately(const glm::vec3& position);
 
+    /// Light level at a world position, 0-15. Unloaded chunks read as full sky.
+    int skyLightAt(int x, int y, int z) const;
+    int blockLightAt(int x, int y, int z) const;
+
     std::uint32_t seed() const { return m_seed; }
     std::size_t loadedChunkCount() const { return m_chunks.size(); }
 
@@ -145,6 +150,14 @@ private:
         std::vector<MeshedChunk> meshed;
     };
 
+    /// A cell to darken, carrying the level it used to have. Neighbours dimmer
+    /// than that were lit by it and must be darkened too; brighter ones have
+    /// another source and become re-fill seeds instead.
+    struct LightRemoval {
+        glm::ivec3 position;
+        int previousLevel;
+    };
+
     const Chunk* chunkAt(const ChunkCoord& coord) const;
     bool hasChunk(const ChunkCoord& coord) const;
     bool neighboursLoaded(const ChunkCoord& coord) const;
@@ -163,15 +176,38 @@ private:
     void refreshQueues(const ChunkCoord& centre);
     void saveIfModified(const ChunkCoord& coord, ChunkSlot& slot);
 
-    /// Snapshots the six neighbouring border layers. Runs on the main thread so
-    /// the job that follows owns copies of everything it reads.
-    ChunkNeighbours snapshotNeighbours(const ChunkCoord& coord) const;
+    /// Copies the chunk plus one cell of surrounding blocks and light. Runs on
+    /// the main thread so the job that follows owns everything it reads.
+    ChunkVolume gatherVolume(const ChunkCoord& coord) const;
 
     using BudgetCheck = std::function<bool()>;
 
     void dispatchLoads(const BudgetCheck& budgetSpent, std::size_t capacity);
     void dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSpent, std::size_t capacity);
     void collectFinishedJobs();
+
+    /// True once every vertical chunk of a column is loaded, which is when its
+    /// sky light can be traced from the top of the world downwards.
+    bool columnLoaded(int chunkX, int chunkZ) const;
+
+    /// Fills in a column's sky light and seeds the propagation queues. Runs once
+    /// per column, when the last of its chunks arrives.
+    void seedColumnLight(int chunkX, int chunkZ);
+
+    /// Spreads queued light outwards until the queues empty or the budget runs
+    /// out. Chunks whose light changed are re-meshed.
+    void propagateLight(const BudgetCheck& budgetSpent);
+
+    /// Walks back light that came from a source which no longer exists, then
+    /// re-fills from whatever still reaches the emptied region.
+    void unpropagate(std::deque<LightRemoval>& removals, std::deque<glm::ivec3>& additions, bool sky);
+
+    void setSkyLightAt(int x, int y, int z, int level);
+    void setBlockLightAt(int x, int y, int z, int level);
+    /// Notes that a chunk's light changed. Collected rather than acted on, then
+    /// applied once per frame.
+    void lightChangedAt(int x, int y, int z);
+    void flushLightDirty();
 
     /// How many jobs of one kind may be outstanding while playing. Kept short on
     /// purpose: a longer queue only produces results for places the player has
@@ -202,6 +238,20 @@ private:
     /// Collected from workers but not yet handed to the renderer. Uploading is
     /// main-thread work with a real cost, so it is metered like everything else.
     std::vector<MeshedChunk> m_readyMeshes;
+
+    // Light propagation runs on the main thread, because it crosses chunk
+    // boundaries freely and so cannot be handed a self-contained snapshot the
+    // way generation and meshing are.
+    std::deque<glm::ivec3> m_skyAdditions;
+    std::deque<glm::ivec3> m_blockAdditions;
+    std::deque<LightRemoval> m_skyRemovals;
+    std::deque<LightRemoval> m_blockRemovals;
+
+    /// Columns whose sky light has already been traced.
+    std::unordered_set<std::uint64_t> m_litColumns;
+
+    /// Chunks needing a rebuild because light moved through them.
+    std::unordered_set<ChunkCoord> m_lightDirty;
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;

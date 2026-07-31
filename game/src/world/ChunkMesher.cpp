@@ -1,8 +1,9 @@
 #include "world/ChunkMesher.hpp"
 
-#include "world/Chunk.hpp"
-
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 
 namespace game {
 namespace {
@@ -16,8 +17,9 @@ struct Face {
     /// V grows downward, matching how image rows are stored.
     std::array<glm::vec2, 4> uvs;
     BlockFace facing;
-    /// Fixed brightness standing in for lighting, so surface orientation is
-    /// readable. Real lighting arrives at M14.
+    /// Fixed brightness by orientation, so surfaces stay readable even where the
+    /// light is flat. Multiplied with the computed lighting rather than
+    /// replacing it.
     float shade;
     /// Which world axis the face's normal points along.
     int axis;
@@ -92,38 +94,57 @@ constexpr std::array<Face, 6> kFaces{{
 /// Empty slot in the merge mask. Texture layers are never negative.
 constexpr float kNoFace = -1.0f;
 
+/// Floor brightness, so an unlit surface is dim rather than pure black. Fully
+/// black geometry reads as a hole in the world rather than as shadow.
+constexpr float kAmbientFloor = 0.06f;
+
+/// How dark a fully enclosed corner becomes. Ambient occlusion is a cheat, not a
+/// simulation, so this is tuned by eye: too strong and the world looks grubby,
+/// too weak and it looks flat.
+constexpr std::array<float, 4> kOcclusionSteps{0.46f, 0.66f, 0.84f, 1.0f};
+
+/// Converts a 0-15 light level into a brightness multiplier.
+///
+/// Deliberately curved rather than linear: the eye reads brightness roughly
+/// logarithmically, and a linear ramp makes everything below about level 10 look
+/// uniformly dark.
+float lightCurve(float level) {
+    const float normalised = std::clamp(level / static_cast<float>(kMaxLight), 0.0f, 1.0f);
+    return std::pow(normalised, 1.4f);
+}
+
+/// Combines sky and block light. They are independent sources, so the brighter
+/// wins rather than summing, which would blow out anywhere both reach.
+float brightnessOf(float sky, float block) {
+    return kAmbientFloor + (1.0f - kAmbientFloor) * std::max(lightCurve(sky), lightCurve(block));
+}
+
+/// Standard voxel ambient occlusion: how boxed-in a corner is, 0 (most
+/// enclosed) to 3 (open). Two solid sides meeting means the corner is sealed
+/// regardless of what sits diagonally behind them.
+int occlusionAt(bool side1, bool side2, bool corner) {
+    if (side1 && side2) {
+        return 0;
+    }
+    return 3 - (static_cast<int>(side1) + static_cast<int>(side2) + static_cast<int>(corner));
+}
+
+/// Everything needed to draw one face, resolved before any merging happens.
+struct FaceSample {
+    float layer = kNoFace;
+    std::array<float, 4> corner{};
+    /// True when all four corners match, which is the only case where a face may
+    /// be merged with its neighbours.
+    bool flat = false;
+};
+
 } // namespace
 
-engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours, const glm::vec3& originOffset) {
-    // Face offsets only ever move along a single axis, so at most one coordinate
-    // can fall outside the chunk and the neighbour lookup stays unambiguous.
-    const auto blockAt = [&](int x, int y, int z) -> BlockId {
-        if (x < 0) {
-            return neighbours.negativeX.at(y, z);
-        }
-        if (x >= Chunk::kSize) {
-            return neighbours.positiveX.at(y, z);
-        }
-        if (y < 0) {
-            return neighbours.negativeY.at(x, z);
-        }
-        if (y >= Chunk::kSize) {
-            return neighbours.positiveY.at(x, z);
-        }
-        if (z < 0) {
-            return neighbours.negativeZ.at(x, y);
-        }
-        if (z >= Chunk::kSize) {
-            return neighbours.positiveZ.at(x, y);
-        }
-        return chunk.at(x, y, z);
-    };
-
+engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) {
     engine::MeshData mesh;
 
-    // One slice of the chunk, holding the texture layer of every visible face on
-    // it. Reused across all six directions and every slice.
-    std::array<float, Chunk::kSize * Chunk::kSize> mask{};
+    constexpr int size = Chunk::kSize;
+    std::array<FaceSample, size * size> faces{};
 
     for (const Face& face : kFaces) {
         // The two axes the face spans. Which is called which does not matter;
@@ -132,48 +153,148 @@ engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours
         const int across = (normal + 1) % 3;
         const int down = (normal + 2) % 3;
 
-        for (int slice = 0; slice < Chunk::kSize; ++slice) {
-            for (int j = 0; j < Chunk::kSize; ++j) {
-                for (int i = 0; i < Chunk::kSize; ++i) {
+        for (int slice = 0; slice < size; ++slice) {
+            for (int j = 0; j < size; ++j) {
+                for (int i = 0; i < size; ++i) {
                     glm::ivec3 p{0};
                     p[normal] = slice;
                     p[across] = i;
                     p[down] = j;
 
-                    const BlockId block = chunk.at(p.x, p.y, p.z);
-                    const glm::ivec3 n = p + face.neighbourOffset;
+                    FaceSample& sample = faces[static_cast<std::size_t>(j) * size + i];
+                    sample = FaceSample{};
+
+                    const BlockId block = volume.blockAt(p.x, p.y, p.z);
+                    if (!isSolid(block)) {
+                        continue;
+                    }
 
                     // The whole optimisation: a face buried against another
                     // solid block can never be seen, so it is never created.
-                    const bool visible = isSolid(block) && !isSolid(blockAt(n.x, n.y, n.z));
-                    mask[static_cast<std::size_t>(j) * Chunk::kSize + i] =
-                        visible ? blockTextureLayer(block, face.facing) : kNoFace;
+                    const glm::ivec3 front = p + face.neighbourOffset;
+                    if (isSolid(volume.blockAt(front.x, front.y, front.z))) {
+                        continue;
+                    }
+
+                    sample.layer = blockTextureLayer(block, face.facing);
+
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        // Each corner leans toward one end of both in-plane axes.
+                        glm::ivec3 stepA{0};
+                        glm::ivec3 stepB{0};
+                        stepA[across] = face.corners[c][across] > 0.5f ? 1 : -1;
+                        stepB[down] = face.corners[c][down] > 0.5f ? 1 : -1;
+
+                        const glm::ivec3 a = front + stepA;
+                        const glm::ivec3 b = front + stepB;
+                        const glm::ivec3 diagonal = front + stepA + stepB;
+
+                        const bool solidA = isSolid(volume.blockAt(a.x, a.y, a.z));
+                        const bool solidB = isSolid(volume.blockAt(b.x, b.y, b.z));
+                        const bool solidDiagonal = isSolid(volume.blockAt(diagonal.x, diagonal.y, diagonal.z));
+
+                        // Smooth lighting: average the open cells touching this
+                        // corner. Solid ones are skipped rather than counted as
+                        // dark, or every surface would be dimmed by its own
+                        // neighbours.
+                        float skySum = 0.0f;
+                        float blockSum = 0.0f;
+                        int samples = 0;
+                        const auto accumulate = [&](const glm::ivec3& cell, bool solid) {
+                            if (solid) {
+                                return;
+                            }
+                            const std::uint8_t packed = volume.lightAt(cell.x, cell.y, cell.z);
+                            skySum += static_cast<float>(packed >> 4);
+                            blockSum += static_cast<float>(packed & 0x0F);
+                            ++samples;
+                        };
+                        accumulate(front, false);
+                        accumulate(a, solidA);
+                        accumulate(b, solidB);
+                        accumulate(diagonal, solidDiagonal || (solidA && solidB));
+
+                        const float scale = 1.0f / static_cast<float>(std::max(1, samples));
+                        const int occlusion = occlusionAt(solidA, solidB, solidDiagonal);
+
+                        sample.corner[c] = face.shade * brightnessOf(skySum * scale, blockSum * scale) *
+                                           kOcclusionSteps[static_cast<std::size_t>(occlusion)];
+                    }
+
+                    sample.flat = sample.corner[0] == sample.corner[1] && sample.corner[1] == sample.corner[2] &&
+                                  sample.corner[2] == sample.corner[3];
                 }
             }
 
-            // Greedy merge: grow a run along `across`, then extend it along
-            // `down` for as long as every row matches. Faces merge when their
-            // texture layer matches, which already accounts for both block type
-            // and which way the face points.
-            for (int j = 0; j < Chunk::kSize; ++j) {
-                for (int i = 0; i < Chunk::kSize;) {
-                    const float layer = mask[static_cast<std::size_t>(j) * Chunk::kSize + i];
-                    if (layer == kNoFace) {
+            const auto emit = [&](int i, int j, int width, int height, const FaceSample& sample) {
+                glm::ivec3 origin{0};
+                origin[normal] = slice;
+                origin[across] = i;
+                origin[down] = j;
+
+                // Extent of the merged quad per world axis. The normal axis stays
+                // 1, so scaling a unit corner by this keeps the winding the
+                // original tables established.
+                glm::vec3 extent{1.0f};
+                extent[across] = static_cast<float>(width);
+                extent[down] = static_cast<float>(height);
+
+                const glm::vec3 quadOrigin = originOffset + glm::vec3{origin};
+                const glm::vec2 uvScale{extent[face.uAxis], extent[face.vAxis]};
+                const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+
+                for (std::size_t c = 0; c < 4; ++c) {
+                    const glm::vec3 position = quadOrigin + face.corners[c] * extent;
+                    const glm::vec2 uv = face.uvs[c] * uvScale;
+                    const float lit = sample.corner[c];
+                    mesh.vertices.push_back(
+                        engine::Vertex{{position.x, position.y, position.z}, {lit, lit, lit, 1.0f}, {uv.x, uv.y},
+                                       sample.layer});
+                }
+
+                // Split along the darker diagonal. Quads with occlusion on
+                // opposite corners otherwise show a visible seam running the
+                // wrong way, which reads as a crease in flat ground.
+                if (sample.corner[0] + sample.corner[2] > sample.corner[1] + sample.corner[3]) {
+                    mesh.indices.insert(mesh.indices.end(),
+                                        {base + 1, base + 2, base + 3, base + 1, base + 3, base + 0});
+                } else {
+                    mesh.indices.insert(mesh.indices.end(),
+                                        {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
+                }
+            };
+
+            // Greedy merge, but only across faces that are evenly lit. A quad
+            // spanning several blocks interpolates its corners across the whole
+            // span, which only matches the individual faces it replaces when
+            // every one of them was uniform to begin with.
+            for (int j = 0; j < size; ++j) {
+                for (int i = 0; i < size;) {
+                    const FaceSample& sample = faces[static_cast<std::size_t>(j) * size + i];
+                    if (sample.layer == kNoFace) {
+                        ++i;
+                        continue;
+                    }
+                    if (!sample.flat) {
+                        emit(i, j, 1, 1, sample);
                         ++i;
                         continue;
                     }
 
+                    const auto matches = [&](const FaceSample& other) {
+                        return other.layer == sample.layer && other.flat && other.corner[0] == sample.corner[0];
+                    };
+
                     int width = 1;
-                    while (i + width < Chunk::kSize &&
-                           mask[static_cast<std::size_t>(j) * Chunk::kSize + i + width] == layer) {
+                    while (i + width < size && matches(faces[static_cast<std::size_t>(j) * size + i + width])) {
                         ++width;
                     }
 
                     int height = 1;
-                    while (j + height < Chunk::kSize) {
+                    while (j + height < size) {
                         bool wholeRowMatches = true;
                         for (int k = 0; k < width; ++k) {
-                            if (mask[static_cast<std::size_t>(j + height) * Chunk::kSize + i + k] != layer) {
+                            if (!matches(faces[static_cast<std::size_t>(j + height) * size + i + k])) {
                                 wholeRowMatches = false;
                                 break;
                             }
@@ -184,36 +305,11 @@ engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours
                         ++height;
                     }
 
-                    glm::ivec3 origin{0};
-                    origin[normal] = slice;
-                    origin[across] = i;
-                    origin[down] = j;
-
-                    // Extent of the merged quad per world axis. The normal axis
-                    // stays 1, so scaling a unit corner by this keeps the
-                    // winding the original tables established.
-                    glm::vec3 extent{1.0f};
-                    extent[across] = static_cast<float>(width);
-                    extent[down] = static_cast<float>(height);
-
-                    const glm::vec3 quadOrigin = originOffset + glm::vec3{origin};
-                    const glm::vec2 uvScale{extent[face.uAxis], extent[face.vAxis]};
-                    const glm::vec3 color{face.shade, face.shade, face.shade};
-                    const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
-
-                    for (std::size_t corner = 0; corner < face.corners.size(); ++corner) {
-                        const glm::vec3 p = quadOrigin + face.corners[corner] * extent;
-                        const glm::vec2 uv = face.uvs[corner] * uvScale;
-                        mesh.vertices.push_back(engine::Vertex{
-                            {p.x, p.y, p.z}, {color.r, color.g, color.b, 1.0f}, {uv.x, uv.y}, layer});
-                    }
-
-                    mesh.indices.insert(mesh.indices.end(),
-                                        {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
+                    emit(i, j, width, height, sample);
 
                     for (int b = 0; b < height; ++b) {
                         for (int a = 0; a < width; ++a) {
-                            mask[static_cast<std::size_t>(j + b) * Chunk::kSize + i + a] = kNoFace;
+                            faces[static_cast<std::size_t>(j + b) * size + i + a].layer = kNoFace;
                         }
                     }
 

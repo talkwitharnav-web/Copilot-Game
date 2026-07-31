@@ -34,6 +34,10 @@ struct Settings {
     /// with F1/F2; this is only the starting value.
     unsigned frameCap = 120;
 
+    /// Real seconds for one full day and night. Short values are useful for
+    /// watching the cycle without waiting.
+    unsigned dayLengthSeconds = 600;
+
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;

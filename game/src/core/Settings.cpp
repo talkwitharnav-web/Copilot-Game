@@ -85,10 +85,12 @@ Settings loadSettings(const std::filesystem::path& file) {
         read("worker_threads", Settings::kMaxWorkerThreads, settings.workerThreads);
         read("render_distance", Settings::kMaxRenderDistance, settings.renderDistance);
         read("frame_cap", 1000, settings.frameCap);
+        read("day_length_seconds", 86400, settings.dayLengthSeconds);
     }
 
     // A render distance of zero would mesh nothing at all.
     settings.renderDistance = std::max(1u, settings.renderDistance);
+    settings.dayLengthSeconds = std::max(10u, settings.dayLengthSeconds);
 
     return settings;
 }
@@ -112,11 +114,13 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#\n"
         << "# render_distance: how far the world is drawn, in 32-block chunks.\n"
         << "# frame_cap: frames per second to aim for; 0 means uncapped.\n"
+        << "# day_length_seconds: real seconds for a full day and night.\n"
         << "#\n"
         << "# All of these take effect on restart.\n"
         << "worker_threads=" << settings.workerThreads << "\n"
         << "render_distance=" << settings.renderDistance << "\n"
-        << "frame_cap=" << settings.frameCap << "\n";
+        << "frame_cap=" << settings.frameCap << "\n"
+        << "day_length_seconds=" << settings.dayLengthSeconds << "\n";
 }
 
 } // namespace game

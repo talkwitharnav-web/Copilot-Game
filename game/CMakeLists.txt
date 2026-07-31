@@ -10,6 +10,7 @@ add_executable(game
     src/world/WorldStore.cpp
     src/world/Player.cpp
     src/world/Raycast.cpp
+    src/world/Sky.cpp
     src/world/BlockOutline.cpp
     src/world/TerrainGenerator.cpp
     src/world/ChunkMesher.cpp

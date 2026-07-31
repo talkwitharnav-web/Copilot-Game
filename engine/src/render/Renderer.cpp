@@ -168,6 +168,7 @@ Renderer::~Renderer() {
     m_freeSlots.clear();
     m_overlayMesh = GpuMesh{};
     m_screenMesh = GpuMesh{};
+    m_skyMesh = GpuMesh{};
 
     // Before the pool: freeing the pool invalidates the set allocated from it.
     m_trianglePipeline.reset();
@@ -400,6 +401,20 @@ void Renderer::setScreenMesh(const MeshData& mesh) {
     uploadInto(m_screenMesh, mesh);
 }
 
+void Renderer::setSkyMesh(const MeshData& mesh) {
+    uploadInto(m_skyMesh, mesh);
+}
+
+void Renderer::setSunDirection(const glm::vec3& direction) {
+    const float length = glm::length(direction);
+    m_sunDirection = length > 0.0f ? direction / length : glm::vec3{0.0f, 1.0f, 0.0f};
+}
+
+void Renderer::setSunLighting(float ambient, float sun) {
+    m_ambientLight = ambient;
+    m_sunLight = sun;
+}
+
 void Renderer::createSyncObjects() {
     VkSemaphoreCreateInfo semaphoreInfo{};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -562,16 +577,20 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->layout(), 0, 1,
                             &m_descriptorSet, 0, nullptr);
 
-    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform) {
+    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit) {
         if (mesh.indexCount == 0) {
             return;
         }
         ++m_frameDrawCalls;
         m_frameTriangles += mesh.indexCount / 3;
 
-        const MeshPushConstants push{transform};
-        vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
-                           sizeof(MeshPushConstants), &push);
+        MeshPushConstants push{};
+        push.modelViewProjection = transform;
+        push.sunDirection = glm::vec4{m_sunDirection, 0.0f};
+        push.lighting = glm::vec4{m_ambientLight, m_sunLight, lit ? 1.0f : 0.0f, 0.0f};
+        vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT |
+                                                                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(MeshPushConstants), &push);
 
         const VkBuffer vertexBuffers[] = {mesh.vertexBuffer->handle()};
         const VkDeviceSize vertexOffsets[] = {0};
@@ -587,11 +606,15 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         if (mesh.indexCount != 0 && !boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax)) {
             continue;
         }
-        drawMesh(mesh, viewProjection);
+        drawMesh(mesh, viewProjection, true);
     }
 
+    // After the world so it is depth-tested against terrain, and unlit because
+    // the sun does not shade itself.
+    drawMesh(m_skyMesh, viewProjection * m_skyTransform, false);
+
     if (overlayTransform.has_value()) {
-        drawMesh(m_overlayMesh, viewProjection * *overlayTransform);
+        drawMesh(m_overlayMesh, viewProjection * *overlayTransform, false);
     }
 
     // Screen space: no view, no projection. Only an aspect correction, so
@@ -600,7 +623,7 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         const float aspect = extent.height == 0
                                  ? 1.0f
                                  : static_cast<float>(extent.width) / static_cast<float>(extent.height);
-        drawMesh(m_screenMesh, glm::scale(glm::mat4{1.0f}, glm::vec3{1.0f / aspect, 1.0f, 1.0f}));
+        drawMesh(m_screenMesh, glm::scale(glm::mat4{1.0f}, glm::vec3{1.0f / aspect, 1.0f, 1.0f}), false);
     }
 
     vkCmdEndRendering(commandBuffer);

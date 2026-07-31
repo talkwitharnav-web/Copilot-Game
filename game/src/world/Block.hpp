@@ -17,10 +17,26 @@ enum class BlockId : std::uint8_t {
     Snow,
     Planks,
     Bricks,
+    Glowstone,
 };
 
 constexpr bool isSolid(BlockId id) {
     return id != BlockId::Air;
+}
+
+/// Highest light level a source can have. Four bits per channel, so a level fits
+/// in a nibble and sky plus block light fit in one byte per block.
+constexpr int kMaxLight = 15;
+
+/// How much light a block gives off. Zero for everything that is not a source.
+constexpr int blockLightEmission(BlockId id) {
+    return id == BlockId::Glowstone ? 14 : 0;
+}
+
+/// Whether light passes through. Currently the exact opposite of solid, but kept
+/// separate because glass and water will be solid *and* transparent.
+constexpr bool isLightTransparent(BlockId id) {
+    return id == BlockId::Air;
 }
 
 /// Which face of a block a texture is for. Most blocks use the same image on
@@ -48,6 +64,10 @@ enum class TextureLayer : std::uint32_t {
     Snow = 8,
     Planks = 9,
     Bricks = 10,
+    Glowstone = 11,
+    /// Not a block. Shares the array because the sun is drawn with the same
+    /// pipeline, and a texture array needs every layer the same size.
+    Sun = 12,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
@@ -79,6 +99,8 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::Planks);
     case BlockId::Bricks:
         return static_cast<float>(TextureLayer::Bricks);
+    case BlockId::Glowstone:
+        return static_cast<float>(TextureLayer::Glowstone);
     case BlockId::Air:
         break;
     }

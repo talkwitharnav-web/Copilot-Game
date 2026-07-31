@@ -28,61 +28,21 @@ int chebyshevDistance(const ChunkCoord& a, const ChunkCoord& b) {
     return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
 }
 
-/// Copies one face layer out of a chunk into the flat form the mesher wants.
-///
-/// `axis` is which axis the face lies on and `high` picks the far layer. The
-/// two remaining axes become the border's (a, b) in ascending axis order, which
-/// is the convention `ChunkBorder::at` documents.
-ChunkBorder extractBorder(const Chunk* chunk, int axis, bool high) {
-    ChunkBorder border;
-    if (chunk == nullptr) {
-        return border; // Absent borders read as air.
-    }
-    border.present = true;
-
-    constexpr int size = Chunk::kSize;
-    const int fixed = high ? size - 1 : 0;
-
-    for (int a = 0; a < size; ++a) {
-        for (int b = 0; b < size; ++b) {
-            int x = 0;
-            int y = 0;
-            int z = 0;
-            switch (axis) {
-            case 0:
-                x = fixed;
-                y = a;
-                z = b;
-                break;
-            case 1:
-                x = a;
-                y = fixed;
-                z = b;
-                break;
-            default:
-                x = a;
-                y = b;
-                z = fixed;
-                break;
-            }
-            border.blocks[a * size + b] = chunk->at(x, y, z);
-        }
-    }
-    return border;
-}
+/// The six directions light travels.
+constexpr std::array<glm::ivec3, 6> kLightSteps{glm::ivec3{1, 0, 0},  glm::ivec3{-1, 0, 0}, glm::ivec3{0, 1, 0},
+                                                glm::ivec3{0, -1, 0}, glm::ivec3{0, 0, 1},  glm::ivec3{0, 0, -1}};
 
 /// Everything a mesh job reads, allocated once and shared with the job.
 ///
 /// Captured by `shared_ptr` rather than by value: a lambda holding a whole chunk
-/// gets copied into the `std::function` that carries it, so the 38 KB of blocks
-/// and borders would be copied twice per job. A pointer-sized capture also fits
-/// inside `std::function` without a second heap allocation.
+/// gets copied into the `std::function` that carries it, so the volume would be
+/// copied twice per job. A pointer-sized capture also fits inside
+/// `std::function` without a second heap allocation.
 struct MeshJobInput {
     ChunkCoord coord;
     std::uint32_t revision = 0;
     glm::vec3 origin{0.0f};
-    Chunk blocks;
-    ChunkNeighbours neighbours;
+    ChunkVolume volume;
 };
 
 } // namespace
@@ -97,6 +57,293 @@ World::World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSyst
 /// still running here keeps what it touches alive and simply writes into a
 /// buffer nobody will read. Nothing needs to be waited for.
 World::~World() = default;
+
+int World::skyLightAt(int x, int y, int z) const {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const Chunk* chunk = chunkAt(coord);
+    // Unloaded reads as full sky, so the frontier does not darken as it streams.
+    if (chunk == nullptr) {
+        return kMaxLight;
+    }
+    return chunk->skyLightAt(floorMod(x, Chunk::kSize), floorMod(y, Chunk::kSize), floorMod(z, Chunk::kSize));
+}
+
+int World::blockLightAt(int x, int y, int z) const {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const Chunk* chunk = chunkAt(coord);
+    if (chunk == nullptr) {
+        return 0;
+    }
+    return chunk->blockLightAt(floorMod(x, Chunk::kSize), floorMod(y, Chunk::kSize), floorMod(z, Chunk::kSize));
+}
+
+void World::setSkyLightAt(int x, int y, int z, int level) {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const auto it = m_chunks.find(coord);
+    if (it == m_chunks.end()) {
+        return;
+    }
+    it->second.blocks.setSkyLight(floorMod(x, Chunk::kSize), floorMod(y, Chunk::kSize), floorMod(z, Chunk::kSize),
+                                  level);
+    lightChangedAt(x, y, z);
+}
+
+void World::setBlockLightAt(int x, int y, int z, int level) {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    const auto it = m_chunks.find(coord);
+    if (it == m_chunks.end()) {
+        return;
+    }
+    it->second.blocks.setBlockLight(floorMod(x, Chunk::kSize), floorMod(y, Chunk::kSize), floorMod(z, Chunk::kSize),
+                                    level);
+    lightChangedAt(x, y, z);
+}
+
+/// Records that a chunk's geometry needs rebuilding because its light moved.
+///
+/// Only collects coordinates; the actual invalidation happens once per frame in
+/// `flushLightDirty`. Propagation touches tens of thousands of cells, and
+/// invalidating per cell would mean a linear scan of the pending queue each time.
+void World::lightChangedAt(int x, int y, int z) {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize), floorDiv(z, Chunk::kSize)};
+    m_lightDirty.insert(coord);
+
+    // A lit cell on a chunk face shades the neighbour's geometry too.
+    const int lx = floorMod(x, Chunk::kSize);
+    const int ly = floorMod(y, Chunk::kSize);
+    const int lz = floorMod(z, Chunk::kSize);
+    constexpr int last = Chunk::kSize - 1;
+
+    if (lx == 0) {
+        m_lightDirty.insert({coord.x - 1, coord.y, coord.z});
+    }
+    if (lx == last) {
+        m_lightDirty.insert({coord.x + 1, coord.y, coord.z});
+    }
+    if (ly == 0) {
+        m_lightDirty.insert({coord.x, coord.y - 1, coord.z});
+    }
+    if (ly == last) {
+        m_lightDirty.insert({coord.x, coord.y + 1, coord.z});
+    }
+    if (lz == 0) {
+        m_lightDirty.insert({coord.x, coord.y, coord.z - 1});
+    }
+    if (lz == last) {
+        m_lightDirty.insert({coord.x, coord.y, coord.z + 1});
+    }
+}
+
+void World::flushLightDirty() {
+    for (const ChunkCoord& coord : m_lightDirty) {
+        invalidateMesh(coord);
+    }
+    m_lightDirty.clear();
+}
+
+bool World::columnLoaded(int chunkX, int chunkZ) const {
+    for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
+        if (!hasChunk({chunkX, cy, chunkZ})) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void World::seedColumnLight(int chunkX, int chunkZ) {
+    const std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
+                              static_cast<std::uint32_t>(chunkZ);
+    if (!m_litColumns.insert(key).second) {
+        return;
+    }
+
+    constexpr int worldTop = kWorldHeightChunks * Chunk::kSize - 1;
+    constexpr int size = Chunk::kSize;
+
+    // Writes go straight into the chunks rather than through `setSkyLightAt`:
+    // this touches ~98,000 cells per column, and marking dirty per cell would
+    // dwarf the actual work. The whole column is marked once at the end.
+    std::array<ChunkSlot*, kWorldHeightChunks> column{};
+    for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
+        const auto it = m_chunks.find({chunkX, cy, chunkZ});
+        if (it == m_chunks.end()) {
+            return;
+        }
+        column[static_cast<std::size_t>(cy)] = &it->second;
+    }
+
+    // Lowest y still reached by open sky, per column. One cell of margin so the
+    // seeding step below can compare against neighbouring chunk-columns.
+    constexpr int span = size + 2;
+    std::array<int, span * span> skyFloor{};
+
+    for (int mz = 0; mz < span; ++mz) {
+        for (int mx = 0; mx < span; ++mx) {
+            const int lx = mx - 1;
+            const int lz = mz - 1;
+            const bool inside = lx >= 0 && lx < size && lz >= 0 && lz < size;
+            const int worldX = chunkX * size + lx;
+            const int worldZ = chunkZ * size + lz;
+
+            int floorY = 0;
+            for (int y = worldTop; y >= 0; --y) {
+                const BlockId block =
+                    inside ? column[static_cast<std::size_t>(y / size)]->blocks.at(lx, y % size, lz)
+                           : blockAt(worldX, y, worldZ);
+                if (!isLightTransparent(block)) {
+                    floorY = y + 1;
+                    break;
+                }
+            }
+            skyFloor[static_cast<std::size_t>(mz) * span + mx] = floorY;
+        }
+    }
+
+    for (int lz = 0; lz < size; ++lz) {
+        for (int lx = 0; lx < size; ++lx) {
+            const int worldX = chunkX * size + lx;
+            const int worldZ = chunkZ * size + lz;
+            const int floorY = skyFloor[static_cast<std::size_t>(lz + 1) * span + (lx + 1)];
+
+            for (int y = worldTop; y >= 0; --y) {
+                ChunkSlot& slot = *column[static_cast<std::size_t>(y / size)];
+                const int ly = y % size;
+                const BlockId block = slot.blocks.at(lx, ly, lz);
+
+                // Sky falls straight down at full strength until something stops
+                // it. Vertical travel costs nothing, which is what makes open
+                // ground uniformly bright; only sideways spread dims.
+                slot.blocks.setSkyLight(lx, ly, lz, y >= floorY ? kMaxLight : 0);
+
+                if (const int emission = blockLightEmission(block); emission > 0) {
+                    slot.blocks.setBlockLight(lx, ly, lz, emission);
+                    m_blockAdditions.push_back({worldX, y, worldZ});
+                }
+            }
+
+            // Only cells that can actually spread anywhere are worth queueing.
+            // A lit cell whose neighbours are all lit has nothing to give, and
+            // seeding every one of them buried the queue under tens of millions
+            // of entries that did nothing.
+            const int highestDarkNeighbour =
+                std::max({skyFloor[static_cast<std::size_t>(lz + 1) * span + lx],
+                          skyFloor[static_cast<std::size_t>(lz + 1) * span + lx + 2],
+                          skyFloor[static_cast<std::size_t>(lz) * span + lx + 1],
+                          skyFloor[static_cast<std::size_t>(lz + 2) * span + lx + 1]});
+
+            for (int y = floorY; y < highestDarkNeighbour && y <= worldTop; ++y) {
+                m_skyAdditions.push_back({worldX, y, worldZ});
+            }
+        }
+    }
+
+    // The column and everything touching it, since border light shades
+    // neighbouring geometry.
+    for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
+        m_lightDirty.insert({chunkX, cy, chunkZ});
+        m_lightDirty.insert({chunkX - 1, cy, chunkZ});
+        m_lightDirty.insert({chunkX + 1, cy, chunkZ});
+        m_lightDirty.insert({chunkX, cy, chunkZ - 1});
+        m_lightDirty.insert({chunkX, cy, chunkZ + 1});
+    }
+}
+
+void World::unpropagate(std::deque<LightRemoval>& removals, std::deque<glm::ivec3>& additions, bool sky) {
+    while (!removals.empty()) {
+        const LightRemoval entry = removals.front();
+        removals.pop_front();
+
+        for (const glm::ivec3& step : kLightSteps) {
+            const glm::ivec3 n = entry.position + step;
+            if (n.y < 0 || n.y >= kWorldHeightChunks * Chunk::kSize) {
+                continue;
+            }
+
+            const int level = sky ? skyLightAt(n.x, n.y, n.z) : blockLightAt(n.x, n.y, n.z);
+            if (level == 0) {
+                continue;
+            }
+
+            if (level < entry.previousLevel) {
+                // This neighbour was lit by what we just removed.
+                if (sky) {
+                    setSkyLightAt(n.x, n.y, n.z, 0);
+                } else {
+                    setBlockLightAt(n.x, n.y, n.z, 0);
+                }
+                removals.push_back({n, level});
+            } else {
+                // Brighter than the source, so it has its own supply and will
+                // fill the hole back in.
+                additions.push_back(n);
+            }
+        }
+    }
+}
+
+void World::propagateLight(const BudgetCheck& budgetSpent) {
+    unpropagate(m_skyRemovals, m_skyAdditions, true);
+    unpropagate(m_blockRemovals, m_blockAdditions, false);
+
+    const int worldHeight = kWorldHeightChunks * Chunk::kSize;
+
+    // Sky first: it is what makes newly streamed terrain look right, and block
+    // light is rare by comparison.
+    while (!m_skyAdditions.empty() && !budgetSpent()) {
+        const glm::ivec3 position = m_skyAdditions.front();
+        m_skyAdditions.pop_front();
+
+        const int level = skyLightAt(position.x, position.y, position.z);
+        if (level <= 0) {
+            continue;
+        }
+
+        for (const glm::ivec3& step : kLightSteps) {
+            const glm::ivec3 n = position + step;
+            if (n.y < 0 || n.y >= worldHeight) {
+                continue;
+            }
+            if (!isLightTransparent(blockAt(n.x, n.y, n.z))) {
+                continue;
+            }
+
+            // Straight down keeps full strength; every other direction dims.
+            const int reaching = (step.y == -1 && level == kMaxLight) ? kMaxLight : level - 1;
+            if (reaching <= 0 || skyLightAt(n.x, n.y, n.z) >= reaching) {
+                continue;
+            }
+
+            setSkyLightAt(n.x, n.y, n.z, reaching);
+            m_skyAdditions.push_back(n);
+        }
+    }
+
+    while (!m_blockAdditions.empty() && !budgetSpent()) {
+        const glm::ivec3 position = m_blockAdditions.front();
+        m_blockAdditions.pop_front();
+
+        const int level = blockLightAt(position.x, position.y, position.z);
+        if (level <= 0) {
+            continue;
+        }
+
+        for (const glm::ivec3& step : kLightSteps) {
+            const glm::ivec3 n = position + step;
+            if (n.y < 0 || n.y >= worldHeight) {
+                continue;
+            }
+            if (!isLightTransparent(blockAt(n.x, n.y, n.z))) {
+                continue;
+            }
+            if (blockLightAt(n.x, n.y, n.z) >= level - 1) {
+                continue;
+            }
+
+            setBlockLightAt(n.x, n.y, n.z, level - 1);
+            m_blockAdditions.push_back(n);
+        }
+    }
+}
 
 void World::setVisibleRadius(int chunks) {
     const int radius = std::clamp(chunks, 1, 64);
@@ -199,11 +446,45 @@ void World::setBlock(int x, int y, int z, BlockId block) {
     const int ly = floorMod(y, Chunk::kSize);
     const int lz = floorMod(z, Chunk::kSize);
 
-    if (it->second.blocks.at(lx, ly, lz) == block) {
+    const BlockId previous = it->second.blocks.at(lx, ly, lz);
+    if (previous == block) {
         return;
     }
     it->second.blocks.set(lx, ly, lz, block);
     it->second.modified = true;
+
+    // Relight around the change. Removals have to run before additions, because
+    // stale light must be cleared out before anything fills the gap.
+    const int oldSky = it->second.blocks.skyLightAt(lx, ly, lz);
+    const int oldBlockLight = it->second.blocks.blockLightAt(lx, ly, lz);
+
+    if (!isLightTransparent(block)) {
+        if (oldSky > 0) {
+            it->second.blocks.setSkyLight(lx, ly, lz, 0);
+            m_skyRemovals.push_back({{x, y, z}, oldSky});
+        }
+        if (oldBlockLight > 0) {
+            it->second.blocks.setBlockLight(lx, ly, lz, 0);
+            m_blockRemovals.push_back({{x, y, z}, oldBlockLight});
+        }
+    } else {
+        // Newly transparent: whatever surrounds it can now flow in.
+        if (blockLightEmission(previous) > 0 && oldBlockLight > 0) {
+            it->second.blocks.setBlockLight(lx, ly, lz, 0);
+            m_blockRemovals.push_back({{x, y, z}, oldBlockLight});
+        }
+        for (const glm::ivec3& step : kLightSteps) {
+            m_skyAdditions.push_back(glm::ivec3{x, y, z} + step);
+            m_blockAdditions.push_back(glm::ivec3{x, y, z} + step);
+        }
+    }
+
+    if (const int emission = blockLightEmission(block); emission > 0) {
+        it->second.blocks.setBlockLight(lx, ly, lz, emission);
+        m_blockAdditions.push_back({x, y, z});
+    }
+
+    lightChangedAt(x, y, z);
 
     invalidateMesh(coord);
 
@@ -237,15 +518,53 @@ bool World::neighboursLoaded(const ChunkCoord& coord) const {
            hasChunk({coord.x, coord.y, coord.z - 1}) && hasChunk({coord.x, coord.y, coord.z + 1});
 }
 
-ChunkNeighbours World::snapshotNeighbours(const ChunkCoord& coord) const {
-    ChunkNeighbours neighbours;
-    neighbours.negativeX = extractBorder(chunkAt({coord.x - 1, coord.y, coord.z}), 0, true);
-    neighbours.positiveX = extractBorder(chunkAt({coord.x + 1, coord.y, coord.z}), 0, false);
-    neighbours.negativeY = extractBorder(chunkAt({coord.x, coord.y - 1, coord.z}), 1, true);
-    neighbours.positiveY = extractBorder(chunkAt({coord.x, coord.y + 1, coord.z}), 1, false);
-    neighbours.negativeZ = extractBorder(chunkAt({coord.x, coord.y, coord.z - 1}), 2, true);
-    neighbours.positiveZ = extractBorder(chunkAt({coord.x, coord.y, coord.z + 1}), 2, false);
-    return neighbours;
+ChunkVolume World::gatherVolume(const ChunkCoord& coord) const {
+    ChunkVolume volume;
+
+    // The padded region spans at most one chunk in each direction, so the 27
+    // possible source chunks are looked up once rather than per cell.
+    const Chunk* sources[3][3][3]{};
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                sources[dx + 1][dy + 1][dz + 1] = chunkAt({coord.x + dx, coord.y + dy, coord.z + dz});
+            }
+        }
+    }
+
+    constexpr int size = Chunk::kSize;
+    constexpr int pad = ChunkVolume::kPad;
+
+    for (int y = -pad; y < size + pad; ++y) {
+        const int dy = (y < 0) ? -1 : (y >= size ? 1 : 0);
+        const int ly = y - dy * size;
+
+        for (int z = -pad; z < size + pad; ++z) {
+            const int dz = (z < 0) ? -1 : (z >= size ? 1 : 0);
+            const int lz = z - dz * size;
+
+            for (int x = -pad; x < size + pad; ++x) {
+                const int dx = (x < 0) ? -1 : (x >= size ? 1 : 0);
+                const int lx = x - dx * size;
+
+                const Chunk* source = sources[dx + 1][dy + 1][dz + 1];
+                const std::size_t at = ChunkVolume::index(x, y, z);
+
+                if (source == nullptr) {
+                    // Missing neighbours read as open sky rather than as solid,
+                    // so the streaming frontier does not draw a wall of faces or
+                    // a band of darkness.
+                    volume.blocks[at] = BlockId::Air;
+                    volume.light[at] = 0xF0;
+                } else {
+                    volume.blocks[at] = source->at(lx, ly, lz);
+                    volume.light[at] = source->lightAt(lx, ly, lz);
+                }
+            }
+        }
+    }
+
+    return volume;
 }
 
 void World::refreshQueues(const ChunkCoord& centre) {
@@ -346,11 +665,10 @@ void World::dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSp
         input->origin = glm::vec3{static_cast<float>(coord.x * Chunk::kSize),
                                   static_cast<float>(coord.y * Chunk::kSize),
                                   static_cast<float>(coord.z * Chunk::kSize)};
-        input->blocks = it->second.blocks;
-        input->neighbours = snapshotNeighbours(coord);
+        input->volume = gatherVolume(coord);
 
         m_jobs.submit([input = std::move(input), results = m_results] {
-            engine::MeshData mesh = meshChunk(input->blocks, input->neighbours, input->origin);
+            engine::MeshData mesh = meshChunk(input->volume, input->origin);
 
             std::lock_guard<std::mutex> lock(results->mutex);
             results->meshed.push_back(MeshedChunk{input->coord, std::move(mesh), input->revision});
@@ -381,6 +699,12 @@ void World::collectFinishedJobs() {
         }
 
         m_chunks.emplace(result.coord, ChunkSlot{std::move(result.blocks), false, false, 0});
+
+        // Sky light is traced from the top of the world down, so it can only be
+        // done once every chunk in the column is present.
+        if (columnLoaded(result.coord.x, result.coord.z)) {
+            seedColumnLight(result.coord.x, result.coord.z);
+        }
 
         // The new chunk and its neighbours may all have gained or lost visible
         // faces along the shared border, so a neighbour already being meshed is
@@ -454,6 +778,9 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         return std::chrono::duration<float>(Clock::now() - start).count() >= budgetSeconds;
     };
 
+    propagateLight(budgetSpent);
+    flushLightDirty();
+
     // Uploading is the only part still on the main thread, so it is what the
     // budget now meters.
     while (!m_readyMeshes.empty() && !budgetSpent()) {
@@ -499,7 +826,16 @@ std::vector<ChunkMeshUpdate> World::loadImmediately(const glm::vec3& position) {
     all.insert(all.end(), std::make_move_iterator(batch.begin()), std::make_move_iterator(batch.end()));
 
     for (int pass = 0; pass < 16; ++pass) {
+        // Loads, then light, then meshes. Meshing before the light has settled
+        // bakes darkness into the geometry, and the world then visibly brightens
+        // over the next second as everything is rebuilt.
         dispatchLoads(never, kUnlimited);
+        m_jobs.waitForIdle();
+        collectFinishedJobs();
+
+        propagateLight(never);
+        flushLightDirty();
+
         dispatchMeshes(centre, never, kUnlimited);
         m_jobs.waitForIdle();
         collectFinishedJobs();

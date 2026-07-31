@@ -81,6 +81,19 @@ public:
     /// be near zero to sit in front of the world.
     void setScreenMesh(const MeshData& mesh);
 
+    /// Geometry drawn in world space with its own transform and no directional
+    /// lighting, for the sun and anything else pinned to the sky.
+    void setSkyMesh(const MeshData& mesh);
+    void setSkyTransform(const glm::mat4& transform) { m_skyTransform = transform; }
+
+    /// Direction *toward* the sun. Drives the directional term on world
+    /// geometry; sky and HUD geometry ignore it.
+    void setSunDirection(const glm::vec3& direction);
+
+    /// `ambient` is the floor every surface receives, `sun` is what a surface
+    /// facing the sun adds on top.
+    void setSunLighting(float ambient, float sun);
+
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
     /// Scene geometry is already in world space, so the caller supplies only
@@ -177,6 +190,11 @@ private:
     std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
     GpuMesh m_screenMesh;
+    GpuMesh m_skyMesh;
+    glm::mat4 m_skyTransform{1.0f};
+    glm::vec3 m_sunDirection{0.0f, 1.0f, 0.0f};
+    float m_ambientLight = 0.55f;
+    float m_sunLight = 0.45f;
 
     struct RetiredMesh {
         GpuMesh mesh;

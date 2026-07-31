@@ -126,6 +126,12 @@ $mortarWeights = @(2, 4, 6, 4, 2)
 $sandPalette  = @('CFC59A', 'D6CCA3', 'DCD2AB', 'E2D8B3', 'E8DEBB')
 $sandWeights  = @(2, 4, 6, 4, 2)
 
+# Warm and blotchy, weighted toward the brighter end so it reads as a light
+# source even before anything is actually lit by it.
+$glowPalette = @('8A6A2E', 'A88338', 'C39D45', 'D9B455', 'ECCB6B')
+$glowWeights = @(2, 3, 5, 6, 5)
+$glowCoreColor = 'FFF3B8'
+
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
@@ -307,9 +313,65 @@ function New-BricksTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'bricks'
 }
 
+# Blotchy warm mineral with a scattering of bright cores, so it reads as glowing
+# rock rather than as a flat yellow tile.
+function New-GlowstoneTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $cx = [Math]::Floor($x / 2)
+            $cy = [Math]::Floor($y / 2)
+            $roll = Get-Hash01 -x $cx -y $cy -salt 211
+            $jitter = (Get-Hash01 -x $x -y $y -salt 233) * 0.3 - 0.15
+            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll + $jitter))
+            $index = Get-WeightedIndex -Roll $roll -Weights $glowWeights
+            $color = ConvertTo-Color $glowPalette[$index]
+
+            # Sparse, so the cores stay individually visible at 16 pixels.
+            if ((Get-Hash01 -x $x -y $y -salt 251) -gt 0.90) {
+                $color = ConvertTo-Color $glowCoreColor
+            }
+            $bitmap.SetPixel($x, $y, $color)
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'glowstone'
+}
+
+# A soft-edged disc rather than a hard square: the sun is the one thing in the
+# sky, so a visible staircase edge at 16 pixels would be the first thing anyone
+# notices. Alpha does the shaping; the pipeline already blends.
+function New-SunTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $centre = ($size - 1) / 2.0
+    $radius = $size * 0.44
+
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $dx = $x - $centre
+            $dy = $y - $centre
+            $distance = [Math]::Sqrt($dx * $dx + $dy * $dy)
+
+            # Opaque core, one pixel of falloff, then nothing.
+            $alpha = 1.0 - [Math]::Max(0.0, [Math]::Min(1.0, ($distance - ($radius - 1.2)) / 1.6))
+            if ($alpha -le 0.0) {
+                $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(0, 255, 255, 240))
+                continue
+            }
+
+            # Faintly warmer toward the rim, which reads as glow rather than as a
+            # flat sticker.
+            $warmth = [Math]::Min(1.0, $distance / $radius)
+            $r = 255
+            $g = [int](255 - 14 * $warmth)
+            $b = [int](236 - 60 * $warmth)
+            $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb([int](255 * $alpha), $r, $g, $b))
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'sun'
+}
+
 New-StoneTexture
-New-DirtTexture
-New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
+New-DirtTextureNew-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
 New-GrassSideTexture
 New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53
 New-ClumpedTexture -Name 'cobblestone' -Palette $cobblePalette -Weights $cobbleWeights -Salt 71 -Clump 2
@@ -317,6 +379,8 @@ New-ClumpedTexture -Name 'gravel' -Palette $gravelPalette -Weights $gravelWeight
 New-FlatTexture -Name 'snow' -Palette $snowPalette -Weights $snowWeights -Salt 97
 New-PlanksTexture
 New-BricksTexture
+New-GlowstoneTexture
+New-SunTexture
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.

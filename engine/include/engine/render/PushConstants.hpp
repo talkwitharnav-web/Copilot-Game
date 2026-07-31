@@ -12,6 +12,13 @@ namespace engine {
 /// exactly, field for field.
 struct MeshPushConstants {
     glm::mat4 modelViewProjection;
+    /// Direction *toward* the sun, normalised. `w` is unused padding: push
+    /// constant members follow std140-like rules, so a vec3 would still occupy
+    /// four floats and the padding may as well be explicit.
+    glm::vec4 sunDirection{0.0f, 1.0f, 0.0f, 0.0f};
+    /// x: ambient floor, y: how much the sun adds on top, z: 1 to apply
+    /// directional light at all. HUD and sky geometry pass 0 and stay flat.
+    glm::vec4 lighting{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
 } // namespace engine

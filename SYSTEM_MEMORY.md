@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–13 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled. Still unlit, by design. `TIMELINE.md` M14 (voxel lighting) is next.
+> **Status:** Milestones 1–14 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, and the world is lit with sky light, block light, smooth lighting and ambient occlusion. `TIMELINE.md` M15 (caves, biomes, 3D terrain) is next.
 
 ---
 
@@ -400,19 +400,61 @@ The overlay mesh rebuilds at **20 Hz**, not every frame. It changes constantly, 
 
 ---
 
+## Sun and sky
+
+A placeholder day cycle: one sun on a fixed arc, no moon, no seasons. Real directional lighting with cast shadows is M24 and needs the renderer restructure first.
+
+The sun is a **billboarded quad** drawn in world space at a fixed distance from the camera, using a layer of the block texture array so it needs no extra binding. It is depth-tested against terrain, so a hill hides it.
+
+World surfaces take a **Lambert term** against the sun direction, on top of the baked sky/block light and ambient occlusion. Sun direction, ambient floor and sun strength travel in the **push constants**, with a per-draw flag so HUD and sky geometry stay unlit.
+
+**The face normal is recovered in the fragment shader** from how world position changes across the triangle, rather than carried per vertex. Every face here is flat, so it is exact, and it kept a normal out of the vertex format — which would have cost memory on every vertex in the world. This works only because chunk geometry is drawn with an identity model matrix, so its vertex position *is* its world position.
+
+Sky colour is blue overhead, warm near the horizon and dark at night, driven by the sun's elevation. Night keeps a usable ambient floor rather than going black; this is a placeholder, and a world nobody can see in is not worth shipping over realism.
+
+> **There are no cast shadows.** A surface is lit by which way it faces, not by whether anything stands between it and the sun. Do not describe this as shadows.
+
+---
+
+## Lighting
+
+Every block stores one byte of light: **sky in the high nibble, block in the low one**, 0-15 each. This doubles a chunk to 64 KB. It is stored rather than recomputed per mesh because light crosses chunk boundaries, so it cannot be derived from a single chunk's contents.
+
+Sky light falls **straight down at full strength** and dims only when spreading sideways, which is what makes open ground uniformly bright. Block light dims in every direction. The two are independent: a surface takes the **brighter** of them, not the sum, which would blow out anywhere both reach.
+
+Propagation runs on the **main thread**, budgeted per frame. Generation and meshing get self-contained snapshots and run on workers; light cannot, because it walks freely between chunks. Adding light is a flood fill. Removing it is the harder half: it walks back everything the dead source lit, and any cell found brighter than expected has its own supply and becomes a seed to re-fill the hole.
+
+**Seeding is the part that has to stay careful.** A column's sky light is traced top-down when the last chunk of that column arrives, and only cells that can actually spread somewhere are queued — those with a horizontal neighbour whose sky reaches less far down. Queueing every lit cell instead buried the queue under tens of millions of entries and took startup from 0.7 s to 8.5 s.
+
+Chunks whose light changed are collected in a set and invalidated **once per frame**, not per cell.
+
+### Smooth lighting and ambient occlusion
+
+Each face corner averages the light of the open cells touching it, and darkens by how boxed-in it is. Two solid sides meeting seals a corner regardless of what sits diagonally behind them.
+
+Quads **split along their darker diagonal**. Without that, occlusion on opposite corners creases flat ground the wrong way, which reads as a fold in the terrain.
+
+**Light does not change the vertex format.** It is folded into the existing per-vertex colour as a brightness multiplier, which is also what carries per-corner smooth lighting and occlusion.
+
+---
+
 ## Meshing
 
 A face is emitted only where a solid block touches air. That alone is what makes voxel worlds affordable; interior faces are never created.
 
-**Adjacent identical faces are merged into single quads** (greedy meshing), which cut geometry ~6.4×. For each of the six directions the mesher walks slice by slice, builds a mask of visible faces on that slice, and grows each run as far as it can horizontally and then vertically.
+**Adjacent identical faces are merged into single quads** (greedy meshing). For each of the six directions the mesher walks slice by slice, builds a mask of visible faces on that slice, and grows each run as far as it can horizontally and then vertically.
 
-The merge key is the **texture layer**, which already encodes both block type and which way the face points, so nothing else needs comparing.
+**Only evenly lit faces merge.** A merged quad interpolates its four corners across the whole span, which matches the individual faces it replaces only when every one of them was uniform. Anything with a lighting or occlusion gradient is emitted on its own. Flat open terrain still merges; edges and corners no longer do, which cost 2.37× more geometry when lighting arrived.
 
-**No vertex format change was needed.** The sampler repeats, so a quad covering N×M blocks takes texture coordinates of 0→N and 0→M and tiles correctly. A merged quad is built by scaling the original unit-face corners, which is deliberate: scaling by positive factors cannot flip the winding, so the culling orientation that was verified on screen still holds. **Do not rewrite this to construct corners from scratch** — see `CLAUDE.md` on backface winding.
+The merge key is the **texture layer plus the corner brightness**. The layer already encodes both block type and which way the face points, so nothing else needs comparing.
+
+**No vertex format change was needed** for either merging or lighting. The sampler repeats, so a quad covering N×M blocks takes texture coordinates of 0→N and 0→M and tiles correctly. A merged quad is built by scaling the original unit-face corners, which is deliberate: scaling by positive factors cannot flip the winding, so the culling orientation that was verified on screen still holds. **Do not rewrite this to construct corners from scratch** — see `CLAUDE.md` on backface winding.
 
 Each face's `uAxis`/`vAxis` say which world axes the texture coordinates run along, read off the corner tables rather than derived. Getting them wrong stretches textures instead of tiling them, silently.
 
-> Ambient occlusion at M14 will need the merge key to include per-corner light, since faces with different lighting cannot merge. Expect merging to become less effective then.
+### What the mesher is given
+
+`ChunkVolume` is the chunk plus **one cell of padding** — 34³ of blocks and light, about 79 KB. Ambient occlusion samples diagonally, so a face on a chunk edge needs cells from as many as three neighbouring chunks at once, which the six face borders it replaced could not supply. It also turns every neighbour lookup into a plain array index instead of a chain of bounds tests.
 
 ---
 
@@ -437,6 +479,7 @@ GLM is column-major and the project builds with `GLM_FORCE_DEPTH_ZERO_TO_ONE`, s
 | `worker_threads` | Background threads for generation and meshing | **No** — restart |
 | `render_distance` | How far the world is drawn, in chunks | Yes, `F6`/`F7` |
 | `frame_cap` | Target frames per second, 0 for uncapped | Yes, `F1`/`F2` |
+| `day_length_seconds` | Real seconds for a full day and night | No — restart |
 
 Render distance is safe to change live because nothing ends up half-migrated: the next update loads or unloads the difference. Shrinking also drops meshes outside the new radius immediately, rather than waiting for those chunks to leave the unload radius, or the change appears to do nothing.
 

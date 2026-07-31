@@ -27,6 +27,8 @@ public class WinCap3 {
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
@@ -84,17 +86,28 @@ if ($Keys -ne "") {
     Start-Sleep -Milliseconds 900
 }
 
-# Client rect only: the title bar and border are not the thing being checked.
+# Absolute screen coordinates directly. `GetClientRect` plus `ClientToScreen`
+# is the tidier pair but silently leaves the origin at (0,0) when the conversion
+# fails, which captures the top-left of the desktop instead of the window.
 $rect = New-Object WinCap3+RECT
-[void][WinCap3]::GetClientRect($handle, [ref]$rect)
-$origin = New-Object WinCap3+POINT
-[void][WinCap3]::ClientToScreen($handle, [ref]$origin)
+[void][WinCap3]::GetWindowRect($handle, [ref]$rect)
+
+# A window hanging off the edge of the screen captures black where it is not
+# there to be read, so it is pulled fully into view first.
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+if ($rect.L -lt $screen.X -or $rect.T -lt $screen.Y -or $rect.R -gt ($screen.X + $screen.Width) -or
+    $rect.B -gt ($screen.Y + $screen.Height)) {
+    # SWP_NOSIZE | SWP_NOZORDER
+    [void][WinCap3]::SetWindowPos($handle, [IntPtr]::Zero, $screen.X + 20, $screen.Y + 20, 0, 0, 0x0001 -bor 0x0004)
+    Start-Sleep -Milliseconds 500
+    [void][WinCap3]::GetWindowRect($handle, [ref]$rect)
+}
 
 $width = $rect.R - $rect.L
 $height = $rect.B - $rect.T
 $bitmap = New-Object System.Drawing.Bitmap($width, $height)
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
+$graphics.CopyFromScreen($rect.L, $rect.T, 0, 0, $bitmap.Size)
 $graphics.Dispose()
 
 $bitmap.Save((Join-Path (Get-Location) $Output), [System.Drawing.Imaging.ImageFormat]::Png)

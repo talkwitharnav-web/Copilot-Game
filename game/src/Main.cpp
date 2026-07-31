@@ -15,6 +15,7 @@
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
+#include "world/Sky.hpp"
 #include "world/TerrainGenerator.hpp"
 #include "world/World.hpp"
 
@@ -39,8 +40,6 @@ namespace {
 
 constexpr std::uint32_t kWindowWidth = 1280;
 constexpr std::uint32_t kWindowHeight = 720;
-constexpr engine::ClearColor kBackgroundColor{0.45f, 0.62f, 0.80f, 1.0f};
-
 constexpr float kLookRadiansPerPixel = 0.0025f;
 
 // How far the player can reach to break or place, in metres.
@@ -108,6 +107,8 @@ const char* describeBlock(game::BlockId block) {
         return "Planks";
     case game::BlockId::Bricks:
         return "Bricks";
+    case game::BlockId::Glowstone:
+        return "Glowstone";
     default:
         return "Air";
     }
@@ -134,7 +135,8 @@ int main() {
             textureDir / "stone.png",       textureDir / "dirt.png",   textureDir / "grass_top.png",
             textureDir / "grass_side.png",  textureDir / "sand.png",   textureDir / "white.png",
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
-            textureDir / "planks.png",      textureDir / "bricks.png"};
+            textureDir / "planks.png",      textureDir / "bricks.png", textureDir / "glowstone.png",
+            textureDir / "sun.png"};
 
         engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
                                   textureDir.parent_path() / "font.png");
@@ -217,6 +219,11 @@ int main() {
         const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
+        renderer.setSkyMesh(game::sky::makeSunQuad());
+
+        // Starts mid-morning rather than at sunrise, so the first thing seen is
+        // a lit world with the sun clearly off to one side.
+        float timeOfDay = 0.18f;
         renderer.setVerticalFov(kDefaultFov);
 
         game::Player player;
@@ -265,7 +272,7 @@ int main() {
         constexpr std::array<game::BlockId, game::kHotbarSlots> hotbar{
             game::BlockId::Grass,       game::BlockId::Dirt,   game::BlockId::Stone,
             game::BlockId::Cobblestone, game::BlockId::Sand,   game::BlockId::Gravel,
-            game::BlockId::Snow,        game::BlockId::Planks, game::BlockId::Bricks};
+            game::BlockId::Planks,      game::BlockId::Bricks, game::BlockId::Glowstone};
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
 
@@ -489,7 +496,22 @@ int main() {
                 highlight = glm::translate(glm::mat4{1.0f}, glm::vec3{target.block});
             }
 
-            renderer.drawFrame(kBackgroundColor, camera.viewMatrix(), highlight);
+            timeOfDay += deltaSeconds / static_cast<float>(settings.dayLengthSeconds);
+            timeOfDay -= std::floor(timeOfDay);
+
+            const glm::vec3 sunDirection = game::sky::sunDirection(timeOfDay);
+            float ambient = 0.0f;
+            float sunStrength = 0.0f;
+            game::sky::sunLighting(sunDirection, ambient, sunStrength);
+
+            renderer.setSunDirection(sunDirection);
+            renderer.setSunLighting(ambient, sunStrength);
+            renderer.setSkyTransform(game::sky::sunTransform(camera.position, sunDirection));
+
+            const glm::vec3 sky = game::sky::skyColor(sunDirection);
+            const engine::ClearColor background{sky.r, sky.g, sky.b, 1.0f};
+
+            renderer.drawFrame(background, camera.viewMatrix(), highlight);
 
             ++framesSinceReport;
             if (now - lastReportTime >= std::chrono::seconds(1)) {

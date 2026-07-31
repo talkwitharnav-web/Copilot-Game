@@ -4,6 +4,13 @@
 layout(location = 0) in vec4 fragColor;
 layout(location = 1) in vec2 fragUv;
 layout(location = 2) flat in float fragLayer;
+layout(location = 3) in vec3 fragWorldPosition;
+
+layout(push_constant) uniform Push {
+    mat4 modelViewProjection;
+    vec4 sunDirection;
+    vec4 lighting;
+} push;
 
 layout(set = 0, binding = 0) uniform sampler2DArray blockTextures;
 // Separate from the block array because HUD sheets are a different size, and a
@@ -23,5 +30,17 @@ void main() {
     } else {
         texel = texture(blockTextures, vec3(fragUv, fragLayer));
     }
-    outColor = vec4(texel.rgb * fragColor.rgb, texel.a * fragColor.a);
+
+    vec3 rgb = texel.rgb * fragColor.rgb;
+
+    if (push.lighting.z > 0.5) {
+        // Recovered from how world position changes across the triangle, rather
+        // than carried per vertex. Every face here is flat, so this is exact,
+        // and it keeps a normal out of the vertex format entirely.
+        vec3 normal = normalize(cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition)));
+        float lambert = max(dot(normal, push.sunDirection.xyz), 0.0);
+        rgb *= push.lighting.x + push.lighting.y * lambert;
+    }
+
+    outColor = vec4(rgb, texel.a * fragColor.a);
 }
