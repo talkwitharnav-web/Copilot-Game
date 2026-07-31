@@ -2,9 +2,15 @@
 
 Current technical truth for this voxel sandbox project: what exists, where it lives, what version it is, and how to build and run it.
 
-Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
+Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. Every planned recipe lives in `CRAFTABLE.md`, and `ASSETS-REFERENCE.md` maps the reference asset dump. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–18 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in behind a loading bar, and the player walks, jumps, sprints, crouches, flies, swims, and breaks and places blocks. Broken blocks drop as items that are collected into a 36-slot inventory, opened with `E` and drawn from the artist's panel. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs and stairs. `TIMELINE.md` M19 (crafting) is next, with M17d (fences) still open as optional.
+> **Status:** Milestones 1–18 complete, plus the inserted M10b (hotbar) and M14c (placeholder sun), M17d (fences), M19a (texture fidelity) and M19b (geometry fidelity). **M19c (crafting) is in progress.**
+>
+> The game is playable: an endless seeded world streams in behind a loading bar, and the player walks, jumps, sprints, crouches, flies, swims, and breaks and places blocks. Broken blocks drop as items collected into a 36-slot inventory, opened with `E` and drawn from the artist's panel, with the full set of click, right-click and click-drag slot interactions. A 2×2 crafting grid works and makes planks and sticks. Edits and player position survive a restart, and `F5` shows per-frame diagnostics.
+>
+> Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs, stairs and fences. Every block texture and every non-cube shape has been measured against the reference dump.
+>
+> **Next:** the crafting table and its 3×3 grid, then smelting and tools — see `TIMELINE.md` M19c for the ordered list.
 
 ---
 
@@ -63,12 +69,17 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 ├── CLAUDE.md               Why decisions were made (narrative)
 ├── SYSTEM_MEMORY.md        What currently exists (this file)
 ├── TIMELINE.md             Where this is going and in what order
+├── CRAFTABLE.md            Every planned recipe, its grid, and what art it still needs
+├── ASSETS-REFERENCE.md     Map of the reference asset dump and how to read it
+├── run.ps1                 Build and launch in one command
 ├── .vscode/                Editor config + recommended extensions
 ├── tools/
 │   ├── dev-env.ps1         Loads the MSVC environment into the current shell
-│   ├── make-block-textures.ps1  Generates the block textures
+│   ├── make-block-textures.ps1  Generates the block and item sprites
+│   ├── compare-texture.ps1       Ours against the reference: palette, spread, saturation, run lengths
 │   ├── preview-textures.ps1     Magnifies textures into a labelled sheet for review
 │   ├── make-font.ps1            Regenerates the ASCII font atlas
+│   ├── make-hud-sheet.ps1       Composites the HUD and inventory art into one sheet
 │   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys
 │   ├── benchmark.ps1            Sweeps a setting and restores settings.cfg afterwards
 │   ├── convert-image.ps1        Any Windows-decodable image (incl. WebP) to PNG, with crop and integer downscale
@@ -259,9 +270,22 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `E` | Open and close the inventory |
 | `Escape` | Release the mouse cursor |
 | Left click | Recapture the cursor when released |
-| `F1` / `F2` | Lower / raise the frame cap || `F3` / `F4` | Narrow / widen the field of view (default 70°) |
+| `F1` / `F2` | Lower / raise the frame cap |
+| `F3` / `F4` | Narrow / widen the field of view (default 70°) |
 | `F5` | Toggle the diagnostics overlay |
 | `F6` / `F7` | Decrease / increase render distance (saved to `settings.cfg`) |
+
+**Inventory screen**, following the rules the genre established — anyone who has played one of these already knows them, and getting them subtly wrong is more jarring than not having them at all:
+
+| Input | Action |
+|---|---|
+| Left click a slot | Take or put down a whole stack; merges onto a matching stack and keeps the remainder; swaps if different |
+| Right click a slot | Take **half**, rounded up (7 leaves 3); or place **one** at a time |
+| Left click and sweep | Spread the carried stack **evenly** over every slot crossed |
+| Right click and sweep | Place **one** in each slot crossed |
+| Click outside the panel | Left throws the whole carried stack into the world, right throws one |
+
+A sweep only starts from a cursor that was *already* carrying something, and only counts slots that are empty or hold the same item. The distribution is applied live and replayed from scratch as the sweep grows, so what you see during the drag is what you get.
 
 Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
 
@@ -358,9 +382,21 @@ Drops are **thrown**, not released: without a forward impulse a dropped stack la
 
 Landing **bounces**, keeping 42% of the impact speed, and anything slower than 2 m/s settles outright. That threshold is what makes it terminate; removing it to get a bouncier feel turns the animation into the infinite loop described in `CLAUDE.md`.
 
-`creative_mode` in `settings.cfg` keeps infinite blocks and suppresses drops, which is what makes it possible to test anything that is not the inventory.
+`creative_mode` in `settings.cfg` keeps infinite blocks and **suppresses drops from breaking**, but items are still picked up in creative. Skipping collection instead leaves anything you drop orbiting you forever, which is the bug recorded in `CLAUDE.md`.
 
 Stack counts are drawn in the **bottom-left** of a slot, and only when there is more than one — a count of one reads as simply having the thing.
+
+### Crafting
+
+`craftResult(slots, size)` returns what a grid currently makes, and `consumeIngredients` spends it. **They are separate calls because the result is a preview until it is taken** — the player sees what a grid would make, then decides.
+
+A recipe's pattern is stored **at its own size**, not padded to the grid. The matcher finds the bounding box of the filled cells and compares the pattern against that, so a 1×2 recipe is craftable in either column of a 2×2 and anywhere in a 3×3. Since `craftResult` takes the grid size as an argument, a crafting table is a layout change rather than a matcher change.
+
+Shapeless matching **counts leftovers**: after ticking off each ingredient it checks nothing else is in the grid, or a grid holding an extra item would still craft and quietly eat it.
+
+Recipes live in one table in `item/Recipe.cpp`. Shapes and yields come from the reference recipe JSON — `CRAFTABLE.md` records every recipe, whether we can build it today, and what art it still needs.
+
+Closing the inventory **returns crafting ingredients** to the inventory, not just the cursor stack. Items left in a grid the player cannot see are items that quietly vanish.
 
 ---
 
@@ -456,11 +492,16 @@ Placement gates on `Biome::treeDensity`, on the biome's surface block being gras
 
 ### Block shapes
 
-Everything before M17b was a unit cube, and both meshing and collision assumed it. `BlockShape` is where that assumption is now written down: `Empty`, `Full`, `Cross` (plants), `Slab` and `Stairs`.
+Everything before M17b was a unit cube, and both meshing and collision assumed it. `BlockShape` is where that assumption is now written down: `Empty`, `Full`, `Cross` (plants), `Slab`, `Stairs` and `Fence`.
+
+Dimensions match the reference models exactly, verified at M19b against `models/block/*.json`: slabs at `0–8` and `8–16` sixteenths, a stair's step at `[8,8,0]→[16,16,16]`, the fence post at `[6,0,6]→[10,16,10]`, its rails at `6–9` and `12–15`, and a plant's blades spanning `0.8–15.2`.
 
 **`collisionBoxes` is the single source of truth for a block's extent**, read by the mesher, by physics and by the targeting raycast. Keep it that way: the moment two of them compute a shape independently, they will disagree.
 
-**`selectionBoxes` is what the crosshair picks**, and it is deliberately *not* always the collision shape. A plant is walked straight through and still has to be breakable, so it collides with nothing and selects as a slim column. That is the only case so far where the two differ.
+**Two deliberate exceptions**, both of which earned their place by having a real second case rather than an anticipated one:
+
+- **`selectionBoxes`** is what the crosshair picks. A plant is walked straight through and still has to be breakable, so it collides with nothing and selects as a slim column.
+- **`fenceRailBoxes`** is what gets *drawn*. A fence renders as a post and two thin rails, but collides as a post and solid full-height arms — modelling the gap between the rails would let the player squeeze through a fence line.
 
 The raycast intersects those boxes rather than treating cell entry as a hit. Testing the cell instead put a placed slab *beside* its neighbour rather than on top: a slab fills half its cell, so a ray aimed at its top from a distance crosses the empty upper half first and reported entry through the side.
 
