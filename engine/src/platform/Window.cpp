@@ -62,6 +62,8 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_F3;
     case Key::F4:
         return GLFW_KEY_F4;
+    case Key::F5:
+        return GLFW_KEY_F5;
     }
     return GLFW_KEY_UNKNOWN;
 }
@@ -133,6 +135,9 @@ bool fromGlfwKey(int glfwKey, Key& out) {
         return true;
     case GLFW_KEY_F4:
         out = Key::F4;
+        return true;
+    case GLFW_KEY_F5:
+        out = Key::F5;
         return true;
     default:
         return false;

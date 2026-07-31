@@ -7,6 +7,7 @@
 #include <engine/render/VulkanContext.hpp>
 
 #include "hud/Crosshair.hpp"
+#include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
@@ -59,6 +60,15 @@ constexpr float kMaxFov = 110.0f;
 // Two Space presses closer together than this toggle flight. Long enough to be
 // comfortable, short enough that ordinary repeated jumping does not trigger it.
 constexpr float kDoubleTapSeconds = 0.3f;
+
+// Frames shown in the diagnostics graph. At 120 fps this is about a second and a
+// half of history, which is long enough to catch a stutter and short enough that
+// the graph still reacts.
+constexpr std::size_t kFrameHistoryLength = 160;
+
+// The overlay changes every frame, but rebuilding its mesh that often would
+// churn GPU buffers for no visible benefit.
+constexpr auto kOverlayRefreshInterval = std::chrono::milliseconds(50);
 
 // Time allowed per frame for generating and meshing chunks. Anything left over
 // waits for the next frame, so a burst of new terrain slows the horizon down
@@ -117,7 +127,8 @@ int main() {
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
             textureDir / "planks.png",      textureDir / "bricks.png"};
 
-        engine::Renderer renderer(context, window, blockTextures);
+        engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
+                                  textureDir.parent_path() / "font.png");
 
         std::size_t capIndex = kDefaultFpsCapIndex;
         engine::FrameLimiter frameLimiter(kFpsCapOptions[capIndex]);
@@ -196,6 +207,7 @@ int main() {
         engine::logInfo("Left click breaks, right click places. 1-9 or scroll pick a block.");
         engine::logInfo("Double-tap Space to fly. Descend onto the ground to land.");
         engine::logInfo("Escape releases the mouse; click to recapture.");
+        engine::logInfo("F5 toggles the diagnostics overlay.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
         using Clock = std::chrono::steady_clock;
@@ -214,16 +226,26 @@ int main() {
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
 
-        // Crosshair and hotbar share one screen mesh, rebuilt only when the
-        // selection changes.
-        const auto rebuildHud = [&] {
-            engine::MeshData hud = game::makeCrosshair();
-            const engine::MeshData bar = game::makeHotbar(hotbar, selectedSlot);
+        bool overlayVisible = false;
+        std::vector<float> frameHistory;
+        frameHistory.reserve(kFrameHistoryLength);
+        auto lastHudRebuild = previousTime;
 
-            const auto base = static_cast<std::uint32_t>(hud.vertices.size());
-            hud.vertices.insert(hud.vertices.end(), bar.vertices.begin(), bar.vertices.end());
-            for (const std::uint32_t index : bar.indices) {
-                hud.indices.push_back(base + index);
+        // Crosshair, hotbar and the diagnostics panel share one screen mesh.
+        const auto rebuildHud = [&](const game::OverlayStats& stats) {
+            engine::MeshData hud = game::makeCrosshair();
+
+            const auto append = [&](const engine::MeshData& part) {
+                const auto base = static_cast<std::uint32_t>(hud.vertices.size());
+                hud.vertices.insert(hud.vertices.end(), part.vertices.begin(), part.vertices.end());
+                for (const std::uint32_t index : part.indices) {
+                    hud.indices.push_back(base + index);
+                }
+            };
+
+            append(game::makeHotbar(hotbar, selectedSlot));
+            if (overlayVisible) {
+                append(game::makeDebugOverlay(stats, frameHistory, renderer.aspectRatio()));
             }
 
             renderer.setScreenMesh(hud);
@@ -236,6 +258,11 @@ int main() {
             const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
             previousTime = now;
             secondsSinceSpacePress += deltaSeconds;
+
+            frameHistory.push_back(deltaSeconds * 1000.0f);
+            if (frameHistory.size() > kFrameHistoryLength) {
+                frameHistory.erase(frameHistory.begin());
+            }
 
             for (const engine::Key key : window.consumeKeyPresses()) {
                 if (key == engine::Key::Escape) {
@@ -253,6 +280,11 @@ int main() {
                     } else {
                         secondsSinceSpacePress = 0.0f;
                     }
+                    continue;
+                }
+                if (key == engine::Key::F5) {
+                    overlayVisible = !overlayVisible;
+                    hudDirty = true;
                     continue;
                 }
                 if (key >= engine::Key::Num1 && key <= engine::Key::Num9) {
@@ -300,10 +332,28 @@ int main() {
                 hudDirty = true;
             }
 
-            if (hudDirty) {
-                rebuildHud();
-                engine::logInfo(std::string("Holding: ") + describeBlock(hotbar[selectedSlot]));
-                hudDirty = false;
+            // The overlay wants refreshing continuously; everything else only
+            // when the selection changes.
+            const bool overlayDue = overlayVisible && now - lastHudRebuild >= kOverlayRefreshInterval;
+            if (hudDirty || overlayDue) {
+                game::OverlayStats stats;
+                stats.frameMilliseconds = deltaSeconds * 1000.0f;
+                stats.gpuMilliseconds = renderer.stats().gpuMilliseconds;
+                stats.fps = deltaSeconds > 0.0f ? static_cast<int>(1.0f / deltaSeconds) : 0;
+                stats.loadedChunks = world.loadedChunkCount();
+                stats.meshes = renderer.meshCount();
+                stats.pending = world.pendingChunkCount();
+                stats.retired = renderer.retiredMeshCount();
+                stats.drawCalls = renderer.stats().drawCalls;
+                stats.triangles = renderer.stats().triangles;
+
+                rebuildHud(stats);
+                lastHudRebuild = now;
+
+                if (hudDirty) {
+                    engine::logInfo(std::string("Holding: ") + describeBlock(hotbar[selectedSlot]));
+                    hudDirty = false;
+                }
             }
 
             const engine::CursorDelta look = window.consumeCursorDelta();

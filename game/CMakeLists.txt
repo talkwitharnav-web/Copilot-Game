@@ -1,6 +1,8 @@
 add_executable(game
     src/Main.cpp
     src/hud/Crosshair.cpp
+    src/hud/DebugOverlay.cpp
+    src/hud/HudPrimitives.cpp
     src/hud/Hotbar.cpp
     src/world/Noise.cpp
     src/world/World.cpp

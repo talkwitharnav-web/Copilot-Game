@@ -49,7 +49,8 @@ VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayou
 } // namespace
 
 Renderer::Renderer(const VulkanContext& context, Window& window,
-                   const std::vector<std::filesystem::path>& blockTextures)
+                   const std::vector<std::filesystem::path>& blockTextures,
+                   const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture)
     : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
       m_depthImage(std::make_unique<DepthImage>(context, m_swapchain.extent())) {
     createCommandResources();
@@ -57,6 +58,8 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
     // Order matters: the texture upload needs the command pool, and the pipeline
     // needs the descriptor set layout that describes it.
     m_blockTextures = std::make_unique<TextureArray>(context, m_commandPool, blockTextures);
+    m_hudTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{hudTexture});
+    m_fontTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{fontTexture});
     createDescriptorResources();
 
     m_trianglePipeline = std::make_unique<GraphicsPipeline>(
@@ -65,6 +68,46 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
         m_descriptorSetLayout);
 
     createSyncObjects();
+    createTimestampPool();
+}
+
+void Renderer::createTimestampPool() {
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_context.physicalDevice(), &properties);
+
+    // A period of zero means the device does not support timestamps at all.
+    m_timestampPeriodNanoseconds = properties.limits.timestampPeriod;
+    m_timestampsSupported = m_timestampPeriodNanoseconds > 0.0f;
+    if (!m_timestampsSupported) {
+        logWarn("GPU timestamps unsupported; GPU frame time will read as zero.");
+        return;
+    }
+
+    VkQueryPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    poolInfo.queryCount = kFramesInFlight * 2;
+    vkCheck(vkCreateQueryPool(m_context.device(), &poolInfo, nullptr, &m_timestampPool), "vkCreateQueryPool");
+
+    m_timestampsPending.assign(kFramesInFlight, false);
+}
+
+void Renderer::readGpuTimestamps() {
+    if (!m_timestampsSupported || !m_timestampsPending[m_currentFrame]) {
+        return;
+    }
+
+    // Only safe because the caller has just waited on this frame's fence, so the
+    // submission that wrote these timestamps has finished.
+    std::uint64_t results[2]{};
+    const VkResult result =
+        vkGetQueryPoolResults(m_context.device(), m_timestampPool, m_currentFrame * 2, 2, sizeof(results), results,
+                              sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
+
+    if (result == VK_SUCCESS && results[1] > results[0]) {
+        const double ticks = static_cast<double>(results[1] - results[0]);
+        m_stats.gpuMilliseconds = static_cast<float>(ticks * m_timestampPeriodNanoseconds / 1.0e6);
+    }
 }
 
 Renderer::~Renderer() {
@@ -90,8 +133,14 @@ Renderer::~Renderer() {
         vkDestroyDescriptorSetLayout(m_context.device(), m_descriptorSetLayout, nullptr);
     }
     m_blockTextures.reset();
+    m_hudTexture.reset();
+    m_fontTexture.reset();
 
     destroySyncObjects();
+
+    if (m_timestampPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(m_context.device(), m_timestampPool, nullptr);
+    }
 
     if (m_commandPool != VK_NULL_HANDLE) {
         // Destroying the pool frees every command buffer allocated from it.
@@ -118,22 +167,24 @@ void Renderer::createCommandResources() {
 }
 
 void Renderer::createDescriptorResources() {
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    for (std::uint32_t index = 0; index < bindings.size(); ++index) {
+        bindings[index].binding = index;
+        bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[index].descriptorCount = 1;
+        bindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
+    layoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
     vkCheck(vkCreateDescriptorSetLayout(m_context.device(), &layoutInfo, nullptr, &m_descriptorSetLayout),
             "vkCreateDescriptorSetLayout");
 
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 1;
+    poolSize.descriptorCount = static_cast<std::uint32_t>(bindings.size());
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -150,21 +201,30 @@ void Renderer::createDescriptorResources() {
     allocInfo.pSetLayouts = &m_descriptorSetLayout;
     vkCheck(vkAllocateDescriptorSets(m_context.device(), &allocInfo, &m_descriptorSet), "vkAllocateDescriptorSets");
 
-    // The texture never changes, so the set is written once here rather than
+    // Neither texture ever changes, so the set is written once here rather than
     // per frame.
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.imageView = m_blockTextures->view();
-    imageInfo.sampler = m_blockTextures->sampler();
+    std::array<VkDescriptorImageInfo, 3> images{};
+    images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    images[0].imageView = m_blockTextures->view();
+    images[0].sampler = m_blockTextures->sampler();
+    images[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    images[1].imageView = m_hudTexture->view();
+    images[1].sampler = m_hudTexture->sampler();
+    images[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    images[2].imageView = m_fontTexture->view();
+    images[2].sampler = m_fontTexture->sampler();
 
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &imageInfo;
-    vkUpdateDescriptorSets(m_context.device(), 1, &write, 0, nullptr);
+    std::array<VkWriteDescriptorSet, 3> writes{};
+    for (std::uint32_t index = 0; index < writes.size(); ++index) {
+        writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[index].dstSet = m_descriptorSet;
+        writes[index].dstBinding = index;
+        writes[index].descriptorCount = 1;
+        writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[index].pImageInfo = &images[index];
+    }
+
+    vkUpdateDescriptorSets(m_context.device(), static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void Renderer::retire(GpuMesh& slot) {
@@ -266,6 +326,11 @@ std::size_t Renderer::meshCount() const {
     return m_meshes.size() - m_freeSlots.size();
 }
 
+float Renderer::aspectRatio() const {
+    const VkExtent2D extent = m_swapchain.extent();
+    return extent.height == 0 ? 1.0f : static_cast<float>(extent.width) / static_cast<float>(extent.height);
+}
+
 void Renderer::setOverlayMesh(const MeshData& mesh) {
     uploadInto(m_overlayMesh, mesh);
 }
@@ -355,6 +420,16 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkCheck(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer");
 
+    m_frameDrawCalls = 0;
+    m_frameTriangles = 0;
+
+    // Queries must be reset on the GPU timeline before being written again, and
+    // this frame slot's previous results have already been read by now.
+    if (m_timestampsSupported) {
+        vkCmdResetQueryPool(commandBuffer, m_timestampPool, m_currentFrame * 2, 2);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_timestampPool, m_currentFrame * 2);
+    }
+
     const VkImage image = m_swapchain.images()[imageIndex];
     const VkExtent2D extent = m_swapchain.extent();
 
@@ -433,6 +508,9 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         if (mesh.indexCount == 0) {
             return;
         }
+        ++m_frameDrawCalls;
+        m_frameTriangles += mesh.indexCount / 3;
+
         const MeshPushConstants push{transform};
         vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(MeshPushConstants), &push);
@@ -469,6 +547,11 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
+    if (m_timestampsSupported) {
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_timestampPool,
+                            m_currentFrame * 2 + 1);
+    }
+
     vkCheck(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
 }
 
@@ -486,6 +569,10 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     const VkDevice device = m_context.device();
 
     vkCheck(vkWaitForFences(device, 1, &m_frameInFlight[m_currentFrame], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+
+    // The fence above guarantees this frame slot's previous submission is done,
+    // which is exactly when its timestamps become readable.
+    readGpuTimestamps();
 
     std::uint32_t imageIndex = 0;
     const VkResult acquireResult = vkAcquireNextImageKHR(device, m_swapchain.handle(), UINT64_MAX,
@@ -505,6 +592,13 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     const VkCommandBuffer commandBuffer = m_commandBuffers[m_currentFrame];
     vkCheck(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer");
     recordCommands(commandBuffer, imageIndex, color, projectionMatrix() * view, overlayTransform);
+
+    // Recording is const, so the counters it fills are published here.
+    m_stats.drawCalls = m_frameDrawCalls;
+    m_stats.triangles = m_frameTriangles;
+    if (m_timestampsSupported) {
+        m_timestampsPending[m_currentFrame] = true;
+    }
 
     // We now write the image as a colour attachment rather than a transfer
     // target, so the wait happens at the stage that actually does that writing.

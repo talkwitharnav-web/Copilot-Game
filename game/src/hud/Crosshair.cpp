@@ -23,10 +23,10 @@ constexpr float kBorder = 0.0006f;
 constexpr float kInnerDepth = 0.0f;
 constexpr float kBorderDepth = 0.0001f;
 
-constexpr glm::vec3 kInnerColor{0.95f, 0.95f, 0.95f};
-constexpr glm::vec3 kBorderColor{0.04f, 0.04f, 0.05f};
+constexpr glm::vec4 kInnerColor{0.95f, 0.95f, 0.95f, 1.0f};
+constexpr glm::vec4 kBorderColor{0.04f, 0.04f, 0.05f, 1.0f};
 
-void appendQuad(engine::MeshData& mesh, float halfWidth, float halfHeight, float depth, const glm::vec3& color) {
+void appendQuad(engine::MeshData& mesh, float halfWidth, float halfHeight, float depth, const glm::vec4& color) {
     const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
     const float layer = static_cast<float>(TextureLayer::White);
 
@@ -35,7 +35,7 @@ void appendQuad(engine::MeshData& mesh, float halfWidth, float halfHeight, float
 
     for (const glm::vec2& corner : corners) {
         mesh.vertices.push_back(engine::Vertex{
-            {corner.x, corner.y, depth}, {color.r, color.g, color.b}, {0.5f, 0.5f}, layer});
+            {corner.x, corner.y, depth}, {color.r, color.g, color.b, color.a}, {0.5f, 0.5f}, layer});
     }
 
     // Both windings. Backface culling is on, and screen-space geometry skips the

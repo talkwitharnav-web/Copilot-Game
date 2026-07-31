@@ -37,7 +37,7 @@ void appendBox(engine::MeshData& mesh, const glm::vec3& lo, const glm::vec3& hi)
         for (const glm::vec3& corner : face.corners) {
             const glm::vec3 p = glm::mix(lo, hi, corner);
             mesh.vertices.push_back(engine::Vertex{{p.x, p.y, p.z},
-                                                   {kColor.r, kColor.g, kColor.b},
+                                                   {kColor.r, kColor.g, kColor.b, 1.0f},
                                                    {0.5f, 0.5f},
                                                    static_cast<float>(TextureLayer::White)});
         }

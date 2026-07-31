@@ -13,9 +13,10 @@ namespace engine {
 /// is one edit here plus one in the shader, never a hunt across the renderer.
 struct Vertex {
     float position[3];
-    /// Face shading, not material colour. Multiplied with the sampled texel, so
-    /// white leaves the texture untouched.
-    float color[3];
+    /// Face shading and opacity, multiplied with the sampled texel. Opaque white
+    /// leaves a texture untouched; the alpha channel is what lets HUD panels sit
+    /// over the world without hiding it.
+    float color[4];
     float uv[2];
     /// Which layer of the texture array to sample. A float because vertex
     /// attributes feed the shader most simply that way.

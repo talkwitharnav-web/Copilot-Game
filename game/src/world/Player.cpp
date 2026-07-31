@@ -144,8 +144,23 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         player.velocity = distance <= maxStep ? target : player.velocity + difference * (maxStep / distance);
         player.onGround = false;
     } else {
-        player.velocity.x = wish.x * speed;
-        player.velocity.z = wish.z * speed;
+        // Eased as one horizontal vector, for the same reason flight is: per-axis
+        // easing stops one axis dead while starting another, which turns a
+        // direction change into a stutter instead of a curve.
+        const glm::vec2 target{wish.x * speed, wish.z * speed};
+        const glm::vec2 current{player.velocity.x, player.velocity.z};
+        const glm::vec2 difference = target - current;
+        const float distance = glm::length(difference);
+
+        const bool wantsToMove = glm::dot(target, target) > 0.0f;
+        const float rate = player.onGround ? (wantsToMove ? kGroundAcceleration : kGroundDeceleration)
+                                           : (wantsToMove ? kAirAcceleration : kAirDeceleration);
+        const float maxStep = rate * dt;
+
+        const glm::vec2 next =
+            distance <= maxStep ? target : current + difference * (maxStep / distance);
+        player.velocity.x = next.x;
+        player.velocity.z = next.y;
 
         if (input.jump && player.onGround) {
             player.velocity.y = kJumpVelocity;

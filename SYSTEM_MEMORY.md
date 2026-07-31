@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–9 complete. The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, and breaks and places textured blocks. Still single-threaded and unlit, both by design. `TIMELINE.md` M10 (world persistence) is next.
+> **Status:** Milestones 1–11 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Still single-threaded and unlit, both by design. `TIMELINE.md` M12 (job system and multithreading) is next.
 
 ---
 
@@ -65,7 +65,13 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 ├── TIMELINE.md             Where this is going and in what order
 ├── .vscode/                Editor config + recommended extensions
 ├── tools/
-│   └── dev-env.ps1         Loads the MSVC environment into the current shell
+│   ├── dev-env.ps1         Loads the MSVC environment into the current shell
+│   ├── make-block-textures.ps1  Generates the block textures
+│   ├── preview-textures.ps1     Magnifies textures into a labelled sheet for review
+│   ├── make-font.ps1            Regenerates the ASCII font atlas
+│   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys
+│   ├── convert-image.ps1        Any Windows-decodable image (incl. WebP) to PNG, with crop and integer downscale
+│   └── probe-image.ps1          Dumps pixel runs along a row or column
 ├── engine/                 The reusable engine — a static library, knows nothing about the game
 │   ├── CMakeLists.txt
 │   ├── include/engine/     Public headers: what the game is allowed to use
@@ -167,14 +173,19 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 
 | Component | Header | Responsibility |
 |---|---|---|
-| `Block` | `world/Block.hpp` | The block ID enum, whether an ID is solid, and its flat colour. Colours are placeholders until textures exist. |
+| `Block` | `world/Block.hpp` | The block ID enum, whether an ID is solid, and which texture layer each face uses. `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher. |
 | `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
 | `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion. An integer hash, so it is reproducible on any machine without storing anything. |
 | `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what makes background generation a migration rather than a rewrite. |
 | `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a chunk plus its six neighbours into mesh data, emitting only faces that touch air. Neighbours are passed in rather than looked up, which keeps meshing pure too. |
 | `World` | `world/World.hpp` | Owns every loaded chunk in a hash map keyed by chunk coordinate, and streams them in and out around the player. The single owner of block state. |
+| `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction. |
 | `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
 | `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. |
+| `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, and isometric block icons. |
+| `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
+| `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. |
+| `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and numeric rows. |
 | `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
 
 ---
@@ -229,14 +240,16 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `W` `A` `S` `D` | Move horizontally, relative to facing |
 | `Space` | Jump (walking) / rise (flying) |
 | `Left Shift` | Sneak (walking) / descend (flying) |
-| `Left Ctrl` | Sprint |
-| `F` | Toggle free-fly debug mode |
+| `Left Ctrl` | Sprint (also sprint-fly) |
+| Double-tap `Space` | Toggle flight |
 | Left click | Break the targeted block (hold to repeat) |
 | Right click | Place against the targeted face (hold to repeat) |
-| `1` `2` `3` `4` | Choose stone / dirt / grass / sand |
+| `1` – `9` / scroll | Select a hotbar slot |
 | `Escape` | Release the mouse cursor |
 | Left click | Recapture the cursor when released |
 | `F1` / `F2` | Lower / raise the frame cap |
+| `F3` / `F4` | Narrow / widen the field of view (default 70°) |
+| `F5` | Toggle the diagnostics overlay |
 
 Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
 
@@ -249,13 +262,18 @@ The player is an axis-aligned box, **0.6 m wide, 1.8 m tall**, with eyes at **1.
 | Quantity | Value |
 |---|---|
 | Walk / sprint / sneak | 4.317 / 5.612 / 1.295 m/s |
-| Fly | 22 m/s |
+| Fly / sprint-fly | 11 / 22 m/s |
+| Fly acceleration / deceleration | 38 / 26 m/s² |
+| Ground acceleration / deceleration | 30 / 42 m/s² |
+| Air acceleration / deceleration | 9 / 2 m/s² |
 | Gravity | 32 m/s² |
 | Terminal velocity | 78.4 m/s |
 | Jump apex | ~1.25 blocks |
 | Automatic step-up | 0.6 m |
 
 These are tuning numbers, not part of the game's identity, and are expected to change once there is real content to move through.
+
+**All movement eases in and out**, as a single horizontal velocity vector rather than per axis, so changing direction curves through the turn instead of stopping one axis and starting another. Stopping is quicker than starting, which is what keeps the player feeling planted rather than skating. Airborne rates are far lower — steering mid-jump is deliberately feeble and air drag is nearly nothing, so a jump commits to its arc. Flight ends when a *downward* move collides — clipping a wall sideways does not land you, and hovering has no vertical movement to collide at all.
 
 **Collision resolves one axis at a time** — vertical first, then X, then Z. Resolving all three simultaneously leaves the maths unable to tell which direction to push out of a corner, which shows up as jitter or as sliding diagonally through walls. Vertical runs first so that "am I on the ground" is settled before the horizontal move decides whether a step-up is permitted.
 
@@ -308,6 +326,76 @@ Blocks whose faces differ are handled by the `BlockFace` parameter rather than b
 The PNGs are ordinary files and may be edited by hand instead; the script is a starting point, not a pipeline step. `tools/preview-textures.ps1` magnifies textures into a labelled sheet, because 16×16 cannot be judged at actual size.
 
 Third-party textures kept for visual reference live in `reference/`, which is gitignored and deliberately outside `assets/` so the build cannot copy them into the game.
+
+---
+
+## HUD
+
+Screen-space geometry is a separate mesh drawn last, with no view or projection — only an aspect correction, so coordinates are relative to window **height** on both axes and a square stays square. Y is positive *downward*.
+
+Everything is built from `hud::` primitives: axis-aligned quads, sprite-sheet regions, free-corner quads, text, and isometric block icons.
+
+**Every HUD quad is emitted with both windings.** Backface culling is on, and screen geometry skips the projection that establishes which way is front. Deriving that has gone wrong before and fails completely silently, so two extra triangles per quad buys certainty.
+
+### The sprite sheet
+
+`assets/textures/hud.png` is loaded as a **second texture binding**, not a layer of the block array, because a texture array requires every layer to share one size and the sheet is 185×41 against the blocks' 16×16. A **negative vertex layer** is the agreed signal for the shader to sample it. Hearts, food and the XP bar are already in the sheet, unused.
+
+> The sheet is recognisably Minecraft's HUD widget art and is a placeholder to replace before any release.
+
+### Text
+
+`assets/textures/font.png` is a **third texture binding**, selected by layer `-2.0` (the HUD sheet is `-1.0`). It is a 128×84 atlas: printable ASCII 32–126 in a 16×6 grid of 8×14 cells, rendered from Consolas with hinted 1-bit rasterisation so every glyph lands on whole pixels. `tools/make-font.ps1` regenerates it.
+
+`hud::appendText` emits one textured quad per character at a fixed advance. Sizes should be chosen so a cell maps to whole pixels — `14.0f / 360.0f` is 1:1 at 720p — because the sampler is nearest-neighbour and any other ratio doubles some rows and not others.
+
+> The sheet is recognisably Minecraft's HUD widget art and is a placeholder to replace before any release.
+
+### Hotbar
+
+Cell frames are drawn as **four edge strips** rather than one quad. The artwork's slot interiors are solid black, so a single quad would hide the world behind them; leaving the middle out is what makes the slot see-through. A dark translucent quad then tints the interior so icons stay readable against bright sky.
+
+The bevel is **three pixels on the top and left but two on the bottom and right** — that asymmetry is what makes a cell look raised, and it means the interior is *not* centred on the tile. Everything inside a cell positions from the interior centre; using the tile centre puts icons visibly high and left.
+
+The selected cell uses a larger sprite and a **nearer depth band than every other cell**, so its oversized frame draws over its neighbours rather than being clipped by them.
+
+Block icons are isometric: three quads (top, front, right) at 30°, using the same face shades as the world mesher so an icon reads like the block it places.
+
+### Transparency
+
+`Vertex::color` carries alpha and the pipeline blends. World geometry is opaque, so blending is a no-op for it; it exists only so HUD panels can sit over the scene.
+
+---
+
+## World Persistence
+
+Generation is a pure function of `(seed, chunkCoord)`, so an untouched chunk is already perfectly reproducible. A save is therefore the **difference** between the generated world and the played one, which keeps it small no matter how far the player travels.
+
+A chunk is flagged `modified` the moment `setBlock` changes something, and only flagged chunks are ever written. The write happens **immediately before the chunk is erased** on unload — not queued — because a modified chunk erased before writing would silently revert. Loading checks disk first and falls back to the generator.
+
+Each chunk is one file under `saves/world_<seed>/chunks/`, written to a `.tmp` name and then **renamed**. Rename is atomic on Windows and POSIX, so the file on disk is always either the complete old version or the complete new one, never a mixture.
+
+Every file carries a header with magic, format version, seed, its own coordinates and block count, **all four checked on load**. This is the only place the game reads bytes it did not produce this run, so it validates rather than assumes. Player position and view direction live in `player.dat` beside the chunks.
+
+One file per chunk is deliberately crude: a bad write damages exactly one chunk and it needs no index to stay consistent. A packed region format belongs with M13 if file count ever becomes the problem.
+
+---
+
+## Rendering Statistics
+
+`Renderer::stats()` reports the last completed frame's GPU time, draw calls and triangle count.
+
+GPU time comes from **timestamp queries** written at the top and bottom of the command buffer, read back only after that frame slot's fence has been waited on — which is exactly when the results are guaranteed available. It measures real device work rather than how long the CPU waited. A `timestampPeriod` of zero means the device does not support timestamps, in which case the figure reads zero and a warning is logged.
+
+### Diagnostics overlay
+
+`F5` draws a compact panel in the top-left: a 160-frame frame-time graph over nine labelled rows — fps, cpu ms, gpu ms, chunks, meshes, queued, retired, draws, tris.
+
+**Frame time is the headline, not fps.** Frames per second is an average, and an average hides the one 30 ms frame that is what actually felt bad. The graph shows every frame individually, clamped at 25 ms, with a single guide line at the 60 fps budget. Bars turn from green to orange when a frame misses that budget.
+
+Rows are real text, not colour codes. An earlier version used colour swatches with the key logged to the console; it was unreadable in practice, which is what prompted building the font.
+
+The overlay mesh rebuilds at **20 Hz**, not every frame. It changes constantly, and rebuilding per frame would churn GPU buffers for no readable benefit.
 
 ---
 
@@ -382,7 +470,7 @@ The window shows a solid dark blue and nothing else. That is the intended and co
 Verified 2026-07-30 on this machine.
 
 - **Configure:** `cmake --preset debug` succeeds. GLFW 3.4 fetched, `Found Vulkan: 1.4.357` with `glslc` and `glslangValidator` components.
-- **Compile:** clean build, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build (`triangle.vert.spv` 1512 bytes, `triangle.frag.spv` 572 bytes).
+- **Compile:** clean build, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build.
 - **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
 - **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
 - **M3 result:** six shaded boxes on a ground plane, 144 vertices / 72 triangles, render solid with correct mutual occlusion from every angle. Free-fly camera confirmed smooth with no ghosting or artifacting. Resizing rebuilds both swapchain and depth image cleanly.
@@ -391,11 +479,14 @@ Verified 2026-07-30 on this machine.
 - **M6 result:** player spawns on the surface at the world centre and walks, jumps, sprints and sneaks across terrain without clipping into blocks or falling through the world. Steady 120–122 fps against a 120 fps cap with collision running every frame.
 - **M7 result:** breaking and placing work across chunk boundaries with no holes or stale geometry, at 12 m reach with hold-to-repeat.
 - **M8 result:** verified over a continuous 135-second flight. Loaded chunks oscillated in a bounded 594–663 band and mesh slots 441–555, tracking each other; pending work spiked to 78 and returned to zero every time; retired GPU buffers stayed at zero throughout. Frame rate held **119–121 fps** with no hitch at any point. Initial load is ~970 ms for 507 chunks, taken as a deliberate one-off stall at startup rather than pop-in.
+- **M9 result:** ten block textures plus a white utility layer in one sRGB texture array with a full mip chain. Frame rate and streaming counters were unchanged from M8, so texturing cost nothing measurable.
+- **M10 result:** a 43-minute session across hundreds of chunks wrote exactly **one** 32,796-byte chunk file — 32,768 blocks plus a 28-byte header — because only one chunk was edited. Relaunching restored both the edits and the player's position.
+- **M10b result:** hotbar, isometric icons and translucent slots added with no measurable change to frame rate or streaming counters.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.
 - **GPU load:** ~9 W at ~500 MHz core clock while rendering the triangle, i.e. essentially idle. Third-party overlay tools report an implausible frame rate on this machine; trust the engine's own counter (see the third-party layer note above).
-- **Shutdown:** closing the window logs `Window closed. Shutting down.` and exits through the normal path with no validation errors and no crash.
+- **Shutdown:** closing the window saves every modified chunk and the player's position, logs how many chunks were written, and exits through the normal path with no validation errors and no crash.
 
 ---
 

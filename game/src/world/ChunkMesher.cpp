@@ -121,7 +121,7 @@ engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours
                         const glm::vec3 p = blockOrigin + face.corners[corner];
                         const glm::vec2 uv = face.uvs[corner];
                         mesh.vertices.push_back(engine::Vertex{
-                            {p.x, p.y, p.z}, {color.r, color.g, color.b}, {uv.x, uv.y}, layer});
+                            {p.x, p.y, p.z}, {color.r, color.g, color.b, 1.0f}, {uv.x, uv.y}, layer});
                     }
 
                     mesh.indices.insert(mesh.indices.end(),

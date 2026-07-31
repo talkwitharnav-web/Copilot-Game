@@ -35,13 +35,23 @@ struct ClearColor {
 using MeshHandle = std::uint32_t;
 inline constexpr MeshHandle kInvalidMesh = ~MeshHandle{0};
 
+/// What the last completed frame cost. GPU time is measured on the device with
+/// timestamp queries, so it reports actual work rather than how long the CPU
+/// waited.
+struct RenderStats {
+    float gpuMilliseconds = 0.0f;
+    std::uint32_t drawCalls = 0;
+    std::uint32_t triangles = 0;
+};
+
 /// Drives one frame of GPU work: acquire an image, record commands, submit, present.
 class Renderer {
 public:
     /// `blockTextures` are loaded into a texture array in the order given; the
-    /// index into that list is what a vertex's `layer` refers to.
-    Renderer(const VulkanContext& context, Window& window,
-             const std::vector<std::filesystem::path>& blockTextures);
+    /// index into that list is what a vertex's `layer` refers to. `hudTexture`
+    /// and `fontTexture` are separate sheets, selected by negative layers.
+    Renderer(const VulkanContext& context, Window& window, const std::vector<std::filesystem::path>& blockTextures,
+             const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -90,6 +100,12 @@ public:
 
     std::size_t meshCount() const;
 
+    const RenderStats& stats() const { return m_stats; }
+
+    /// Width divided by height. Screen-space geometry is built in units relative
+    /// to window height, so anything anchored to a left or right edge needs this.
+    float aspectRatio() const;
+
     /// Buffers freed but still held back until in-flight frames finish with
     /// them. Should hover near zero; sustained growth means the release logic
     /// has stopped running.
@@ -98,6 +114,8 @@ public:
 private:
     void createCommandResources();
     void createDescriptorResources();
+    void createTimestampPool();
+    void readGpuTimestamps();
     void createSyncObjects();
     void destroySyncObjects();
     void recreateSwapchain();
@@ -129,7 +147,6 @@ private:
 
     void recordCommands(VkCommandBuffer commandBuffer, std::uint32_t imageIndex, const ClearColor& color,
                         const glm::mat4& viewProjection, const std::optional<glm::mat4>& overlayTransform) const;
-
     /// How many frames the CPU is allowed to work on before waiting for the GPU.
     static constexpr std::uint32_t kFramesInFlight = 2;
 
@@ -140,6 +157,8 @@ private:
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::unique_ptr<TextureArray> m_blockTextures;
+    std::unique_ptr<TextureArray> m_hudTexture;
+    std::unique_ptr<TextureArray> m_fontTexture;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
@@ -170,6 +189,17 @@ private:
     std::vector<VkSemaphore> m_renderFinished;
 
     std::uint32_t m_currentFrame = 0;
+
+    RenderStats m_stats;
+    /// Two timestamps per frame in flight: one before any work, one after.
+    VkQueryPool m_timestampPool = VK_NULL_HANDLE;
+    float m_timestampPeriodNanoseconds = 0.0f;
+    bool m_timestampsSupported = false;
+    std::vector<bool> m_timestampsPending;
+
+    // Counted while recording, which is const, so they are mutable.
+    mutable std::uint32_t m_frameDrawCalls = 0;
+    mutable std::uint32_t m_frameTriangles = 0;
 };
 
 } // namespace engine

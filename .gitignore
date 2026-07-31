@@ -20,3 +20,9 @@ reference/
 
 # Magnified texture sheets written by tools/preview-textures.ps1
 *-preview.png
+
+# Screenshots written by tools/capture-window.ps1, plus redirected game output
+*-shot.png
+capture.png
+run.log
+run.err

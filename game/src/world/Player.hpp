@@ -44,6 +44,16 @@ constexpr float kFlySprintSpeed = 22.0f;
 constexpr float kFlyAcceleration = 38.0f;
 constexpr float kFlyDeceleration = 26.0f;
 
+/// Walking ramps up and down too. Stopping is quicker than starting, so the
+/// player still feels planted rather than skating.
+constexpr float kGroundAcceleration = 30.0f;
+constexpr float kGroundDeceleration = 42.0f;
+
+/// Mid-air steering is deliberately feeble, and air drag is close to nothing:
+/// that is what makes a jump commit to its arc instead of being flown.
+constexpr float kAirAcceleration = 9.0f;
+constexpr float kAirDeceleration = 2.0f;
+
 constexpr float kGravity = 32.0f;
 constexpr float kTerminalVelocity = 78.4f;
 
