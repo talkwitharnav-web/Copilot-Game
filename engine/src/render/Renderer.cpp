@@ -21,10 +21,49 @@ namespace {
 // 60 degrees or wider makes anything close to the camera visibly warp at the
 // frame edges, the same way an ultrawide phone lens does. 45 reads as natural.
 constexpr float kNearPlane = 0.1f;
-constexpr float kFarPlane = 500.0f;
 
 VkExtent2D toVkExtent(Extent2D extent) {
     return VkExtent2D{extent.width, extent.height};
+}
+
+/// The six clip-space planes of a view-projection matrix, each as (normal, d)
+/// with the normal pointing inward.
+///
+/// Gribb-Hartmann: adding or subtracting a row of the matrix from the w row
+/// gives a plane directly, because clip-space testing is exactly those
+/// comparisons. GLM is column-major, so a "row" here reads across columns. The
+/// near plane is row 2 alone rather than w+2 because the project builds with
+/// `GLM_FORCE_DEPTH_ZERO_TO_ONE`, which is what Vulkan expects.
+std::array<glm::vec4, 6> frustumPlanes(const glm::mat4& viewProjection) {
+    const glm::mat4& m = viewProjection;
+    const glm::vec4 rowX{m[0][0], m[1][0], m[2][0], m[3][0]};
+    const glm::vec4 rowY{m[0][1], m[1][1], m[2][1], m[3][1]};
+    const glm::vec4 rowZ{m[0][2], m[1][2], m[2][2], m[3][2]};
+    const glm::vec4 rowW{m[0][3], m[1][3], m[2][3], m[3][3]};
+
+    std::array<glm::vec4, 6> planes{rowW + rowX, rowW - rowX, rowW + rowY, rowW - rowY, rowZ, rowW - rowZ};
+
+    for (glm::vec4& plane : planes) {
+        const float length = glm::length(glm::vec3{plane});
+        if (length > 0.0f) {
+            plane /= length;
+        }
+    }
+    return planes;
+}
+
+/// Conservative: false only when the box is provably outside. Tests the box
+/// corner furthest along each plane normal, so a box straddling a plane counts
+/// as visible.
+bool boxInFrustum(const std::array<glm::vec4, 6>& planes, const glm::vec3& min, const glm::vec3& max) {
+    for (const glm::vec4& plane : planes) {
+        const glm::vec3 nearestInside{plane.x >= 0.0f ? max.x : min.x, plane.y >= 0.0f ? max.y : min.y,
+                                      plane.z >= 0.0f ? max.z : min.z};
+        if (glm::dot(glm::vec3{plane}, nearestInside) + plane.w < 0.0f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
@@ -290,6 +329,14 @@ void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
     m_uploads->stage(*slot.vertexBuffer, mesh.vertices.data(), vertexBytes);
     m_uploads->stage(*slot.indexBuffer, mesh.indices.data(), indexBytes);
     slot.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
+
+    slot.boundsMin = glm::vec3{std::numeric_limits<float>::max()};
+    slot.boundsMax = glm::vec3{std::numeric_limits<float>::lowest()};
+    for (const Vertex& vertex : mesh.vertices) {
+        const glm::vec3 p{vertex.position[0], vertex.position[1], vertex.position[2]};
+        slot.boundsMin = glm::min(slot.boundsMin, p);
+        slot.boundsMax = glm::max(slot.boundsMax, p);
+    }
 }
 
 MeshHandle Renderer::addMesh(const MeshData& mesh) {
@@ -327,6 +374,10 @@ void Renderer::removeMesh(MeshHandle handle) {
 
 void Renderer::setVerticalFov(float degrees) {
     m_verticalFovDegrees = std::clamp(degrees, 30.0f, 130.0f);
+}
+
+void Renderer::setFarPlane(float distance) {
+    m_farPlane = std::max(distance, kNearPlane * 2.0f);
 }
 
 std::size_t Renderer::meshCount() const {
@@ -410,7 +461,7 @@ glm::mat4 Renderer::projectionMatrix() const {
     const float height = static_cast<float>(extent.height > 0 ? extent.height : 1);
 
     glm::mat4 projection =
-        glm::perspective(glm::radians(m_verticalFovDegrees), width / height, kNearPlane, kFarPlane);
+        glm::perspective(glm::radians(m_verticalFovDegrees), width / height, kNearPlane, m_farPlane);
 
     // GLM builds this for OpenGL, whose Y axis points the opposite way to
     // Vulkan's. Without this flip the whole scene renders upside down, and
@@ -529,7 +580,13 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
     };
 
+    // Chunks outside the view are the overwhelming majority at high render
+    // distance, and skipping them costs one box test each.
+    const std::array<glm::vec4, 6> planes = frustumPlanes(viewProjection);
     for (const GpuMesh& mesh : m_meshes) {
+        if (mesh.indexCount != 0 && !boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax)) {
+            continue;
+        }
         drawMesh(mesh, viewProjection);
     }
 

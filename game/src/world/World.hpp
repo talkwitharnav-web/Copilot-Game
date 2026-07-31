@@ -25,17 +25,8 @@ namespace game {
 /// upper chunks exist purely as building room.
 constexpr int kWorldHeightChunks = 3;
 
-/// Chunks stay loaded within this many chunks of the player, horizontally.
-constexpr int kLoadRadiusChunks = 6;
-
-/// A chunk is only meshed once its four horizontal neighbours exist, so the
-/// visible radius is one less than the loaded radius. Meshing against a missing
-/// neighbour emits a wall of faces at the frontier that then has to be undone.
-constexpr int kVisibleRadiusChunks = kLoadRadiusChunks - 1;
-
-/// Unload only past this, so pacing back and forth across the boundary does not
-/// thrash chunks in and out.
-constexpr int kUnloadRadiusChunks = kLoadRadiusChunks + 2;
+/// Fallback render distance when nothing else specifies one.
+constexpr int kDefaultVisibleRadiusChunks = 5;
 
 /// A chunk's drawable geometry has changed. `removed` means the chunk left the
 /// world and its mesh should be released.
@@ -54,8 +45,19 @@ class World {
 public:
     /// `jobs` must outlive the world. Generation and meshing are submitted to
     /// it; a pool with no workers runs them inline, which is a supported mode.
-    World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSystem& jobs);
+    ///
+    /// `visibleRadiusChunks` is the render distance. Chunks are generated one
+    /// ring beyond it, because a chunk can only be meshed once its four
+    /// horizontal neighbours exist — meshing against a missing neighbour emits a
+    /// wall of faces at the frontier that then has to be undone. They are
+    /// unloaded two rings beyond *that*, so pacing back and forth across the
+    /// boundary does not thrash chunks in and out.
+    World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSystem& jobs,
+          int visibleRadiusChunks = kDefaultVisibleRadiusChunks);
     ~World();
+
+    int visibleRadius() const { return m_visibleRadius; }
+    int loadRadius() const { return m_loadRadius; }
 
     /// Anything not currently loaded reads as air.
     BlockId blockAt(int x, int y, int z) const;
@@ -170,6 +172,9 @@ private:
     std::size_t jobCapacity() const;
 
     std::uint32_t m_seed;
+    int m_visibleRadius;
+    int m_loadRadius;
+    int m_unloadRadius;
     /// Shared with in-flight jobs, which read chunk files from it.
     std::shared_ptr<WorldStore> m_store;
     engine::JobSystem& m_jobs;

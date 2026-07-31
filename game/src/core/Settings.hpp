@@ -22,9 +22,24 @@ struct Settings {
     /// of bugs for nothing.
     unsigned workerThreads = 0;
 
+    /// How far the world is drawn, in chunks (32 blocks each). Everything else
+    /// derives from this: chunks are generated one ring further out so borders
+    /// mesh correctly, and unloaded two rings beyond that.
+    ///
+    /// 12 is comfortable rather than maximal — measured at roughly 330 MB and
+    /// far above the frame budget on this machine. Raise it freely.
+    unsigned renderDistance = 12;
+
+    /// Frames per second to aim for. Zero means uncapped. Adjustable at runtime
+    /// with F1/F2; this is only the starting value.
+    unsigned frameCap = 120;
+
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;
+
+    /// Beyond this the chunk count grows faster than anything can feed it.
+    static constexpr unsigned kMaxRenderDistance = 32;
 };
 
 /// Reads `file`, filling anything missing with defaults for this machine. A

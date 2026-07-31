@@ -14,19 +14,38 @@ param(
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
-# Versioned name: Add-Type cannot redefine a type, so editing this block would
-# otherwise fail forever in an already-running shell.
-if (-not ([System.Management.Automation.PSTypeName]'WinCap2').Type) {
+if (-not ([System.Management.Automation.PSTypeName]'WinCap3').Type) {
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class WinCap2 {
+public class WinCap3 {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr pid);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+
+    // Windows refuses foreground changes from a background process unless the
+    // caller shares an input queue with whatever currently has focus.
+    public static bool ForceForeground(IntPtr hWnd) {
+        uint target = GetWindowThreadProcessId(hWnd, IntPtr.Zero);
+        uint current = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+        uint me = GetCurrentThreadId();
+        AttachThreadInput(current, me, true);
+        AttachThreadInput(target, me, true);
+        ShowWindow(hWnd, 9 /* SW_RESTORE */);
+        BringWindowToTop(hWnd);
+        bool ok = SetForegroundWindow(hWnd);
+        AttachThreadInput(target, me, false);
+        AttachThreadInput(current, me, false);
+        return ok;
+    }
 }
 "@
 }
@@ -41,21 +60,20 @@ if (-not $proc) {
 
 $handle = $proc.MainWindowHandle
 
-# Windows refuses foreground changes from a background process, so this must be
-# confirmed rather than assumed: an unverified SendKeys goes to whatever is
-# focused instead, which means keystrokes land in the editor.
+# Required for capture as well as for keys: CopyFromScreen reads whatever pixels
+# are on screen, so a window that is behind the editor captures the editor.
 $focused = $false
-for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    [void][WinCap2]::SetForegroundWindow($handle)
-    Start-Sleep -Milliseconds 400
-    if ([WinCap2]::GetForegroundWindow() -eq $handle) {
+for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    [void][WinCap3]::ForceForeground($handle)
+    Start-Sleep -Milliseconds 350
+    if ([WinCap3]::GetForegroundWindow() -eq $handle) {
         $focused = $true
         break
     }
 }
 
 if (-not $focused) {
-    Write-Error "could not focus '$Title'; refusing to send keys or capture"
+    Write-Error "could not bring '$Title' to the front; refusing to capture"
     exit 1
 }
 
@@ -67,10 +85,10 @@ if ($Keys -ne "") {
 }
 
 # Client rect only: the title bar and border are not the thing being checked.
-$rect = New-Object WinCap2+RECT
-[void][WinCap2]::GetClientRect($handle, [ref]$rect)
-$origin = New-Object WinCap2+POINT
-[void][WinCap2]::ClientToScreen($handle, [ref]$origin)
+$rect = New-Object WinCap3+RECT
+[void][WinCap3]::GetClientRect($handle, [ref]$rect)
+$origin = New-Object WinCap3+POINT
+[void][WinCap3]::ClientToScreen($handle, [ref]$origin)
 
 $width = $rect.R - $rect.L
 $height = $rect.B - $rect.T

@@ -25,13 +25,13 @@ std::string trim(const std::string& text) {
 
 /// Returns false rather than throwing on anything unexpected: this file is
 /// hand-editable, so bad input is ordinary and should fall back to a default.
-bool parseUnsigned(const std::string& text, unsigned& out) {
+bool parseUnsigned(const std::string& text, unsigned limit, unsigned& out) {
     if (text.empty() || !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) {
         return false;
     }
     try {
         const unsigned long value = std::stoul(text);
-        if (value > Settings::kMaxWorkerThreads) {
+        if (value > limit) {
             return false;
         }
         out = static_cast<unsigned>(value);
@@ -69,15 +69,26 @@ Settings loadSettings(const std::filesystem::path& file) {
         const std::string key = trim(line.substr(0, equals));
         const std::string value = trim(line.substr(equals + 1));
 
-        if (key == "worker_threads") {
-            unsigned parsed = 0;
-            if (parseUnsigned(value, parsed)) {
-                settings.workerThreads = parsed;
-            } else {
-                engine::logWarn("settings: worker_threads '" + value + "' is not usable; keeping the default");
+        const auto read = [&](const char* name, unsigned limit, unsigned& target) {
+            if (key != name) {
+                return;
             }
-        }
+            unsigned parsed = 0;
+            if (parseUnsigned(value, limit, parsed)) {
+                target = parsed;
+            } else {
+                engine::logWarn(std::string("settings: ") + name + " '" + value +
+                                "' is not usable; keeping the default");
+            }
+        };
+
+        read("worker_threads", Settings::kMaxWorkerThreads, settings.workerThreads);
+        read("render_distance", Settings::kMaxRenderDistance, settings.renderDistance);
+        read("frame_cap", 1000, settings.frameCap);
     }
+
+    // A render distance of zero would mesh nothing at all.
+    settings.renderDistance = std::max(1u, settings.renderDistance);
 
     return settings;
 }
@@ -99,8 +110,13 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#   1        a single background worker\n"
         << "#   default  half this machine's hardware threads\n"
         << "#\n"
-        << "# Takes effect on restart. The thread pool is fixed once the game starts.\n"
-        << "worker_threads=" << settings.workerThreads << "\n";
+        << "# render_distance: how far the world is drawn, in 32-block chunks.\n"
+        << "# frame_cap: frames per second to aim for; 0 means uncapped.\n"
+        << "#\n"
+        << "# All of these take effect on restart.\n"
+        << "worker_threads=" << settings.workerThreads << "\n"
+        << "render_distance=" << settings.renderDistance << "\n"
+        << "frame_cap=" << settings.frameCap << "\n";
 }
 
 } // namespace game

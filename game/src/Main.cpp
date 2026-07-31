@@ -139,6 +139,12 @@ int main() {
                                   textureDir.parent_path() / "font.png");
 
         std::size_t capIndex = kDefaultFpsCapIndex;
+        for (std::size_t i = 0; i < kFpsCapOptions.size(); ++i) {
+            if (kFpsCapOptions[i] == static_cast<int>(settings.frameCap)) {
+                capIndex = i;
+                break;
+            }
+        }
         engine::FrameLimiter frameLimiter(kFpsCapOptions[capIndex]);
 
         engine::Camera camera;
@@ -147,7 +153,12 @@ int main() {
         window.setCursorCaptured(true);
 
         const auto buildStart = std::chrono::steady_clock::now();
-        game::World world(kWorldSeed, engine::executableDirectory() / "saves", jobs);
+        game::World world(kWorldSeed, engine::executableDirectory() / "saves", jobs,
+                          static_cast<int>(settings.renderDistance));
+
+        // Far enough to reach the diagonal corner of the furthest drawn chunk,
+        // or the world visibly clips into a dome at high render distances.
+        renderer.setFarPlane(static_cast<float>(world.loadRadius() * game::Chunk::kSize) * 1.8f);
 
         // Spawn is chosen before any chunk exists, so the surface height comes
         // straight from the generator rather than from loaded blocks.
@@ -221,8 +232,8 @@ int main() {
         const auto ms = [](auto from, auto to) {
             return std::to_string(std::chrono::duration<float, std::milli>(to - from).count());
         };
-        engine::logInfo("World seed " + std::to_string(kWorldSeed) + ", load radius " +
-                        std::to_string(game::kLoadRadiusChunks) + " chunks");
+        engine::logInfo("World seed " + std::to_string(kWorldSeed) + ", render distance " +
+                        std::to_string(world.visibleRadius()) + " chunks");
         engine::logInfo("Saves: " + (engine::executableDirectory() / "saves").string());
         engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks, " +
                         std::to_string(initialTriangles) + " triangles in " + ms(buildStart, worldReady) +
@@ -471,7 +482,10 @@ int main() {
                                 std::to_string(world.loadedChunkCount()) + " | meshes " +
                                 std::to_string(renderer.meshCount()) + " | pending " +
                                 std::to_string(world.pendingChunkCount()) + " | retired " +
-                                std::to_string(renderer.retiredMeshCount()));
+                                std::to_string(renderer.retiredMeshCount()) + " | gpu " +
+                                std::to_string(renderer.stats().gpuMilliseconds) + " ms | draws " +
+                                std::to_string(renderer.stats().drawCalls) + " | tris " +
+                                std::to_string(renderer.stats().triangles));
                 framesSinceReport = 0;
                 lastReportTime = now;
             }

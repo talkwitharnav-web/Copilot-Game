@@ -87,8 +87,10 @@ struct MeshJobInput {
 
 } // namespace
 
-World::World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSystem& jobs)
-    : m_seed(seed), m_store(std::make_shared<WorldStore>(std::move(saveRoot), seed)), m_jobs(jobs),
+World::World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSystem& jobs, int visibleRadiusChunks)
+    : m_seed(seed), m_visibleRadius(std::max(1, visibleRadiusChunks)), m_loadRadius(m_visibleRadius + 1),
+      m_unloadRadius(m_loadRadius + 2),
+      m_store(std::make_shared<WorldStore>(std::move(saveRoot), seed)), m_jobs(jobs),
       m_results(std::make_shared<JobResults>()) {}
 
 /// Jobs hold `shared_ptr`s to the results buffer and the store, so anything
@@ -228,8 +230,8 @@ ChunkNeighbours World::snapshotNeighbours(const ChunkCoord& coord) const {
 void World::refreshQueues(const ChunkCoord& centre) {
     m_pendingLoad.clear();
 
-    for (int dz = -kLoadRadiusChunks; dz <= kLoadRadiusChunks; ++dz) {
-        for (int dx = -kLoadRadiusChunks; dx <= kLoadRadiusChunks; ++dx) {
+    for (int dz = -m_loadRadius; dz <= m_loadRadius; ++dz) {
+        for (int dx = -m_loadRadius; dx <= m_loadRadius; ++dx) {
             for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
                 const ChunkCoord coord{centre.x + dx, cy, centre.z + dz};
                 if (!hasChunk(coord)) {
@@ -254,7 +256,7 @@ void World::refreshQueues(const ChunkCoord& centre) {
     // revision here would throw away perfectly good work every time the player
     // crossed a chunk boundary.
     for (const auto& [coord, slot] : m_chunks) {
-        if (!slot.meshed && chebyshevDistance(coord, centre) <= kVisibleRadiusChunks) {
+        if (!slot.meshed && chebyshevDistance(coord, centre) <= m_visibleRadius) {
             queueMesh(coord);
         }
     }
@@ -303,7 +305,7 @@ void World::dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSp
         if (it == m_chunks.end()) {
             continue;
         }
-        if (chebyshevDistance(coord, centre) > kVisibleRadiusChunks || !neighboursLoaded(coord)) {
+        if (chebyshevDistance(coord, centre) > m_visibleRadius || !neighboursLoaded(coord)) {
             continue;
         }
         // Already being meshed. Dropping it is safe: if the chunk has changed
@@ -353,7 +355,7 @@ void World::collectFinishedJobs() {
         if (hasChunk(result.coord)) {
             continue;
         }
-        if (m_hasCentre && chebyshevDistance(result.coord, m_centre) > kUnloadRadiusChunks) {
+        if (m_hasCentre && chebyshevDistance(result.coord, m_centre) > m_unloadRadius) {
             continue;
         }
 
@@ -388,7 +390,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
 
         // Unload first so memory is released before anything new is allocated.
         for (auto it = m_chunks.begin(); it != m_chunks.end();) {
-            if (chebyshevDistance(it->first, centre) > kUnloadRadiusChunks) {
+            if (chebyshevDistance(it->first, centre) > m_unloadRadius) {
                 // Must happen before the erase, or an edited chunk is lost the
                 // moment the player walks away from it.
                 saveIfModified(it->first, it->second);
@@ -407,7 +409,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         // alone; they are discarded on collection instead, because a running job
         // cannot be recalled.
         const auto outOfRange = [&](const ChunkCoord& c) {
-            return chebyshevDistance(c, centre) > kUnloadRadiusChunks;
+            return chebyshevDistance(c, centre) > m_unloadRadius;
         };
         m_pendingMesh.erase(std::remove_if(m_pendingMesh.begin(), m_pendingMesh.end(), outOfRange),
                             m_pendingMesh.end());

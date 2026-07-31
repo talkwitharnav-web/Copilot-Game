@@ -99,6 +99,10 @@ public:
     void setVerticalFov(float degrees);
     float verticalFov() const { return m_verticalFovDegrees; }
 
+    /// Distance beyond which nothing is drawn. Must reach past the furthest
+    /// visible geometry or the world is visibly clipped into a dome.
+    void setFarPlane(float distance);
+
     std::size_t meshCount() const;
 
     const RenderStats& stats() const { return m_stats; }
@@ -128,6 +132,9 @@ private:
         std::unique_ptr<Buffer> vertexBuffer;
         std::unique_ptr<Buffer> indexBuffer;
         std::uint32_t indexCount = 0;
+        /// World-space bounds, for frustum culling. Computed on upload.
+        glm::vec3 boundsMin{0.0f};
+        glm::vec3 boundsMax{0.0f};
         /// Distinguishes a live-but-empty mesh from a free slot. Without it a
         /// double remove would push the same handle onto the free list twice and
         /// hand it to two different chunks.
@@ -178,6 +185,7 @@ private:
     std::vector<RetiredMesh> m_retired;
     std::uint64_t m_frameIndex = 0;
     float m_verticalFovDegrees = 70.0f;
+    float m_farPlane = 500.0f;
 
     std::vector<VkCommandBuffer> m_commandBuffers;
 
