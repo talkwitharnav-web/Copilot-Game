@@ -2,13 +2,17 @@
 
 #include "hud/HudPrimitives.hpp"
 
+#include <string>
+
 #include <glm/glm.hpp>
 
 namespace game {
 namespace {
 
 /// Pixel dimensions of assets/textures/hud.png.
-constexpr glm::vec2 kSheetSize{185.0f, 41.0f};
+// The widget art sits at the sheet's origin; the inventory panel is stacked
+// below it, so these pixel coordinates are unaffected by the sheet growing.
+constexpr glm::vec2 kSheetSize{185.0f, 207.0f};
 
 /// One cell of the sprite sheet, and where its open interior sits inside it.
 ///
@@ -57,6 +61,13 @@ constexpr float kFrameDepth = 0.00095f;
 constexpr float kTintDepth = 0.00090f;
 constexpr float kIconDepth = 0.00085f;
 
+// Nearer than the icon, so a count is never swallowed by the block behind it.
+constexpr float kCountDepth = 0.00080f;
+constexpr float kSelectedCountDepth = 0.00060f;
+constexpr float kCountHeight = 0.042f;
+constexpr float kCountInset = 0.004f;
+constexpr glm::vec4 kCountColor{1.0f, 1.0f, 1.0f, 1.0f};
+
 /// Places a sub-rectangle of a cell sprite at the right spot on screen.
 void appendCellPiece(engine::MeshData& mesh, const CellSprite& cell, float cellCentreX, float cellCentreY,
                      float cellSize, const glm::vec2& localMin, const glm::vec2& localSize, float depth) {
@@ -88,7 +99,7 @@ void appendCellFrame(engine::MeshData& mesh, const CellSprite& cell, float centr
 
 } // namespace
 
-engine::MeshData makeHotbar(const std::array<BlockId, kHotbarSlots>& slots, std::size_t selected) {
+engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected) {
     engine::MeshData mesh;
 
     // Cells butt up against each other so neighbouring borders merge into a
@@ -118,12 +129,32 @@ engine::MeshData makeHotbar(const std::array<BlockId, kHotbarSlots>& slots, std:
                         isSelected ? kSelectedTintDepth : kTintDepth, kInteriorTint,
                         static_cast<float>(TextureLayer::White), false);
 
-        if (slots[slot] == BlockId::Air) {
+        const ItemStack& stack = inventory.slot(slot);
+        if (stack.empty()) {
             continue;
         }
 
-        hud::appendBlockIcon(mesh, slots[slot], interiorCentre.x, interiorCentre.y,
-                             kSlotSize * 0.5f * kIconScale, isSelected ? kSelectedIconDepth : kIconDepth);
+        const float iconHalf = kSlotSize * 0.5f * kIconScale;
+        const float iconDepth = isSelected ? kSelectedIconDepth : kIconDepth;
+        if (isBlockItem(stack.item)) {
+            hud::appendBlockIcon(mesh, blockForItem(stack.item), interiorCentre.x, interiorCentre.y, iconHalf,
+                                 iconDepth);
+        } else if (const int layer = itemTextureLayer(stack.item); layer >= 0) {
+            // Flat, because there is no block to build a little cube out of.
+            hud::appendQuad(mesh, interiorCentre.x, interiorCentre.y, iconHalf, iconHalf, iconDepth,
+                            {1.0f, 1.0f, 1.0f, 1.0f}, static_cast<float>(layer), true);
+        } else {
+            continue;
+        }
+
+        // A lone item shows no number, matching how a count of one reads as
+        // simply having the thing.
+        if (stack.count > 1) {
+            const std::string label = std::to_string(stack.count);
+            hud::appendText(mesh, label, interiorCentre.x - interiorHalf.x + kCountInset,
+                            interiorCentre.y + interiorHalf.y - kCountHeight * 0.5f - kCountInset, kCountHeight,
+                            isSelected ? kSelectedCountDepth : kCountDepth, kCountColor);
+        }
     }
 
     return mesh;

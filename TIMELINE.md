@@ -572,11 +572,17 @@ A face buried inside another box of the same block is skipped, or a stair's step
 
 > **The cost of widening the cube assumption was five bugs, every one found by playing.** Collision resolution snapped to the block boundary; the fluid update deleted plants; the outline drew a full cage; the raycast treated cell entry as a hit; and the outline flashed on the frame a block was broken. All five were the same fault — a shape derived somewhere other than the shape table — and none of them was anything the compiler could catch.
 
-### ⬜ M17d — Connected shapes · **Optional**
+### ✅ M17d — Connected shapes · **Optional**
 
 Fences, walls and panes, whose geometry depends on their neighbours rather than on stored state.
 
-Separated from M17c because they need no block state at all — connections are derived at mesh time — so they share none of that milestone's risk.
+**Done when:** a line of fence posts joins into a rail and blocks the player.
+
+**Result:** plank fences that grow arms toward any solid block or other fence.
+
+**Connections are derived at mesh time, not stored**, which is why this needed no block state at all and could be separated from M17c.
+
+**Collision assumes every arm**, because `collisionBoxes` is given only an id and cannot see neighbours. A post on its own leaves a 0.75-wide gap between two fences, which the 0.6-wide player walks straight through — so the barrier has to be there even when the arm is not drawn. That is the one place the shape table and the drawn geometry deliberately disagree.
 
 ---
 
@@ -588,10 +594,96 @@ Separated from M17c because they need no block state at all — connections are 
 >
 > **Assets are the exception.** Textures, models, sounds, music and names have to be ours. That is a legal line, not a creative one — see "The End Product".
 
-### ⬜ M18 — Inventory and items · **Core**
-### ⬜ M19 — Crafting and resource progression · **Core**
+### ✅ M18a — Items and drops · **Core**
 
-A crafting and progression system. Following the familiar shape — a crafting grid, material tiers, tools gating access to better materials — is fine and expected. Recipes and balance are a conversation with the user, not something to improvise.
+Blocks stop being infinite: breaking one yields a thing you have to pick up.
+
+**Done when:** breaking a block drops an item, walking over it collects it, and placing consumes one from the stack.
+
+**Result:** a nine-slot inventory with stack counts drawn on the hotbar, dropped items that fall and are drawn to the player, and placement that runs out.
+
+**`ItemId` is deliberately not `BlockId`.** Every placeable block has an item form; the reverse will not hold, because a pickaxe is an item that is never a block. Block items *share* the block numbering so there is one list to maintain rather than two that drift, and anything that is not a block starts above `kFirstToolItem`.
+
+**Drops are the smallest possible entity**, not the start of an entity system. They have a position, a velocity and a stack, and resolve only against the ground. The general system is M20, and building it now would be guessing at what creatures need before any exist.
+
+**What a block drops is a table, not an identity.** Stone yields cobblestone, grass yields dirt, and the eight stair orientations all collapse to one item so an inventory does not fill with rotations of the same thing.
+
+**Creative mode survives**, as `creative_mode` in `settings.cfg`. Infinite blocks are genuinely useful for testing everything that is not the inventory, and losing them would make every later milestone harder to work on.
+
+### ✅ M18b — Inventory screen · **Core**
+
+The full inventory UI, against the concept art in `reference/`: armour slots, offhand, 2×2 crafting, and the wider grid.
+
+**Done when:** `E` opens a screen showing the whole inventory, and stacks can be moved between slots.
+
+**Result:** the artist's panel drawn as a single sprite, with 36 slots wired up — 27 storage plus the hotbar — and click-to-swap between them. `Q` throws, and clicking outside the panel drops one from the cursor.
+
+**The panel is the artwork, not a rebuild of it.** It is one textured quad from a sheet, with item icons composited on top. Redrawing her frames and bevels out of primitives would have been hand-copying something that already exists as a picture, and it would drift the moment she revised it.
+
+**Slot positions are measured off the art in its own pixels** and scaled through a single constant, so the layout cannot disagree with the image it came from.
+
+**No UI library.** ImGui was deferred at M11 and is still deferred: this screen needs click-to-swap and nothing else, and hand-rolling that was smaller than the dependency. Revisit when something wants text entry or dragging.
+
+**Not wired:** armour, offhand and crafting slots are drawn and hit-tested but do nothing — crafting is M19 and equipment needs armour to exist. The character panel is empty until there is a player model at M20.
+
+### ✅ M19a — Texture fidelity · **Core**
+
+Every block texture measured against the reference dump and regenerated to match.
+
+**Done when:** each texture's measured statistics land near the reference and the world looks better, not merely more similar.
+
+**Measurement replaced opinion, up to a point.** `tools/compare-texture.ps1` reports palette size, luminance spread, saturation and run lengths side by side, and it caught things the eye had not: our snow spanned 25 luminance levels against the reference's 5, cobblestone was half as noisy as it should be, gravel was three times too saturated, and planks ran flat colour the full 16-pixel width where the reference's longest run is 8.
+
+**Biome-tinted foliage was built and reverted.** Greyscale grass and leaves multiplied by a per-column climate colour — every statistic agreed with the reference, and the result was washed-out sage-grey plants. A mid-grey times a mid-green is duller than either. Green is baked into the textures instead. See `CLAUDE.md` for why the number moving was not enough.
+
+**What survived:** thirteen retuned textures. **What did not:** the vertex tint attribute, per-chunk climate storage, and the tint comparison in the greedy merge — all removed rather than left dead.
+
+### ✅ M19b — Geometry fidelity · **Core**
+
+Every non-cube shape checked against the reference model JSON, which records exact extents in sixteenths of a block.
+
+**Done when:** slabs, stairs, fences and the plant cross all match the reference's dimensions, or differ deliberately with the reason written down.
+
+**Already exact:** slabs (`0–8` and `8–16`), both stair boxes (`[0,0,0]→[16,8,16]` plus `[8,8,0]→[16,16,16]`), and the fence post (`[6,0,6]→[10,16,10]`). All four had been arrived at by guessing and all four were right, which is worth knowing — the guesses were not lucky so much as constrained, since a half block has few plausible sizes.
+
+**Two real errors found.**
+
+Fences were *drawn* with solid full-height arms, so a fence line read as a thin wall rather than as a rail you can see through — and the code carried a comment claiming it drew two rails, which it had never done. Rendering now uses `fenceRailBoxes` (rails at `6–9` and `12–15`, matching the reference) while collision keeps `fenceBoxes` and its full-height arms. **This is the second place where drawn geometry and collision deliberately disagree**, and like the first it is written down at the function rather than left to be rediscovered.
+
+Plants were held 0.15 off each cell wall where the reference spans `0.8–15.2`, very nearly corner to corner, so every plant rendered a size too small. Their selection box also now matches the reference hitbox — slimmer and shorter than the blades, so aiming at a plant is not the same as aiming at its whole cell.
+
+**Dimensions are not colours.** M19a's lesson was that a matching statistic does not make something look right. A matching *hitbox* genuinely is right, because it is a fact about geometry rather than a judgement about appearance — which is why this milestone could follow the reference exactly where the last one could not.
+
+### 🔶 M19c — Crafting and resource progression · **Core**
+
+A crafting and progression system: a grid, material tiers, tools gating access to better materials.
+
+Recipes are settled facts — see `CRAFTABLE.md`, verified against the reference recipe JSON. What still needs deciding is **scope**: which recipes ship, and in what order.
+
+**Landed:**
+
+- The recipe matcher (`item/Recipe.hpp`), shaped and shapeless in one struct.
+- The 2×2 grid wired into the inventory screen, with slot positions measured off the artwork.
+- Two recipes: `Log → 4 Planks` (shapeless) and `2 Planks → 4 Sticks` (shaped).
+- **Stick**, the first non-block item. Its sprite is a layer in the block texture array rather than a second binding, because that array is really "every 16×16 sprite we own".
+- Full slot interaction (`item/SlotOps.hpp`): left click takes or merges a whole stack, right click takes half and places one, and a click-drag distributes a stack across every slot it crosses — evenly with the left button, one at a time with the right.
+
+**Patterns are stored at their own size, not padded.** The matcher finds the bounding box of what is in the grid and compares against that, so a 1×2 recipe works in either column of a 2×2 and will work anywhere in a 3×3 without the matcher changing. `craftResult` takes the grid size as an argument for the same reason.
+
+**The result is a preview until it is taken**, which is why `craftResult` and `consumeIngredients` are separate calls.
+
+**Shapeless matching counts leftovers**, or a grid holding an extra item would still craft and quietly eat it.
+
+**Dragging applies live and is replayed from scratch each frame**, not committed on release. See `CLAUDE.md`: a UI action that commits only on release looks broken while it is working.
+
+**Four bugs fell out of playtesting**, all recorded in `CLAUDE.md`: horizontal collision resolution ignoring the shape table (stairs threw the player backwards), creative mode skipping item pickup (drops bounced off the player forever), drag committing on release only, and a drag armed by the click that filled the cursor.
+
+**Still to do — this is where a fresh session should pick up:**
+
+1. **The crafting table.** A new block with three face textures (reference: `crafting_table_{top,side,front}`), right-click to open, and a 3×3 layout. The matcher needs no changes; the screen does. `4 Planks → 1 Crafting Table` is already in `CRAFTABLE.md`.
+2. **Shift-click quick-move** between hotbar and storage, and double-click to gather a stack.
+3. **The rest of Tier 1** from `CRAFTABLE.md`: furnace and smelting, then torches.
+4. **Tools and mining tiers**, which is the part that turns crafting into progression.
 
 ### ⬜ M20 — Entities and creatures · **Core**
 

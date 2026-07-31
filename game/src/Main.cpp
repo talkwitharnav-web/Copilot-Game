@@ -11,7 +11,12 @@
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
+#include "hud/InventoryScreen.hpp"
 #include "hud/LoadingScreen.hpp"
+#include "item/Inventory.hpp"
+#include "item/Recipe.hpp"
+#include "item/SlotOps.hpp"
+#include "world/ItemEntity.hpp"
 #include "world/Biome.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
@@ -87,6 +92,16 @@ constexpr float kLoadingBudgetSeconds = 0.016f;
 /// counts arrive in coarse steps, and easing is what turns them into movement.
 constexpr float kLoadingBarEase = 6.0f;
 
+/// How hard a dropped item is thrown, and how long before it can be collected.
+/// The delay has to outlast the flight, or the item is pulled straight back
+/// before it clears the pickup radius.
+constexpr float kThrowSpeed = 6.0f;
+constexpr float kThrowPickupDelay = 1.2f;
+
+/// Slower than breaking or placing: emptying a stack by accident is more
+/// annoying than having to hold the key a moment longer.
+constexpr float kDropRepeatSeconds = 0.22f;
+
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
 // Selectable frame caps, lowest to highest. 0 means uncapped.
@@ -127,6 +142,10 @@ const char* describeBlock(game::BlockId block) {
         return "Tall Grass";
     case game::BlockId::StoneSlab:
         return "Stone Slab";
+    case game::BlockId::StoneSlabTop:
+        return "Stone Slab";
+    case game::BlockId::PlanksFence:
+        return "Fence";
     default:
         return "Air";
     }
@@ -155,7 +174,8 @@ int main() {
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
             textureDir / "planks.png",      textureDir / "bricks.png", textureDir / "glowstone.png",
             textureDir / "water.png",       textureDir / "log_side.png", textureDir / "log_top.png",
-            textureDir / "leaves.png",      textureDir / "sun.png",      textureDir / "tall_grass.png"};
+            textureDir / "leaves.png",      textureDir / "sun.png",      textureDir / "tall_grass.png",
+            textureDir / "stick.png"};
 
         engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
                                   textureDir.parent_path() / "font.png");
@@ -379,12 +399,54 @@ int main() {
 
         float breakTimer = 0.0f;
         float placeTimer = 0.0f;
+        float dropTimer = 0.0f;
         float secondsSinceSpacePress = kDoubleTapSeconds;
 
-        constexpr std::array<game::BlockId, game::kHotbarSlots> hotbar{
+        // Creative starts with one of everything placeable; survival starts with
+        // nothing and fills up from what you break.
+        constexpr std::array<game::BlockId, game::kHotbarSlots> creativeKit{
             game::BlockId::Grass,     game::BlockId::Dirt,          game::BlockId::Stone,
             game::BlockId::StoneSlab, game::BlockId::CobbleStairs0, game::BlockId::TallGrass,
-            game::BlockId::Planks,    game::BlockId::Water0,        game::BlockId::Glowstone};
+            game::BlockId::Planks,    game::BlockId::PlanksFence,   game::BlockId::Glowstone};
+
+        // Raw materials, in the storage rows rather than the hotbar: they are
+        // crafting inputs rather than things to place, and the hotbar is full.
+        constexpr std::array<game::BlockId, 5> creativeStock{game::BlockId::Log, game::BlockId::Cobblestone,
+                                                             game::BlockId::Sand, game::BlockId::Gravel,
+                                                             game::BlockId::Bricks};
+
+        game::Inventory inventory;
+        bool creative = settings.creativeMode;
+        const auto fillCreativeKit = [&] {
+            for (std::size_t i = 0; i < game::kHotbarSlots; ++i) {
+                inventory.slot(i) = game::ItemStack{game::itemForBlock(creativeKit[i]), game::kMaxStack};
+            }
+            for (std::size_t i = 0; i < creativeStock.size(); ++i) {
+                inventory.slot(game::kHotbarSlots + i) =
+                    game::ItemStack{game::itemForBlock(creativeStock[i]), game::kMaxStack};
+            }
+        };
+        if (creative) {
+            fillCreativeKit();
+        }
+
+        game::ItemEntities drops;
+        engine::MeshHandle dropMesh = engine::kInvalidMesh;
+        bool inventoryOpen = false;
+        game::ItemStack heldStack;
+        std::array<game::ItemStack, game::inventoryScreen::kCraftSlots> craftSlots{};
+
+        // A sweep with the button held spreads the cursor's stack over every
+        // slot it crosses.
+        //
+        // The distribution is recomputed from scratch every frame rather than
+        // applied incrementally, which is why each slot's contents from before
+        // the drag are kept: replaying from the original state is the only way
+        // to show a live preview that stays correct as more slots are added.
+        enum class DragButton { None, Left, Right };
+        DragButton dragButton = DragButton::None;
+        game::ItemStack dragOriginalCursor;
+        std::vector<std::pair<game::inventoryScreen::SlotHit, game::ItemStack>> draggedSlots;
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
 
@@ -395,7 +457,9 @@ int main() {
 
         // Crosshair, hotbar and the diagnostics panel share one screen mesh.
         const auto rebuildHud = [&](const game::OverlayStats& stats) {
-            engine::MeshData hud = game::makeCrosshair();
+            // The inventory screen carries its own hotbar row, and a crosshair
+            // over a pointer-driven panel is just clutter.
+            engine::MeshData hud = inventoryOpen ? engine::MeshData{} : game::makeCrosshair();
 
             const auto append = [&](const engine::MeshData& part) {
                 const auto base = static_cast<std::uint32_t>(hud.vertices.size());
@@ -405,7 +469,17 @@ int main() {
                 }
             };
 
-            append(game::makeHotbar(hotbar, selectedSlot));
+            if (inventoryOpen) {
+                const engine::Extent2D extent = window.framebufferExtent();
+                const float halfHeight = static_cast<float>(extent.height) * 0.5f;
+                append(game::inventoryScreen::build(
+                    inventory, craftSlots.data(),
+                    game::craftResult(craftSlots.data(), game::inventoryScreen::kCraftSize), heldStack,
+                    (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight,
+                    (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight, renderer.aspectRatio()));
+            } else {
+                append(game::makeHotbar(inventory, selectedSlot));
+            }
             if (overlayVisible) {
                 append(game::makeDebugOverlay(stats, frameHistory, renderer.aspectRatio()));
             }
@@ -428,7 +502,51 @@ int main() {
 
             for (const engine::Key key : window.consumeKeyPresses()) {
                 if (key == engine::Key::Escape) {
+                    inventoryOpen = false;
                     window.setCursorCaptured(false);
+                    continue;
+                }
+                if (key == engine::Key::E) {
+                    inventoryOpen = !inventoryOpen;
+                    // The screen needs a pointer, so opening it hands the cursor
+                    // back and closing it takes it again.
+                    window.setCursorCaptured(!inventoryOpen);
+                    // Nothing is left stranded on the cursor when the screen
+                    // closes.
+                    if (!heldStack.empty()) {
+                        const int left = inventory.add(heldStack.item, heldStack.count);
+                        if (left > 0 && !creative) {
+                            drops.spawn(camera.position + camera.forward() * 0.5f, heldStack.item, left,
+                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        }
+                        heldStack = game::ItemStack{};
+                    }
+                    // Ingredients go back too. Leaving them in a grid the player
+                    // cannot see is how items quietly disappear.
+                    for (game::ItemStack& slot : craftSlots) {
+                        if (slot.empty()) {
+                            continue;
+                        }
+                        const int left = inventory.add(slot.item, slot.count);
+                        if (left > 0 && !creative) {
+                            drops.spawn(camera.position + camera.forward() * 0.5f, slot.item, left,
+                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        }
+                        slot = game::ItemStack{};
+                    }
+                    hudDirty = true;
+                    continue;
+                }
+                if (key == engine::Key::Q) {
+                    // Only the cursor is emptied here. Dropping from the hotbar
+                    // repeats while held, so it lives with the other held-key
+                    // actions below.
+                    if (inventoryOpen && !heldStack.empty()) {
+                        drops.spawn(camera.position + camera.forward() * 0.5f, heldStack.item, heldStack.count,
+                                    camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        heldStack = game::ItemStack{};
+                        hudDirty = true;
+                    }
                     continue;
                 }
                 if (key == engine::Key::Space) {
@@ -490,9 +608,174 @@ int main() {
             // Drained every frame even when unused, so the queue cannot grow
             // without bound. It only exists to notice a click while the cursor
             // is free.
-            const bool clicked = !window.consumeMouseButtonPresses().empty();
+            const std::vector<engine::MouseButton> presses = window.consumeMouseButtonPresses();
+            const bool clicked = !presses.empty();
             const bool hadCursor = window.isCursorCaptured();
-            if (!hadCursor && clicked) {
+
+            if (inventoryOpen) {
+                // Pixels to the same space the screen is laid out in: relative
+                // to window height, origin at the centre, Y down.
+                const engine::Extent2D extent = window.framebufferExtent();
+                const float halfHeight = static_cast<float>(extent.height) * 0.5f;
+                const float cursorX =
+                    (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight;
+                const float cursorY = (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight;
+                const auto hit = game::inventoryScreen::slotAt(cursorX, cursorY, renderer.aspectRatio());
+
+                using Region = game::inventoryScreen::Region;
+
+                // Resolves a hit to the stack behind it. The crafting result is
+                // deliberately absent: it is produced, not stored, so it cannot
+                // be written to.
+                const auto stackAt = [&](const game::inventoryScreen::SlotHit& at) -> game::ItemStack* {
+                    if (at.region == Region::Grid) {
+                        return &inventory.slot(at.index);
+                    }
+                    if (at.region == Region::Craft) {
+                        return &craftSlots[at.index];
+                    }
+                    return nullptr;
+                };
+
+                const bool leftDown = window.isMouseButtonDown(engine::MouseButton::Left);
+                const bool rightDown = window.isMouseButtonDown(engine::MouseButton::Right);
+
+                // Puts every dragged slot back as it was and hands the cursor
+                // its stack back, so a distribution can be replayed over a
+                // longer list without compounding.
+                const auto rewindDrag = [&] {
+                    for (auto& [at, before] : draggedSlots) {
+                        if (game::ItemStack* stack = stackAt(at); stack != nullptr) {
+                            *stack = before;
+                        }
+                    }
+                    heldStack = dragOriginalCursor;
+                };
+
+                const auto applyDrag = [&] {
+                    rewindDrag();
+                    std::vector<game::ItemStack*> targets;
+                    targets.reserve(draggedSlots.size());
+                    for (auto& [at, before] : draggedSlots) {
+                        if (game::ItemStack* stack = stackAt(at); stack != nullptr) {
+                            targets.push_back(stack);
+                        }
+                    }
+                    game::slots::distribute(targets, heldStack, dragButton == DragButton::Right);
+                };
+
+                if (dragButton != DragButton::None) {
+                    const bool stillHeld = dragButton == DragButton::Left ? leftDown : rightDown;
+
+                    if (stillHeld) {
+                        if (hit.has_value() && hit->region != Region::CraftResult) {
+                            const bool already =
+                                std::any_of(draggedSlots.begin(), draggedSlots.end(), [&](const auto& seen) {
+                                    return seen.first.region == hit->region && seen.first.index == hit->index;
+                                });
+                            if (!already) {
+                                rewindDrag();
+                                if (game::ItemStack* stack = stackAt(*hit); stack != nullptr) {
+                                    draggedSlots.emplace_back(*hit, *stack);
+                                }
+                                applyDrag();
+                                hudDirty = true;
+                            }
+                        }
+                    } else {
+                        // A sweep that never left its first slot is an ordinary
+                        // click, so undo the split and treat it as one.
+                        if (draggedSlots.size() < 2) {
+                            rewindDrag();
+                            if (!draggedSlots.empty()) {
+                                if (game::ItemStack* stack = stackAt(draggedSlots.front().first); stack != nullptr) {
+                                    if (dragButton == DragButton::Right) {
+                                        game::slots::rightClick(*stack, heldStack);
+                                    } else {
+                                        game::slots::leftClick(*stack, heldStack);
+                                    }
+                                }
+                            }
+                        }
+                        dragButton = DragButton::None;
+                        draggedSlots.clear();
+                        hudDirty = true;
+                    }
+                }
+
+                for (const engine::MouseButton button : presses) {
+                    const bool right = button == engine::MouseButton::Right;
+
+                    if (!hit.has_value()) {
+                        if (!game::inventoryScreen::insidePanel(cursorX, cursorY, renderer.aspectRatio()) &&
+                            !heldStack.empty()) {
+                            // Clicking into the world throws items away, the way
+                            // letting go of something over open ground would.
+                            // The right button parts with one; the left, all of
+                            // it.
+                            const int thrown = right ? 1 : heldStack.count;
+                            drops.spawn(camera.position + camera.forward() * 0.5f, heldStack.item, thrown,
+                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                            heldStack.count -= thrown;
+                            if (heldStack.count <= 0) {
+                                heldStack = game::ItemStack{};
+                            }
+                            hudDirty = true;
+                        }
+                        continue;
+                    }
+
+                    if (hit->region == Region::CraftResult) {
+                        // The result is a preview until it is taken, which is why
+                        // the ingredients are only spent here.
+                        const game::ItemStack made =
+                            game::craftResult(craftSlots.data(), game::inventoryScreen::kCraftSize);
+                        if (made.empty()) {
+                            continue;
+                        }
+                        const bool intoCursor = heldStack.empty();
+                        const bool ontoSame =
+                            !intoCursor && heldStack.item == made.item && heldStack.space() >= made.count;
+                        if (intoCursor || ontoSame) {
+                            if (intoCursor) {
+                                heldStack = made;
+                            } else {
+                                heldStack.count += made.count;
+                            }
+                            game::consumeIngredients(craftSlots.data(), game::inventoryScreen::kCraftSize);
+                            hudDirty = true;
+                        }
+                        continue;
+                    }
+
+                    game::ItemStack* stack = stackAt(*hit);
+                    if (stack == nullptr) {
+                        continue;
+                    }
+
+                    // Pressing with a full cursor begins a sweep rather than
+                    // acting immediately: which it turns out to be is only known
+                    // once the button comes back up. Picking a stack *up* never
+                    // starts one, or moving away from the slot you just took
+                    // from would scatter it again.
+                    if (!heldStack.empty()) {
+                        dragButton = right ? DragButton::Right : DragButton::Left;
+                        dragOriginalCursor = heldStack;
+                        draggedSlots.clear();
+                        draggedSlots.emplace_back(*hit, *stack);
+                        applyDrag();
+                        hudDirty = true;
+                        continue;
+                    }
+
+                    if (right) {
+                        game::slots::rightClick(*stack, heldStack);
+                    } else {
+                        game::slots::leftClick(*stack, heldStack);
+                    }
+                    hudDirty = true;
+                }
+            } else if (!hadCursor && clicked) {
                 window.setCursorCaptured(true);
             }
 
@@ -509,10 +792,11 @@ int main() {
                 hudDirty = true;
             }
 
-            // The overlay wants refreshing continuously; everything else only
-            // when the selection changes.
+            // The overlay wants refreshing continuously, and so does the
+            // inventory because the held stack follows the cursor. Everything
+            // else only when the selection changes.
             const bool overlayDue = overlayVisible && now - lastHudRebuild >= kOverlayRefreshInterval;
-            if (hudDirty || overlayDue) {
+            if (hudDirty || overlayDue || inventoryOpen) {
                 game::OverlayStats stats;
                 stats.frameMilliseconds = deltaSeconds * 1000.0f;
                 stats.gpuMilliseconds = renderer.stats().gpuMilliseconds;
@@ -535,7 +819,11 @@ int main() {
                 lastHudRebuild = now;
 
                 if (hudDirty) {
-                    engine::logInfo(std::string("Holding: ") + describeBlock(hotbar[selectedSlot]));
+                    const game::ItemStack& held = inventory.slot(selectedSlot);
+                    engine::logInfo(std::string("Holding: ") +
+                                    (held.empty() ? "nothing"
+                                                  : describeBlock(game::blockForItem(held.item))) +
+                                    (held.empty() ? "" : " x" + std::to_string(held.count)));
                     hudDirty = false;
                 }
             }
@@ -554,23 +842,26 @@ int main() {
             right.y = 0.0f;
 
             game::PlayerInput move;
-            if (window.isKeyDown(engine::Key::W)) {
-                move.moveDirection += forward;
+            // Keys belong to the screen while it is open, not to the player.
+            if (!inventoryOpen) {
+                if (window.isKeyDown(engine::Key::W)) {
+                    move.moveDirection += forward;
+                }
+                if (window.isKeyDown(engine::Key::S)) {
+                    move.moveDirection -= forward;
+                }
+                if (window.isKeyDown(engine::Key::D)) {
+                    move.moveDirection += right;
+                }
+                if (window.isKeyDown(engine::Key::A)) {
+                    move.moveDirection -= right;
+                }
+                move.jump = window.isKeyDown(engine::Key::Space);
+                move.sprint = window.isKeyDown(engine::Key::LeftControl);
+                move.sneak = window.isKeyDown(engine::Key::LeftShift);
+                move.verticalWish = (window.isKeyDown(engine::Key::Space) ? 1.0f : 0.0f) -
+                                    (window.isKeyDown(engine::Key::LeftShift) ? 1.0f : 0.0f);
             }
-            if (window.isKeyDown(engine::Key::S)) {
-                move.moveDirection -= forward;
-            }
-            if (window.isKeyDown(engine::Key::D)) {
-                move.moveDirection += right;
-            }
-            if (window.isKeyDown(engine::Key::A)) {
-                move.moveDirection -= right;
-            }
-            move.jump = window.isKeyDown(engine::Key::Space);
-            move.sprint = window.isKeyDown(engine::Key::LeftControl);
-            move.sneak = window.isKeyDown(engine::Key::LeftShift);
-            move.verticalWish = (window.isKeyDown(engine::Key::Space) ? 1.0f : 0.0f) -
-                                (window.isKeyDown(engine::Key::LeftShift) ? 1.0f : 0.0f);
 
             game::updatePlayer(player, move, world, deltaSeconds);
             camera.position = player.eyePosition();
@@ -581,6 +872,23 @@ int main() {
             // click that recaptures the cursor does not also swing at a block.
             const bool wantBreak = hadCursor && window.isMouseButtonDown(engine::MouseButton::Left);
             const bool wantPlace = hadCursor && window.isMouseButtonDown(engine::MouseButton::Right);
+            const bool wantDrop = !inventoryOpen && window.isKeyDown(engine::Key::Q);
+
+            if (!wantDrop) {
+                dropTimer = 0.0f;
+            } else {
+                dropTimer -= deltaSeconds;
+                if (dropTimer <= 0.0f) {
+                    game::ItemStack& held = inventory.slot(selectedSlot);
+                    if (!held.empty()) {
+                        drops.spawn(camera.position + camera.forward() * 0.5f, held.item, 1,
+                                    camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        inventory.consumeOne(selectedSlot);
+                        hudDirty = true;
+                    }
+                    dropTimer = kDropRepeatSeconds;
+                }
+            }
 
             // Timers only run down while the button is held, so releasing and
             // pressing again always acts immediately.
@@ -589,8 +897,18 @@ int main() {
             } else {
                 breakTimer -= deltaSeconds;
                 if (breakTimer <= 0.0f && target.hit) {
+                    const game::BlockId broken = world.blockAt(target.block.x, target.block.y, target.block.z);
                     world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air);
                     breakTimer = kBreakRepeatSeconds;
+
+                    // Creative removes blocks outright; survival makes you pick
+                    // them up.
+                    if (!creative) {
+                        const game::ItemId dropped = game::dropForBlock(broken);
+                        if (dropped != game::ItemId::None) {
+                            drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped, 1);
+                        }
+                    }
                 }
             }
 
@@ -598,8 +916,11 @@ int main() {
                 placeTimer = 0.0f;
             } else {
                 placeTimer -= deltaSeconds;
-                if (placeTimer <= 0.0f && target.hit && !game::playerOverlapsBlock(player, target.adjacent)) {
-                    game::BlockId placing = hotbar[selectedSlot];
+                const game::ItemStack& held = inventory.slot(selectedSlot);
+                const bool canPlace = !held.empty() && game::isBlockItem(held.item);
+                if (placeTimer <= 0.0f && canPlace && target.hit &&
+                    !game::playerOverlapsBlock(player, target.adjacent)) {
+                    game::BlockId placing = game::blockForItem(held.item);
                     glm::ivec3 where = target.adjacent;
 
                     const bool clickedAbove = target.adjacent.y > target.block.y;
@@ -631,6 +952,10 @@ int main() {
                     }
 
                     world.setBlock(where.x, where.y, where.z, placing);
+                    if (!creative) {
+                        inventory.consumeOne(selectedSlot);
+                        hudDirty = true;
+                    }
                     placeTimer = kPlaceRepeatSeconds;
                 }
             }
@@ -638,6 +963,40 @@ int main() {
             // Streaming runs after edits so a broken block is re-meshed in the
             // same frame it changed, and shares the same budget.
             applyUpdates(world.update(player.position, kStreamingBudgetSeconds));
+
+            // Dropped items live entirely on the main thread: there are a
+            // handful of them and they touch the world only to read it.
+            drops.update(world, player.position, deltaSeconds);
+            for (const game::ItemEntities::Collectable& ready : drops.collectable(player.position)) {
+                // Creative collects too. It has no need of the items, but a
+                // drop that can never be picked up just orbits the player
+                // forever, which is worse than a redundant pickup.
+                if (!inventory.hasRoomFor(ready.item, ready.count)) {
+                    continue;
+                }
+                const int left = inventory.add(ready.item, ready.count);
+                drops.reduce(ready.index, ready.count - left);
+                hudDirty = true;
+                break; // Indices shift as drops are removed.
+            }
+
+            // Rebuilt rather than transformed: world meshes are drawn with an
+            // identity model matrix, which is what lets the shader recover
+            // normals from world position. The handle is reused rather than
+            // recreated, or every frame would retire a GPU buffer.
+            {
+                engine::MeshData dropGeometry = drops.buildMesh(world, timeOfDay * 1000.0f);
+                if (dropGeometry.empty()) {
+                    if (dropMesh != engine::kInvalidMesh) {
+                        renderer.removeMesh(dropMesh);
+                        dropMesh = engine::kInvalidMesh;
+                    }
+                } else if (dropMesh == engine::kInvalidMesh) {
+                    dropMesh = renderer.addMesh(dropGeometry);
+                } else {
+                    renderer.updateMesh(dropMesh, dropGeometry);
+                }
+            }
 
             std::optional<glm::mat4> highlight;
             if (target.hit) {

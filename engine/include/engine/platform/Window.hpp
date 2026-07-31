@@ -21,7 +21,9 @@ enum class Key {
     A,
     S,
     D,
+    E,
     F,
+    Q,
     Space,
     LeftShift,
     LeftControl,
@@ -112,6 +114,11 @@ public:
 
     /// Cursor movement since the last call. Clears the accumulator.
     CursorDelta consumeCursorDelta();
+
+    /// Cursor position in pixels from the window's top-left. Only meaningful
+    /// while the cursor is released; mouse-look uses the delta instead.
+    double cursorX() const { return m_lastCursorX; }
+    double cursorY() const { return m_lastCursorY; }
 
     /// Mouse wheel movement since the last call, in notches. Positive is away
     /// from the user. Clears the accumulator.

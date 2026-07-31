@@ -127,6 +127,9 @@ Settings loadSettings(const std::filesystem::path& file) {
         if (key == "spawn_underground") {
             settings.spawnUnderground = (value == "1" || value == "true");
         }
+        if (key == "creative_mode") {
+            settings.creativeMode = (value == "1" || value == "true");
+        }
     }
 
     // A render distance of zero would mesh nothing at all.
@@ -161,6 +164,10 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "# spawn_underground: start on the floor of the deepest cave in that\n"
         << "#   column instead of on the surface. Only useful for testing.\n"
         << "#\n"
+        << "# creative_mode: 1 starts you with a full hotbar and blocks never run\n"
+        << "#   out. 0 starts you empty-handed, which until crafting exists means\n"
+        << "#   you can only place what you have already broken.\n"
+        << "#\n"
         << "# All of these take effect on restart.\n"
         << "worker_threads=" << settings.workerThreads << "\n"
         << "render_distance=" << settings.renderDistance << "\n"
@@ -168,7 +175,8 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "day_length_seconds=" << settings.dayLengthSeconds << "\n"
         << "spawn_x=" << settings.spawnX << "\n"
         << "spawn_z=" << settings.spawnZ << "\n"
-        << "spawn_underground=" << (settings.spawnUnderground ? 1 : 0) << "\n";
+        << "spawn_underground=" << (settings.spawnUnderground ? 1 : 0) << "\n"
+        << "creative_mode=" << (settings.creativeMode ? 1 : 0) << "\n";
 }
 
 } // namespace game

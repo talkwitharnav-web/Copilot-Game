@@ -134,6 +134,59 @@ float highestSurfaceBelow(const World& world, const Aabb& box, float notAbove) {
     return best;
 }
 
+/// The face that stopped motion along `axis`, or infinity if nothing did.
+///
+/// Resolution has to read the same shape table the overlap test does. Snapping
+/// to the cell boundary instead is only correct for full cubes: a stair's step
+/// starts halfway across its cell, so walking into one from the high side threw
+/// the player a whole block backwards. Same failure as landing on a slab, one
+/// axis over.
+float blockingPlaneAlong(const World& world, const Aabb& box, int axis, bool positive) {
+    const int minX = static_cast<int>(std::floor(box.min.x));
+    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
+    const int minY = static_cast<int>(std::floor(box.min.y));
+    const int maxY = static_cast<int>(std::floor(box.max.y - kSkin));
+    const int minZ = static_cast<int>(std::floor(box.min.z));
+    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
+
+    float best = positive ? std::numeric_limits<float>::infinity() : -std::numeric_limits<float>::infinity();
+
+    for (int y = minY; y <= maxY; ++y) {
+        for (int z = minZ; z <= maxZ; ++z) {
+            for (int x = minX; x <= maxX; ++x) {
+                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                const glm::vec3 cell{static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)};
+
+                for (int i = 0; i < shape.count; ++i) {
+                    const BlockBox& b = shape.boxes[i];
+                    const glm::vec3 lo = cell + glm::vec3{b.minX, b.minY, b.minZ};
+                    const glm::vec3 hi = cell + glm::vec3{b.maxX, b.maxY, b.maxZ};
+
+                    // Only boxes overlapping on the other two axes can block
+                    // this one; the rest are beside the player, not in the way.
+                    bool blocks = true;
+                    for (int other = 0; other < 3 && blocks; ++other) {
+                        if (other == axis) {
+                            continue;
+                        }
+                        blocks = box.min[other] < hi[other] && box.max[other] > lo[other];
+                    }
+                    if (!blocks) {
+                        continue;
+                    }
+
+                    if (positive) {
+                        best = std::min(best, lo[axis]);
+                    } else {
+                        best = std::max(best, hi[axis]);
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
 /// Moves along one axis and snaps to the blocking surface if something is hit.
 ///
 /// Axes are resolved one at a time on purpose. Resolving all three together
@@ -168,13 +221,14 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount, f
     const float extentAbove = (axis == 1) ? height : half;
     const float extentBelow = (axis == 1) ? 0.0f : half;
 
-    if (amount > 0.0f) {
-        const float blockingPlane = std::floor(candidate[axis] + extentAbove);
-        candidate[axis] = blockingPlane - extentAbove - kSkin;
-    } else {
-        const float blockingPlane = std::floor(candidate[axis] - extentBelow) + 1.0f;
-        candidate[axis] = blockingPlane + extentBelow + kSkin;
+    const float plane = blockingPlaneAlong(world, boxAt(candidate, height), axis, amount > 0.0f);
+    if (!std::isfinite(plane)) {
+        // Overlapped but nothing squarely in the way, which the skin makes
+        // possible at a corner. Refusing the move is the safe answer.
+        return true;
     }
+
+    candidate[axis] = amount > 0.0f ? plane - extentAbove - kSkin : plane + extentBelow + kSkin;
 
     position = candidate;
     return true;

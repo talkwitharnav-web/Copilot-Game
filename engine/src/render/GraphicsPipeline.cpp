@@ -87,7 +87,8 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     // Geometry now arrives from a vertex buffer, described by the single layout
     // definition in Vertex.hpp.
     const VkVertexInputBindingDescription binding = Vertex::bindingDescription();
-    const std::array<VkVertexInputAttributeDescription, 4> attributes = Vertex::attributeDescriptions();
+    // auto, so adding an attribute is one edit in Vertex.hpp rather than two.
+    const auto attributes = Vertex::attributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

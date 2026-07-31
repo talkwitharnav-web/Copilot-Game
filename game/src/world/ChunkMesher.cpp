@@ -189,7 +189,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // would slow down the path that carries the whole world for
                     // the sake of a few decorative blocks.
                     const BlockShape shape = blockShape(block);
-                    if (shape == BlockShape::Cross || shape == BlockShape::Slab || shape == BlockShape::Stairs) {
+                    if (shape == BlockShape::Cross || shape == BlockShape::Slab || shape == BlockShape::Stairs ||
+                        shape == BlockShape::Fence) {
                         continue;
                     }
 
@@ -435,7 +436,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
             for (int x = 0; x < size; ++x) {
                 const BlockId block = volume.blockAt(x, y, z);
                 const BlockShape shape = blockShape(block);
-                if (shape != BlockShape::Cross && shape != BlockShape::Slab && shape != BlockShape::Stairs) {
+                if (shape != BlockShape::Cross && shape != BlockShape::Slab && shape != BlockShape::Stairs &&
+                    shape != BlockShape::Fence) {
                     continue;
                 }
 
@@ -448,9 +450,10 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // its own cell rather than by a neighbour.
                     lightOf({x, y, z}, sky, blockLight);
 
-                    // Held off the cell walls so a blade never lands exactly on
-                    // the face of the block beside it.
-                    constexpr float lo = 0.15f;
+                    // Reference plants span 0.8 to 15.2 in sixteenths, so the
+                    // blade very nearly reaches the cell corners. Holding it
+                    // further in made plants read a size too small.
+                    constexpr float lo = 0.05f;
                     constexpr float hi = 1.0f - lo;
                     const float layer = blockTextureLayer(block, BlockFace::Side);
 
@@ -473,7 +476,32 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                 // Slabs and stairs are both just boxes, and they read the very
                 // same table collision does, so what you see and what you bump
                 // into cannot disagree.
-                const BlockBoxes shapeBoxes = collisionBoxes(block);
+                //
+                // A fence is the exception: its arms follow its neighbours,
+                // which the id alone cannot express, so the drawn shape is
+                // computed here while collision assumes every arm.
+                BlockBoxes shapeBoxes = collisionBoxes(block);
+                if (shape == BlockShape::Fence) {
+                    const auto reaches = [&](int dx, int dz) {
+                        const BlockId neighbour = volume.blockAt(x + dx, y, z + dz);
+                        return isOpaque(neighbour) || blockShape(neighbour) == BlockShape::Fence;
+                    };
+                    std::uint8_t connections = 0;
+                    if (reaches(0, -1)) {
+                        connections |= ConnectNorth;
+                    }
+                    if (reaches(0, 1)) {
+                        connections |= ConnectSouth;
+                    }
+                    if (reaches(-1, 0)) {
+                        connections |= ConnectWest;
+                    }
+                    if (reaches(1, 0)) {
+                        connections |= ConnectEast;
+                    }
+                    shapeBoxes = fenceRailBoxes(connections);
+                }
+
                 for (int i = 0; i < shapeBoxes.count; ++i) {
                     const BlockBox& b = shapeBoxes.boxes[i];
                     const glm::vec3 lo{b.minX, b.minY, b.minZ};

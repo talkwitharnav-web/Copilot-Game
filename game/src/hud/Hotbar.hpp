@@ -1,21 +1,18 @@
 #pragma once
 
-#include "world/Block.hpp"
+#include "item/Inventory.hpp"
 
 #include <engine/render/MeshData.hpp>
 
-#include <array>
 #include <cstddef>
 
 namespace game {
 
-constexpr std::size_t kHotbarSlots = 9;
-
-/// The row of selectable blocks along the bottom of the screen.
+/// The row of carried items along the bottom of the screen.
 ///
-/// Rebuilt whenever the selection changes rather than animated, because the
-/// whole bar is a few dozen triangles and uploading it is cheaper than tracking
-/// which slot moved. `BlockId::Air` leaves a slot empty.
-engine::MeshData makeHotbar(const std::array<BlockId, kHotbarSlots>& slots, std::size_t selected);
+/// Rebuilt whenever the selection or its contents change rather than animated,
+/// because the whole bar is a few dozen triangles and uploading it is cheaper
+/// than tracking which slot moved. An empty stack leaves a slot bare.
+engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected);
 
 } // namespace game

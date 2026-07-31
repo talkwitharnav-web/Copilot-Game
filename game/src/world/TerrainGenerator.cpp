@@ -81,7 +81,6 @@ int surfaceHeightAt(std::uint32_t seed, int worldX, int worldZ) {
 
 Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
     Chunk chunk;
-
     const int baseX = coord.x * Chunk::kSize;
     const int baseY = coord.y * Chunk::kSize;
     const int baseZ = coord.z * Chunk::kSize;

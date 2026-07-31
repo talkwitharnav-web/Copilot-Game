@@ -38,6 +38,13 @@ struct Settings {
     /// watching the cycle without waiting.
     unsigned dayLengthSeconds = 600;
 
+    /// Drops off, and one of everything placeable in the hotbar. Useful while
+    /// developing anything that is not the inventory itself.
+    /// On by default until there is a way to obtain blocks other than breaking
+    /// them. Survival with no crafting lets you place only what you have
+    /// already dug up, which is not a game. Flip this once M19c lands.
+    bool creativeMode = true;
+
     /// Where the player starts, in world blocks. Height is still found from the
     /// terrain, so this only chooses the column.
     ///

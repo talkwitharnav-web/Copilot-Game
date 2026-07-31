@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–17c complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs and stairs. `TIMELINE.md` M17d (connected shapes) is next, and is optional — M18 (inventory and items) is the next Core milestone.
+> **Status:** Milestones 1–18 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in behind a loading bar, and the player walks, jumps, sprints, crouches, flies, swims, and breaks and places blocks. Broken blocks drop as items that are collected into a 36-slot inventory, opened with `E` and drawn from the artist's panel. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs and stairs. `TIMELINE.md` M19 (crafting) is next, with M17d (fences) still open as optional.
 
 ---
 
@@ -186,10 +186,15 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 | `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
 | `Sky` | `world/Sky.hpp` | Placeholder day cycle: sun direction over time, sky colour, and the billboarded sun quad. |
 | `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. Sized from the targeted block's selection box, and rebuilt only when that height changes. |
-| `Settings` | `core/Settings.hpp` | `settings.cfg` next to the executable. Read once at startup. |
+| `Settings` | `core/Settings.hpp` | `settings.cfg` next to the executable. Read once at startup. **`creative_mode` defaults to 1** — survival with no crafting lets you place only what you have already dug up, so flip it once progression exists. |
+| `Item` | `item/Item.hpp` | `ItemId`, stacks, and what a block drops when broken. Block items share the block's numbering; anything else starts at `kFirstToolItem`. Non-block items name a sprite layer through `itemTextureLayer`. |
+| `Inventory` | `item/Inventory.hpp` | 36 slots, the first 9 being the hotbar. `add()` tops up matching stacks before using an empty slot. |
+| `Recipe` | `item/Recipe.hpp` | Shaped and shapeless recipes in one struct, and the matcher. **Patterns are stored at their own size**, so the matcher slides them around a larger grid — a 1×2 recipe works anywhere in a 3×3 without changes. `craftResult` takes the grid size, which is what lets a crafting table reuse it unchanged. |
+| `slots` | `item/SlotOps.hpp` | What a click does to one slot given what the cursor holds: left takes or merges a whole stack, right takes half and places one, and `distribute` spreads a stack over several slots. Free functions over two stacks, because the crafting grid is not part of the inventory but obeys the same rules. |
 | `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, and isometric block icons. |
 | `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
 | `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. |
+| `InventoryScreen` | `hud/InventoryScreen.hpp` | The inventory panel, drawn as one sprite from the artist's art with icons composited on top. Owns the 2×2 crafting grid's layout; every slot position is measured off the art in its own pixels and scaled through one constant. |
 | `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and labelled rows. |
 | `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
 
@@ -250,10 +255,11 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | Left click | Break the targeted block (hold to repeat) |
 | Right click | Place against the targeted face (hold to repeat) |
 | `1` – `9` / scroll | Select a hotbar slot |
+| `Q` | Throw one of the held item (hold to repeat); empties the cursor while the inventory is open |
+| `E` | Open and close the inventory |
 | `Escape` | Release the mouse cursor |
 | Left click | Recapture the cursor when released |
-| `F1` / `F2` | Lower / raise the frame cap |
-| `F3` / `F4` | Narrow / widen the field of view (default 70°) |
+| `F1` / `F2` | Lower / raise the frame cap || `F3` / `F4` | Narrow / widen the field of view (default 70°) |
 | `F5` | Toggle the diagnostics overlay |
 | `F6` / `F7` | Decrease / increase render distance (saved to `settings.cfg`) |
 
@@ -285,6 +291,8 @@ These are tuning numbers, not part of the game's identity, and are expected to c
 **In water**, buoyancy cancels most of gravity: holding jump climbs, releasing it drifts slowly down, and horizontal speed drops. Water is survivable rather than a pit to drown in — there is no breath meter or drowning damage, and there is no swimming animation.
 
 **Collision resolves one axis at a time** — vertical first, then X, then Z. Resolving all three simultaneously leaves the maths unable to tell which direction to push out of a corner, which shows up as jitter or as sliding diagonally through walls. Vertical runs first so that "am I on the ground" is settled before the horizontal move decides whether a step-up is permitted.
+
+**Resolution reads the same shape table the overlap test does, on every axis.** `blockingPlaneAlong` finds the face that actually stopped the box rather than assuming a cell boundary. Snapping to `floor()` is only correct for full cubes — a slab's top is halfway up its cell and a stair's step starts halfway across it, and both produced spectacular bugs before this existed. See `CLAUDE.md`; this one root cause has surfaced three times.
 
 `updatePlayer` **clamps its own delta time to 50 ms**. A long stall must not let the player travel far enough in one step to pass straight through a wall; the collision test only looks at blocks the box overlaps, so it cannot see anything it skipped over.
 
@@ -338,6 +346,22 @@ The PNGs are ordinary files and may be edited by hand instead; the script is a s
 
 Third-party textures kept for visual reference live in `reference/`, which is gitignored and deliberately outside `assets/` so the build cannot copy them into the game.
 
+### Items and drops
+
+**`ItemId` is a separate type from `BlockId`.** Every placeable block has an item form, but not every item is a block — a tool never is. Block items share the block's numbering so there is only one list to maintain, and non-block items start at `kFirstToolItem`.
+
+`dropForBlock` decides what breaking yields. It is a table, not an identity: stone gives cobblestone, grass gives dirt, and all eight stair orientations collapse to one item so an inventory cannot fill with rotations of the same thing.
+
+**Dropped items are the smallest possible entity** — position, velocity, stack — and resolve only vertically against the ground. The general entity system is M20. Their geometry is **rebuilt every frame rather than transformed**, because world meshes are drawn with an identity model matrix and the shader recovers normals from screen-space derivatives of world position; that only holds while vertex positions *are* world positions. The mesh handle is reused, or every frame would retire a GPU buffer.
+
+Drops are **thrown**, not released: without a forward impulse a dropped stack lands at your feet and is collected again immediately. Each drop carries **its own pickup delay** — 0.35 s from breaking, 1.2 s when thrown — because the delay has to outlast the flight or the item is pulled straight back inside the 2 m attraction radius.
+
+Landing **bounces**, keeping 42% of the impact speed, and anything slower than 2 m/s settles outright. That threshold is what makes it terminate; removing it to get a bouncier feel turns the animation into the infinite loop described in `CLAUDE.md`.
+
+`creative_mode` in `settings.cfg` keeps infinite blocks and suppresses drops, which is what makes it possible to test anything that is not the inventory.
+
+Stack counts are drawn in the **bottom-left** of a slot, and only when there is more than one — a count of one reads as simply having the thing.
+
 ---
 
 ## HUD
@@ -351,6 +375,10 @@ Everything is built from `hud::` primitives: axis-aligned quads, sprite-sheet re
 **Every HUD quad is emitted with both windings.** Backface culling is on, and screen geometry skips the projection that establishes which way is front. Deriving that has gone wrong before and fails completely silently, so two extra triangles per quad buys certainty.
 
 ### The sprite sheet
+
+`assets/textures/hud.png` is **built, not hand-edited** — `tools/make-hud-sheet.ps1` stacks the widget art and the inventory panel into one image. One sheet because the HUD samples a single texture, and a texture array needs every layer the same size, which these are not. The widget art stays at the origin so its pixel coordinates survive the sheet growing.
+
+The inventory art arrives as an **integer upscale** of its real pixel grid, so the tool samples every Nth pixel to recover the original exactly. Resizing would blur crisp pixel art. The artist's mock-up also contains a drawn character in the preview panel, which the tool paints out with the panel's own backdrop colour — the game renders its own there.
 
 `assets/textures/hud.png` is loaded as a **second texture binding**, not a layer of the block array, because a texture array requires every layer to share one size and the sheet is 185×41 against the blocks' 16×16. A **negative vertex layer** is the agreed signal for the shader to sample it. Hearts, food and the XP bar are already in the sheet, unused.
 
@@ -616,6 +644,7 @@ GLM is column-major and the project builds with `GLM_FORCE_DEPTH_ZERO_TO_ONE`, s
 | `day_length_seconds` | Real seconds for a full day and night | No — restart |
 | `spawn_x` / `spawn_z` | Which column a new world starts in | No — restart |
 | `spawn_underground` | Start in the most open cave near that column | No — restart |
+| `creative_mode` | Infinite blocks, no drops | No — restart |
 
 `spawn_underground` **searches** the surrounding area for the roomiest cave floor rather than trusting the spawn column to contain one. It exists because testing anything underground otherwise means minutes of flying per attempt, which is enough friction that the test stops being run. All three only apply to a fresh world; a saved player position wins.
 

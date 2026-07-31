@@ -51,6 +51,7 @@ enum class BlockId : std::uint8_t {
     /// The upper half of a cell. Two slabs meeting in one cell become a full
     /// block instead, so this is only ever a lone half.
     StoneSlabTop,
+    PlanksFence,
 };
 
 /// Highest flowing level. Water at this depth cannot spread any further, which
@@ -133,6 +134,8 @@ enum class BlockShape : std::uint8_t {
     Slab,
     /// A half block with a quarter step on top of it.
     Stairs,
+    /// A post that grows arms toward whatever it touches.
+    Fence,
 };
 
 constexpr BlockShape blockShape(BlockId id) {
@@ -148,6 +151,9 @@ constexpr BlockShape blockShape(BlockId id) {
     if (isStairs(id)) {
         return BlockShape::Stairs;
     }
+    if (id == BlockId::PlanksFence) {
+        return BlockShape::Fence;
+    }
     return BlockShape::Full;
 }
 
@@ -157,12 +163,85 @@ struct BlockBox {
     float maxX, maxY, maxZ;
 };
 
-/// Every box a block occupies. Two is enough for all current shapes, and stairs
-/// are the only one needing more than one.
+/// Every box a block occupies. Nine covers the widest case, a fence drawn with
+/// two rails toward each of four neighbours plus its post.
 struct BlockBoxes {
-    BlockBox boxes[2]{};
+    BlockBox boxes[9]{};
     int count = 0;
 };
+
+/// Which sides a neighbour-aware block reaches toward.
+enum ConnectionBits : std::uint8_t {
+    ConnectNorth = 1, // -Z
+    ConnectEast = 2,  // +X
+    ConnectSouth = 4, // +Z
+    ConnectWest = 8,  // -X
+    ConnectAll = 15,
+};
+
+// Shared by both fence shapes. The post matches the reference exactly, and the
+// rails sit where its model puts them: 6-9 and 12-15 in sixteenths.
+constexpr float kFencePostLow = 0.375f;
+constexpr float kFencePostHigh = 0.625f;
+constexpr float kFenceArmLow = 0.4375f;
+constexpr float kFenceArmHigh = 0.5625f;
+constexpr float kFenceLowRailBottom = 0.375f;
+constexpr float kFenceLowRailTop = 0.5625f;
+constexpr float kFenceHighRailBottom = 0.75f;
+constexpr float kFenceHighRailTop = 0.9375f;
+
+/// Post plus a solid full-height arm toward each connected side.
+///
+/// **Collision only.** What matters underfoot is that a line of fences is a
+/// barrier; modelling the gap between the rails would let you squeeze through
+/// it. `fenceRailBoxes` is what gets drawn.
+constexpr BlockBoxes fenceBoxes(std::uint8_t connections) {
+    BlockBoxes result;
+    result.boxes[result.count++] = {kFencePostLow, 0.0f, kFencePostLow, kFencePostHigh, 1.0f, kFencePostHigh};
+
+    if ((connections & ConnectNorth) != 0) {
+        result.boxes[result.count++] = {kFenceArmLow, 0.0f, 0.0f, kFenceArmHigh, 1.0f, kFencePostLow};
+    }
+    if ((connections & ConnectSouth) != 0) {
+        result.boxes[result.count++] = {kFenceArmLow, 0.0f, kFencePostHigh, kFenceArmHigh, 1.0f, 1.0f};
+    }
+    if ((connections & ConnectWest) != 0) {
+        result.boxes[result.count++] = {0.0f, 0.0f, kFenceArmLow, kFencePostLow, 1.0f, kFenceArmHigh};
+    }
+    if ((connections & ConnectEast) != 0) {
+        result.boxes[result.count++] = {kFencePostHigh, 0.0f, kFenceArmLow, 1.0f, 1.0f, kFenceArmHigh};
+    }
+    return result;
+}
+
+/// Post plus two thin rails toward each connected side.
+///
+/// **Drawing only.** A fence you can see through is most of what makes it read
+/// as a fence rather than as a thin wall, and this is the one place drawn
+/// geometry and collision geometry deliberately disagree.
+constexpr BlockBoxes fenceRailBoxes(std::uint8_t connections) {
+    BlockBoxes result;
+    result.boxes[result.count++] = {kFencePostLow, 0.0f, kFencePostLow, kFencePostHigh, 1.0f, kFencePostHigh};
+
+    const auto addRails = [&result](float minX, float minZ, float maxX, float maxZ) {
+        result.boxes[result.count++] = {minX, kFenceLowRailBottom, minZ, maxX, kFenceLowRailTop, maxZ};
+        result.boxes[result.count++] = {minX, kFenceHighRailBottom, minZ, maxX, kFenceHighRailTop, maxZ};
+    };
+
+    if ((connections & ConnectNorth) != 0) {
+        addRails(kFenceArmLow, 0.0f, kFenceArmHigh, kFencePostLow);
+    }
+    if ((connections & ConnectSouth) != 0) {
+        addRails(kFenceArmLow, kFencePostHigh, kFenceArmHigh, 1.0f);
+    }
+    if ((connections & ConnectWest) != 0) {
+        addRails(0.0f, kFenceArmLow, kFencePostLow, kFenceArmHigh);
+    }
+    if ((connections & ConnectEast) != 0) {
+        addRails(kFencePostHigh, kFenceArmLow, 1.0f, kFenceArmHigh);
+    }
+    return result;
+}
 
 /// The single source of truth for a block's extent. Meshing, collision and the
 /// targeting outline all read this, so none of them can disagree about where a
@@ -204,6 +283,11 @@ constexpr BlockBoxes collisionBoxes(BlockId id) {
         result.count = 2;
         break;
     }
+    case BlockShape::Fence:
+        // Every arm, regardless of neighbours: what is drawn follows the
+        // neighbours, but collision cannot see them from an id alone, and a
+        // post on its own would let you squeeze past.
+        return fenceBoxes(ConnectAll);
     default:
         break;
     }
@@ -224,7 +308,10 @@ constexpr float shapeHeight(BlockShape shape) {
 constexpr BlockBoxes selectionBoxes(BlockId id) {
     if (blockShape(id) == BlockShape::Cross) {
         BlockBoxes result;
-        result.boxes[0] = {0.15f, 0.0f, 0.15f, 0.85f, 1.0f, 0.85f};
+        // Slimmer and shorter than the blades themselves, matching the
+        // reference's 2-14 by 0-13 hitbox: aiming at a plant should not mean
+        // aiming at the whole cell it stands in.
+        result.boxes[0] = {0.125f, 0.0f, 0.125f, 0.875f, 0.8125f, 0.875f};
         result.count = 1;
         return result;
     }
@@ -235,7 +322,8 @@ constexpr BlockBoxes selectionBoxes(BlockId id) {
 /// you walk straight through.
 constexpr bool isSolid(BlockId id) {
     const BlockShape shape = blockShape(id);
-    return shape == BlockShape::Full || shape == BlockShape::Slab || shape == BlockShape::Stairs;
+    return shape == BlockShape::Full || shape == BlockShape::Slab || shape == BlockShape::Stairs ||
+           shape == BlockShape::Fence;
 }
 
 /// Hides whatever is behind it. Kept separate from `isSolid` because water is
@@ -329,6 +417,10 @@ enum class TextureLayer : std::uint32_t {
     /// pipeline, and a texture array needs every layer the same size.
     Sun = 16,
     TallGrass = 17,
+    /// Not a block face. The array is really "every 16x16 sprite", and putting
+    /// item icons in it costs nothing where a second array would need its own
+    /// binding and sampler.
+    Stick = 18,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
@@ -344,6 +436,8 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::Stone);
     case BlockId::StoneSlabTop:
         return static_cast<float>(TextureLayer::Stone);
+    case BlockId::PlanksFence:
+        return static_cast<float>(TextureLayer::Planks);
     case BlockId::Dirt:
         return static_cast<float>(TextureLayer::Dirt);
     case BlockId::Grass:

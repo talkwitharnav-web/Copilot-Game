@@ -6,6 +6,11 @@ add_executable(game
     src/hud/HudPrimitives.cpp
     src/hud/Hotbar.cpp
     src/hud/LoadingScreen.cpp
+    src/hud/InventoryScreen.cpp
+    src/item/Inventory.cpp
+    src/item/Recipe.cpp
+    src/item/SlotOps.cpp
+    src/world/ItemEntity.cpp
     src/world/Noise.cpp
     src/world/Biome.cpp
     src/world/Structures.cpp

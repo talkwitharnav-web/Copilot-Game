@@ -89,48 +89,82 @@ function Save-Bitmap {
 # --- Palettes -------------------------------------------------------------
 # Dark to light. Deliberately narrow: the reference spans far less range than
 # instinct suggests.
+#
+# Every ramp below is tuned against measured reference statistics - luminance
+# range, mean, standard deviation and run length - rather than against how it
+# looks in isolation. Run `tools\compare-texture.ps1 <ours> <reference>` after
+# any change here; a number moving is the only reliable signal.
 
-$stonePalette = @('6E6E6E', '757575', '7C7C7C', '848484', '8C8C8C')
-$stoneWeights = @(2, 4, 6, 4, 2)
+# 4 tones, not 6: reference stone is more banded than instinct suggests, and
+# its horizontal runs reach 9 pixels where ours reached 4.
+$stonePalette = @('686868', '747474', '808080', '8C8C8C')
+$stoneWeights = @(3, 6, 6, 3)
 
-$dirtPalette  = @('61452F', '6E4E36', '7A573C', '875F43', '936A4C')
-$dirtWeights  = @(3, 5, 6, 4, 2)
+# Lighter and higher contrast than before: the reference sits at mean 102 with
+# a spread of 23, ours was 92 and 16, which read as flat mud.
+$dirtPalette  = @('5E4430', '6C4E38', '7A5840', '886248', '966C50', 'A47758', 'B08260')
+$dirtWeights  = @(3, 5, 7, 7, 5, 3, 2)
 
-$grassPalette = @('4F7F31', '5A8C38', '65993F', '70A646', '7BB34D')
-$grassWeights = @(2, 4, 6, 4, 2)
+# Green is baked in, not applied at draw time.
+#
+# A greyscale texture multiplied by a per-biome colour was tried and reverted:
+# it washed every plant out to a pale sage, because a mid-grey times a mid-green
+# is a much duller colour than either. Matching a reference statistic is not the
+# goal; the goal is that it looks right.
+$grassPalette = @('44722B', '4A7A2F', '508233', '558A37', '5A923B', '5F9A3F', '64A143', '69A947',
+                  '6EB14B', '73B94F', '78C153', '7DC957')
+$grassWeights = @(1, 2, 4, 6, 8, 10, 10, 8, 6, 4, 2, 1)
+
+$grassTopPalette = $grassPalette
+$grassTopWeights = $grassWeights
+
 
 # Loose rubble carries far more contrast than bedrock-smooth stone.
-$cobblePalette = @('4F4F53', '646468', '78787D', '8E8E93', 'A6A6AB')
-$cobbleWeights = @(3, 5, 5, 4, 3)
+# Near neutral, and wider than before. Reference cobblestone measures 0.4%
+# saturation against our 3.7%, and spans 82-181 against our 79-166.
+$cobblePalette = @('525252', '686868', '7E7E7E', '949494', 'AAAAAA', 'B5B5B5')
+$cobbleWeights = @(3, 5, 6, 5, 4, 2)
 
-# Gravel mixes warm and cool greys rather than staying neutral.
-$gravelPalette = @('575250', '6A625D', '7C736C', '8D847C', '9F958C')
-$gravelWeights = @(3, 5, 5, 4, 3)
+# Reference gravel is almost colourless - 4.3% saturation, where ours reached
+# 11.8% and read as brown rubble rather than stone chips.
+$gravelPalette = @('5D5D5B', '696966', '747471', '80807C', '8B8B87', '979792', 'A2A29D', 'AEAEA8')
+$gravelWeights = @(2, 4, 5, 6, 6, 5, 4, 2)
 
-# Snow is almost flat with a faint blue cast; real contrast reads as dirty snow.
-$snowPalette = @('DFE7EF', 'E9EFF5', 'F2F6FA', 'F9FBFD', 'FFFFFF')
-$snowWeights = @(1, 2, 5, 7, 5)
+# Three tones spanning five luminance levels. Reference snow is very nearly
+# pure white; ours spanned 25 levels and read as dirty.
+$snowPalette = @('FAFAFA', 'FCFCFC', 'FFFFFF')
+$snowWeights = @(3, 5, 6)
 
-$planksPalette = @('9A7C4B', 'A78855', 'B4945F', 'BE9F6A', 'C9AB76')
-$planksWeights = @(3, 5, 6, 4, 2)
-$plankSeamColor = '6A5330'
+# Reference planks top out at 161 and their longest identical run is 8 pixels -
+# half the tile. Ours reached 174 and ran the full 16, which is what made whole
+# rows read as painted bands.
+$planksPalette = @('9A7C4B', 'A58653', 'B0905B', 'BA9A63', 'C3A46B')
+$planksWeights = @(3, 5, 6, 5, 3)
+$plankSeamColor = '6E5635'
+$plankSeamDark = '5E4A2D'
 
-$brickPalette = @('6B3729', '7D4234', '8E4D3D', '9F5847', 'B0664F', 'C0765E')
+$brickPalette = @('6F3B2D', '7F4638', '8F5143', '9F5C4D', 'AB6755', 'B37160')
 $brickWeights = @(3, 5, 6, 5, 4, 2)
 
 # Mortar is not a flat fill: it carries as much grain as the brick faces, which
-# is most of what stops the texture reading as vector art.
-$mortarPalette = @('978D86', 'A39992', 'AEA49C', 'B9AEA6', 'C4B8AF')
+# is most of what stops the texture reading as vector art. Darker than it was -
+# the reference spread is 22 where ours reached 42, because pale mortar against
+# dark brick is most of a texture's contrast all by itself.
+$mortarPalette = @('80756E', '8A7F77', '948980', '9E9389', 'A69B91')
 $mortarWeights = @(2, 4, 6, 4, 2)
 
-$sandPalette  = @('CFC59A', 'D6CCA3', 'DCD2AB', 'E2D8B3', 'E8DEBB')
-$sandWeights  = @(2, 4, 6, 4, 2)
+# Nearly twice the spread it had: reference sand covers 187-233 where ours
+# covered 196-222 and read as flat card.
+$sandPalette  = @('C6BC92', 'CFC59B', 'D8CEA4', 'E1D7AD', 'EAE0B6', 'F0E6BC')
+$sandWeights  = @(2, 4, 6, 6, 4, 2)
 
 # Warm and blotchy, weighted toward the brighter end so it reads as a light
-# source even before anything is actually lit by it.
-$glowPalette = @('8A6A2E', 'A88338', 'C39D45', 'D9B455', 'ECCB6B')
-$glowWeights = @(2, 3, 5, 6, 5)
-$glowCoreColor = 'FFF3B8'
+# source even before anything is actually lit by it. The reference spans 75-255
+# against our 108-241: a glowing block needs genuinely dark pits for its bright
+# cores to register as bright.
+$glowPalette = @('6B4F1F', '85632A', 'A07935', 'BA8F42', 'D3A754', 'E4BC68')
+$glowWeights = @(3, 5, 6, 6, 5, 3)
+$glowCoreColor = 'FFF6C8'
 
 # Narrow and deliberately low-contrast: water carries its look from being
 # see-through and from what is under it, not from its own texture.
@@ -143,15 +177,13 @@ $barkWeights = @(7, 14, 15, 42, 16, 5)
 $logCorePalette = @('8A6C42', '9A7A4C', 'A78754', 'AF8E5B', 'B89862')
 $logCoreWeights = @(2, 4, 6, 4, 2)
 
-# Four tones and a third of the tile missing, matching the reference's
-# structure. Weights follow its distribution: the two lighter tones carry most
-# of the surface, which is what stops foliage reading as a flat dark mass.
+# Green is baked in for the same reason ground cover is. Four tones and roughly
+# a third of the tile missing, so a canopy reads as leaves rather than a cube.
 $leafPalette = @('3B6328', '47762F', '5D9A3D', '74BC4B')
 $leafWeights = @(34, 36, 57, 45)
 
-# Lighter and yellower than canopy leaves, and a wider value range: the
-# reference plant sprite spans luminance 108-183 where its leaves span 101-186,
-# but plants read brighter because they are lit from every side.
+# Lighter and yellower than canopy leaves: plants read brighter because they are
+# lit from every side.
 $tallGrassPalette = @('4A7A2E', '55892F', '629B36', '6FAD3E', '7EC048', '8FD456')
 $tallGrassWeights = @(8, 20, 28, 25, 40, 19)
 
@@ -160,9 +192,9 @@ $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
 
 function New-FlatTexture {
-    param([string]$Name, [string[]]$Palette, [int[]]$Weights, [int]$Salt)
+    param([string]$Name, [string[]]$Palette, [int[]]$Weights, [int]$Salt, [double]$RunChance = 0.30)
 
-    $grid = New-IndexGrid -Weights $Weights -Salt $Salt
+    $grid = New-IndexGrid -Weights $Weights -Salt $Salt -RunChance $RunChance
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
     for ($y = 0; $y -lt $size; $y++) {
         for ($x = 0; $x -lt $size; $x++) {
@@ -196,9 +228,11 @@ function New-DirtTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'dirt'
 }
 
-# Stone: the grey ramp plus a few darker flecks so it reads as rock.
+# Stone: the grey ramp plus a few darker flecks so it reads as rock. A high run
+# chance because reference stone repeats up to 9 pixels across, where ours
+# managed 4 and came out speckled.
 function New-StoneTexture {
-    $grid = New-IndexGrid -Weights $stoneWeights -Salt 11
+    $grid = New-IndexGrid -Weights $stoneWeights -Salt 11 -RunChance 0.55
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
     for ($y = 0; $y -lt $size; $y++) {
         for ($x = 0; $x -lt $size; $x++) {
@@ -217,7 +251,7 @@ function New-StoneTexture {
 # the boundary read as growth rather than as a painted stripe.
 function New-GrassSideTexture {
     $dirtGrid = New-IndexGrid -Weights $dirtWeights -Salt 23
-    $grassGrid = New-IndexGrid -Weights $grassWeights -Salt 31
+    $grassGrid = New-IndexGrid -Weights $grassWeights -Salt 31 -RunChance 0.10
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
 
     $depths = @()
@@ -274,13 +308,17 @@ function New-PlanksTexture {
         $previous = 0
         for ($x = 0; $x -lt $size; $x++) {
             if ($rowInBoard -eq ($boardHeight - 1)) {
-                $bitmap.SetPixel($x, $y, (ConvertTo-Color $plankSeamColor))
+                # Not one flat colour across the tile. A uniform seam row is a
+                # 16-pixel run, and the reference's longest is 8 - a solid line
+                # is what made these read as painted stripes rather than wood.
+                $shade = if ((Get-Hash01 -x $x -y $y -salt 411) -gt 0.42) { $plankSeamColor } else { $plankSeamDark }
+                $bitmap.SetPixel($x, $y, (ConvertTo-Color $shade))
                 continue
             }
 
             # Grain runs along the board, so a pixel usually repeats the one to
             # its left. Salting by board keeps each plank distinct.
-            if ($x -gt 0 -and (Get-Hash01 -x $x -y $y -salt (600 + $board)) -lt 0.55) {
+            if ($x -gt 0 -and (Get-Hash01 -x $x -y $y -salt (600 + $board)) -lt 0.38) {
                 $index = $previous
             } else {
                 $roll = Get-Hash01 -x $x -y ($board * 4 + $rowInBoard) -salt 91
@@ -486,8 +524,8 @@ function New-LogTopTexture {
 }
 
 # Foliage is clumped and high-contrast, and roughly a third of it is nothing at
-# all. The reference stores four greys and tints them per biome at runtime; we
-# have no tinting stage, so the green is baked in.
+# all. Authored greyscale and tinted per biome at draw time, so this file is
+# tones rather than colours.
 function New-LeavesTexture {
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
     $hole = [System.Drawing.Color]::FromArgb(0, 0, 0, 0)
@@ -505,12 +543,12 @@ function New-LeavesTexture {
             $index = Get-WeightedIndex -Roll $roll -Weights $leafWeights
             $color = ConvertTo-Color $leafPalette[$index]
 
-            # The reference is a third hole. Clustered only slightly, and on a
-            # grid offset from the colour one so the two do not line up.
+            # Holes make a canopy read as leaves rather than a solid cube, but
+            # too many turn a tree to lace. Tuned by eye, not to a statistic.
             $gx = [Math]::Floor(($x + 1) / 2)
             $gy = [Math]::Floor(($y + 1) / 2)
             $gap = (Get-Hash01 -x $x -y $y -salt 191) * 0.65 + (Get-Hash01 -x $gx -y $gy -salt 179) * 0.35
-            if ($gap -gt 0.7515) {
+            if ($gap -gt 0.70) {
                 $color = $hole
             }
             $bitmap.SetPixel($x, $y, $color)
@@ -547,12 +585,52 @@ function New-TallGrassTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'tall_grass'
 }
 
+# A whittled stick: a three-pixel diagonal running corner to corner, lit along
+# its upper-left edge and shadowed along its lower-right so it reads as round
+# rather than as a painted line. Item sprites live in the same array as block
+# faces, since that array is really "every 16x16 sprite we own".
+function New-StickTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $clear = [System.Drawing.Color]::FromArgb(0, 0, 0, 0)
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $bitmap.SetPixel($x, $y, $clear)
+        }
+    }
+
+    $light = ConvertTo-Color '8C7038'
+    $mid = ConvertTo-Color '6B532A'
+    $dark = ConvertTo-Color '4C3A1B'
+    $edge = ConvertTo-Color '2E2110'
+
+    # A three-wide band, drawn a row at a time. Stepping one pixel diagonally
+    # per iteration instead leaves each step overwriting the last, which comes
+    # out two pixels wide and reads as a scratch rather than a stick.
+    for ($y = 2; $y -le 14; $y++) {
+        $xStart = 15 - $y
+        for ($k = 0; $k -lt 3; $k++) {
+            $x = $xStart + $k
+            if ($x -lt 0 -or $x -ge $size) { continue }
+            # Lit along the upper-left edge, shadowed along the lower-right.
+            $color = if ($k -eq 0) { $light } elseif ($k -eq 1) { $mid } else { $edge }
+            if ($k -eq 1 -and (Get-Hash01 -x $x -y $y -salt 811) -gt 0.62) {
+                $color = $dark
+            }
+            $bitmap.SetPixel($x, $y, $color)
+        }
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'stick'
+}
+
 New-StoneTexture
 New-DirtTexture
-New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
+New-FlatTexture -Name 'grass_top' -Palette $grassTopPalette -Weights $grassTopWeights -Salt 31 -RunChance 0.10
 New-GrassSideTexture
-New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53
-New-ClumpedTexture -Name 'cobblestone' -Palette $cobblePalette -Weights $cobbleWeights -Salt 71 -Clump 2
+New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53 -RunChance 0.08
+# Clump 1: reference cobblestone is per-pixel noise, 82% of its horizontal runs
+# being a single pixel against our 52%.
+New-ClumpedTexture -Name 'cobblestone' -Palette $cobblePalette -Weights $cobbleWeights -Salt 71 -Clump 1
 New-ClumpedTexture -Name 'gravel' -Palette $gravelPalette -Weights $gravelWeights -Salt 83 -Clump 1
 New-FlatTexture -Name 'snow' -Palette $snowPalette -Weights $snowWeights -Salt 97
 New-PlanksTexture
@@ -564,6 +642,7 @@ New-BarkTexture
 New-LogTopTexture
 New-LeavesTexture
 New-TallGrassTexture
+New-StickTexture
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.
