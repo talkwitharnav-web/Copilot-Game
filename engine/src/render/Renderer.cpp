@@ -62,6 +62,10 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
     m_fontTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{fontTexture});
     createDescriptorResources();
 
+    // 16 MB holds a good many chunk meshes at once. Bigger only raises the
+    // memory floor; smaller just means more submissions.
+    m_uploads = std::make_unique<UploadContext>(context, 16 * 1024 * 1024);
+
     m_trianglePipeline = std::make_unique<GraphicsPipeline>(
         context.device(), executableDirectory() / "shaders" / "triangle.vert.spv",
         executableDirectory() / "shaders" / "triangle.frag.spv", m_swapchain.imageFormat(), m_depthImage->format(),
@@ -111,6 +115,9 @@ void Renderer::readGpuTimestamps() {
 }
 
 Renderer::~Renderer() {
+    // Copies may still be queued against buffers that are about to be freed.
+    m_uploads->waitForCompletion();
+
     // The GPU may still be reading resources we are about to free.
     vkDeviceWaitIdle(m_context.device());
 
@@ -135,6 +142,7 @@ Renderer::~Renderer() {
     m_blockTextures.reset();
     m_hudTexture.reset();
     m_fontTexture.reset();
+    m_uploads.reset();
 
     destroySyncObjects();
 
@@ -279,9 +287,8 @@ void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    uploadBufferData(m_context, m_commandPool, *slot.vertexBuffer, mesh.vertices.data(), vertexBytes);
-    uploadBufferData(m_context, m_commandPool, *slot.indexBuffer, mesh.indices.data(), indexBytes);
-
+    m_uploads->stage(*slot.vertexBuffer, mesh.vertices.data(), vertexBytes);
+    m_uploads->stage(*slot.indexBuffer, mesh.indices.data(), indexBytes);
     slot.indexCount = static_cast<std::uint32_t>(mesh.indices.size());
 }
 
@@ -591,6 +598,11 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
 
     const VkCommandBuffer commandBuffer = m_commandBuffers[m_currentFrame];
     vkCheck(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer");
+
+    // Uploads go in first. Same queue, so submission order plus the barrier at
+    // the end of the batch is what makes the new geometry visible to these draws.
+    m_uploads->flush();
+
     recordCommands(commandBuffer, imageIndex, color, projectionMatrix() * view, overlayTransform);
 
     // Recording is const, so the counters it fills are published here.

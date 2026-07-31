@@ -10,6 +10,7 @@ add_library(engine STATIC
     src/render/Swapchain.cpp
     src/render/DepthImage.cpp
     src/render/Buffer.cpp
+    src/render/UploadContext.cpp
     src/render/Vertex.cpp
     src/render/Camera.cpp
     src/render/TextureArray.cpp

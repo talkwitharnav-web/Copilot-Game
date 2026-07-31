@@ -6,6 +6,7 @@
 #include "engine/render/MeshData.hpp"
 #include "engine/render/Swapchain.hpp"
 #include "engine/render/TextureArray.hpp"
+#include "engine/render/UploadContext.hpp"
 
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
@@ -159,6 +160,7 @@ private:
     std::unique_ptr<TextureArray> m_blockTextures;
     std::unique_ptr<TextureArray> m_hudTexture;
     std::unique_ptr<TextureArray> m_fontTexture;
+    std::unique_ptr<UploadContext> m_uploads;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;

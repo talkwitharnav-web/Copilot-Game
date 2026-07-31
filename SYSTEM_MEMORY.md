@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–12 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. World generation and meshing run on a worker-thread pool. Still unlit, by design. `TIMELINE.md` M13a (mesh upload path) is next.
+> **Status:** Milestones 1–12 and M13a complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. World generation and meshing run on a worker-thread pool, and mesh uploads are batched. Still unlit, by design. `TIMELINE.md` M13b (mesh and render optimization) is next.
 
 ---
 
@@ -474,8 +474,23 @@ The per-second log line reports `chunks | meshes | pending | retired`. Each catc
 
 ---
 
-## GPU Memory Ownership
+### Getting geometry onto the GPU
 
+The memory a GPU renders from fastest is not writable by the CPU, so data goes into a host-visible *staging* buffer and the GPU copies it across.
+
+`engine::UploadContext` owns a **16 MB persistently mapped staging arena**, one command buffer and one fence. `stage()` memcpys into the arena and records a copy; `flush()` submits the whole batch once. `Renderer::drawFrame` flushes immediately before recording the frame, so the copies are submitted to the graphics queue ahead of the draws that read them.
+
+**Visibility comes from submission order plus one barrier** at the end of the batch, from `TRANSFER_WRITE` to `VERTEX_ATTRIBUTE_READ | INDEX_READ`. There is no transfer queue and no semaphore, and there does not need to be while everything is on one queue.
+
+This is safe against in-flight frames for a specific reason worth keeping: **`uploadInto` always retires the old buffers and allocates new ones**, so a copy only ever targets a buffer no submitted frame has ever referenced. If mesh updates are ever changed to write into an existing buffer, that guarantee disappears and this needs revisiting.
+
+The only blocking is in `recycleArena`, which waits on the previous submission before the arena is reused. In play the fence is already signalled and the wait is free; during a bulk load it throttles to a handful of waits instead of one per buffer.
+
+`uploadBufferData` still exists for **one-shot texture uploads only**. It allocates, submits and calls `vkQueueWaitIdle` every time, which is why the mesh path no longer uses it.
+
+---
+
+## GPU Memory Ownership
 **Every Vulkan allocation has exactly one owning C++ object that releases it in its destructor.** Vulkan reference-counts nothing, so this is the only thing preventing VRAM leaks.
 
 - `Buffer` owns a `VkBuffer` and its `VkDeviceMemory` together. Copy **and move** are deleted — two objects owning one allocation is how double-frees happen. If a buffer ever needs to be returned from a factory, implement move properly rather than reaching for `shared_ptr`.

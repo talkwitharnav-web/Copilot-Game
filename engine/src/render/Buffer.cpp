@@ -76,6 +76,9 @@ Buffer::Buffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFla
 }
 
 Buffer::~Buffer() {
+    if (m_mapped != nullptr) {
+        vkUnmapMemory(m_context.device(), m_memory);
+    }
     if (m_buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(m_context.device(), m_buffer, nullptr);
     }
@@ -84,13 +87,25 @@ Buffer::~Buffer() {
     }
 }
 
-void Buffer::writeFromHost(const void* data, VkDeviceSize bytes) {
-    if (bytes > m_size) {
+void* Buffer::persistentMap() {
+    if (m_mapped == nullptr) {
+        vkCheck(vkMapMemory(m_context.device(), m_memory, 0, m_size, 0, &m_mapped), "vkMapMemory");
+    }
+    return m_mapped;
+}
+
+void Buffer::writeFromHost(const void* data, VkDeviceSize bytes, VkDeviceSize offset) {
+    if (offset + bytes > m_size) {
         throw std::runtime_error("Write exceeds buffer size");
     }
 
+    if (m_mapped != nullptr) {
+        std::memcpy(static_cast<std::byte*>(m_mapped) + offset, data, static_cast<std::size_t>(bytes));
+        return;
+    }
+
     void* mapped = nullptr;
-    vkCheck(vkMapMemory(m_context.device(), m_memory, 0, bytes, 0, &mapped), "vkMapMemory");
+    vkCheck(vkMapMemory(m_context.device(), m_memory, offset, bytes, 0, &mapped), "vkMapMemory");
     std::memcpy(mapped, data, static_cast<std::size_t>(bytes));
     vkUnmapMemory(m_context.device(), m_memory);
 }

@@ -306,7 +306,7 @@ Identical triangle counts at every worker count is the determinism check. **One 
 
 **Not achieved:** upload still stalls. Generation and meshing no longer block the main thread, but every mesh upload does two full GPU waits, so "walk fast without hitching" is only half true. That is M13a.
 
-### ▶ M13a — Mesh upload path · **Core**
+### ✅ M13a — Mesh upload path · **Core**
 
 Remove the per-buffer GPU stall from mesh upload. Today `uploadBufferData` allocates a staging buffer, allocates device memory, submits a copy and calls `vkQueueWaitIdle` — **per buffer**, so a 363-chunk world costs 726 submits and 726 full queue waits, and every block break costs two.
 
@@ -317,6 +317,20 @@ Remove the per-buffer GPU stall from mesh upload. Today `uploadBufferData` alloc
 **You can:** break and place blocks with no GPU stall, and load a world without a serial upload tail.
 
 **Done when:** startup upload time and per-edit stall are both measurably lower, with numbers recorded, and `vkQueueWaitIdle` no longer appears in the per-mesh path.
+
+**Result:** `engine::UploadContext` owns a 16 MB persistently mapped staging arena, one command buffer and one fence. Copies accumulate and are submitted once per frame from `drawFrame`, ahead of the draws that read them; queue submission order plus a transfer→vertex-input barrier is what makes them visible, with no transfer queue and no semaphore. It only ever blocks when the arena must be reused before the GPU has finished with it.
+
+Release build, 507 chunks, same 590,492 triangles throughout:
+
+| | Generate + mesh | Upload | Total |
+|---|---|---|---|
+| Pre-M12 (0 workers) | 179 ms | 180 ms | 356 ms |
+| M12 (11 workers) | 55 ms | 186 ms | 245 ms |
+| **M13a (11 workers)** | **51 ms** | **33 ms** | **84 ms** |
+
+Upload is **5.6× faster** and startup overall is **4.2×** better than the pre-M12 baseline. Submissions at startup went from 726 to roughly 4. `vkQueueWaitIdle` is gone from the mesh path entirely; `uploadBufferData` survives only for one-shot texture loads and is documented as such.
+
+**Deliberately not done:** device-local buffers are still one allocation per mesh. That is the sub-allocator question, and it belongs with M13b/VMA rather than here.
 
 ### ⬜ M13b — Mesh and render optimization · **Core**
 
