@@ -19,6 +19,7 @@ struct OverlayStats {
     std::size_t retired = 0;
     std::uint32_t drawCalls = 0;
     std::uint32_t triangles = 0;
+    unsigned workerThreads = 0;
 };
 
 /// Builds the diagnostics panel: a frame-time history graph plus labelled rows.

@@ -1,5 +1,6 @@
 add_library(engine STATIC
     src/core/FrameLimiter.cpp
+    src/core/JobSystem.cpp
     src/core/Log.cpp
     src/core/Paths.cpp
     src/platform/Window.cpp

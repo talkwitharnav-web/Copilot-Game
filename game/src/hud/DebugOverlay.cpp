@@ -85,7 +85,7 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 9> rows{{
+    const std::array<Row, 10> rows{{
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
@@ -95,6 +95,7 @@ engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<f
         {"retired", std::to_string(stats.retired)},
         {"draws", std::to_string(stats.drawCalls)},
         {"tris", formatCount(stats.triangles)},
+        {"workers", std::to_string(stats.workerThreads)},
     }};
 
     const float panelLeft = -aspect + kMargin;

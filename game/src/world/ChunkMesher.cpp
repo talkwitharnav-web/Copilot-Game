@@ -69,24 +69,23 @@ engine::MeshData meshChunk(const Chunk& chunk, const ChunkNeighbours& neighbours
     // Face offsets only ever move along a single axis, so at most one coordinate
     // can fall outside the chunk and the neighbour lookup stays unambiguous.
     const auto blockAt = [&](int x, int y, int z) -> BlockId {
-        constexpr int last = Chunk::kSize - 1;
         if (x < 0) {
-            return neighbours.negativeX != nullptr ? neighbours.negativeX->at(last, y, z) : BlockId::Air;
+            return neighbours.negativeX.at(y, z);
         }
         if (x >= Chunk::kSize) {
-            return neighbours.positiveX != nullptr ? neighbours.positiveX->at(0, y, z) : BlockId::Air;
+            return neighbours.positiveX.at(y, z);
         }
         if (y < 0) {
-            return neighbours.negativeY != nullptr ? neighbours.negativeY->at(x, last, z) : BlockId::Air;
+            return neighbours.negativeY.at(x, z);
         }
         if (y >= Chunk::kSize) {
-            return neighbours.positiveY != nullptr ? neighbours.positiveY->at(x, 0, z) : BlockId::Air;
+            return neighbours.positiveY.at(x, z);
         }
         if (z < 0) {
-            return neighbours.negativeZ != nullptr ? neighbours.negativeZ->at(x, y, last) : BlockId::Air;
+            return neighbours.negativeZ.at(x, y);
         }
         if (z >= Chunk::kSize) {
-            return neighbours.positiveZ != nullptr ? neighbours.positiveZ->at(x, y, 0) : BlockId::Air;
+            return neighbours.positiveZ.at(x, y);
         }
         return chunk.at(x, y, z);
     };

@@ -1,4 +1,5 @@
 #include <engine/core/FrameLimiter.hpp>
+#include <engine/core/JobSystem.hpp>
 #include <engine/core/Log.hpp>
 #include <engine/core/Paths.hpp>
 #include <engine/platform/Window.hpp>
@@ -6,6 +7,7 @@
 #include <engine/render/Renderer.hpp>
 #include <engine/render/VulkanContext.hpp>
 
+#include "core/Settings.hpp"
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
@@ -115,6 +117,12 @@ const char* describeBlock(game::BlockId block) {
 
 int main() {
     try {
+        const game::Settings settings = game::loadSettings(engine::executableDirectory() / "settings.cfg");
+
+        // Declared before the world, and therefore destroyed after it: the world
+        // submits jobs to this pool and must not outlive it.
+        engine::JobSystem jobs(settings.workerThreads);
+
         engine::Window window(kWindowWidth, kWindowHeight, "Voxel Game");
         engine::VulkanContext context(window);
 
@@ -139,7 +147,7 @@ int main() {
         window.setCursorCaptured(true);
 
         const auto buildStart = std::chrono::steady_clock::now();
-        game::World world(kWorldSeed, engine::executableDirectory() / "saves");
+        game::World world(kWorldSeed, engine::executableDirectory() / "saves", jobs);
 
         // Spawn is chosen before any chunk exists, so the surface height comes
         // straight from the generator rather than from loaded blocks.
@@ -174,7 +182,12 @@ int main() {
             }
         };
 
-        applyUpdates(world.loadImmediately(spawn));
+        // Split so the two costs stay honest: building the world is the part
+        // worker threads divide up, while uploading is main-thread work that no
+        // amount of threading helps.
+        const std::vector<game::ChunkMeshUpdate> initial = world.loadImmediately(spawn);
+        const auto worldBuilt = std::chrono::steady_clock::now();
+        applyUpdates(initial);
         const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
@@ -198,7 +211,9 @@ int main() {
                         std::to_string(game::kLoadRadiusChunks) + " chunks");
         engine::logInfo("Saves: " + (engine::executableDirectory() / "saves").string());
         engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks in " +
-                        ms(buildStart, worldReady) + " ms");
+                        ms(buildStart, worldReady) + " ms (generate+mesh " + ms(buildStart, worldBuilt) +
+                        " ms on " + std::to_string(jobs.threadCount()) + " workers, upload " +
+                        ms(worldBuilt, worldReady) + " ms)");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Field of view: " + std::to_string(static_cast<int>(kDefaultFov)) +
@@ -346,6 +361,7 @@ int main() {
                 stats.retired = renderer.retiredMeshCount();
                 stats.drawCalls = renderer.stats().drawCalls;
                 stats.triangles = renderer.stats().triangles;
+                stats.workerThreads = jobs.threadCount();
 
                 rebuildHud(stats);
                 lastHudRebuild = now;
