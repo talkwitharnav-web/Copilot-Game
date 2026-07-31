@@ -184,6 +184,14 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     if (block == BlockId::Air) {
                         continue;
                     }
+                    // Anything that is not a unit cube is emitted by the shape
+                    // pass below. Teaching the greedy mask about partial faces
+                    // would slow down the path that carries the whole world for
+                    // the sake of a few decorative blocks.
+                    const BlockShape shape = blockShape(block);
+                    if (shape == BlockShape::Cross || shape == BlockShape::Slab || shape == BlockShape::Stairs) {
+                        continue;
+                    }
 
                     // The whole optimisation: a face buried against something
                     // that hides it can never be seen, so it is never created.
@@ -210,7 +218,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     const bool visible =
                         isTranslucent(block)
                             ? (ahead == BlockId::Air || (isWater(ahead) && waterLevel(ahead) > waterLevel(block)))
-                            : (!isOpaque(ahead) && (positiveFacing || !sharedWithOwnKind));
+                            : (!occludesFace(ahead, face.neighbourOffset.y) &&
+                               (positiveFacing || !sharedWithOwnKind));
                     if (!visible) {
                         continue;
                     }
@@ -393,6 +402,140 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     }
 
                     i += width;
+                }
+            }
+        }
+    }
+
+    // Shapes that are not unit cubes, one block at a time and never merged.
+    const auto lightOf = [&](const glm::ivec3& cell, float& sky, float& blockLight) {
+        const std::uint8_t packed = volume.lightAt(cell.x, cell.y, cell.z);
+        sky = lightCurve(static_cast<float>(packed >> 4));
+        blockLight = lightCurve(static_cast<float>(packed & 0x0F));
+    };
+
+    const auto pushQuad = [&](const std::array<glm::vec3, 4>& corners, const std::array<glm::vec2, 4>& uvs,
+                              float layer, float sky, float blockLight, float shading, bool doubleSided) {
+        engine::MeshData& mesh = result.opaque;
+        const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (std::size_t c = 0; c < 4; ++c) {
+            mesh.vertices.push_back(engine::Vertex{{corners[c].x, corners[c].y, corners[c].z},
+                                                   {sky, blockLight, shading, 1.0f},
+                                                   {uvs[c].x, uvs[c].y},
+                                                   layer});
+        }
+        mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
+        if (doubleSided) {
+            mesh.indices.insert(mesh.indices.end(), {base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
+        }
+    };
+
+    for (int z = 0; z < size; ++z) {
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                const BlockId block = volume.blockAt(x, y, z);
+                const BlockShape shape = blockShape(block);
+                if (shape != BlockShape::Cross && shape != BlockShape::Slab && shape != BlockShape::Stairs) {
+                    continue;
+                }
+
+                const glm::vec3 cellOrigin = originOffset + glm::vec3{x, y, z};
+                float sky = 0.0f;
+                float blockLight = 0.0f;
+
+                if (shape == BlockShape::Cross) {
+                    // A plant sits in an otherwise empty cell, so it is lit by
+                    // its own cell rather than by a neighbour.
+                    lightOf({x, y, z}, sky, blockLight);
+
+                    // Held off the cell walls so a blade never lands exactly on
+                    // the face of the block beside it.
+                    constexpr float lo = 0.15f;
+                    constexpr float hi = 1.0f - lo;
+                    const float layer = blockTextureLayer(block, BlockFace::Side);
+
+                    const std::array<std::array<glm::vec3, 4>, 2> blades{
+                        std::array<glm::vec3, 4>{glm::vec3{lo, 0, lo}, glm::vec3{hi, 0, hi}, glm::vec3{hi, 1, hi},
+                                                 glm::vec3{lo, 1, lo}},
+                        std::array<glm::vec3, 4>{glm::vec3{hi, 0, lo}, glm::vec3{lo, 0, hi}, glm::vec3{lo, 1, hi},
+                                                 glm::vec3{hi, 1, lo}}};
+
+                    for (const std::array<glm::vec3, 4>& blade : blades) {
+                        std::array<glm::vec3, 4> corners{};
+                        for (std::size_t c = 0; c < 4; ++c) {
+                            corners[c] = cellOrigin + blade[c];
+                        }
+                        pushQuad(corners, kBottomLeftWinding, layer, sky, blockLight, 1.0f, true);
+                    }
+                    continue;
+                }
+
+                // Slabs and stairs are both just boxes, and they read the very
+                // same table collision does, so what you see and what you bump
+                // into cannot disagree.
+                const BlockBoxes shapeBoxes = collisionBoxes(block);
+                for (int i = 0; i < shapeBoxes.count; ++i) {
+                    const BlockBox& b = shapeBoxes.boxes[i];
+                    const glm::vec3 lo{b.minX, b.minY, b.minZ};
+                    const glm::vec3 hi{b.maxX, b.maxY, b.maxZ};
+
+                    for (const Face& face : kFaces) {
+                        const int axis = face.axis;
+                        const bool positive = face.neighbourOffset[axis] > 0;
+
+                        // A face flush with the cell wall can be buried by a
+                        // neighbour; one floating inside the cell never can.
+                        if (positive ? hi[axis] >= 1.0f : lo[axis] <= 0.0f) {
+                            const glm::ivec3 ahead{x + face.neighbourOffset.x, y + face.neighbourOffset.y,
+                                                   z + face.neighbourOffset.z};
+                            if (occludesFace(volume.blockAt(ahead.x, ahead.y, ahead.z), face.neighbourOffset.y)) {
+                                continue;
+                            }
+                            lightOf(ahead, sky, blockLight);
+                        } else {
+                            lightOf({x, y, z}, sky, blockLight);
+                        }
+
+                        // Faces buried inside another box of the same block are
+                        // never seen, and emitting them leaves two coplanar
+                        // quads fighting over one depth - a stair's step sits
+                        // directly on its own lower half.
+                        glm::vec3 probe{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+                        probe[axis] = positive ? hi[axis] : lo[axis];
+                        probe += glm::vec3{face.neighbourOffset} * 0.01f;
+
+                        bool buried = false;
+                        for (int j = 0; j < shapeBoxes.count && !buried; ++j) {
+                            if (j == i) {
+                                continue;
+                            }
+                            const BlockBox& o = shapeBoxes.boxes[j];
+                            buried = probe.x > o.minX && probe.x < o.maxX && probe.y > o.minY && probe.y < o.maxY &&
+                                     probe.z > o.minZ && probe.z < o.maxZ;
+                        }
+                        if (buried) {
+                            continue;
+                        }
+
+                        // V runs the same way as the corner on some faces and
+                        // the opposite way on others, so it is read off the
+                        // tables rather than assumed.
+                        const int uAxis = face.uAxis;
+                        const int vAxis = face.vAxis;
+                        const bool flipV = std::abs(face.uvs[0].y - face.corners[0][vAxis]) > 0.5f;
+
+                        std::array<glm::vec3, 4> corners{};
+                        std::array<glm::vec2, 4> uvs{};
+                        for (std::size_t c = 0; c < 4; ++c) {
+                            // Mixing the shared unit-cube corners keeps the
+                            // winding the face tables established.
+                            const glm::vec3 local = lo + face.corners[c] * (hi - lo);
+                            corners[c] = cellOrigin + local;
+                            uvs[c] = {local[uAxis], flipV ? 1.0f - local[vAxis] : local[vAxis]};
+                        }
+                        pushQuad(corners, uvs, blockTextureLayer(block, face.facing), sky, blockLight, face.shade,
+                                 false);
+                    }
                 }
             }
         }

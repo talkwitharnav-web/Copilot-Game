@@ -37,6 +37,10 @@ constexpr int kCaveFadeDepth = 10;
 /// The world's floor is never carved, so there is always something to stand on.
 constexpr int kBedrockHeight = 2;
 
+/// Fraction of grassy surface cells carrying a tuft. Gated on the surface block
+/// rather than on a biome column, so it follows wherever grass actually ends up.
+constexpr float kTallGrassDensity = 0.12f;
+
 /// True where a cave should hollow out the rock.
 bool isCave(std::uint32_t seed, int worldX, int worldY, int worldZ, int surfaceHeight) {
     if (worldY <= kBedrockHeight) {
@@ -130,6 +134,16 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                 if (chunk.at(x, y, z) == BlockId::Air) {
                     chunk.set(x, y, z, BlockId::Water0);
                 }
+            }
+
+            // Ground cover, on whatever the surface turned out to be rather than
+            // on the biome's nominal top block: a snow line or a shoreline may
+            // already have overridden it.
+            const int plantY = surface + 1 - baseY;
+            if (top == BlockId::Grass && surface > kSeaLevel + 1 && plantY >= 0 && plantY < Chunk::kSize &&
+                chunk.at(x, plantY, z) == BlockId::Air &&
+                noise::hashUnit2D(seed ^ 0x91a5eedu, worldX, worldZ) < kTallGrassDensity) {
+                chunk.set(x, plantY, z, BlockId::TallGrass);
             }
         }
     }

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace game {
 namespace {
@@ -46,8 +47,16 @@ bool overlapsSolid(const World& world, const Aabb& box) {
     for (int y = minY; y <= maxY; ++y) {
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
-                if (world.isSolid(x, y, z)) {
-                    return true;
+                // Not every solid block fills its cell, and stairs do not even
+                // fill one box, so the cell test is only the first step.
+                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                for (int i = 0; i < shape.count; ++i) {
+                    const BlockBox& b = shape.boxes[i];
+                    if (box.min.x < static_cast<float>(x) + b.maxX && box.max.x > static_cast<float>(x) + b.minX &&
+                        box.min.y < static_cast<float>(y) + b.maxY && box.max.y > static_cast<float>(y) + b.minY &&
+                        box.min.z < static_cast<float>(z) + b.maxZ && box.max.z > static_cast<float>(z) + b.minZ) {
+                        return true;
+                    }
                 }
             }
         }
@@ -88,6 +97,43 @@ bool submerged(const World& world, const glm::vec3& feet, float height) {
     return false;
 }
 
+/// Highest surface under `box` that the feet may come to rest on.
+///
+/// Not every solid block fills its cell, so the landing plane is not simply the
+/// block boundary. Snapping to the boundary above a slab drops the player onto
+/// thin air, the ground probe finds nothing, and they fall again - a bounce that
+/// repeats forever.
+float highestSurfaceBelow(const World& world, const Aabb& box, float notAbove) {
+    const int minX = static_cast<int>(std::floor(box.min.x));
+    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
+    const int minZ = static_cast<int>(std::floor(box.min.z));
+    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
+    const int minY = static_cast<int>(std::floor(box.min.y));
+    const int maxY = static_cast<int>(std::floor(notAbove));
+
+    float best = -std::numeric_limits<float>::infinity();
+    for (int y = minY; y <= maxY; ++y) {
+        for (int z = minZ; z <= maxZ; ++z) {
+            for (int x = minX; x <= maxX; ++x) {
+                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                for (int i = 0; i < shape.count; ++i) {
+                    const BlockBox& b = shape.boxes[i];
+                    // Only boxes actually under the footprint can be landed on.
+                    if (box.min.x >= static_cast<float>(x) + b.maxX || box.max.x <= static_cast<float>(x) + b.minX ||
+                        box.min.z >= static_cast<float>(z) + b.maxZ || box.max.z <= static_cast<float>(z) + b.minZ) {
+                        continue;
+                    }
+                    const float top = static_cast<float>(y) + b.maxY;
+                    if (top <= notAbove + kSkin && top > best) {
+                        best = top;
+                    }
+                }
+            }
+        }
+    }
+    return best;
+}
+
 /// Moves along one axis and snaps to the blocking surface if something is hit.
 ///
 /// Axes are resolved one at a time on purpose. Resolving all three together
@@ -104,6 +150,17 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount, f
     if (!overlapsSolid(world, boxAt(candidate, height))) {
         position = candidate;
         return false;
+    }
+
+    // Landing is the one case where the blocking plane is not a block boundary:
+    // a slab's top is halfway up its cell. Its sides and underside still are.
+    if (axis == 1 && amount < 0.0f) {
+        const float surface = highestSurfaceBelow(world, boxAt(candidate, height), position.y);
+        if (std::isfinite(surface)) {
+            candidate.y = surface + kSkin;
+            position = candidate;
+            return true;
+        }
     }
 
     // How far the box extends past `position` on this axis, in each direction.

@@ -2,10 +2,71 @@
 
 #include "world/World.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace game {
+namespace {
+
+/// Nearest entry into the geometry of the block in `cell`, as a ray parameter,
+/// along with the face the ray crossed to get in.
+///
+/// Testing the *cell* instead is what put a placed slab beside its neighbour
+/// rather than on top of it: a slab fills only half its cell, so a ray aimed at
+/// its top from a distance crosses the empty upper half first and would be
+/// reported as entering through the side.
+bool hitsBlockGeometry(const World& world, const glm::vec3& origin, const glm::vec3& dir, const glm::ivec3& cell,
+                       float maxDistance, float& tHit, glm::ivec3& normal) {
+    const BlockBoxes shape = selectionBoxes(world.blockAt(cell.x, cell.y, cell.z));
+    bool found = false;
+    tHit = maxDistance;
+
+    for (int i = 0; i < shape.count; ++i) {
+        const BlockBox& b = shape.boxes[i];
+        const glm::vec3 lo{static_cast<float>(cell.x) + b.minX, static_cast<float>(cell.y) + b.minY,
+                           static_cast<float>(cell.z) + b.minZ};
+        const glm::vec3 hi{static_cast<float>(cell.x) + b.maxX, static_cast<float>(cell.y) + b.maxY,
+                           static_cast<float>(cell.z) + b.maxZ};
+
+        float tEnter = 0.0f;
+        float tExit = maxDistance;
+        int enterAxis = -1;
+        bool miss = false;
+
+        for (int axis = 0; axis < 3 && !miss; ++axis) {
+            if (std::abs(dir[axis]) < 1e-8f) {
+                // Parallel to this pair of faces: either always between them or
+                // never.
+                miss = origin[axis] < lo[axis] || origin[axis] > hi[axis];
+                continue;
+            }
+
+            float near = (lo[axis] - origin[axis]) / dir[axis];
+            float far = (hi[axis] - origin[axis]) / dir[axis];
+            if (near > far) {
+                std::swap(near, far);
+            }
+            if (near > tEnter) {
+                tEnter = near;
+                enterAxis = axis;
+            }
+            tExit = std::min(tExit, far);
+            miss = tEnter > tExit;
+        }
+
+        if (!miss && enterAxis >= 0 && tEnter < tHit) {
+            tHit = tEnter;
+            normal = glm::ivec3{0};
+            // Entered against the direction of travel on that axis.
+            normal[enterAxis] = dir[enterAxis] > 0.0f ? -1 : 1;
+            found = true;
+        }
+    }
+    return found;
+}
+
+} // namespace
 
 RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction, float maxDistance) {
     RaycastHit result;
@@ -18,13 +79,6 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
 
     glm::ivec3 cell{static_cast<int>(std::floor(origin.x)), static_cast<int>(std::floor(origin.y)),
                     static_cast<int>(std::floor(origin.z))};
-
-    if (world.isSolid(cell.x, cell.y, cell.z)) {
-        result.hit = true;
-        result.block = cell;
-        result.adjacent = cell;
-        return result;
-    }
 
     constexpr float infinity = std::numeric_limits<float>::infinity();
 
@@ -45,6 +99,15 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
     }
 
     while (true) {
+        float tHit = 0.0f;
+        glm::ivec3 normal{0};
+        if (hitsBlockGeometry(world, origin, dir, cell, maxDistance, tHit, normal)) {
+            result.hit = true;
+            result.block = cell;
+            result.adjacent = cell + normal;
+            return result;
+        }
+
         // Cross whichever cell boundary is nearest along the ray.
         int axis = 0;
         if (tMax.y < tMax[axis]) {
@@ -58,16 +121,8 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
             return result;
         }
 
-        const glm::ivec3 previous = cell;
         cell[axis] += step[axis];
         tMax[axis] += tDelta[axis];
-
-        if (world.isSolid(cell.x, cell.y, cell.z)) {
-            result.hit = true;
-            result.block = cell;
-            result.adjacent = previous;
-            return result;
-        }
     }
 }
 

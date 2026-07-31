@@ -89,6 +89,9 @@ std::string describeCap(double fps) {
 }
 
 const char* describeBlock(game::BlockId block) {
+    if (game::isStairs(block)) {
+        return "Cobblestone Stairs";
+    }
     switch (block) {
     case game::BlockId::Stone:
         return "Stone";
@@ -110,6 +113,10 @@ const char* describeBlock(game::BlockId block) {
         return "Bricks";
     case game::BlockId::Glowstone:
         return "Glowstone";
+    case game::BlockId::TallGrass:
+        return "Tall Grass";
+    case game::BlockId::StoneSlab:
+        return "Stone Slab";
     default:
         return "Air";
     }
@@ -138,7 +145,7 @@ int main() {
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
             textureDir / "planks.png",      textureDir / "bricks.png", textureDir / "glowstone.png",
             textureDir / "water.png",       textureDir / "log_side.png", textureDir / "log_top.png",
-            textureDir / "leaves.png",      textureDir / "sun.png"};
+            textureDir / "leaves.png",      textureDir / "sun.png",      textureDir / "tall_grass.png"};
 
         engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
                                   textureDir.parent_path() / "font.png");
@@ -240,6 +247,7 @@ int main() {
         const auto worldReady = std::chrono::steady_clock::now();
 
         renderer.setOverlayMesh(game::makeBlockOutline());
+        float outlineHeight = 1.0f;
         renderer.setSkyMesh(game::sky::makeSunQuad());
 
         // Starts mid-morning rather than at sunrise, so the first thing seen is
@@ -339,9 +347,9 @@ int main() {
         float secondsSinceSpacePress = kDoubleTapSeconds;
 
         constexpr std::array<game::BlockId, game::kHotbarSlots> hotbar{
-            game::BlockId::Grass,       game::BlockId::Dirt,   game::BlockId::Stone,
-            game::BlockId::Cobblestone, game::BlockId::Sand,   game::BlockId::Gravel,
-            game::BlockId::Planks,      game::BlockId::Water0, game::BlockId::Glowstone};
+            game::BlockId::Grass,     game::BlockId::Dirt,          game::BlockId::Stone,
+            game::BlockId::StoneSlab, game::BlockId::CobbleStairs0, game::BlockId::TallGrass,
+            game::BlockId::Planks,    game::BlockId::Water0,        game::BlockId::Glowstone};
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
 
@@ -556,7 +564,38 @@ int main() {
             } else {
                 placeTimer -= deltaSeconds;
                 if (placeTimer <= 0.0f && target.hit && !game::playerOverlapsBlock(player, target.adjacent)) {
-                    world.setBlock(target.adjacent.x, target.adjacent.y, target.adjacent.z, hotbar[selectedSlot]);
+                    game::BlockId placing = hotbar[selectedSlot];
+                    glm::ivec3 where = target.adjacent;
+
+                    const bool clickedAbove = target.adjacent.y > target.block.y;
+                    const bool clickedBelow = target.adjacent.y < target.block.y;
+
+                    // Two halves meeting in one cell become a whole block. Left
+                    // as separate halves they stack as slab, gap, slab, which is
+                    // never what anyone is trying to build.
+                    const game::BlockId aimedAt = world.blockAt(target.block.x, target.block.y, target.block.z);
+                    const bool completesSlab = game::isSlab(placing) && game::isSlab(aimedAt) &&
+                                               (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
+
+                    if (completesSlab) {
+                        placing = game::BlockId::Stone;
+                        where = target.block;
+                    } else if (game::isSlab(placing)) {
+                        // Clicking an underside puts the half up against it.
+                        placing = clickedBelow ? game::BlockId::StoneSlabTop : game::BlockId::StoneSlab;
+                    } else if (game::isStairs(placing)) {
+                        // Oriented blocks take their facing from the camera and
+                        // their half from which end of the block was clicked,
+                        // which is what lets you build a staircase that turns.
+                        const glm::vec3 aim = camera.forward();
+                        const game::Facing facing =
+                            std::abs(aim.x) > std::abs(aim.z)
+                                ? (aim.x > 0.0f ? game::Facing::West : game::Facing::East)
+                                : (aim.z > 0.0f ? game::Facing::North : game::Facing::South);
+                        placing = game::stairsAt(facing, clickedBelow);
+                    }
+
+                    world.setBlock(where.x, where.y, where.z, placing);
                     placeTimer = kPlaceRepeatSeconds;
                 }
             }
@@ -567,7 +606,29 @@ int main() {
 
             std::optional<glm::mat4> highlight;
             if (target.hit) {
-                highlight = glm::translate(glm::mat4{1.0f}, glm::vec3{target.block});
+                // Read from the world rather than from `target`, which was
+                // resolved before this frame's edits: breaking a slab otherwise
+                // flashes a full-size cage around the cell just emptied.
+                const game::BlockBoxes aimed =
+                    game::selectionBoxes(world.blockAt(target.block.x, target.block.y, target.block.z));
+                if (aimed.count > 0) {
+                    float lowY = 1.0f;
+                    float highY = 0.0f;
+                    for (int i = 0; i < aimed.count; ++i) {
+                        lowY = std::min(lowY, aimed.boxes[i].minY);
+                        highY = std::max(highY, aimed.boxes[i].maxY);
+                    }
+
+                    // Rebuilt only when the targeted height changes, which is a
+                    // handful of times a session rather than every frame.
+                    const float height = highY - lowY;
+                    if (height != outlineHeight) {
+                        outlineHeight = height;
+                        renderer.setOverlayMesh(game::makeBlockOutline(height));
+                    }
+                    highlight = glm::translate(glm::mat4{1.0f},
+                                               glm::vec3{target.block} + glm::vec3{0.0f, lowY, 0.0f});
+                }
             }
 
             timeOfDay += deltaSeconds / static_cast<float>(settings.dayLengthSeconds);

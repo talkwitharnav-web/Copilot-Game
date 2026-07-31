@@ -76,6 +76,24 @@ void appendQuadCorners(engine::MeshData& mesh, const glm::vec2 (&corners)[4], co
 
 void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float centreY, float halfHeight,
                      float depth) {
+    // Matching order for every face, so one texture-coordinate set serves all.
+    const glm::vec2 uvs[4]{{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+
+    const BlockShape shape = blockShape(block);
+
+    // A plant is drawn flat, as the artwork actually is. Wrapping it around a
+    // cube shows it as a box of grass, which is not what gets placed.
+    if (shape == BlockShape::Cross) {
+        const float half = halfHeight * 0.95f;
+        const glm::vec2 corners[4]{{centreX - half, centreY - half},
+                                   {centreX + half, centreY - half},
+                                   {centreX + half, centreY + half},
+                                   {centreX - half, centreY + half}};
+        appendQuadCorners(mesh, corners, uvs, depth, glm::vec4{1.0f, 1.0f, 1.0f, 1.0f},
+                          blockTextureLayer(block, BlockFace::Side));
+        return;
+    }
+
     // Isometric projection of a unit cube: x runs right-and-down, z runs
     // left-and-down, y runs straight up. Only the three faces pointing at the
     // viewer are drawn, so the icon costs three quads rather than six.
@@ -87,20 +105,21 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
                          centreY + ((x + z) * kIsoY - y) * halfHeight};
     };
 
-    // Matching order for every face, so one texture-coordinate set serves all.
-    const glm::vec2 uvs[4]{{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    // A slab is drawn at the height it actually stands, so the icon matches the
+    // block rather than implying a full cube.
+    const float top = shapeHeight(shape);
 
     // Shades match the world mesher, so an icon reads the same way the placed
     // block does.
-    const glm::vec2 top[4]{project(0, 1, 0), project(1, 1, 0), project(1, 1, 1), project(0, 1, 1)};
-    appendQuadCorners(mesh, top, uvs, depth, glm::vec4{1.00f, 1.00f, 1.00f, 1.0f},
+    const glm::vec2 topFace[4]{project(0, top, 0), project(1, top, 0), project(1, top, 1), project(0, top, 1)};
+    appendQuadCorners(mesh, topFace, uvs, depth, glm::vec4{1.00f, 1.00f, 1.00f, 1.0f},
                       blockTextureLayer(block, BlockFace::Top));
 
-    const glm::vec2 front[4]{project(0, 1, 1), project(1, 1, 1), project(1, 0, 1), project(0, 0, 1)};
+    const glm::vec2 front[4]{project(0, top, 1), project(1, top, 1), project(1, 0, 1), project(0, 0, 1)};
     appendQuadCorners(mesh, front, uvs, depth, glm::vec4{0.86f, 0.86f, 0.86f, 1.0f},
                       blockTextureLayer(block, BlockFace::Side));
 
-    const glm::vec2 right[4]{project(1, 1, 0), project(1, 1, 1), project(1, 0, 1), project(1, 0, 0)};
+    const glm::vec2 right[4]{project(1, top, 0), project(1, top, 1), project(1, 0, 1), project(1, 0, 0)};
     appendQuadCorners(mesh, right, uvs, depth, glm::vec4{0.68f, 0.68f, 0.68f, 1.0f},
                       blockTextureLayer(block, BlockFace::Side));
 }

@@ -48,29 +48,29 @@ void appendBox(engine::MeshData& mesh, const glm::vec3& lo, const glm::vec3& hi)
 
 } // namespace
 
-engine::MeshData makeBlockOutline() {
+engine::MeshData makeBlockOutline(float height) {
     engine::MeshData mesh;
 
-    const float lo = -kInflate;
-    const float hi = 1.0f + kInflate;
+    const glm::vec3 lo{-kInflate, -kInflate, -kInflate};
+    const glm::vec3 hi{1.0f + kInflate, height + kInflate, 1.0f + kInflate};
     const float t = kThickness;
 
-    // Four bars along each axis, one per edge of the cube.
+    // Four bars along each axis, one per edge of the box.
     for (int axis = 0; axis < 3; ++axis) {
         const int a = (axis + 1) % 3;
         const int b = (axis + 2) % 3;
 
         for (int corner = 0; corner < 4; ++corner) {
-            glm::vec3 min{lo};
-            glm::vec3 max{hi};
+            glm::vec3 min = lo;
+            glm::vec3 max = hi;
 
             const bool farA = (corner & 1) != 0;
             const bool farB = (corner & 2) != 0;
 
-            min[a] = farA ? hi - t : lo;
-            max[a] = farA ? hi : lo + t;
-            min[b] = farB ? hi - t : lo;
-            max[b] = farB ? hi : lo + t;
+            min[a] = farA ? hi[a] - t : lo[a];
+            max[a] = farA ? hi[a] : lo[a] + t;
+            min[b] = farB ? hi[b] - t : lo[b];
+            max[b] = farB ? hi[b] : lo[b] + t;
 
             appendBox(mesh, min, max);
         }

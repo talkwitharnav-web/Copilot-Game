@@ -376,7 +376,11 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
         m_fluidUpdates.pop_front();
 
         const BlockId current = blockAt(p.x, p.y, p.z);
-        if (game::isSolid(current)) {
+        // Only air and water are the fluid system's business. Testing for
+        // "not solid" was the same thing while every block was a full cube or
+        // water, but a plant is neither - and falling through here rewrites it
+        // to air, which silently deleted anything you placed.
+        if (current != BlockId::Air && !isWater(current)) {
             continue;
         }
         // Sources are the fixed points of the whole system. Without something

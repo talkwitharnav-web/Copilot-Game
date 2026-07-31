@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–16 complete plus M17a, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, and trees whose leaves are alpha-tested. `TIMELINE.md` M17b (block shapes) is next.
+> **Status:** Milestones 1–17c complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs and stairs. `TIMELINE.md` M17d (connected shapes) is next, and is optional — M18 (inventory and items) is the next Core milestone.
 
 ---
 
@@ -185,7 +185,7 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 | `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction. |
 | `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
 | `Sky` | `world/Sky.hpp` | Placeholder day cycle: sun direction over time, sky colour, and the billboarded sun quad. |
-| `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. |
+| `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. Sized from the targeted block's selection box, and rebuilt only when that height changes. |
 | `Settings` | `core/Settings.hpp` | `settings.cfg` next to the executable. Read once at startup. |
 | `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, and isometric block icons. |
 | `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
@@ -346,6 +346,8 @@ Screen-space geometry is a separate mesh drawn last, with no view or projection 
 
 Everything is built from `hud::` primitives: axis-aligned quads, sprite-sheet regions, free-corner quads, text, and isometric block icons.
 
+**Block icons follow the block's shape.** A slab is drawn at half height and a cross-shaped plant is drawn as a flat sprite, because wrapping a plant's artwork around a cube shows a box of grass rather than what actually gets placed. Only `Full` blocks get the three-quad isometric cube.
+
 **Every HUD quad is emitted with both windings.** Backface culling is on, and screen geometry skips the projection that establishes which way is front. Deriving that has gone wrong before and fails completely silently, so two extra triangles per quad buys certainty.
 
 ### The sprite sheet
@@ -413,6 +415,30 @@ Candidates sit on a fixed **8-block grid**, at most one per cell, jittered insid
 **Presence is decided by an integer hash before any noise runs.** Most cells are empty, and finding that out costs one hash; sampling biome and surface height first meant three noise evaluations to answer a question already settled. `maxTreeDensity()` is derived from the table rather than written down, so a leafier biome cannot invalidate the early rejection.
 
 Placement gates on `Biome::treeDensity`, on the biome's surface block being grass, and on being above sea level and below the snow line.
+
+### Block shapes
+
+Everything before M17b was a unit cube, and both meshing and collision assumed it. `BlockShape` is where that assumption is now written down: `Empty`, `Full`, `Cross` (plants), `Slab` and `Stairs`.
+
+**`collisionBoxes` is the single source of truth for a block's extent**, read by the mesher, by physics and by the targeting raycast. Keep it that way: the moment two of them compute a shape independently, they will disagree.
+
+**`selectionBoxes` is what the crosshair picks**, and it is deliberately *not* always the collision shape. A plant is walked straight through and still has to be breakable, so it collides with nothing and selects as a slim column. That is the only case so far where the two differ.
+
+The raycast intersects those boxes rather than treating cell entry as a hit. Testing the cell instead put a placed slab *beside* its neighbour rather than on top: a slab fills half its cell, so a ray aimed at its top from a distance crosses the empty upper half first and reported entry through the side.
+
+**The targeting cage is sized from the live block, not from the ray hit.** The hit is resolved before the frame's edits are applied, so reading the shape from it flashed a full-size cage around a cell the moment its slab was broken. It spans the selection box's actual min and max Y, which is also what puts the cage on the upper half of a top slab rather than around the whole cell.
+
+**Orientation lives in the block id.** Stairs occupy eight contiguous ids — two bits of facing, one of half — the same way water spends eight on its level. Orientation is part of *which block this is*, so it needs no second per-block array. See `TIMELINE.md` M17c for why a metadata nibble was rejected.
+
+**A half block has a half.** `StoneSlab` is the lower half and `StoneSlabTop` the upper, and **two halves meeting in one cell are placed as a whole block instead**. Without both of those, stacking slabs gives slab, gap, slab — the second lands in the next cell's lower half. Which half gets placed comes from whether the underside or the top of a block was clicked.
+
+Non-cube shapes are meshed in a **second pass** and never greedily merged. Teaching the greedy mask about partial faces would slow the path carrying the whole world for the sake of a handful of decorative blocks. Their faces are built by mixing the shared unit-cube corner tables into the box, which preserves the winding those tables established.
+
+A face **buried inside another box of the same block** is skipped, or a stair's step and the half it stands on leave coplanar quads fighting over one depth value.
+
+`occludesFace` replaces a bare `isOpaque` test when deciding whether a face is buried: a bottom slab only hides the face directly above it, because that is the only boundary its geometry reaches.
+
+**Landing is the one case where a block boundary is the wrong answer.** Sides and undersides sit on integer planes, but a slab's top is halfway up its cell, so downward movement resolves against the real surface height instead. See `CLAUDE.md`.
 
 ---
 
@@ -734,6 +760,8 @@ Verified 2026-07-31 on this machine.
 - **M15 result:** caves, seven biomes, oceans and flowing water. Release build at render distance 12: 2,742,884 triangles, 1.15 ms GPU, 121 fps, ~1.9 s startup, 575–630 MB.
 - **M16 result:** trees. Release build at render distance 12: **2,829,100 triangles, 1.06 ms GPU, 121 fps**, generate+mesh 1275 ms on 11 workers. The determinism check is the one that matters here — 2,829,100 triangles at 0, 4 and 11 workers, so structures straddling chunk borders come out identical regardless of scheduling.
 - **M17a result:** alpha-tested, double-sided, layered leaves. **3,024,166 triangles, 1.45 ms GPU, 121 fps** — +6.9% geometry over M16. Zero validation errors once `shaderDemoteToHelperInvocation` was enabled.
+- **M17b result:** block shapes. Tall grass and stone slabs. **3,146,576 triangles, 1.35 ms GPU, 120 fps.** Verified numerically: a player dropped onto a slab platform rests at 40.501 where the surface is 40.5.
+- **M17c result:** oriented shapes. Cobblestone stairs in eight orientations, plus top slabs and slab merging. **3,146,570 triangles, 1.48 ms GPU, 120 fps.** Slabs were rewritten onto the shared box table and reproduced a bit-identical triangle count, which is the check that the rewrite changed nothing.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

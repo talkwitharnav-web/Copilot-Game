@@ -149,6 +149,12 @@ $logCoreWeights = @(2, 4, 6, 4, 2)
 $leafPalette = @('3B6328', '47762F', '5D9A3D', '74BC4B')
 $leafWeights = @(34, 36, 57, 45)
 
+# Lighter and yellower than canopy leaves, and a wider value range: the
+# reference plant sprite spans luminance 108-183 where its leaves span 101-186,
+# but plants read brighter because they are lit from every side.
+$tallGrassPalette = @('4A7A2E', '55892F', '629B36', '6FAD3E', '7EC048', '8FD456')
+$tallGrassWeights = @(8, 20, 28, 25, 40, 19)
+
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
@@ -513,6 +519,34 @@ function New-LeavesTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'leaves'
 }
 
+# Tall grass: vertical blades of differing height, sparse at the top and solid
+# at the base. Measured from the reference sprite, which is 45% hole and whose
+# per-row coverage climbs 0, 0, 4, 4, 6, 7, 8, 7, 10, 10, 11, 12, 15, 15, 15, 16.
+# One blade per column is what produces that profile.
+function New-TallGrassTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $hole = [System.Drawing.Color]::FromArgb(0, 0, 0, 0)
+
+    for ($x = 0; $x -lt $size; $x++) {
+        # Neighbouring blades are pushed apart in height deliberately. Drawing
+        # each start independently lets adjacent columns land together and merge
+        # into wide clumps, where the reference is almost all 1px strands.
+        $base = 4 + [int][Math]::Floor((Get-Hash01 -x $x -y 0 -salt 211) * 7)
+        $lean = if ($x % 2 -eq 0) { -2 } else { 2 }
+        $start = [Math]::Max(2, [Math]::Min(13, $base + $lean))
+
+        for ($y = 0; $y -lt $size; $y++) {
+            $color = $hole
+            if ($y -ge $start -and (Get-Hash01 -x $x -y $y -salt 223) -gt 0.04) {
+                $index = Get-WeightedIndex -Roll (Get-Hash01 -x $x -y $y -salt 227) -Weights $tallGrassWeights
+                $color = ConvertTo-Color $tallGrassPalette[$index]
+            }
+            $bitmap.SetPixel($x, $y, $color)
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'tall_grass'
+}
+
 New-StoneTexture
 New-DirtTexture
 New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
@@ -529,6 +563,7 @@ New-FlatTexture -Name 'water' -Palette $waterPalette -Weights $waterWeights -Sal
 New-BarkTexture
 New-LogTopTexture
 New-LeavesTexture
+New-TallGrassTexture
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.

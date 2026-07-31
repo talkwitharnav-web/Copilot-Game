@@ -536,19 +536,47 @@ Alpha-tested rendering, so a texture can have genuine holes in it.
 
 **Not yet:** mip levels still erode alpha coverage, so canopies thin slightly with distance. The standard fix is rescaling alpha per mip to preserve coverage, and it belongs with the renderer work at M23 rather than here.
 
-### ⬜ M17b — Block shapes · **Core**
+### ✅ M17b — Block shapes · **Core**
 
 Blocks that are not full cubes: cross-shaped plants, slabs, stairs.
 
 **Done when:** a slab is half-height to stand on and to look at, and plants render as crossed quads visible from both sides.
 
-**Why it is separate:** this is the half that touches *collision* as well as meshing, and it breaks the "every block is a unit cube" assumption the mesher's face culling and greedy merging both rest on.
+**Result:** tall grass scatters across grassland, and stone slabs are placeable and standable. **3,146,576 triangles, 1.35 ms GPU, 120 fps.**
 
-### ⬜ M17c — Connected shapes · **Optional**
+**One shape, two consumers.** `BlockShape` and `shapeHeight` are read by both the mesher and the collision code, so geometry and the box you bump into cannot drift apart.
 
-Fences, panes and anything whose geometry depends on its neighbours.
+**Non-cubes are meshed in a second pass, not through the greedy mask.** Teaching the mask about partial faces would slow the path that carries the entire world for the sake of a few decorative blocks. Slabs reuse the same unit-cube corner tables scaled in Y, which keeps the winding the face tables established rather than restating it.
 
-May fold into M17b if the shape system makes it trivial. Listed separately so it cannot quietly expand that milestone.
+**Landing is the only place a block boundary is the wrong answer.** A slab's sides and underside sit on integer planes; only its top is halfway up the cell. Resolving downward movement to the boundary dropped the player onto thin air above a slab, the ground probe found nothing, and they fell again — an endless bounce. Vertical descent now resolves against the real surface height.
+
+**Stairs are deferred to M17c**, because they need per-block *orientation* and the block id carries no such state. Water encodes its level in the id; stairs would need eight variants per material, which is a data-model question rather than a geometry one.
+
+### ✅ M17c — Oriented shapes · **Core**
+
+Stairs, and the block-state decision they force.
+
+**Done when:** stairs can be placed facing any direction and either way up, and you can walk up them.
+
+**Result:** cobblestone stairs, eight orientations, oriented from the camera when placed and flipped when placed against the underside of a block.
+
+**State lives in contiguous block ids**, exactly as water's level already does — two bits of facing and one of half. The alternative, a 4-bit metadata array per chunk, was rejected because **memory is this project's measured binding constraint** (1.66 GB at render distance 24, while frame rate never was) and a nibble array costs about +25% of chunk storage to buy headroom that 233 unused ids already provide. Revisit when ids genuinely run short, or when a block needs state that is *not* part of its identity — that is a block entity, a different problem.
+
+**One table, three consumers.** `collisionBoxes` is read by meshing, by physics and by the targeting raycast, so what you see, what you bump into and what you aim at cannot disagree. Slabs were rewritten onto it and produced a bit-identical 3,146,574 triangles, which is the check that the rewrite changed nothing.
+
+A face buried inside another box of the same block is skipped, or a stair's step and the half it stands on leave coplanar quads fighting over one depth value.
+
+**Slabs gained a top half and a merge rule**, because stacking them otherwise gives slab, gap, slab — the second lands in the next cell's lower half. Two halves meeting in one cell are placed as a whole block instead.
+
+**Selection and collision had to split.** A plant is walked through and still has to be breakable, so it collides with nothing and selects as a slim column. That is the only block where the two differ, and it is the one place the "single source of truth" rule bends.
+
+> **The cost of widening the cube assumption was five bugs, every one found by playing.** Collision resolution snapped to the block boundary; the fluid update deleted plants; the outline drew a full cage; the raycast treated cell entry as a hit; and the outline flashed on the frame a block was broken. All five were the same fault — a shape derived somewhere other than the shape table — and none of them was anything the compiler could catch.
+
+### ⬜ M17d — Connected shapes · **Optional**
+
+Fences, walls and panes, whose geometry depends on their neighbours rather than on stored state.
+
+Separated from M17c because they need no block state at all — connections are derived at mesh time — so they share none of that milestone's risk.
 
 ---
 
