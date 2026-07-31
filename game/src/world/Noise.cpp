@@ -125,4 +125,12 @@ float fbm3D(std::uint32_t seed, float x, float y, float z, int octaves) {
     return normalisation > 0.0f ? total / normalisation : 0.0f;
 }
 
+std::uint32_t hash2D(std::uint32_t seed, std::int32_t x, std::int32_t z) {
+    return hashCoords(seed, x, z);
+}
+
+float hashUnit2D(std::uint32_t seed, std::int32_t x, std::int32_t z) {
+    return unitFloat(hashCoords(seed, x, z));
+}
+
 } // namespace game::noise

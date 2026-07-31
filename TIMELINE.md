@@ -500,11 +500,23 @@ Release build, render distance 12: **2,742,884 triangles, 1.15 ms GPU, 121 fps.*
 
 **Still not a water *system*.** No reflection, refraction, depth absorption, waves, foam or shoreline effects — that is M26, and it is a headline visual feature rather than a block type.
 
-### ⬜ M16 — Procedural structures · **Core**
+### ✅ M16 — Procedural structures · **Core**
 
 A structure placement system — deterministic, seed-driven, biome-aware — plus the first structures.
 
 **Done when:** structures generate reliably without corrupting terrain or chunk borders.
+
+**Result:** forests. Trees stand in plains, sparsely on rocky ground, and never in desert, ocean, beach or above the snow line.
+
+**The hard part is not the tree, it is the chunk border.** Generation must stay a pure function of `(seed, chunkCoord)` — that rule is what makes threading safe — so a chunk may not push blocks into its neighbour, and may not ask a neighbour what it decided. Instead **every chunk rebuilds each structure that could reach it and keeps only the blocks landing inside its own bounds.** Two chunks generating the same tree independently reach the same answer, so it comes out whole. Verified: 2,829,100 triangles at **0, 4 and 11 workers** — bit-identical regardless of scheduling.
+
+**Candidates live on an 8-block grid**, one structure per cell, jittered within it and held two blocks off the cell edge so neighbouring trees cannot touch. A cheap integer hash decides presence *before* any noise runs — sampling biome and height first meant three noise evaluations per candidate to answer a question already settled, and skipping that cut generation from 1912 ms to **1275 ms**.
+
+**Biome density is a table column, not a branch.** `Biome::treeDensity` means adding a leafier region is a row edit.
+
+Release build, render distance 12: **2,829,100 triangles, 1.06 ms GPU, 121 fps.** A whole forest cost 3.1% more geometry.
+
+**Leaves are opaque.** They read correctly at distance, but the dark pixels standing in for gaps are a placeholder until M17 brings alpha-tested rendering. Trees are also the only structure so far — villages, dungeons and ruins are Phase 5 content.
 
 ### ⬜ M17 — Flexible block system · **Core**
 

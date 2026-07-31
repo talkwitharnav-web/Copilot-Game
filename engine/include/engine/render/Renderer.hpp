@@ -95,7 +95,7 @@ public:
 
     /// `ambient` is the floor every surface receives, `sun` is what a surface
     /// facing the sun adds on top.
-    void setSunLighting(float ambient, float sun);
+    void setSunLighting(float ambient, float sun, float ambientFloor);
 
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
@@ -201,6 +201,7 @@ private:
     glm::vec3 m_sunDirection{0.0f, 1.0f, 0.0f};
     float m_ambientLight = 0.55f;
     float m_sunLight = 0.45f;
+    float m_ambientFloor = 0.0f;
 
     struct RetiredMesh {
         GpuMesh mesh;

@@ -8,6 +8,13 @@
 
 namespace game {
 
+/// Floor division, correct for negative coordinates. Plain integer division
+/// truncates toward zero, which puts blocks at -1 and 0 in the same cell.
+constexpr int floorDivInt(int value, int divisor) {
+    const int quotient = value / divisor;
+    return (value % divisor != 0 && ((value < 0) != (divisor < 0))) ? quotient - 1 : quotient;
+}
+
 /// Position of a chunk in the world, measured in chunks rather than blocks.
 struct ChunkCoord {
     int x = 0;

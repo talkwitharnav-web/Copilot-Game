@@ -18,6 +18,8 @@ enum class BlockId : std::uint8_t {
     Planks,
     Bricks,
     Glowstone,
+    Log,
+    Leaves,
     /// Water carries its depth in the block id itself. Levels run 0 (a full
     /// source that never drains) to 7 (the thinnest film), and must stay
     /// contiguous and in order.
@@ -114,9 +116,12 @@ enum class TextureLayer : std::uint32_t {
     Bricks = 10,
     Glowstone = 11,
     Water = 12,
+    LogSide = 13,
+    LogTop = 14,
+    Leaves = 15,
     /// Not a block. Shares the array because the sun is drawn with the same
     /// pipeline, and a texture array needs every layer the same size.
-    Sun = 13,
+    Sun = 16,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
@@ -150,6 +155,11 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::Bricks);
     case BlockId::Glowstone:
         return static_cast<float>(TextureLayer::Glowstone);
+    case BlockId::Log:
+        // End grain differs from bark, the same way grass differs from soil.
+        return static_cast<float>(face == BlockFace::Side ? TextureLayer::LogSide : TextureLayer::LogTop);
+    case BlockId::Leaves:
+        return static_cast<float>(TextureLayer::Leaves);
     case BlockId::Water0:
     case BlockId::Water1:
     case BlockId::Water2:

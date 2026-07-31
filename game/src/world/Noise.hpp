@@ -28,5 +28,12 @@ float value3D(std::uint32_t seed, float x, float y, float z);
 /// Octaves of `value3D`, same rules as `fbm2D`. Returns [0, 1].
 float fbm3D(std::uint32_t seed, float x, float y, float z, int octaves);
 
+/// Raw integer hash of a grid cell, for decisions that must be discrete rather
+/// than smooth — whether a tree stands in this cell, and where in it.
+std::uint32_t hash2D(std::uint32_t seed, std::int32_t x, std::int32_t z);
+
+/// `hash2D` mapped to [0, 1).
+float hashUnit2D(std::uint32_t seed, std::int32_t x, std::int32_t z);
+
 } // namespace noise
 } // namespace game

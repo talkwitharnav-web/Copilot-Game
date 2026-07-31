@@ -137,7 +137,8 @@ int main() {
             textureDir / "grass_side.png",  textureDir / "sand.png",   textureDir / "white.png",
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
             textureDir / "planks.png",      textureDir / "bricks.png", textureDir / "glowstone.png",
-            textureDir / "water.png",       textureDir / "sun.png"};
+            textureDir / "water.png",       textureDir / "log_side.png", textureDir / "log_top.png",
+            textureDir / "leaves.png",      textureDir / "sun.png"};
 
         engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
                                   textureDir.parent_path() / "font.png");
@@ -166,8 +167,8 @@ int main() {
 
         // Spawn is chosen before any chunk exists, so the surface height comes
         // straight from the generator rather than from loaded blocks.
-        const int spawnX = 8;
-        const int spawnZ = 8;
+        const int spawnX = settings.spawnX;
+        const int spawnZ = settings.spawnZ;
         const glm::vec3 spawn{static_cast<float>(spawnX) + 0.5f,
                               static_cast<float>(game::surfaceHeightAt(kWorldSeed, spawnX, spawnZ) + 1),
                               static_cast<float>(spawnZ) + 0.5f};
@@ -255,6 +256,54 @@ int main() {
         } else {
             player.position = spawn;
             player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
+
+            if (settings.spawnUnderground) {
+                // Searched over an area rather than one column, because whether
+                // a particular column happens to contain a cave is luck, and
+                // hunting for one by hand is exactly the friction this setting
+                // exists to remove. The most open spot wins, so the result is a
+                // chamber worth standing in rather than a one-block crevice.
+                constexpr int radius = 20;
+                int bestOpenness = 0;
+                glm::ivec3 best{0};
+
+                for (int z = spawnZ - radius; z <= spawnZ + radius; ++z) {
+                    for (int x = spawnX - radius; x <= spawnX + radius; ++x) {
+                        const int ceiling = world.highestSolid(x, z) - 5;
+                        for (int y = 4; y < ceiling; ++y) {
+                            if (!world.isSolid(x, y, z) || world.isSolid(x, y + 1, z) ||
+                                world.isSolid(x, y + 2, z) || world.isSolid(x, y + 3, z)) {
+                                continue;
+                            }
+
+                            int openness = 0;
+                            for (int dz = -2; dz <= 2; ++dz) {
+                                for (int dy = 1; dy <= 3; ++dy) {
+                                    for (int dx = -2; dx <= 2; ++dx) {
+                                        if (!world.isSolid(x + dx, y + dy, z + dz)) {
+                                            ++openness;
+                                        }
+                                    }
+                                }
+                            }
+                            if (openness > bestOpenness) {
+                                bestOpenness = openness;
+                                best = {x, y + 1, z};
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (bestOpenness > 0) {
+                    player.position = glm::vec3{static_cast<float>(best.x) + 0.5f, static_cast<float>(best.y),
+                                                static_cast<float>(best.z) + 0.5f};
+                    engine::logInfo("Spawned underground at " + std::to_string(best.x) + ", " +
+                                    std::to_string(best.y) + ", " + std::to_string(best.z));
+                } else {
+                    engine::logWarn("spawn_underground: no cave found near the spawn column");
+                }
+            }
         }
 
         const auto ms = [](auto from, auto to) {
@@ -530,7 +579,7 @@ int main() {
             game::sky::sunLighting(sunDirection, ambient, sunStrength);
 
             renderer.setSunDirection(sunDirection);
-            renderer.setSunLighting(ambient, sunStrength);
+            renderer.setSunLighting(ambient, sunStrength, game::sky::kAmbientFloor);
             renderer.setSkyTransform(game::sky::sunTransform(camera.position, sunDirection));
 
             const glm::vec3 sky = game::sky::skyColor(sunDirection);

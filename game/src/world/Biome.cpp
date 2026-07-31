@@ -22,14 +22,14 @@ constexpr float kBlendRadius = 0.55f;
 constexpr int kNoSnow = 4096;
 
 constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
-    // name           top               filler            depth base   amp   snow     temp   humid
-    {"Ocean", BlockId::Gravel, BlockId::Stone, 3, 6.0f, 12.0f, kNoSnow, 0.50f, 0.95f},
-    {"Beach", BlockId::Sand, BlockId::Sand, 4, 23.0f, 3.0f, kNoSnow, 0.70f, 0.80f},
-    {"Plains", BlockId::Grass, BlockId::Dirt, 4, 26.0f, 11.0f, kNoSnow, 0.58f, 0.50f},
-    {"Desert", BlockId::Sand, BlockId::Sand, 5, 26.0f, 9.0f, kNoSnow, 0.92f, 0.12f},
-    {"Rocky", BlockId::Gravel, BlockId::Stone, 3, 28.0f, 20.0f, 58, 0.34f, 0.22f},
-    {"Mountains", BlockId::Stone, BlockId::Stone, 3, 32.0f, 41.0f, 52, 0.26f, 0.66f},
-    {"Snowy Peaks", BlockId::Snow, BlockId::Dirt, 4, 36.0f, 46.0f, 34, 0.06f, 0.40f},
+    // name           top               filler            depth base   amp   snow     temp   humid  trees
+    {"Ocean", BlockId::Gravel, BlockId::Stone, 3, 6.0f, 12.0f, kNoSnow, 0.50f, 0.95f, 0.00f},
+    {"Beach", BlockId::Sand, BlockId::Sand, 4, 23.0f, 3.0f, kNoSnow, 0.70f, 0.80f, 0.00f},
+    {"Plains", BlockId::Grass, BlockId::Dirt, 4, 26.0f, 11.0f, kNoSnow, 0.58f, 0.50f, 0.16f},
+    {"Desert", BlockId::Sand, BlockId::Sand, 5, 26.0f, 9.0f, kNoSnow, 0.92f, 0.12f, 0.00f},
+    {"Rocky", BlockId::Gravel, BlockId::Stone, 3, 28.0f, 20.0f, 58, 0.34f, 0.22f, 0.02f},
+    {"Mountains", BlockId::Stone, BlockId::Stone, 3, 32.0f, 41.0f, 52, 0.26f, 0.66f, 0.05f},
+    {"Snowy Peaks", BlockId::Snow, BlockId::Dirt, 4, 36.0f, 46.0f, 34, 0.06f, 0.40f, 0.00f},
 }};
 
 /// Value noise clusters around the middle, so the raw field would never reach
@@ -44,6 +44,19 @@ float spread(float value) {
 const Biome& biomeInfo(BiomeId id) {
     const auto index = static_cast<std::size_t>(id);
     return kBiomes[std::min(index, kBiomes.size() - 1)];
+}
+
+float maxTreeDensity() {
+    // Derived rather than written down, so adding a leafier biome cannot
+    // silently make the placement rejection wrong.
+    static const float highest = [] {
+        float best = 0.0f;
+        for (const Biome& biome : kBiomes) {
+            best = std::max(best, biome.treeDensity);
+        }
+        return best;
+    }();
+    return highest;
 }
 
 BiomeSample sampleBiome(std::uint32_t seed, int worldX, int worldZ) {

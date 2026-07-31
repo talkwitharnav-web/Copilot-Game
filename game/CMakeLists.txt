@@ -7,6 +7,7 @@ add_executable(game
     src/hud/Hotbar.cpp
     src/world/Noise.cpp
     src/world/Biome.cpp
+    src/world/Structures.cpp
     src/world/World.cpp
     src/world/WorldStore.cpp
     src/world/Player.cpp
@@ -24,12 +25,14 @@ target_include_directories(game PRIVATE src)
 target_link_libraries(game PRIVATE engine)
 
 # Assets are resolved relative to the executable, so they have to sit next to it.
-# Copied after every build rather than at configure time, so editing a texture
-# and rebuilding is enough to see the change.
-add_custom_command(TARGET game POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+# This is a target rather than a POST_BUILD step because POST_BUILD only fires
+# when the executable actually relinks - an art-only change left the old texture
+# sitting next to the exe and looked like the edit had not worked.
+add_custom_target(game_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
             "${CMAKE_SOURCE_DIR}/assets"
             "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets"
-    COMMENT "Copying assets next to the executable"
+    COMMENT "Syncing assets next to the executable"
 )
+add_dependencies(game game_assets)
 

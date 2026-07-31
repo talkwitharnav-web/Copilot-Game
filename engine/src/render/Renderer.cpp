@@ -411,9 +411,10 @@ void Renderer::setSunDirection(const glm::vec3& direction) {
     m_sunDirection = length > 0.0f ? direction / length : glm::vec3{0.0f, 1.0f, 0.0f};
 }
 
-void Renderer::setSunLighting(float ambient, float sun) {
+void Renderer::setSunLighting(float ambient, float sun, float ambientFloor) {
     m_ambientLight = ambient;
     m_sunLight = sun;
+    m_ambientFloor = ambientFloor;
 }
 
 void Renderer::createSyncObjects() {
@@ -588,7 +589,7 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         MeshPushConstants push{};
         push.modelViewProjection = transform;
         push.sunDirection = glm::vec4{m_sunDirection, 0.0f};
-        push.lighting = glm::vec4{m_ambientLight, m_sunLight, lit ? 1.0f : 0.0f, 0.0f};
+        push.lighting = glm::vec4{m_ambientLight, m_sunLight, lit ? 1.0f : 0.0f, m_ambientFloor};
         vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT |
                                                                            VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(MeshPushConstants), &push);

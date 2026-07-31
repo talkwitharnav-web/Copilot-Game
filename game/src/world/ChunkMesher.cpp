@@ -94,10 +94,6 @@ constexpr std::array<Face, 6> kFaces{{
 /// Empty slot in the merge mask. Texture layers are never negative.
 constexpr float kNoFace = -1.0f;
 
-/// Floor brightness, so an unlit surface is dim rather than pure black. Fully
-/// black geometry reads as a hole in the world rather than as shadow.
-constexpr float kAmbientFloor = 0.06f;
-
 /// How dark a fully enclosed corner becomes. Ambient occlusion is a cheat, not a
 /// simulation, so this is tuned by eye: too strong and the world looks grubby,
 /// too weak and it looks flat.
@@ -115,9 +111,10 @@ float lightCurve(float level) {
 
 /// Combines sky and block light. They are independent sources, so the brighter
 /// wins rather than summing, which would blow out anywhere both reach.
-float brightnessOf(float sky, float block) {
-    return kAmbientFloor + (1.0f - kAmbientFloor) * std::max(lightCurve(sky), lightCurve(block));
-}
+///
+/// The two are *not* combined here any more - the shader needs them apart,
+/// because sunlight has to follow the sun's direction and the time of day while
+/// a glowstone block must not.
 
 /// Standard voxel ambient occlusion: how boxed-in a corner is, 0 (most
 /// enclosed) to 3 (open). Two solid sides meeting means the corner is sealed
@@ -132,7 +129,12 @@ int occlusionAt(bool side1, bool side2, bool corner) {
 /// Everything needed to draw one face, resolved before any merging happens.
 struct FaceSample {
     float layer = kNoFace;
-    std::array<float, 4> corner{};
+    /// Per corner, and deliberately kept apart: the shader applies the sun to
+    /// sky light only, and `shading` has to survive where neither light reaches
+    /// or unlit caves lose their ambient occlusion entirely.
+    std::array<float, 4> sky{};
+    std::array<float, 4> block{};
+    std::array<float, 4> shading{};
     /// True when all four corners match, which is the only case where a face may
     /// be merged with its neighbours.
     bool flat = false;
@@ -242,12 +244,19 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         const float scale = 1.0f / static_cast<float>(std::max(1, samples));
                         const int occlusion = occlusionAt(solidA, solidB, solidDiagonal);
 
-                        sample.corner[c] = face.shade * brightnessOf(skySum * scale, blockSum * scale) *
-                                           kOcclusionSteps[static_cast<std::size_t>(occlusion)];
+                        sample.sky[c] = lightCurve(skySum * scale);
+                        sample.block[c] = lightCurve(blockSum * scale);
+                        sample.shading[c] = face.shade * kOcclusionSteps[static_cast<std::size_t>(occlusion)];
                     }
 
-                    sample.flat = sample.corner[0] == sample.corner[1] && sample.corner[1] == sample.corner[2] &&
-                                  sample.corner[2] == sample.corner[3];
+                    sample.flat = true;
+                    for (std::size_t c = 1; c < 4; ++c) {
+                        if (sample.sky[c] != sample.sky[0] || sample.block[c] != sample.block[0] ||
+                            sample.shading[c] != sample.shading[0]) {
+                            sample.flat = false;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -278,17 +287,24 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         position.y -= sample.surfaceDrop;
                     }
                     const glm::vec2 uv = face.uvs[c] * uvScale;
-                    const float lit = sample.corner[c];
-                    mesh.vertices.push_back(engine::Vertex{{position.x, position.y, position.z},
-                                                           {lit, lit, lit, sample.alpha},
-                                                           {uv.x, uv.y},
-                                                           sample.layer});
+                    // Red is sky light, green is block light, blue is face shade
+                    // times ambient occlusion. The vertex format was already
+                    // wide enough, because the shading was only ever greyscale.
+                    mesh.vertices.push_back(
+                        engine::Vertex{{position.x, position.y, position.z},
+                                       {sample.sky[c], sample.block[c], sample.shading[c], sample.alpha},
+                                       {uv.x, uv.y},
+                                       sample.layer});
                 }
 
                 // Split along the darker diagonal. Quads with occlusion on
                 // opposite corners otherwise show a visible seam running the
                 // wrong way, which reads as a crease in flat ground.
-                if (sample.corner[0] + sample.corner[2] > sample.corner[1] + sample.corner[3]) {
+                const float lit0 = sample.shading[0] * std::max(sample.sky[0], sample.block[0]);
+                const float lit1 = sample.shading[1] * std::max(sample.sky[1], sample.block[1]);
+                const float lit2 = sample.shading[2] * std::max(sample.sky[2], sample.block[2]);
+                const float lit3 = sample.shading[3] * std::max(sample.sky[3], sample.block[3]);
+                if (lit0 + lit2 > lit1 + lit3) {
                     mesh.indices.insert(mesh.indices.end(),
                                         {base + 1, base + 2, base + 3, base + 1, base + 3, base + 0});
                 } else {
@@ -315,7 +331,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     }
 
                     const auto matches = [&](const FaceSample& other) {
-                        return other.layer == sample.layer && other.flat && other.corner[0] == sample.corner[0] &&
+                        return other.layer == sample.layer && other.flat && other.sky[0] == sample.sky[0] &&
+                               other.block[0] == sample.block[0] && other.shading[0] == sample.shading[0] &&
                                other.translucent == sample.translucent && other.surfaceDrop == sample.surfaceDrop;
                     };
 

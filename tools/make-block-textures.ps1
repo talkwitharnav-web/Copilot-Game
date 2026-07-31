@@ -137,6 +137,18 @@ $glowCoreColor = 'FFF3B8'
 $waterPalette = @('2E6FA8', '3479B4', '3A83C0', '408DCB', '4796D6')
 $waterWeights = @(2, 4, 6, 4, 2)
 
+$barkPalette = @('3B2A19', '503B25', '634B2E', '775C39', '8F7145', '9E7E50')
+$barkWeights = @(7, 14, 15, 42, 16, 5)
+
+$logCorePalette = @('8A6C42', '9A7A4C', 'A78754', 'AF8E5B', 'B89862')
+$logCoreWeights = @(2, 4, 6, 4, 2)
+
+# Darker and more varied than grass: foliage reads as depth rather than as a
+# flat surface, and the spread of tones is what suggests that.
+$leafPalette = @('2F5220', '386127', '41702E', '4A7F35', '558E3E', '629C48')
+$leafWeights = @(4, 5, 6, 5, 3, 2)
+$leafGapColor = '1B3714'
+
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
@@ -375,8 +387,126 @@ function New-SunTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'sun'
 }
 
+# Bark is a dense field of short vertical dashes, not stripes. Measured from
+# reference art: vertical runs are overwhelmingly 1-3px, horizontally almost no
+# two neighbouring pixels match, and one mid tone carries ~40% of the tile.
+# Painting whole columns one tone reads as planks instead.
+function New-BarkTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    for ($x = 0; $x -lt $size; $x++) {
+        # Roughly half the columns lean dark. Drawn freely rather than alternated
+        # by parity: a strict checker makes the 16-pixel repeat obvious once the
+        # texture tiles up a trunk, and reference bark runs two light or two dark
+        # columns together often enough to break that up.
+        $dark = (Get-Hash01 -x $x -y 0 -salt 401) -lt 0.5
+
+        # Each column leans on two adjacent tones, but both windows reach far
+        # enough down to scatter dark flecks - the reference has them in light
+        # columns too, and they are most of what makes bark look fine-grained.
+        # The tile is an even number of columns wide, so the alternation meets
+        # itself cleanly where the texture wraps.
+        $base = if ($dark) { 0 } else { 1 }
+        $windowWeights = if ($dark) { @(2, 7, 6, 3) } else { @(1, 3, 8, 6) }
+
+        $y = 0
+        $previous = -1
+        while ($y -lt $size) {
+            $lengthRoll = Get-Hash01 -x $x -y $y -salt 409
+            $runLength = 1
+            if ($lengthRoll -gt 0.34) { $runLength = 2 }
+            if ($lengthRoll -gt 0.66) { $runLength = 3 }
+            if ($lengthRoll -gt 0.85) { $runLength = 4 }
+            if ($lengthRoll -gt 0.94) { $runLength = 5 }
+            if ($lengthRoll -gt 0.98) { $runLength = 6 }
+
+            $offset = Get-WeightedIndex -Roll (Get-Hash01 -x $x -y ($y + 32) -salt 419) -Weights $windowWeights
+            $index = $base + $offset
+
+            # Consecutive runs landing on the same tone merge into a chunky slab.
+            # The step is drawn rather than fixed, because always nudging one way
+            # drags every column toward that end of the palette.
+            if ($index -eq $previous) {
+                if ((Get-Hash01 -x $x -y ($y + 96) -salt 439) -lt 0.5) { $index++ } else { $index-- }
+                if ($index -lt $base) { $index = $base + 1 }
+                if ($index -gt $base + 3) { $index = $base + 2 }
+            }
+            $index = [Math]::Max(0, [Math]::Min($barkPalette.Count - 1, $index))
+            $previous = $index
+            $color = ConvertTo-Color $barkPalette[$index]
+
+            for ($i = 0; $i -lt $runLength -and $y -lt $size; $i++) {
+                $bitmap.SetPixel($x, $y, $color)
+                $y++
+            }
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'log_side'
+}
+
+# End grain: concentric *square* rings inside a bark border. Circular rings look
+# wrong at 16 pixels and are not what the reference does.
+function New-LogTopTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $centre = ($size - 1) / 2.0
+
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            # Chebyshev distance is what makes the rings square.
+            $ring = [Math]::Max([Math]::Abs($x - $centre), [Math]::Abs($y - $centre))
+
+            # A single pixel of bark. Two reads as a thick frame and swallows
+            # the end grain it is meant to surround.
+            if ($ring -gt 7.0) {
+                $roll = Get-Hash01 -x $x -y $y -salt 433
+                $index = Get-WeightedIndex -Roll $roll -Weights $barkWeights
+                $bitmap.SetPixel($x, $y, (ConvertTo-Color $barkPalette[$index]))
+                continue
+            }
+
+            # Rings are thin dark lines on a light field, not thick bands. The
+            # ring index is exact: distances land on half-integers.
+            $r = [int][Math]::Round($ring - 0.5)
+            $index = if ($r % 2 -eq 0) { 1 } else { 3 }
+            if ($r -eq 0) { $index = 0 }
+
+            if ((Get-Hash01 -x $x -y $y -salt 449) -gt 0.82) {
+                $index = [Math]::Max(0, [Math]::Min($logCorePalette.Count - 1, $index + 1))
+            }
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $logCorePalette[$index]))
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'log_top'
+}
+
+# Foliage is clumped and high-contrast, with dark gaps standing in for the holes
+# the reference gets from transparency. Alpha-tested leaves arrive at M17.
+function New-LeavesTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $cx = [Math]::Floor($x / 2)
+            $cy = [Math]::Floor($y / 2)
+            $roll = Get-Hash01 -x $cx -y $cy -salt 151
+            $jitter = (Get-Hash01 -x $x -y $y -salt 163) * 0.45 - 0.225
+            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll + $jitter))
+            $index = Get-WeightedIndex -Roll $roll -Weights $leafWeights
+            $color = ConvertTo-Color $leafPalette[$index]
+
+            # Gaps you would see sky through, until transparency exists.
+            if ((Get-Hash01 -x $x -y $y -salt 179) -gt 0.86) {
+                $color = ConvertTo-Color $leafGapColor
+            }
+            $bitmap.SetPixel($x, $y, $color)
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name 'leaves'
+}
+
 New-StoneTexture
-New-DirtTextureNew-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
+New-DirtTexture
+New-FlatTexture -Name 'grass_top' -Palette $grassPalette -Weights $grassWeights -Salt 31
 New-GrassSideTexture
 New-FlatTexture -Name 'sand' -Palette $sandPalette -Weights $sandWeights -Salt 53
 New-ClumpedTexture -Name 'cobblestone' -Palette $cobblePalette -Weights $cobbleWeights -Salt 71 -Clump 2
@@ -387,6 +517,9 @@ New-BricksTexture
 New-GlowstoneTexture
 New-SunTexture
 New-FlatTexture -Name 'water' -Palette $waterPalette -Weights $waterWeights -Salt 137
+New-BarkTexture
+New-LogTopTexture
+New-LeavesTexture
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.

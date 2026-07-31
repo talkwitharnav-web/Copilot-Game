@@ -38,6 +38,20 @@ struct Settings {
     /// watching the cycle without waiting.
     unsigned dayLengthSeconds = 600;
 
+    /// Where the player starts, in world blocks. Height is still found from the
+    /// terrain, so this only chooses the column.
+    ///
+    /// Exists so a specific place can be reached without flying there. Testing a
+    /// cave otherwise means several minutes of travel before every single
+    /// attempt, which is enough friction that the test stops being run.
+    int spawnX = 8;
+    int spawnZ = 8;
+
+    /// Drops the player onto the floor of the deepest open space in the spawn
+    /// column instead of the surface. Underground lighting is impossible to
+    /// judge from above ground.
+    bool spawnUnderground = false;
+
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;

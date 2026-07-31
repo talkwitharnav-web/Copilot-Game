@@ -41,6 +41,27 @@ bool parseUnsigned(const std::string& text, unsigned limit, unsigned& out) {
     }
 }
 
+/// Signed, because world coordinates run either side of the origin.
+bool parseInt(const std::string& text, int& out) {
+    if (text.empty()) {
+        return false;
+    }
+    const std::size_t digitsFrom = (text[0] == '-' || text[0] == '+') ? 1 : 0;
+    if (digitsFrom >= text.size()) {
+        return false;
+    }
+    if (!std::all_of(text.begin() + static_cast<std::string::difference_type>(digitsFrom), text.end(),
+                     [](char c) { return c >= '0' && c <= '9'; })) {
+        return false;
+    }
+    try {
+        out = std::stoi(text);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 } // namespace
 
 Settings loadSettings(const std::filesystem::path& file) {
@@ -86,6 +107,26 @@ Settings loadSettings(const std::filesystem::path& file) {
         read("render_distance", Settings::kMaxRenderDistance, settings.renderDistance);
         read("frame_cap", 1000, settings.frameCap);
         read("day_length_seconds", 86400, settings.dayLengthSeconds);
+
+        const auto readInt = [&](const char* name, int& target) {
+            if (key != name) {
+                return;
+            }
+            int parsed = 0;
+            if (parseInt(value, parsed)) {
+                target = parsed;
+            } else {
+                engine::logWarn(std::string("settings: ") + name + " '" + value +
+                                "' is not usable; keeping the default");
+            }
+        };
+
+        readInt("spawn_x", settings.spawnX);
+        readInt("spawn_z", settings.spawnZ);
+
+        if (key == "spawn_underground") {
+            settings.spawnUnderground = (value == "1" || value == "true");
+        }
     }
 
     // A render distance of zero would mesh nothing at all.
@@ -116,11 +157,18 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "# frame_cap: frames per second to aim for; 0 means uncapped.\n"
         << "# day_length_seconds: real seconds for a full day and night.\n"
         << "#\n"
+        << "# spawn_x / spawn_z: which column to start in.\n"
+        << "# spawn_underground: start on the floor of the deepest cave in that\n"
+        << "#   column instead of on the surface. Only useful for testing.\n"
+        << "#\n"
         << "# All of these take effect on restart.\n"
         << "worker_threads=" << settings.workerThreads << "\n"
         << "render_distance=" << settings.renderDistance << "\n"
         << "frame_cap=" << settings.frameCap << "\n"
-        << "day_length_seconds=" << settings.dayLengthSeconds << "\n";
+        << "day_length_seconds=" << settings.dayLengthSeconds << "\n"
+        << "spawn_x=" << settings.spawnX << "\n"
+        << "spawn_z=" << settings.spawnZ << "\n"
+        << "spawn_underground=" << (settings.spawnUnderground ? 1 : 0) << "\n";
 }
 
 } // namespace game

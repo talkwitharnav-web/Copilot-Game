@@ -39,7 +39,16 @@ void main() {
         // and it keeps a normal out of the vertex format entirely.
         vec3 normal = normalize(cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition)));
         float lambert = max(dot(normal, push.sunDirection.xyz), 0.0);
-        rgb *= push.lighting.x + push.lighting.y * lambert;
+        float daylight = push.lighting.x + push.lighting.y * lambert;
+
+        // Red is sky light, green is block light, blue is face shade times
+        // ambient occlusion. Only sky light answers to the sun - modulating
+        // block light by it would put torches out at dusk and leave a lit cave
+        // dark, since underground no face points at the sun. Shading multiplies
+        // the result including the floor, or unlit caves come out perfectly
+        // flat.
+        float lit = max(fragColor.g, fragColor.r * daylight);
+        rgb = texel.rgb * fragColor.b * (push.lighting.w + (1.0 - push.lighting.w) * lit);
     }
 
     outColor = vec4(rgb, texel.a * fragColor.a);

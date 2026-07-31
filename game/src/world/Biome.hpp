@@ -53,6 +53,10 @@ struct Biome {
     /// boundaries and nothing has to define an edge.
     float temperature;
     float humidity;
+
+    /// Chance that any given placement cell holds a tree. Zero for anything
+    /// nothing grows on.
+    float treeDensity;
 };
 
 const Biome& biomeInfo(BiomeId id);
@@ -71,5 +75,9 @@ struct BiomeSample {
 };
 
 BiomeSample sampleBiome(std::uint32_t seed, int worldX, int worldZ);
+
+/// Highest `treeDensity` in the table. Structure placement uses it to reject
+/// empty cells before doing any noise work.
+float maxTreeDensity();
 
 } // namespace game

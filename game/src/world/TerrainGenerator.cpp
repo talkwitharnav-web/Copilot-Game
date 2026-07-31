@@ -2,6 +2,7 @@
 
 #include "world/Biome.hpp"
 #include "world/Noise.hpp"
+#include "world/Structures.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -132,6 +133,8 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
             }
         }
     }
+
+    structures::generateInto(chunk, seed, coord);
 
     return chunk;
 }

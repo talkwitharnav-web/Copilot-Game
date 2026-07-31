@@ -291,8 +291,37 @@ void World::propagateLight(const BudgetCheck& budgetSpent) {
 
     const int worldHeight = kWorldHeightChunks * Chunk::kSize;
 
-    // Sky first: it is what makes newly streamed terrain look right, and block
-    // light is rare by comparison.
+    // Block light goes first even though sky light is what makes newly streamed
+    // terrain look right. Block light is rare and its queue is short, so it
+    // costs sky light almost nothing - but behind sky light it can be starved
+    // outright, because streaming refills the sky queue every frame and the two
+    // share one budget. That is a placed torch that never lights anything.
+    while (!m_blockAdditions.empty() && !budgetSpent()) {
+        const glm::ivec3 position = m_blockAdditions.front();
+        m_blockAdditions.pop_front();
+
+        const int level = blockLightAt(position.x, position.y, position.z);
+        if (level <= 0) {
+            continue;
+        }
+
+        for (const glm::ivec3& step : kLightSteps) {
+            const glm::ivec3 n = position + step;
+            if (n.y < 0 || n.y >= worldHeight) {
+                continue;
+            }
+            if (!isLightTransparent(blockAt(n.x, n.y, n.z))) {
+                continue;
+            }
+            if (blockLightAt(n.x, n.y, n.z) >= level - 1) {
+                continue;
+            }
+
+            setBlockLightAt(n.x, n.y, n.z, level - 1);
+            m_blockAdditions.push_back(n);
+        }
+    }
+
     while (!m_skyAdditions.empty() && !budgetSpent()) {
         const glm::ivec3 position = m_skyAdditions.front();
         m_skyAdditions.pop_front();
@@ -319,32 +348,6 @@ void World::propagateLight(const BudgetCheck& budgetSpent) {
 
             setSkyLightAt(n.x, n.y, n.z, reaching);
             m_skyAdditions.push_back(n);
-        }
-    }
-
-    while (!m_blockAdditions.empty() && !budgetSpent()) {
-        const glm::ivec3 position = m_blockAdditions.front();
-        m_blockAdditions.pop_front();
-
-        const int level = blockLightAt(position.x, position.y, position.z);
-        if (level <= 0) {
-            continue;
-        }
-
-        for (const glm::ivec3& step : kLightSteps) {
-            const glm::ivec3 n = position + step;
-            if (n.y < 0 || n.y >= worldHeight) {
-                continue;
-            }
-            if (!isLightTransparent(blockAt(n.x, n.y, n.z))) {
-                continue;
-            }
-            if (blockLightAt(n.x, n.y, n.z) >= level - 1) {
-                continue;
-            }
-
-            setBlockLightAt(n.x, n.y, n.z, level - 1);
-            m_blockAdditions.push_back(n);
         }
     }
 }

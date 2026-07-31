@@ -36,6 +36,10 @@ glm::vec3 skyColor(const glm::vec3& sunDirection);
 /// `ambient` is the floor everything receives regardless of facing.
 void sunLighting(const glm::vec3& sunDirection, float& ambient, float& sun);
 
+/// Floor brightness, so a surface no light reaches is dim rather than pure
+/// black. Fully black geometry reads as a hole in the world rather than shadow.
+constexpr float kAmbientFloor = 0.06f;
+
 /// A unit quad on the XY plane, textured with the sun. Built once; the transform
 /// does the positioning.
 engine::MeshData makeSunQuad();

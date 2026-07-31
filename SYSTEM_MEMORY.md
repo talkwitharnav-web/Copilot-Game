@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–15 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath and oceans that flow. `TIMELINE.md` M16 (procedural structures) is next.
+> **Status:** Milestones 1–16 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, and trees that grow. `TIMELINE.md` M17 (flexible block system) is next.
 
 ---
 
@@ -331,6 +331,8 @@ Blocks whose faces differ are handled by the `BlockFace` parameter rather than b
 - **Weighted palette selection**, so most pixels land on middle tones and extremes stay sparse.
 - **Short horizontal runs**, never large patches.
 - **Accent pixels**, such as the grey pebbles in soil, which are what stop brown reading as a blanket.
+- **Direction beats noise where the material has a grain.** Bark is per-column stripes with occasional vertical breaks, not isotropic noise stretched vertically. Log end grain is **square** rings (Chebyshev distance), not circular ones — concentric squares are what reads as a cut log at 16×16.
+- **Leaves are baked green.** Reference art stores them greyscale because the original tints them per biome at runtime; we have no tinting stage, so the colour goes into the texture.
 
 The PNGs are ordinary files and may be edited by hand instead; the script is a starting point, not a pipeline step. `tools/preview-textures.ps1` magnifies textures into a labelled sheet, because 16×16 cannot be judged at actual size.
 
@@ -382,7 +384,7 @@ Generation is a **pure function of `(seed, chunkCoord)`** — no neighbour reads
 
 ### Biomes
 
-A biome is the data structure that answers *"which block goes here, and why"*. Each is one row in a table carrying its surface block, filler, filler depth, terrain base height, amplitude and snow line. **Adding a block type should mean adding or editing a row, never adding a branch to the generator.**
+A biome is the data structure that answers *"which block goes here, and why"*. Each is one row in a table carrying its surface block, filler, filler depth, terrain base height, amplitude, snow line, climate coordinates and tree density. **Adding a block type should mean adding or editing a row, never adding a branch to the generator.**
 
 Selection uses **two independent low-frequency noise fields**: temperature and humidity. One field could only ever order biomes along a line, which is why a single "climate" value cannot separate desert from plains from tundra. Each biome sits at a point in that 2D space and claims ground by proximity.
 
@@ -399,6 +401,18 @@ Carved where a 3D noise field passes close to a chosen value, which gives connec
 Carving fades in with depth below the surface and never touches the world floor, so the ground is not left rotten and there is always something to stand on.
 
 **Cost tracks cave surface area, not hollow volume.** Narrow tunnels have far more surface per unit volume than open caverns, so making caves *thinner* barely helps; making them *fewer and larger* does. See `CLAUDE.md`.
+
+### Structures
+
+`game/src/world/Structures.cpp`. Anything spanning more than one block — currently trees.
+
+**Nothing is ever written into a neighbouring chunk.** That would break generation purity, and with it thread safety. Instead **every chunk rebuilds each structure that could reach it and discards the blocks that fall outside its own bounds.** The same tree is therefore built several times over, independently, by each chunk it touches — and because it is derived entirely from the seed, every one of them agrees. This is the whole trick; do not "optimise" it into writing across chunk boundaries.
+
+Candidates sit on a fixed **8-block grid**, at most one per cell, jittered inside it and kept `margin = 2` blocks from the cell edge so neighbours cannot touch. `kReach` is the furthest a structure may extend horizontally and sets how many cells outside the chunk are considered — **a structure wider than `kReach` gets silently clipped at borders**, so raise it when adding anything larger.
+
+**Presence is decided by an integer hash before any noise runs.** Most cells are empty, and finding that out costs one hash; sampling biome and surface height first meant three noise evaluations to answer a question already settled. `maxTreeDensity()` is derived from the table rather than written down, so a leafier biome cannot invalidate the early rejection.
+
+Placement gates on `Biome::treeDensity`, on the biome's surface block being grass, and on being above sea level and below the snow line.
 
 ---
 
@@ -484,7 +498,11 @@ Every block stores one byte of light: **sky in the high nibble, block in the low
 
 Sky light falls **straight down at full strength** and dims only when spreading sideways, which is what makes open ground uniformly bright. Block light dims in every direction. The two are independent: a surface takes the **brighter** of them, not the sum, which would blow out anywhere both reach.
 
+They are also kept apart **all the way into the fragment shader**, and that is load-bearing rather than tidiness. Only sky light answers to the sun's direction and the time of day; block light must not, or a glowstone underground gets multiplied by the ambient term and lights nothing. See `CLAUDE.md`.
+
 Propagation runs on the **main thread**, budgeted per frame. Generation and meshing get self-contained snapshots and run on workers; light cannot, because it walks freely between chunks. Adding light is a flood fill. Removing it is the harder half: it walks back everything the dead source lit, and any cell found brighter than expected has its own supply and becomes a seed to re-fill the hole.
+
+**Block light propagates before sky light**, even though sky light is what makes newly streamed terrain look right. Block light is rare and its queue is short, so going first costs sky light almost nothing — but behind sky light it can be starved outright, because streaming refills the sky queue every frame and the two share one budget.
 
 **Seeding is the part that has to stay careful.** A column's sky light is traced top-down when the last chunk of that column arrives, and only cells that can actually spread somewhere are queued — those with a horizontal neighbour whose sky reaches less far down. Queueing every lit cell instead buried the queue under tens of millions of entries and took startup from 0.7 s to 8.5 s.
 
@@ -496,7 +514,11 @@ Each face corner averages the light of the open cells touching it, and darkens b
 
 Quads **split along their darker diagonal**. Without that, occlusion on opposite corners creases flat ground the wrong way, which reads as a fold in the terrain.
 
-**Light does not change the vertex format.** It is folded into the existing per-vertex colour as a brightness multiplier, which is also what carries per-corner smooth lighting and occlusion.
+**Light does not change the vertex format.** The vertex colour carries **red = sky light, green = block light, blue = face shade × ambient occlusion**, with alpha still alpha. It fits because the shading was only ever greyscale, so two of the three colour channels were redundant. The shader reads those channels as light only when `lighting.z > 0.5`; HUD and sky geometry are drawn unlit and use the colour as an actual colour.
+
+The final term is `shading * (floor + (1 - floor) * max(block, sky * daylight))`, where `daylight` is the sun's ambient plus its directional term and the floor arrives as `lighting.w`.
+
+**Shading has to stay a separate channel**, not be pre-multiplied into the two light values. Folding it in makes both terms exactly zero wherever no light reaches, which silently deletes ambient occlusion in caves *and* lets every unlit face merge with its neighbours — geometry dropped 47% and the underground rendered perfectly flat.
 
 ---
 
@@ -542,6 +564,10 @@ GLM is column-major and the project builds with `GLM_FORCE_DEPTH_ZERO_TO_ONE`, s
 | `render_distance` | How far the world is drawn, in chunks | Yes, `F6`/`F7` |
 | `frame_cap` | Target frames per second, 0 for uncapped | Yes, `F1`/`F2` |
 | `day_length_seconds` | Real seconds for a full day and night | No — restart |
+| `spawn_x` / `spawn_z` | Which column a new world starts in | No — restart |
+| `spawn_underground` | Start in the most open cave near that column | No — restart |
+
+`spawn_underground` **searches** the surrounding area for the roomiest cave floor rather than trusting the spawn column to contain one. It exists because testing anything underground otherwise means minutes of flying per attempt, which is enough friction that the test stops being run. All three only apply to a fresh world; a saved player position wins.
 
 Render distance is safe to change live because nothing ends up half-migrated: the next update loads or unloads the difference. Shrinking also drops meshes outside the new radius immediately, rather than waiting for those chunks to leave the unload radius, or the change appears to do nothing.
 
@@ -692,6 +718,7 @@ Verified 2026-07-31 on this machine.
 - **M14 result:** sky and block light propagate across chunks; smooth lighting and ambient occlusion per face corner. Verified numerically at the spawn column — sky 15 above the surface, 0 at it and below. Geometry rose 2.37× because only evenly lit faces can merge.
 - **M14c result:** a visible sun crosses the sky, surfaces take a directional term, and sky colour follows the sun's elevation. No cast shadows.
 - **M15 result:** caves, seven biomes, oceans and flowing water. Release build at render distance 12: 2,742,884 triangles, 1.15 ms GPU, 121 fps, ~1.9 s startup, 575–630 MB.
+- **M16 result:** trees. Release build at render distance 12: **2,829,100 triangles, 1.06 ms GPU, 121 fps**, generate+mesh 1275 ms on 11 workers. The determinism check is the one that matters here — 2,829,100 triangles at 0, 4 and 11 workers, so structures straddling chunk borders come out identical regardless of scheduling.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.
