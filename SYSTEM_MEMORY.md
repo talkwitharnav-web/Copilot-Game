@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–11 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Still single-threaded and unlit, both by design. `TIMELINE.md` M12 (job system and multithreading) is next.
+> **Status:** Milestones 1–12 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. World generation and meshing run on a worker-thread pool. Still unlit, by design. `TIMELINE.md` M13a (mesh upload path) is next.
 
 ---
 
@@ -144,6 +144,7 @@ Milestone 1 only. Each type owns its Vulkan resources and destroys them in its d
 | `Log` | `engine/core/Log.hpp` | Minimal timestamped console output at info/warn/error levels. Deliberately trivial — replaced when there is a real need. |
 | `Paths` | `engine/core/Paths.hpp` | `executableDirectory()`. Assets resolve relative to the `.exe`, not the working directory, which differs between terminal and editor launches. |
 | `FrameLimiter` | `engine/core/FrameLimiter.hpp` | Paces the main loop to a target frame rate, adjustable at runtime. A target of `0` means uncapped. |
+| `JobSystem` | `engine/core/JobSystem.hpp` | Fixed-size worker thread pool and job queue. Knows nothing about what a job is. Zero workers runs jobs inline. |
 | `Window` | `engine/platform/Window.hpp` | Owns the GLFW window and its lifetime. Reports whether a close was requested, pumps OS events, and exposes a queue of key presses via the engine-level `Key` enum so the game never includes GLFW. |
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
@@ -399,6 +400,41 @@ The overlay mesh rebuilds at **20 Hz**, not every frame. It changes constantly, 
 
 ---
 
+## Threading
+
+`engine::JobSystem` is a worker pool with a single job queue. It takes a callable and runs it elsewhere; it knows nothing about chunks, and deciding what is safe to run in parallel is entirely the caller's problem.
+
+**The pool size is fixed for the lifetime of the process.** `settings.cfg` next to the executable holds `worker_threads`, read once at startup, defaulting to half the machine's hardware threads. Zero is a supported value and means every job runs inline on the calling thread — the lowest-resource mode, and a way to reproduce a bug without threads in the picture. Changing it requires a restart; see `CLAUDE.md` for why resizing a live pool was rejected.
+
+### What runs where
+
+| Work | Thread |
+|---|---|
+| Chunk generation and disk load | Worker |
+| Meshing | Worker |
+| Everything else: block edits, physics, raycasting, GPU upload, saving | Main |
+
+**The main thread remains the only thing that mutates the world.** A worker never sees `m_chunks`. Before a mesh job is submitted the main thread copies the chunk and its six neighbouring border layers into a `MeshJobInput`, so the job owns everything it reads and the question of what the main thread may do meanwhile never arises. That copy is ~38 KB against a mesh build that costs far more.
+
+### Surviving the world's destruction
+
+Jobs capture `shared_ptr`s to the results buffer and to `WorldStore`, never a `World*`. A job still running when the world is destroyed writes into a buffer that is still alive and is simply never read. Nothing has to be drained or waited for at shutdown.
+
+`JobSystem` is declared **before** `World` in `main`, so it is destroyed after it. The world submits to the pool and must not outlive it.
+
+### Stale results
+
+Every chunk carries a `revision`, and a mesh job records the revision it started from. On collection, a result whose revision no longer matches is thrown away and the chunk re-queued. This is what catches an edit made while a mesh was being built.
+
+Two distinct operations exist, and confusing them causes real bugs:
+
+- `queueMesh` — this chunk has no current mesh. Does **not** bump the revision.
+- `invalidateMesh` — this chunk's geometry is genuinely out of date. Bumps the revision, discarding any job in flight.
+
+Editing a block on a chunk face calls `invalidateMesh` on **both** chunks, because the neighbour may already be meshing against the old border. Merely re-queueing it there would let a stale mesh install and never be corrected. Conversely the "never meshed" sweep uses `queueMesh`, because bumping revisions there would throw away good in-flight work every time the player crossed a chunk boundary.
+
+---
+
 ## Chunk Streaming
 
 Chunks live in a `std::unordered_map` keyed by world chunk coordinate. The world is **3 chunks (96 blocks) tall** and streams horizontally only.
@@ -411,7 +447,9 @@ Chunks live in a `std::unordered_map` keyed by world chunk coordinate. The world
 
 **Visible is one less than load on purpose.** A chunk is only meshed once its four horizontal neighbours exist; meshing against a missing neighbour emits a full sheet of faces at the frontier that has to be thrown away when the neighbour arrives. **Unload is larger than load** so pacing back and forth across the boundary does not thrash chunks in and out.
 
-Generation and meshing share a **3 ms per-frame budget**. Whatever does not fit waits for the next frame, so a burst of new terrain slows the horizon down instead of freezing the game. Unloading is never metered — it frees memory and is nearly free.
+Generation and meshing are submitted to the job system; the **3 ms per-frame budget** now meters how much is dispatched and how many finished meshes are uploaded, because uploading is the part still on the main thread. Whatever does not fit waits for the next frame. Unloading is never metered — it frees memory and is nearly free.
+
+Only `workers × 2 + 2` jobs of each kind are outstanding at once. A longer queue does not go faster; it just produces results for places the player has already left. Loads and meshes have separate limits so a long stream of loads cannot starve meshing and leave the player standing in an invisible world. **Startup ignores the limit entirely** and queues everything at once — batching it left eleven workers waiting on each other and was slower than single-threaded.
 
 The load queue is sorted farthest-first and drained from the back, so the nearest chunk is always the cheapest to remove and the world fills in from the player outwards.
 

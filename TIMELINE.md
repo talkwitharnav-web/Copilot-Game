@@ -78,7 +78,7 @@ So: **no `IRenderBackend` interface, no material abstraction layer, no "PBR-read
 | World data ownership | M4+ | **Severe** | The three purity rules above, enforced from M4 |
 | Determinism | M5 | **Severe** | Generation depends only on seed and coordinates |
 | Job system | M12 | Low, if the above hold | Migration, not rewrite |
-| Mesh optimization / LOD | M13 | Low | Purely additive to meshing |
+| Mesh optimization / LOD | M13b | Low | Purely additive to meshing |
 | Renderer architecture | M23 | Low, and accepted | Isolated to the rendering path |
 | Ray tracing | M30 | Low | Hybrid; sits on top of M23 |
 
@@ -281,7 +281,7 @@ Frame-time graph, CPU/GPU timing, chunk counts, draw-call and triangle counts, m
 
 **Deviation:** the plan named Dear ImGui. It was not added — see `CLAUDE.md`. This milestone needs read-only numbers and a graph, which the existing screen-space mesh system already covers; ImGui's justification is the settings UI at M34.
 
-### ▶ M12 — Job system and multithreading · **Core**
+### ✅ M12 — Job system and multithreading · **Core**
 
 A general worker-thread job system. Migrate world generation and chunk meshing onto it first, since they are the obvious wins and were written as pure parameters-in/results-out functions specifically to make this migration cheap.
 
@@ -291,7 +291,34 @@ A general worker-thread job system. Migrate world generation and chunk meshing o
 
 **Done when:** generation and meshing no longer stall the render thread, main-thread frame time is measurably lower than the M11 baseline, and worlds remain byte-identical regardless of thread count.
 
-### ⬜ M13 — Mesh and render optimization · **Core**
+**Result:** `engine::JobSystem` is a fixed-size worker pool with a job queue. Generation and meshing both run on it; the main thread only snapshots inputs, collects results and uploads. Release build, 507 chunks:
+
+| Workers | Generate + mesh | Triangles |
+|---|---|---|
+| 0 (inline) | 179 ms | 590,492 |
+| 1 | 199 ms | 590,492 |
+| 4 | 77 ms | 590,492 |
+| 11 (default) | 55 ms | 590,492 |
+
+Identical triangle counts at every worker count is the determinism check. **One worker is slower than zero** and that is expected: it adds a snapshot copy and a handoff without any second thread to overlap against. Its value is that the work leaves the main thread, which a startup benchmark cannot show.
+
+**Worker count is a setting** (`settings.cfg`, `worker_threads`), defaulting to half the machine's hardware threads, and is **fixed for the run** — see `CLAUDE.md`.
+
+**Not achieved:** upload still stalls. Generation and meshing no longer block the main thread, but every mesh upload does two full GPU waits, so "walk fast without hitching" is only half true. That is M13a.
+
+### ▶ M13a — Mesh upload path · **Core**
+
+Remove the per-buffer GPU stall from mesh upload. Today `uploadBufferData` allocates a staging buffer, allocates device memory, submits a copy and calls `vkQueueWaitIdle` — **per buffer**, so a 363-chunk world costs 726 submits and 726 full queue waits, and every block break costs two.
+
+**Why now:** it is the largest remaining main-thread cost and the reason M12's own goal is not fully met. It is also a prerequisite for M13b being measurable: batching draw calls is pointless while uploads dominate.
+
+**Scope is deliberately narrow.** Reusable staging, one fence, uploads waited on once per frame rather than once per buffer. **No transfer queue, no allocator rewrite, no batching architecture** — those belong to M13b and M23.
+
+**You can:** break and place blocks with no GPU stall, and load a world without a serial upload tail.
+
+**Done when:** startup upload time and per-edit stall are both measurably lower, with numbers recorded, and `vkQueueWaitIdle` no longer appears in the per-mesh path.
+
+### ⬜ M13b — Mesh and render optimization · **Core**
 
 Greedy meshing or equivalent face merging, frustum culling, level-of-detail for distant chunks, draw-call batching, indirect drawing.
 
@@ -456,7 +483,7 @@ Listed so future sessions know roughly when each becomes justifiable — **not**
 | M5 | A noise library — **not taken** | Value-noise fBm was ~60 lines written in-house. A dependency was not justifiable for that. |
 | M9 | stb_image — **added** | Decoding PNG block textures |
 | M11 | Dear ImGui | Debug overlay and tools |
-| M13 | meshoptimizer | Mesh optimization, LOD |
+| M13b | meshoptimizer | Mesh optimization, LOD |
 | M22 | An audio library | Sound |
 
 If the dependency count approaches ~5, revisit the vcpkg-versus-FetchContent decision recorded in `CLAUDE.md`.

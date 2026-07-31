@@ -187,6 +187,20 @@ int main() {
         // amount of threading helps.
         const std::vector<game::ChunkMeshUpdate> initial = world.loadImmediately(spawn);
         const auto worldBuilt = std::chrono::steady_clock::now();
+
+        // Final triangle count per chunk, not the sum of every update: a chunk
+        // may legitimately be meshed more than once during startup. This must
+        // come out identical at any worker count, which is the check that
+        // generation and meshing really are independent of thread scheduling.
+        std::unordered_map<game::ChunkCoord, std::size_t> trianglesPerChunk;
+        for (const game::ChunkMeshUpdate& update : initial) {
+            trianglesPerChunk[update.coord] = update.mesh.indices.size() / 3;
+        }
+        std::size_t initialTriangles = 0;
+        for (const auto& [coord, count] : trianglesPerChunk) {
+            initialTriangles += count;
+        }
+
         applyUpdates(initial);
         const auto worldReady = std::chrono::steady_clock::now();
 
@@ -210,10 +224,11 @@ int main() {
         engine::logInfo("World seed " + std::to_string(kWorldSeed) + ", load radius " +
                         std::to_string(game::kLoadRadiusChunks) + " chunks");
         engine::logInfo("Saves: " + (engine::executableDirectory() / "saves").string());
-        engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks in " +
-                        ms(buildStart, worldReady) + " ms (generate+mesh " + ms(buildStart, worldBuilt) +
-                        " ms on " + std::to_string(jobs.threadCount()) + " workers, upload " +
-                        ms(worldBuilt, worldReady) + " ms)");
+        engine::logInfo("Initial load: " + std::to_string(world.loadedChunkCount()) + " chunks, " +
+                        std::to_string(initialTriangles) + " triangles in " + ms(buildStart, worldReady) +
+                        " ms (generate+mesh " + ms(buildStart, worldBuilt) + " ms on " +
+                        std::to_string(jobs.threadCount()) + " workers, upload " + ms(worldBuilt, worldReady) +
+                        " ms)");
 
         engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]) + " (F1 lower, F2 raise)");
         engine::logInfo("Field of view: " + std::to_string(static_cast<int>(kDefaultFov)) +
