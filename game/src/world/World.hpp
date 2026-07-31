@@ -30,10 +30,11 @@ constexpr int kWorldHeightChunks = 3;
 constexpr int kDefaultVisibleRadiusChunks = 5;
 
 /// A chunk's drawable geometry has changed. `removed` means the chunk left the
-/// world and its mesh should be released.
+/// world and its meshes should be released.
 struct ChunkMeshUpdate {
     ChunkCoord coord;
     engine::MeshData mesh;
+    engine::MeshData translucentMesh;
     bool removed = false;
 };
 
@@ -134,7 +135,7 @@ private:
     /// A finished mesh job, tagged with the chunk revision it was built from.
     struct MeshedChunk {
         ChunkCoord coord;
-        engine::MeshData mesh;
+        ChunkMeshes meshes;
         std::uint32_t revision = 0;
     };
 
@@ -204,6 +205,13 @@ private:
 
     void setSkyLightAt(int x, int y, int z, int level);
     void setBlockLightAt(int x, int y, int z, int level);
+
+    /// Re-evaluates one cell of water and spreads the consequences.
+    ///
+    /// Incremental on purpose: generated oceans are already settled, so nothing
+    /// runs until something disturbs them.
+    void updateFluids(const BudgetCheck& budgetSpent);
+    void scheduleFluidUpdate(int x, int y, int z);
     /// Notes that a chunk's light changed. Collected rather than acted on, then
     /// applied once per frame.
     void lightChangedAt(int x, int y, int z);
@@ -252,6 +260,9 @@ private:
 
     /// Chunks needing a rebuild because light moved through them.
     std::unordered_set<ChunkCoord> m_lightDirty;
+
+    /// Water cells whose supply may have changed.
+    std::deque<glm::ivec3> m_fluidUpdates;
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;

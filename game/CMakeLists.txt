@@ -6,6 +6,7 @@ add_executable(game
     src/hud/HudPrimitives.cpp
     src/hud/Hotbar.cpp
     src/world/Noise.cpp
+    src/world/Biome.cpp
     src/world/World.cpp
     src/world/WorldStore.cpp
     src/world/Player.cpp

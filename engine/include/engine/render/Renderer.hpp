@@ -62,7 +62,10 @@ public:
 
     /// Uploads a new mesh and returns its handle. An empty mesh is valid and
     /// occupies a slot without any GPU memory.
-    MeshHandle addMesh(const MeshData& mesh);
+    /// `translucent` geometry is drawn in a second pass, after every opaque mesh
+    /// in the scene. Blending is order-dependent, so it cannot simply sit in the
+    /// same buffer and be drawn whenever its chunk comes up.
+    MeshHandle addMesh(const MeshData& mesh, bool translucent = false);
 
     /// Replaces a mesh's contents, keeping its handle.
     void updateMesh(MeshHandle handle, const MeshData& mesh);
@@ -152,6 +155,9 @@ private:
         /// double remove would push the same handle onto the free list twice and
         /// hand it to two different chunks.
         bool inUse = false;
+        /// Drawn in the second pass. Blending depends on draw order, so these
+        /// cannot be interleaved with opaque geometry.
+        bool translucent = false;
     };
 
     /// Allocates and fills a slot's buffers. Any previous contents are retired

@@ -340,7 +340,7 @@ void Renderer::uploadInto(GpuMesh& slot, const MeshData& mesh) {
     }
 }
 
-MeshHandle Renderer::addMesh(const MeshData& mesh) {
+MeshHandle Renderer::addMesh(const MeshData& mesh, bool translucent) {
     MeshHandle handle = kInvalidMesh;
 
     if (!m_freeSlots.empty()) {
@@ -353,6 +353,7 @@ MeshHandle Renderer::addMesh(const MeshData& mesh) {
 
     uploadInto(m_meshes[handle], mesh);
     m_meshes[handle].inUse = true;
+    m_meshes[handle].translucent = translucent;
     return handle;
 }
 
@@ -603,6 +604,9 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     // distance, and skipping them costs one box test each.
     const std::array<glm::vec4, 6> planes = frustumPlanes(viewProjection);
     for (const GpuMesh& mesh : m_meshes) {
+        if (mesh.translucent) {
+            continue;
+        }
         if (mesh.indexCount != 0 && !boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax)) {
             continue;
         }
@@ -612,6 +616,17 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     // After the world so it is depth-tested against terrain, and unlit because
     // the sun does not shade itself.
     drawMesh(m_skyMesh, viewProjection * m_skyTransform, false);
+
+    // Blended geometry last, so what shows through it has already been drawn.
+    for (const GpuMesh& mesh : m_meshes) {
+        if (!mesh.translucent) {
+            continue;
+        }
+        if (mesh.indexCount != 0 && !boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax)) {
+            continue;
+        }
+        drawMesh(mesh, viewProjection, true);
+    }
 
     if (overlayTransform.has_value()) {
         drawMesh(m_overlayMesh, viewProjection * *overlayTransform, false);

@@ -23,6 +23,13 @@ std::uint32_t hashCoords(std::uint32_t seed, std::int32_t x, std::int32_t z) {
     return hash(seed ^ hash(ux * 0x9e3779b9u) ^ hash(uz * 0x85ebca6bu));
 }
 
+std::uint32_t hashCoords3(std::uint32_t seed, std::int32_t x, std::int32_t y, std::int32_t z) {
+    const auto ux = static_cast<std::uint32_t>(x);
+    const auto uy = static_cast<std::uint32_t>(y);
+    const auto uz = static_cast<std::uint32_t>(z);
+    return hash(seed ^ hash(ux * 0x9e3779b9u) ^ hash(uy * 0xc2b2ae35u) ^ hash(uz * 0x85ebca6bu));
+}
+
 /// Hash to [0, 1). Dropping the low bits keeps the better-mixed high bits.
 float unitFloat(std::uint32_t h) {
     return static_cast<float>(h >> 8) * (1.0f / 16777216.0f);
@@ -69,6 +76,47 @@ float fbm2D(std::uint32_t seed, float x, float z, int octaves) {
         // would otherwise produce visible repeating structure.
         total += amplitude * value2D(seed + static_cast<std::uint32_t>(octave) * 0x9e3779b9u, x * frequency,
                                      z * frequency);
+        normalisation += amplitude;
+        amplitude *= 0.5f;
+        frequency *= 2.0f;
+    }
+
+    return normalisation > 0.0f ? total / normalisation : 0.0f;
+}
+
+float value3D(std::uint32_t seed, float x, float y, float z) {
+    const float floorX = std::floor(x);
+    const float floorY = std::floor(y);
+    const float floorZ = std::floor(z);
+    const auto cellX = static_cast<std::int32_t>(floorX);
+    const auto cellY = static_cast<std::int32_t>(floorY);
+    const auto cellZ = static_cast<std::int32_t>(floorZ);
+
+    const float fadeX = fade(x - floorX);
+    const float fadeY = fade(y - floorY);
+    const float fadeZ = fade(z - floorZ);
+
+    const auto corner = [&](int dx, int dy, int dz) {
+        return unitFloat(hashCoords3(seed, cellX + dx, cellY + dy, cellZ + dz));
+    };
+
+    const float z0 = lerp(lerp(corner(0, 0, 0), corner(1, 0, 0), fadeX),
+                          lerp(corner(0, 1, 0), corner(1, 1, 0), fadeX), fadeY);
+    const float z1 = lerp(lerp(corner(0, 0, 1), corner(1, 0, 1), fadeX),
+                          lerp(corner(0, 1, 1), corner(1, 1, 1), fadeX), fadeY);
+
+    return lerp(z0, z1, fadeZ);
+}
+
+float fbm3D(std::uint32_t seed, float x, float y, float z, int octaves) {
+    float total = 0.0f;
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float normalisation = 0.0f;
+
+    for (int octave = 0; octave < octaves; ++octave) {
+        total += amplitude * value3D(seed + static_cast<std::uint32_t>(octave) * 0x9e3779b9u, x * frequency,
+                                     y * frequency, z * frequency);
         normalisation += amplitude;
         amplitude *= 0.5f;
         frequency *= 2.0f;

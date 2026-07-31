@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–14 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, and the world is lit with sky light, block light, smooth lighting and ambient occlusion. `TIMELINE.md` M15 (caves, biomes, 3D terrain) is next.
+> **Status:** Milestones 1–15 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath and oceans that flow. `TIMELINE.md` M16 (procedural structures) is next.
 
 ---
 
@@ -70,6 +70,7 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 │   ├── preview-textures.ps1     Magnifies textures into a labelled sheet for review
 │   ├── make-font.ps1            Regenerates the ASCII font atlas
 │   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys
+│   ├── benchmark.ps1            Sweeps a setting and restores settings.cfg afterwards
 │   ├── convert-image.ps1        Any Windows-decodable image (incl. WebP) to PNG, with crop and integer downscale
 │   └── probe-image.ps1          Dumps pixel runs along a row or column
 ├── engine/                 The reusable engine — a static library, knows nothing about the game
@@ -92,7 +93,7 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 | Target | Type | Purpose |
 |---|---|---|
 | `engine` | Static library | All reusable engine code. Produces `engine.lib`, which is linked into the game. |
-| `game` | Executable | The actual runnable program. Currently just opens a window and clears it. |
+| `game` | Executable | The actual runnable program. |
 
 A **static library** means the engine's compiled code is copied into the final `.exe` at link time — one self-contained executable, no separate `.dll` to ship. This is the right default until there is a reason (hot-reloading, plugins) to change it.
 
@@ -174,19 +175,22 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 
 | Component | Header | Responsibility |
 |---|---|---|
-| `Block` | `world/Block.hpp` | The block ID enum, whether an ID is solid, and which texture layer each face uses. `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher. |
-| `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
-| `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion. An integer hash, so it is reproducible on any machine without storing anything. |
-| `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what makes background generation a migration rather than a rewrite. |
-| `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a chunk plus its six neighbours into mesh data, emitting only faces that touch air. Neighbours are passed in rather than looked up, which keeps meshing pure too. |
-| `World` | `world/World.hpp` | Owns every loaded chunk in a hash map keyed by chunk coordinate, and streams them in and out around the player. The single owner of block state. |
+| `Block` | `world/Block.hpp` | The block ID enum plus the three predicates that must stay distinct: solid (blocks movement), opaque (blocks vision), light-transparent. Also which texture layer each face uses — `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher. Water encodes its depth in the id. |
+| `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`, plus a parallel light array. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
+| `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion in 2D and 3D. An integer hash, so it is reproducible on any machine without storing anything. |
+| `Biome` | `world/Biome.hpp` | The table that answers "which block goes here, and why", and the temperature/humidity selection that picks between rows. |
+| `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what lets generation run on a worker thread. |
+| `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a padded chunk volume into opaque and translucent mesh data, emitting only faces that can be seen. The volume is passed in rather than looked up, which keeps meshing pure. |
+| `World` | `world/World.hpp` | Owns every loaded chunk, streams them around the player, and runs light propagation and water flow. The single owner of block state, and the only thing that mutates it. |
 | `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction. |
 | `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
+| `Sky` | `world/Sky.hpp` | Placeholder day cycle: sun direction over time, sky colour, and the billboarded sun quad. |
 | `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. |
+| `Settings` | `core/Settings.hpp` | `settings.cfg` next to the executable. Read once at startup. |
 | `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, and isometric block icons. |
 | `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
 | `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. |
-| `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and numeric rows. |
+| `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and labelled rows. |
 | `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
 
 ---
@@ -239,7 +243,7 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 |---|---|
 | Mouse | Look (raw motion, bypassing OS pointer acceleration) |
 | `W` `A` `S` `D` | Move horizontally, relative to facing |
-| `Space` | Jump (walking) / rise (flying) |
+| `Space` | Jump (walking) / rise (flying) / swim up (in water) |
 | `Left Shift` | Sneak (walking) / descend (flying) |
 | `Left Ctrl` | Sprint (also sprint-fly) |
 | Double-tap `Space` | Toggle flight |
@@ -251,6 +255,7 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `F1` / `F2` | Lower / raise the frame cap |
 | `F3` / `F4` | Narrow / widen the field of view (default 70°) |
 | `F5` | Toggle the diagnostics overlay |
+| `F6` / `F7` | Decrease / increase render distance (saved to `settings.cfg`) |
 
 Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
 
@@ -267,6 +272,7 @@ The player is an axis-aligned box, **0.6 m wide, 1.8 m tall**, with eyes at **1.
 | Fly acceleration / deceleration | 38 / 26 m/s² |
 | Ground acceleration / deceleration | 30 / 42 m/s² |
 | Air acceleration / deceleration | 9 / 2 m/s² |
+| Swim rise / sink | 5.0 / 3.0 m/s |
 | Gravity | 32 m/s² |
 | Terminal velocity | 78.4 m/s |
 | Jump apex | ~1.25 blocks |
@@ -275,6 +281,8 @@ The player is an axis-aligned box, **0.6 m wide, 1.8 m tall**, with eyes at **1.
 These are tuning numbers, not part of the game's identity, and are expected to change once there is real content to move through.
 
 **All movement eases in and out**, as a single horizontal velocity vector rather than per axis, so changing direction curves through the turn instead of stopping one axis and starting another. Stopping is quicker than starting, which is what keeps the player feeling planted rather than skating. Airborne rates are far lower — steering mid-jump is deliberately feeble and air drag is nearly nothing, so a jump commits to its arc. Flight ends when a *downward* move collides — clipping a wall sideways does not land you, and hovering has no vertical movement to collide at all.
+
+**In water**, buoyancy cancels most of gravity: holding jump climbs, releasing it drifts slowly down, and horizontal speed drops. Water is survivable rather than a pit to drown in — there is no breath meter or drowning damage, and there is no swimming animation.
 
 **Collision resolves one axis at a time** — vertical first, then X, then Z. Resolving all three simultaneously leaves the maths unable to tell which direction to push out of a corner, which shows up as jitter or as sliding diagonally through walls. Vertical runs first so that "am I on the ground" is settled before the horizontal move decides whether a step-up is permitted.
 
@@ -365,6 +373,60 @@ Block icons are isometric: three quads (top, front, right) at 30°, using the sa
 ### Transparency
 
 `Vertex::color` carries alpha and the pipeline blends. World geometry is opaque, so blending is a no-op for it; it exists only so HUD panels can sit over the scene.
+
+---
+
+## Terrain Generation
+
+Generation is a **pure function of `(seed, chunkCoord)`** — no neighbour reads, no global state, no wall-clock time. That is what lets it run on a worker thread and what makes a world reproducible from one number.
+
+### Biomes
+
+A biome is the data structure that answers *"which block goes here, and why"*. Each is one row in a table carrying its surface block, filler, filler depth, terrain base height, amplitude and snow line. **Adding a block type should mean adding or editing a row, never adding a branch to the generator.**
+
+Selection uses **two independent low-frequency noise fields**: temperature and humidity. One field could only ever order biomes along a line, which is why a single "climate" value cannot separate desert from plains from tundra. Each biome sits at a point in that 2D space and claims ground by proximity.
+
+**Blending falls out of the same weights.** Terrain height is a weighted average over every biome in range, so regions slope into each other. Surface *blocks* take the single strongest biome instead — a blend of two block types is not a thing — and the boundary still reads naturally because the selection noise makes it a wandering contour rather than a straight edge.
+
+Snow is a **height rule per biome**, not a biome of its own, so a mountain reads as a mountain rather than as tall grass.
+
+> The seven current biomes are placeholders that prove the machinery and give the existing blocks a natural home. The finished game's roster is Phase 5 and needs a design conversation.
+
+### Caves
+
+Carved where a 3D noise field passes close to a chosen value, which gives connected winding systems. Thresholding the field directly gives disconnected blobs that read as holes rather than caves.
+
+Carving fades in with depth below the surface and never touches the world floor, so the ground is not left rotten and there is always something to stand on.
+
+**Cost tracks cave surface area, not hollow volume.** Narrow tunnels have far more surface per unit volume than open caverns, so making caves *thinner* barely helps; making them *fewer and larger* does. See `CLAUDE.md`.
+
+---
+
+## Water
+
+**Depth lives in the block id.** `Water0` through `Water7` are contiguous ids: level 0 is a source that never drains, 7 is the thinnest film. Encoding it this way costs no per-block metadata array and needed no change to the save format. `isWater`, `waterLevel` and `waterAtLevel` are the only things that should know about the encoding.
+
+Three predicates that are easy to confuse and must stay separate:
+
+| | Water | Why |
+|---|---|---|
+| `isSolid` | no | you sink into it |
+| `isOpaque` | no | you can see the seabed |
+| `isLightTransparent` | yes | sunlight reaches underwater |
+
+Conflating the first two gets you either walking on water or an invisible seabed.
+
+### Flow
+
+Event-driven and incremental. Generated oceans are already settled, so nothing runs until an edit disturbs them; `setBlock` queues the changed cell and its six neighbours, and the queue is drained against the same per-frame budget as everything else.
+
+A cell takes the **strongest supply reaching it** — the minimum level of any valid neighbour, plus one. That is what makes two flows meeting resolve to one answer instead of oscillating. **Falling beats spreading:** a neighbour with air beneath it is draining downward and does not feed sideways. **Two sources meeting over solid ground create a source**, which is what makes water renewable.
+
+Sources are the fixed points of the whole system. Without something that never drains, every body of water eventually empties itself.
+
+### Drawing it
+
+Blending depends on draw order, so water cannot share a buffer with the terrain behind it. **Each chunk owns two meshes**, opaque and translucent, and the renderer draws every opaque mesh in the scene before any translucent one. Water faces are emitted against air, and against thinner water whose lower surface would otherwise leave a gap.
 
 ---
 
@@ -608,10 +670,10 @@ The window shows a solid dark blue and nothing else. That is the intended and co
 
 ## Current Validation Baseline
 
-Verified 2026-07-30 on this machine.
+Verified 2026-07-31 on this machine.
 
 - **Configure:** `cmake --preset debug` succeeds. GLFW 3.4 fetched, `Found Vulkan: 1.4.357` with `glslc` and `glslangValidator` components.
-- **Compile:** clean build, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build.
+- **Compile:** clean build in both debug and release, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build.
 - **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
 - **M2 result:** an RGB-interpolated triangle renders correctly, confirmed visually. Resizing scales it correctly with no flicker, no crash, and no validation errors; the swapchain rebuilds on each resize as expected.
 - **M3 result:** six shaded boxes on a ground plane, 144 vertices / 72 triangles, render solid with correct mutual occlusion from every angle. Free-fly camera confirmed smooth with no ghosting or artifacting. Resizing rebuilds both swapchain and depth image cleanly.
@@ -623,10 +685,17 @@ Verified 2026-07-30 on this machine.
 - **M9 result:** ten block textures plus a white utility layer in one sRGB texture array with a full mip chain. Frame rate and streaming counters were unchanged from M8, so texturing cost nothing measurable.
 - **M10 result:** a 43-minute session across hundreds of chunks wrote exactly **one** 32,796-byte chunk file — 32,768 blocks plus a 28-byte header — because only one chunk was edited. Relaunching restored both the edits and the player's position.
 - **M10b result:** hotbar, isometric icons and translucent slots added with no measurable change to frame rate or streaming counters.
+- **M11 result:** `F5` overlay reports fps, CPU and GPU frame time, streaming counters, draw calls and triangles. GPU time comes from timestamp queries read after the frame's fence.
+- **M12 result:** generation and meshing moved to a worker pool. Release build, 507 chunks: 179 ms on 0 workers, 55 ms on 11. Identical triangle counts at every worker count, which is the determinism check.
+- **M13a result:** batched mesh upload. Startup upload 186 ms → 33 ms, submissions 726 → ~4. `vkQueueWaitIdle` gone from the mesh path.
+- **M13b result:** greedy meshing and frustum culling. Geometry ~6.4× smaller, draw calls ~70% lower. Default render distance 5 → 12, and 32 is usable. Culling verified by drawing 29.4% of triangles against the ~28% a 100° horizontal field of view covers.
+- **M14 result:** sky and block light propagate across chunks; smooth lighting and ambient occlusion per face corner. Verified numerically at the spawn column — sky 15 above the surface, 0 at it and below. Geometry rose 2.37× because only evenly lit faces can merge.
+- **M14c result:** a visible sun crosses the sky, surfaces take a directional term, and sky colour follows the sun's elevation. No cast shadows.
+- **M15 result:** caves, seven biomes, oceans and flowing water. Release build at render distance 12: 2,742,884 triangles, 1.15 ms GPU, 121 fps, ~1.9 s startup, 575–630 MB.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.
-- **GPU load:** ~9 W at ~500 MHz core clock while rendering the triangle, i.e. essentially idle. Third-party overlay tools report an implausible frame rate on this machine; trust the engine's own counter (see the third-party layer note above).
+- **GPU load:** ~9 W at ~500 MHz core clock while rendering the triangle at M2, i.e. essentially idle. Third-party overlay tools report an implausible frame rate on this machine; trust the engine's own counter (see the third-party layer note above).
 - **Shutdown:** closing the window saves every modified chunk and the player's position, logs how many chunks were written, and exits through the normal path with no validation errors and no crash.
 
 ---

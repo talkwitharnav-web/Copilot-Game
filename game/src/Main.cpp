@@ -11,6 +11,7 @@
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
+#include "world/Biome.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
 #include "world/Player.hpp"
@@ -136,7 +137,7 @@ int main() {
             textureDir / "grass_side.png",  textureDir / "sand.png",   textureDir / "white.png",
             textureDir / "cobblestone.png", textureDir / "gravel.png", textureDir / "snow.png",
             textureDir / "planks.png",      textureDir / "bricks.png", textureDir / "glowstone.png",
-            textureDir / "sun.png"};
+            textureDir / "water.png",       textureDir / "sun.png"};
 
         engine::Renderer renderer(context, window, blockTextures, textureDir.parent_path() / "hud.png",
                                   textureDir.parent_path() / "font.png");
@@ -171,7 +172,13 @@ int main() {
                               static_cast<float>(game::surfaceHeightAt(kWorldSeed, spawnX, spawnZ) + 1),
                               static_cast<float>(spawnZ) + 0.5f};
 
-        std::unordered_map<game::ChunkCoord, engine::MeshHandle> chunkMeshes;
+        // A chunk owns two meshes: its opaque geometry and its water, which has
+        // to be drawn in a separate pass.
+        struct ChunkHandles {
+            engine::MeshHandle opaque = engine::kInvalidMesh;
+            engine::MeshHandle translucent = engine::kInvalidMesh;
+        };
+        std::unordered_map<game::ChunkCoord, ChunkHandles> chunkMeshes;
 
         // Applies mesh changes and is the only place handles are created or
         // released. Anything that removes a chunk without going through here
@@ -182,17 +189,30 @@ int main() {
 
                 if (update.removed) {
                     if (existing != chunkMeshes.end()) {
-                        renderer.removeMesh(existing->second);
+                        if (existing->second.opaque != engine::kInvalidMesh) {
+                            renderer.removeMesh(existing->second.opaque);
+                        }
+                        if (existing->second.translucent != engine::kInvalidMesh) {
+                            renderer.removeMesh(existing->second.translucent);
+                        }
                         chunkMeshes.erase(existing);
                     }
                     continue;
                 }
 
-                if (existing != chunkMeshes.end()) {
-                    renderer.updateMesh(existing->second, update.mesh);
-                } else {
-                    chunkMeshes.emplace(update.coord, renderer.addMesh(update.mesh));
-                }
+                ChunkHandles& handles =
+                    existing != chunkMeshes.end() ? existing->second : chunkMeshes[update.coord];
+
+                const auto apply = [&](engine::MeshHandle& handle, const engine::MeshData& mesh, bool translucent) {
+                    if (handle != engine::kInvalidMesh) {
+                        renderer.updateMesh(handle, mesh);
+                    } else if (!mesh.empty()) {
+                        handle = renderer.addMesh(mesh, translucent);
+                    }
+                };
+
+                apply(handles.opaque, update.mesh, false);
+                apply(handles.translucent, update.translucentMesh, true);
             }
         };
 
@@ -272,7 +292,7 @@ int main() {
         constexpr std::array<game::BlockId, game::kHotbarSlots> hotbar{
             game::BlockId::Grass,       game::BlockId::Dirt,   game::BlockId::Stone,
             game::BlockId::Cobblestone, game::BlockId::Sand,   game::BlockId::Gravel,
-            game::BlockId::Planks,      game::BlockId::Bricks, game::BlockId::Glowstone};
+            game::BlockId::Planks,      game::BlockId::Water0, game::BlockId::Glowstone};
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
 
@@ -413,6 +433,11 @@ int main() {
                 stats.triangles = renderer.stats().triangles;
                 stats.workerThreads = jobs.threadCount();
                 stats.renderDistance = world.visibleRadius();
+                stats.biome = game::biomeInfo(game::sampleBiome(kWorldSeed,
+                                                                static_cast<int>(std::floor(player.position.x)),
+                                                                static_cast<int>(std::floor(player.position.z)))
+                                                  .dominant)
+                                  .name;
 
                 rebuildHud(stats);
                 lastHudRebuild = now;

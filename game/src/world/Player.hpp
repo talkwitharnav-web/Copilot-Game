@@ -57,6 +57,14 @@ constexpr float kAirDeceleration = 2.0f;
 constexpr float kGravity = 32.0f;
 constexpr float kTerminalVelocity = 78.4f;
 
+/// In water: gravity mostly cancels, everything slows, and holding jump swims
+/// upward. Enough to make water survivable rather than a pit you drown in.
+constexpr float kSwimGravityScale = 0.22f;
+constexpr float kSwimSinkSpeed = 3.0f;
+constexpr float kSwimRiseSpeed = 5.0f;
+constexpr float kSwimSpeedScale = 0.55f;
+constexpr float kSwimDrag = 6.0f;
+
 /// Chosen so the jump apex is ~1.25 blocks: high enough to clear one block,
 /// not high enough to clear two.
 constexpr float kJumpVelocity = 8.944f;
@@ -74,6 +82,9 @@ struct Player {
     /// Held across frames rather than read from input, because standing back up
     /// is refused when there is no headroom.
     bool sneaking = false;
+
+    /// True while any part of the body is in water.
+    bool inWater = false;
 
     float eyeOffset = player_constants::kEyeHeight;
 

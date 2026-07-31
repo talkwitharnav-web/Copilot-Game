@@ -39,12 +39,21 @@ struct ChunkVolume {
     std::array<std::uint8_t, kSpan * kSpan * kSpan> light{};
 };
 
+/// Geometry for one chunk, split by how it has to be drawn.
+///
+/// Translucent faces must be drawn after every opaque face in the scene, not
+/// merely after the ones in their own chunk, so they cannot share a buffer.
+struct ChunkMeshes {
+    engine::MeshData opaque;
+    engine::MeshData translucent;
+};
+
 /// Turns blocks into triangles, emitting a face only where a solid block touches
 /// air. Interior faces are never generated, which is the single idea that makes
 /// voxel worlds affordable to render.
 ///
 /// Pure: it reads only its arguments, returns vertex data, and touches neither
 /// the GPU nor any global state. That is what lets it run on a worker thread.
-engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset);
+ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset);
 
 } // namespace game

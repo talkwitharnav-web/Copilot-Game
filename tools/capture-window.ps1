@@ -28,6 +28,20 @@ public class WinCap3 {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out RECT r, int size);
+
+    // GetWindowRect includes an invisible resize border and drop shadow, which
+    // captures as a black margin. The DWM frame bounds are what is actually on
+    // screen.
+    public static RECT VisibleBounds(IntPtr hWnd) {
+        RECT r;
+        const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        if (DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out r, Marshal.SizeOf(typeof(RECT))) == 0) {
+            return r;
+        }
+        GetWindowRect(hWnd, out r);
+        return r;
+    }
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
@@ -89,8 +103,7 @@ if ($Keys -ne "") {
 # Absolute screen coordinates directly. `GetClientRect` plus `ClientToScreen`
 # is the tidier pair but silently leaves the origin at (0,0) when the conversion
 # fails, which captures the top-left of the desktop instead of the window.
-$rect = New-Object WinCap3+RECT
-[void][WinCap3]::GetWindowRect($handle, [ref]$rect)
+$rect = [WinCap3]::VisibleBounds($handle)
 
 # A window hanging off the edge of the screen captures black where it is not
 # there to be read, so it is pulled fully into view first.
@@ -100,7 +113,7 @@ if ($rect.L -lt $screen.X -or $rect.T -lt $screen.Y -or $rect.R -gt ($screen.X +
     # SWP_NOSIZE | SWP_NOZORDER
     [void][WinCap3]::SetWindowPos($handle, [IntPtr]::Zero, $screen.X + 20, $screen.Y + 20, 0, 0, 0x0001 -bor 0x0004)
     Start-Sleep -Milliseconds 500
-    [void][WinCap3]::GetWindowRect($handle, [ref]$rect)
+    $rect = [WinCap3]::VisibleBounds($handle)
 }
 
 $width = $rect.R - $rect.L

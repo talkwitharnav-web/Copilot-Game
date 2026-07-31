@@ -132,6 +132,11 @@ $glowPalette = @('8A6A2E', 'A88338', 'C39D45', 'D9B455', 'ECCB6B')
 $glowWeights = @(2, 3, 5, 6, 5)
 $glowCoreColor = 'FFF3B8'
 
+# Narrow and deliberately low-contrast: water carries its look from being
+# see-through and from what is under it, not from its own texture.
+$waterPalette = @('2E6FA8', '3479B4', '3A83C0', '408DCB', '4796D6')
+$waterWeights = @(2, 4, 6, 4, 2)
+
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
@@ -381,6 +386,7 @@ New-PlanksTexture
 New-BricksTexture
 New-GlowstoneTexture
 New-SunTexture
+New-FlatTexture -Name 'water' -Palette $waterPalette -Weights $waterWeights -Salt 137
 
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.

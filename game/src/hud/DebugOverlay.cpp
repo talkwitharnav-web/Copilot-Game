@@ -85,10 +85,11 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 11> rows{{
+    const std::array<Row, 12> rows{{
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
+        {"biome", stats.biome},
         {"dist", std::to_string(stats.renderDistance)},
         {"chunks", std::to_string(stats.loadedChunks)},
         {"meshes", std::to_string(stats.meshes)},

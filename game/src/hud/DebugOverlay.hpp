@@ -21,6 +21,7 @@ struct OverlayStats {
     std::uint32_t triangles = 0;
     unsigned workerThreads = 0;
     int renderDistance = 0;
+    const char* biome = "";
 };
 
 /// Builds the diagnostics panel: a frame-time history graph plus labelled rows.

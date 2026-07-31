@@ -18,10 +18,58 @@ enum class BlockId : std::uint8_t {
     Planks,
     Bricks,
     Glowstone,
+    /// Water carries its depth in the block id itself. Levels run 0 (a full
+    /// source that never drains) to 7 (the thinnest film), and must stay
+    /// contiguous and in order.
+    Water0,
+    Water1,
+    Water2,
+    Water3,
+    Water4,
+    Water5,
+    Water6,
+    Water7,
 };
 
+/// Highest flowing level. Water at this depth cannot spread any further, which
+/// is what stops a single source flooding the world.
+constexpr int kMaxWaterLevel = 7;
+
+constexpr bool isWater(BlockId id) {
+    return id >= BlockId::Water0 && id <= BlockId::Water7;
+}
+
+/// 0 for a source, rising as the flow thins out.
+constexpr int waterLevel(BlockId id) {
+    return isWater(id) ? static_cast<int>(id) - static_cast<int>(BlockId::Water0) : kMaxWaterLevel + 1;
+}
+
+constexpr BlockId waterAtLevel(int level) {
+    const int clamped = level < 0 ? 0 : (level > kMaxWaterLevel ? kMaxWaterLevel : level);
+    return static_cast<BlockId>(static_cast<int>(BlockId::Water0) + clamped);
+}
+
+/// A source never drains. Everything else needs a supply each time it is
+/// re-evaluated, which is what makes flow recede when you cut it off.
+constexpr bool isWaterSource(BlockId id) {
+    return id == BlockId::Water0;
+}
+
+/// Blocks movement. Water does not — you sink into it.
 constexpr bool isSolid(BlockId id) {
-    return id != BlockId::Air;
+    return id != BlockId::Air && !isWater(id);
+}
+
+/// Hides whatever is behind it. Kept separate from `isSolid` because water is
+/// neither solid nor invisible, and conflating the two is how you end up either
+/// walking on water or unable to see the seabed.
+constexpr bool isOpaque(BlockId id) {
+    return id != BlockId::Air && !isWater(id);
+}
+
+/// Drawn in the transparent pass, after everything opaque.
+constexpr bool isTranslucent(BlockId id) {
+    return isWater(id);
 }
 
 /// Highest light level a source can have. Four bits per channel, so a level fits
@@ -36,7 +84,7 @@ constexpr int blockLightEmission(BlockId id) {
 /// Whether light passes through. Currently the exact opposite of solid, but kept
 /// separate because glass and water will be solid *and* transparent.
 constexpr bool isLightTransparent(BlockId id) {
-    return id == BlockId::Air;
+    return id == BlockId::Air || isWater(id);
 }
 
 /// Which face of a block a texture is for. Most blocks use the same image on
@@ -65,9 +113,10 @@ enum class TextureLayer : std::uint32_t {
     Planks = 9,
     Bricks = 10,
     Glowstone = 11,
+    Water = 12,
     /// Not a block. Shares the array because the sun is drawn with the same
     /// pipeline, and a texture array needs every layer the same size.
-    Sun = 12,
+    Sun = 13,
 };
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
@@ -101,6 +150,15 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::Bricks);
     case BlockId::Glowstone:
         return static_cast<float>(TextureLayer::Glowstone);
+    case BlockId::Water0:
+    case BlockId::Water1:
+    case BlockId::Water2:
+    case BlockId::Water3:
+    case BlockId::Water4:
+    case BlockId::Water5:
+    case BlockId::Water6:
+    case BlockId::Water7:
+        return static_cast<float>(TextureLayer::Water);
     case BlockId::Air:
         break;
     }

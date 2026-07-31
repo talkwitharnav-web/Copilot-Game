@@ -136,12 +136,22 @@ struct FaceSample {
     /// True when all four corners match, which is the only case where a face may
     /// be merged with its neighbours.
     bool flat = false;
+    bool translucent = false;
+    float alpha = 1.0f;
+    /// How far the top of this block is lowered, for partly filled water.
+    float surfaceDrop = 0.0f;
 };
+
+/// How much of a block each level of water gives up. Level 7 is a thin film.
+constexpr float kWaterLevelDrop = 0.11f;
+
+/// How much of the world shows through water.
+constexpr float kWaterAlpha = 0.72f;
 
 } // namespace
 
-engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) {
-    engine::MeshData mesh;
+ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) {
+    ChunkMeshes result;
 
     constexpr int size = Chunk::kSize;
     std::array<FaceSample, size * size> faces{};
@@ -165,18 +175,33 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
                     sample = FaceSample{};
 
                     const BlockId block = volume.blockAt(p.x, p.y, p.z);
-                    if (!isSolid(block)) {
+                    if (block == BlockId::Air) {
                         continue;
                     }
 
-                    // The whole optimisation: a face buried against another
-                    // solid block can never be seen, so it is never created.
+                    // The whole optimisation: a face buried against something
+                    // that hides it can never be seen, so it is never created.
+                    // Water only shows where it meets air, so the faces between
+                    // water and the seabed are skipped and you can see through.
                     const glm::ivec3 front = p + face.neighbourOffset;
-                    if (isSolid(volume.blockAt(front.x, front.y, front.z))) {
+                    const BlockId ahead = volume.blockAt(front.x, front.y, front.z);
+                    // Water shows against air, and against thinner water, whose
+                    // lower surface would otherwise leave a gap to see through.
+                    const bool visible =
+                        isTranslucent(block)
+                            ? (ahead == BlockId::Air || (isWater(ahead) && waterLevel(ahead) > waterLevel(block)))
+                            : !isOpaque(ahead);
+                    if (!visible) {
                         continue;
                     }
 
                     sample.layer = blockTextureLayer(block, face.facing);
+                    sample.translucent = isTranslucent(block);
+                    sample.alpha = sample.translucent ? kWaterAlpha : 1.0f;
+                    // Thinner flows sit lower, so a stream visibly tapers away
+                    // from its source rather than running at full depth.
+                    sample.surfaceDrop =
+                        isWater(block) ? static_cast<float>(waterLevel(block)) * kWaterLevelDrop : 0.0f;
 
                     for (std::size_t c = 0; c < 4; ++c) {
                         // Each corner leans toward one end of both in-plane axes.
@@ -189,9 +214,9 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
                         const glm::ivec3 b = front + stepB;
                         const glm::ivec3 diagonal = front + stepA + stepB;
 
-                        const bool solidA = isSolid(volume.blockAt(a.x, a.y, a.z));
-                        const bool solidB = isSolid(volume.blockAt(b.x, b.y, b.z));
-                        const bool solidDiagonal = isSolid(volume.blockAt(diagonal.x, diagonal.y, diagonal.z));
+                        const bool solidA = isOpaque(volume.blockAt(a.x, a.y, a.z));
+                        const bool solidB = isOpaque(volume.blockAt(b.x, b.y, b.z));
+                        const bool solidDiagonal = isOpaque(volume.blockAt(diagonal.x, diagonal.y, diagonal.z));
 
                         // Smooth lighting: average the open cells touching this
                         // corner. Solid ones are skipped rather than counted as
@@ -227,6 +252,8 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
             }
 
             const auto emit = [&](int i, int j, int width, int height, const FaceSample& sample) {
+                engine::MeshData& mesh = sample.translucent ? result.translucent : result.opaque;
+
                 glm::ivec3 origin{0};
                 origin[normal] = slice;
                 origin[across] = i;
@@ -244,12 +271,18 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
                 const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
 
                 for (std::size_t c = 0; c < 4; ++c) {
-                    const glm::vec3 position = quadOrigin + face.corners[c] * extent;
+                    glm::vec3 position = quadOrigin + face.corners[c] * extent;
+                    // Only the top of the block moves; the sides follow it down
+                    // so the column stays closed.
+                    if (sample.surfaceDrop > 0.0f && face.corners[c].y > 0.5f) {
+                        position.y -= sample.surfaceDrop;
+                    }
                     const glm::vec2 uv = face.uvs[c] * uvScale;
                     const float lit = sample.corner[c];
-                    mesh.vertices.push_back(
-                        engine::Vertex{{position.x, position.y, position.z}, {lit, lit, lit, 1.0f}, {uv.x, uv.y},
-                                       sample.layer});
+                    mesh.vertices.push_back(engine::Vertex{{position.x, position.y, position.z},
+                                                           {lit, lit, lit, sample.alpha},
+                                                           {uv.x, uv.y},
+                                                           sample.layer});
                 }
 
                 // Split along the darker diagonal. Quads with occlusion on
@@ -282,7 +315,8 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
                     }
 
                     const auto matches = [&](const FaceSample& other) {
-                        return other.layer == sample.layer && other.flat && other.corner[0] == sample.corner[0];
+                        return other.layer == sample.layer && other.flat && other.corner[0] == sample.corner[0] &&
+                               other.translucent == sample.translucent && other.surfaceDrop == sample.surfaceDrop;
                     };
 
                     int width = 1;
@@ -319,7 +353,7 @@ engine::MeshData meshChunk(const ChunkVolume& volume, const glm::vec3& originOff
         }
     }
 
-    return mesh;
+    return result;
 }
 
 } // namespace game

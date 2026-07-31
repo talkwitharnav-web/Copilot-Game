@@ -66,6 +66,28 @@ bool hasGroundBelow(const World& world, const glm::vec3& feet, float probeDepth 
     return overlapsSolid(world, probe);
 }
 
+/// True if any block the body occupies is water.
+bool submerged(const World& world, const glm::vec3& feet, float height) {
+    const Aabb box = boxAt(feet, height);
+    const int minX = static_cast<int>(std::floor(box.min.x));
+    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
+    const int minY = static_cast<int>(std::floor(box.min.y));
+    const int maxY = static_cast<int>(std::floor(box.max.y - kSkin));
+    const int minZ = static_cast<int>(std::floor(box.min.z));
+    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
+
+    for (int y = minY; y <= maxY; ++y) {
+        for (int z = minZ; z <= maxZ; ++z) {
+            for (int x = minX; x <= maxX; ++x) {
+                if (isWater(world.blockAt(x, y, z))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /// Moves along one axis and snaps to the blocking surface if something is hit.
 ///
 /// Axes are resolved one at a time on purpose. Resolving all three together
@@ -114,6 +136,7 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     }
 
     const float height = player.height();
+    player.inWater = submerged(world, player.position, height);
 
     const float targetEye = player.sneaking ? kSneakEyeHeight : kEyeHeight;
     const float maxEyeChange = kEyeAdjustSpeed * dt;
@@ -147,14 +170,18 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         // Eased as one horizontal vector, for the same reason flight is: per-axis
         // easing stops one axis dead while starting another, which turns a
         // direction change into a stutter instead of a curve.
-        const glm::vec2 target{wish.x * speed, wish.z * speed};
+        const float horizontalSpeed = player.inWater ? speed * kSwimSpeedScale : speed;
+        const glm::vec2 target{wish.x * horizontalSpeed, wish.z * horizontalSpeed};
         const glm::vec2 current{player.velocity.x, player.velocity.z};
         const glm::vec2 difference = target - current;
         const float distance = glm::length(difference);
 
         const bool wantsToMove = glm::dot(target, target) > 0.0f;
-        const float rate = player.onGround ? (wantsToMove ? kGroundAcceleration : kGroundDeceleration)
-                                           : (wantsToMove ? kAirAcceleration : kAirDeceleration);
+        float rate = player.onGround ? (wantsToMove ? kGroundAcceleration : kGroundDeceleration)
+                                     : (wantsToMove ? kAirAcceleration : kAirDeceleration);
+        if (player.inWater) {
+            rate = kSwimDrag;
+        }
         const float maxStep = rate * dt;
 
         const glm::vec2 next =
@@ -162,11 +189,23 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         player.velocity.x = next.x;
         player.velocity.z = next.y;
 
-        if (input.jump && player.onGround) {
-            player.velocity.y = kJumpVelocity;
+        if (player.inWater) {
+            // Buoyancy nearly cancels gravity, so holding jump climbs and doing
+            // nothing drifts slowly down rather than dropping like a stone.
+            if (input.jump) {
+                player.velocity.y = kSwimRiseSpeed;
+            } else {
+                player.velocity.y =
+                    std::max(player.velocity.y - kGravity * kSwimGravityScale * dt, -kSwimSinkSpeed);
+            }
             player.onGround = false;
+        } else {
+            if (input.jump && player.onGround) {
+                player.velocity.y = kJumpVelocity;
+                player.onGround = false;
+            }
+            player.velocity.y = std::max(player.velocity.y - kGravity * dt, -kTerminalVelocity);
         }
-        player.velocity.y = std::max(player.velocity.y - kGravity * dt, -kTerminalVelocity);
     }
 
     // Vertical first, so standing on ground is established before the horizontal

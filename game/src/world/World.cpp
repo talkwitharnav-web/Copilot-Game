@@ -32,6 +32,10 @@ int chebyshevDistance(const ChunkCoord& a, const ChunkCoord& b) {
 constexpr std::array<glm::ivec3, 6> kLightSteps{glm::ivec3{1, 0, 0},  glm::ivec3{-1, 0, 0}, glm::ivec3{0, 1, 0},
                                                 glm::ivec3{0, -1, 0}, glm::ivec3{0, 0, 1},  glm::ivec3{0, 0, -1}};
 
+/// The four directions water spreads sideways.
+constexpr std::array<glm::ivec3, 4> kFlowSteps{glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0}, glm::ivec3{0, 0, 1},
+                                               glm::ivec3{0, 0, -1}};
+
 /// Everything a mesh job reads, allocated once and shared with the job.
 ///
 /// Captured by `shared_ptr` rather than by value: a lambda holding a whole chunk
@@ -345,6 +349,74 @@ void World::propagateLight(const BudgetCheck& budgetSpent) {
     }
 }
 
+void World::scheduleFluidUpdate(int x, int y, int z) {
+    if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
+        return;
+    }
+    m_fluidUpdates.push_back({x, y, z});
+}
+
+void World::updateFluids(const BudgetCheck& budgetSpent) {
+    while (!m_fluidUpdates.empty() && !budgetSpent()) {
+        const glm::ivec3 p = m_fluidUpdates.front();
+        m_fluidUpdates.pop_front();
+
+        const BlockId current = blockAt(p.x, p.y, p.z);
+        if (game::isSolid(current)) {
+            continue;
+        }
+        // Sources are the fixed points of the whole system. Without something
+        // that never drains, every body of water eventually empties itself.
+        if (isWaterSource(current)) {
+            continue;
+        }
+
+        int supply = kMaxWaterLevel + 1;
+        int adjacentSources = 0;
+
+        // Anything falling from above arrives nearly full, and falling beats
+        // spreading: water only runs sideways once it has nowhere to drop.
+        if (isWater(blockAt(p.x, p.y + 1, p.z))) {
+            supply = 1;
+        }
+
+        for (const glm::ivec3& step : kFlowSteps) {
+            const glm::ivec3 n = p + step;
+            const BlockId neighbour = blockAt(n.x, n.y, n.z);
+            if (!isWater(neighbour)) {
+                continue;
+            }
+            if (isWaterSource(neighbour)) {
+                ++adjacentSources;
+            }
+
+            // That neighbour has somewhere to fall, so it drains downward
+            // instead of feeding us.
+            if (blockAt(n.x, n.y - 1, n.z) == BlockId::Air) {
+                continue;
+            }
+
+            const int level = waterLevel(neighbour);
+            if (level < kMaxWaterLevel) {
+                // Competing flows resolve to whichever supply is strongest.
+                supply = std::min(supply, level + 1);
+            }
+        }
+
+        BlockId wanted = BlockId::Air;
+        if (adjacentSources >= 2 && game::isSolid(blockAt(p.x, p.y - 1, p.z))) {
+            // Two sources meeting over solid ground fill the gap permanently.
+            wanted = BlockId::Water0;
+        } else if (supply <= kMaxWaterLevel) {
+            wanted = waterAtLevel(supply);
+        }
+
+        if (wanted != current) {
+            setBlock(p.x, p.y, p.z, wanted);
+        }
+    }
+}
+
 void World::setVisibleRadius(int chunks) {
     const int radius = std::clamp(chunks, 1, 64);
     if (radius == m_visibleRadius) {
@@ -485,6 +557,14 @@ void World::setBlock(int x, int y, int z, BlockId block) {
     }
 
     lightChangedAt(x, y, z);
+
+    // Water re-evaluates itself and everything touching it. Removing a block
+    // under a stream is what makes it fall; removing its supply is what makes it
+    // recede.
+    scheduleFluidUpdate(x, y, z);
+    for (const glm::ivec3& step : kLightSteps) {
+        scheduleFluidUpdate(x + step.x, y + step.y, z + step.z);
+    }
 
     invalidateMesh(coord);
 
@@ -668,10 +748,10 @@ void World::dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSp
         input->volume = gatherVolume(coord);
 
         m_jobs.submit([input = std::move(input), results = m_results] {
-            engine::MeshData mesh = meshChunk(input->volume, input->origin);
+            ChunkMeshes meshes = meshChunk(input->volume, input->origin);
 
             std::lock_guard<std::mutex> lock(results->mutex);
-            results->meshed.push_back(MeshedChunk{input->coord, std::move(mesh), input->revision});
+            results->meshed.push_back(MeshedChunk{input->coord, std::move(meshes), input->revision});
         });
     }
 }
@@ -741,7 +821,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
                 saveIfModified(it->first, it->second);
 
                 if (it->second.meshed) {
-                    updates.push_back(ChunkMeshUpdate{it->first, {}, true});
+                    updates.push_back(ChunkMeshUpdate{it->first, {}, {}, true});
                 }
                 it = m_chunks.erase(it);
             } else {
@@ -767,7 +847,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         for (auto& [coord, slot] : m_chunks) {
             if (slot.meshed && chebyshevDistance(coord, centre) > m_visibleRadius) {
                 slot.meshed = false;
-                updates.push_back(ChunkMeshUpdate{coord, {}, true});
+                updates.push_back(ChunkMeshUpdate{coord, {}, {}, true});
             }
         }
     }
@@ -780,6 +860,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
 
     propagateLight(budgetSpent);
     flushLightDirty();
+    updateFluids(budgetSpent);
 
     // Uploading is the only part still on the main thread, so it is what the
     // budget now meters.
@@ -799,7 +880,8 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         }
 
         it->second.meshed = true;
-        updates.push_back(ChunkMeshUpdate{result.coord, std::move(result.mesh), false});
+        updates.push_back(ChunkMeshUpdate{result.coord, std::move(result.meshes.opaque),
+                                          std::move(result.meshes.translucent), false});
     }
 
     dispatchLoads(budgetSpent, jobCapacity());

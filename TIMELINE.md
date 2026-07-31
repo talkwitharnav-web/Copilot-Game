@@ -67,7 +67,7 @@ Follow these and M12 is "call these existing functions from a worker pool." Brea
 
 Building a deferred, physically based, HDR pipeline before there is a single block on screen would mean carrying enormous complexity through every early milestone for no benefit, and doing it blind — with no real scene, no real content, and no measurements to design against.
 
-What actually changes at M23 is the *rendering path*: passes, shaders, material handling, vertex formats. That is genuinely rewritable in isolation. What does **not** change is the world data, chunk storage, generation, meshing inputs, persistence, physics, and gameplay — the expensive parts to get wrong. Vertex formats will also change at M14 (lighting) and again at M23; that churn is localized inside meshing and is accepted.
+What actually changes at M23 is the *rendering path*: passes, shaders, material handling, vertex formats. That is genuinely rewritable in isolation. What does **not** change is the world data, chunk storage, generation, meshing inputs, persistence, physics, and gameplay — the expensive parts to get wrong. The vertex format was expected to churn at M14 as well; in the event it did not, because lighting folded into the existing per-vertex colour and the sun's face normal is recovered in the fragment shader.
 
 So: **no `IRenderBackend` interface, no material abstraction layer, no "PBR-ready" hooks before M23.** Per `CLAUDE.md`, no abstraction without a second implementation actually in sight. The cheap insurance is keeping mesh *generation* separate from mesh *upload* (rule 2 above), which we need for threading regardless.
 
@@ -416,11 +416,68 @@ A visible sun that rises in the east and sets in the west, a directional light t
 
 **Explicitly not done:** cast shadows. Nothing occludes the sun — a wall is lit by its facing, not by whether something stands between it and the sun. That needs shadow maps and stays at M24.
 
-### ⬜ M15 — Caves, biomes, and 3D terrain · **Core**
+### ✅ M15a — Caves and 3D terrain · **Core**
 
-3D noise for overhangs and cave systems, biome definition and blending, oceans, rivers, and underground regions.
+3D noise for cave systems, and the surface block decision moved out of a hardcoded height comparison.
 
-**Done when:** exploration reveals genuinely distinct regions and a connected underground worth exploring.
+**Done when:** the underground is worth exploring and is genuinely dark, with the surface still intact.
+
+**Result:** caves are carved where a 3D noise field passes close to a chosen value, which gives connected winding systems. Thresholding the field directly would give disconnected blobs that read as holes rather than caves. Carving fades in with depth below the surface and never touches the bottom of the world, so the ground is not left rotten and there is always something to stand on.
+
+Release build, render distance 12:
+
+| | Triangles | RAM | Startup | GPU |
+|---|---|---|---|---|
+| M14 (no caves) | 1,152,956 | ~400 MB | 1.13 s | 0.19 ms |
+| **M15a** | **2,695,614** | **629 MB** | **1.72 s** | **1.18 ms** |
+
+About 20% of the underground is hollow. Still 120 fps.
+
+**Cave cost tracks surface area, not volume.** Halving the tunnel width cut hollow volume from 21% to 12% and reduced geometry by only 3%, because narrow tunnels have more surface per unit volume than open caverns. Lowering the *frequency* instead — fewer, larger caves — cut geometry 25% while increasing hollow volume.
+
+**Groundwork for M15b:** the surface block decision now lives in a `SurfaceRule` (top block, filler, depth) chosen by a single function, replacing `surface <= kSeaLevel ? Sand : Grass` inline in the fill loop. There is still only one rule, picked by height; biome selection replaces that chooser without touching the fill loop.
+
+### ✅ M15b — Biome system · **Core**
+
+The machinery that decides which blocks belong where: rule tables, low-frequency selection noise so regions are large and coherent, and blending so neighbours do not meet at a hard line.
+
+**Why it matters beyond flavour:** a biome is the data structure that answers "which block goes here and why". Without it every new block type means another hardcoded threshold, and they start fighting each other.
+
+**Done when:** regions are large, coherent and reproducible from the seed, transitions are not visible as lines, and adding a block type means adding a row rather than a branch.
+
+**Result:** five biomes — Plains, Desert, Rocky, Mountains, Snowy Peaks — each a row in one table carrying its surface block, filler, filler depth, terrain base height, amplitude and snow line.
+
+Selection uses **two independent low-frequency noise fields**, temperature and humidity. One field could only order biomes along a line, which is why a single "climate" value cannot separate desert from plains from tundra convincingly. Each biome sits at a point in that 2D space and claims territory by proximity.
+
+**Blending falls out of the same weights.** Terrain height is a weighted average across every biome in range, so regions slope into each other instead of meeting at a cliff. Surface *blocks* come from the single strongest biome, because a blend of two block types is not a thing — and the boundary still reads naturally because the selection noise makes it a wandering contour rather than a straight edge.
+
+Release build, render distance 12: **2,246,526 triangles, 575 MB, 1.27 s startup, 1.47 ms GPU, 119 fps.** Geometry actually fell from M15a's 2.70M because plains and desert are flatter than the old uniform terrain.
+
+**The hardcoded `surface <= kSeaLevel ? Sand : Grass` is gone**, and with it the dead-flat contour line that ran across the entire world. Six of the natural block types now occur on their own — grass, dirt, sand, stone, gravel and snow. Cobblestone, planks and bricks remain manufactured-only, which is correct.
+
+The current biome shows in the `F5` overlay.
+
+**Placeholders, not the roster.** These five exist to prove the machinery and give the existing blocks a home. What the finished game's regions actually are is Phase 5.
+
+### ✅ M15c — Oceans, rivers and flowing water · **Core**
+
+Sea level, ocean basins, shorelines, and water that actually behaves like water.
+
+**Done when:** terrain below sea level fills, water flows and recedes when disturbed, and the player can swim rather than drown in a pit.
+
+**Result:** an Ocean biome sits well below sea level, a Beach biome rings it, and anything still empty under the waterline fills with water — including caves that breach it, which flood for free.
+
+**Water carries its depth in the block id.** Levels run 0 (a source that never drains) to 7 (the thinnest film), which costs no per-block metadata array and works with the existing save format unchanged. Thinner flows render with a lower surface, so a stream visibly tapers.
+
+**Flow is incremental and event-driven.** Generated oceans are already settled, so nothing runs until something disturbs them; editing a block queues that cell and its neighbours. A cell takes the **strongest supply reaching it**, which is what makes competing flows resolve rather than fight. Falling beats spreading — water only runs sideways once it has nowhere to drop. **Two sources meeting over solid ground create a source**, so water is renewable.
+
+**Transparency needed a second render pass.** Blending depends on draw order, so water cannot sit in the same buffer as the terrain behind it. Each chunk now owns two meshes and the renderer draws every opaque one before any translucent one.
+
+**Swimming:** buoyancy nearly cancels gravity, holding jump climbs, and letting go drifts down. Water is survivable rather than a hole you fall into.
+
+Release build, render distance 12: **2,742,884 triangles, 1.15 ms GPU, 121 fps.**
+
+**Still not a water *system*.** No reflection, refraction, depth absorption, waves, foam or shoreline effects — that is M26, and it is a headline visual feature rather than a block type.
 
 ### ⬜ M16 — Procedural structures · **Core**
 
@@ -575,8 +632,10 @@ Things deliberately not decided yet. Do not silently resolve these — raise the
 - **The project name.** `VoxelGame` is a placeholder. Needed before M35, harmless until then.
 - **Creative direction.** Required before Phase 5 begins. See that phase's note.
 - **Art direction.** Whether blocks are stylized, realistic, or something else drives M9, M17, and all of Phase 6.
+- **The biome roster.** M15b built the machinery and shipped seven placeholders. Which regions the finished game actually has is Phase 5 work.
+- **Rivers.** M15c delivered oceans, shorelines and inland water where terrain dips below sea level. Winding rivers cutting through highlands need a separate carving pass and were not done.
 
-**Resolved:** chunk dimensions are 32³, settled at M4 and confirmed by M8's streaming behaviour.
+**Resolved:** chunk dimensions are 32³, settled at M4 and confirmed by M8's streaming behaviour. Worker count is a restart-only setting, settled at M12. Render distance is adjustable while playing, settled at M13b.
 
 ---
 
