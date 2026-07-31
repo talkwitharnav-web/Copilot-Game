@@ -10,7 +10,11 @@ Read [`SYSTEM_MEMORY.md`](SYSTEM_MEMORY.md) for what currently exists and [`CLAU
 
 ## The End Product
 
-A **voxel sandbox game** with the core freedoms of the genre — exploration, building, destruction, gathering, crafting, survival, discovery, progression — running on a **custom C++20/Vulkan engine** built from scratch, targeting modern high-end Windows PCs.
+A **voxel sandbox game** with the core freedoms of the genre — exploration, building, destruction, gathering, crafting, survival, discovery, progression — running on a **custom C++20/Vulkan engine** built from scratch, targeting Windows.
+
+**The graphics ambition is real and confirmed** (user, 2026-07-31) — ray tracing, volumetric clouds, the modern hybrid renderer, all of it. But it arrives as **settings, not as a hardware requirement**. A `Video` tab lets the player turn clouds off, ray tracing off, resolution down, frame cap up, render distance in or out.
+
+That is a design constraint on every visual feature from M23 onward, not a footnote: **anything expensive must be switchable at runtime.** A feature baked unconditionally into pipeline state cannot be turned off, and the machine this is developed on is a laptop whose owner sometimes wants to play on one core while doing something else.
 
 **This is openly a game in Minecraft's tradition, and that is the point.** User position, 2026-07-31: _"this game is impossible to make without referencing to the original one, and truthfully, i don't want anything different. the only difference i wanted was control, which i now have cuz i'm developing it."_ Reinventing the genre from first principles was never the goal and is not a requirement. Following Minecraft's design closely is a legitimate, deliberate choice.
 
@@ -541,6 +545,8 @@ First audio dependency. Positional sound, ambience, music. Deliberately late —
 
 *Goal: the modern high-end renderer. Ordered so that structural changes land before the effects that depend on them.*
 
+> **Every effect in this phase and the next needs an off switch.** The target is a game that scales from "one core while multitasking" to "everything on", which means quality levels are part of each feature's definition of done, not a pass at M34. See "The End Product".
+
 ### ⬜ M23 — Renderer restructure: PBR and deferred/hybrid · **Core**
 
 Physically based materials (albedo, normal, roughness, metallic, emissive), a G-buffer or visibility-buffer architecture, HDR rendering and tone mapping.
@@ -603,7 +609,9 @@ Shader and asset hot reload, world-generation debug views, chunk and collision v
 
 ### ⬜ M34 — Settings and accessibility · **Core**
 
-A real settings screen — graphics presets, render distance, frame cap (retiring the temporary `F1`/`F2` binding from M1), key rebinding, audio, accessibility options.
+A real settings screen. **This is where the whole graphics-as-settings promise is delivered**, so it is not cosmetic: a `Video` tab exposing quality levels, clouds, ray tracing, resolution, render distance and frame cap (retiring the temporary `F1`–`F7` bindings), plus key rebinding, audio and accessibility options.
+
+The backing file already exists — `settings.cfg` has carried worker count, render distance, frame cap and day length since M12–M14c. This milestone builds the screen, not the system.
 
 ### ⬜ M35 — Packaging and distribution · **Core**
 
@@ -622,6 +630,7 @@ These are not milestones; they run continuously and are everyone's responsibilit
 | **Validation** | Debug builds must stay at zero Vulkan validation errors. This is an acceptance bar, not an aspiration. |
 | **Tooling** | When something is debugged the hard way twice, build the tool the third time. |
 | **Assets** | Every texture, model, sound and name that ships must be ours. Third-party material may be used as reference and lives in `reference/`, never in `assets/`. Mechanics carry no such restriction. |
+| **Scalability** | Any feature with a real cost ships with a way to turn it down or off. The game must stay playable on minimal settings, not merely on the development machine. |
 | **Documentation** | `SYSTEM_MEMORY.md` after structural change; `CLAUDE.md` when a decision was contested or a bug was misleading. |
 
 ---
@@ -651,6 +660,7 @@ Things deliberately not decided yet. Do not silently resolve these — raise the
 - **The project name.** `VoxelGame` is a placeholder. Needed before M35, harmless until then.
 - **Creative direction.** Not a blocker. The game follows the genre by default; ask the user where they want it to differ rather than assuming it must.
 - **Art direction.** Whether blocks are stylized, realistic, or something else drives M9, M17, and all of Phase 6. Assets must be original regardless of which way this goes.
+- **Minimum hardware.** The game must scale down, but how far has not been decided. Settle it when there is something worth benchmarking on a weaker machine.
 - **The biome roster.** M15b built the machinery and shipped seven placeholders. Which regions the finished game actually has is a conversation with the user, not a blocker.
 - **Rivers.** M15c delivered oceans, shorelines and inland water where terrain dips below sea level. Winding rivers cutting through highlands need a separate carving pass and were not done.
 
