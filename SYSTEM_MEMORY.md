@@ -390,7 +390,7 @@ Selection uses **two independent low-frequency noise fields**: temperature and h
 
 Snow is a **height rule per biome**, not a biome of its own, so a mountain reads as a mountain rather than as tall grass.
 
-> The seven current biomes are placeholders that prove the machinery and give the existing blocks a natural home. The finished game's roster is Phase 5 and needs a design conversation.
+> The seven current biomes prove the machinery and give the existing blocks a natural home. Which regions the finished game has is a conversation with the user, and adding one is a row in the table.
 
 ### Caves
 

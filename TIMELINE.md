@@ -10,11 +10,28 @@ Read [`SYSTEM_MEMORY.md`](SYSTEM_MEMORY.md) for what currently exists and [`CLAU
 
 ## The End Product
 
-An **original voxel sandbox game** with the core freedoms of the genre — exploration, building, destruction, gathering, crafting, survival, discovery, progression — running on a **custom C++20/Vulkan engine** built from scratch, targeting modern high-end Windows PCs.
+A **voxel sandbox game** with the core freedoms of the genre — exploration, building, destruction, gathering, crafting, survival, discovery, progression — running on a **custom C++20/Vulkan engine** built from scratch, targeting modern high-end Windows PCs.
 
-Someone should reasonably describe it as *a voxel sandbox*, while it is still obviously **its own game**: its own creatures, resources, biomes, structures, progression, events, mechanics, and visual identity.
+**This is openly a game in Minecraft's tradition, and that is the point.** User position, 2026-07-31: _"this game is impossible to make without referencing to the original one, and truthfully, i don't want anything different. the only difference i wanted was control, which i now have cuz i'm developing it."_ Reinventing the genre from first principles was never the goal and is not a requirement. Following Minecraft's design closely is a legitimate, deliberate choice.
 
-The bar is deliberately higher than "Minecraft clone with shaders." The renderer should be a genuinely modern hybrid renderer — rasterization, compute, and ray tracing each doing what they are best at — not a retrofit of pretty effects onto a naive engine.
+### The one boundary that is real
+
+**Mechanics are free. Assets are not.**
+
+Game rules, systems and mechanics — crafting grids, tool tiers, hunger, mob behaviour, redstone-like logic — are functional designs, and reimplementing them is both legal and normal. A great many voxel games do exactly this.
+
+What cannot be copied is the **expressive** work: textures, models, sounds, music, code, and trademarked names. Those must be ours. This is not a purity test, it is the line between a game that can be shared and one that cannot.
+
+| | Copy freely | Must be original |
+|---|---|---|
+| Mechanics, rules, systems | ✅ | |
+| Recipe structure, progression shape | ✅ | |
+| Textures, models, sounds, music | | ✅ |
+| Names, lore, characters | | ✅ |
+
+Where something feels genuinely better done differently, do it differently — because it is better, not because it must differ.
+
+The bar on *engineering* is still deliberately higher than "Minecraft clone with shaders." The renderer should be a genuinely modern hybrid renderer — rasterization, compute, and ray tracing each doing what they are best at — not a retrofit of pretty effects onto a naive engine. **That** is where this project earns its keep.
 
 ### Explicitly out of scope
 
@@ -481,7 +498,7 @@ Release build, render distance 12: **2,742,884 triangles, 1.15 ms GPU, 121 fps.*
 
 ### ⬜ M16 — Procedural structures · **Core**
 
-A structure placement system — deterministic, seed-driven, biome-aware — plus the first original structures.
+A structure placement system — deterministic, seed-driven, biome-aware — plus the first structures.
 
 **Done when:** structures generate reliably without corrupting terrain or chunk borders.
 
@@ -495,22 +512,24 @@ Move beyond full cubes: slabs, stairs, cross-shaped plants, fences, models with 
 
 # Phase 5 — It Is A Game
 
-*Goal: the original identity. This is where the project stops resembling a reference implementation.*
+*Goal: the systems that turn a world into something you play rather than something you look at.*
 
-> **Creative direction is required before this phase begins.** Phases 0–4 are largely universal voxel-engine work. From here the specifics must be *ours* — original creatures, resources, biomes, progression, events, and art direction. Deciding this is a design conversation with the user, not an implementation detail to improvise.
+> **Reference the genre freely.** "How does Minecraft do it?" is a perfectly good question here, for design as well as engineering — it is a well-tested set of answers and there is no prize for ignoring them. Ask the user where they want something to differ; do not invent divergence for its own sake.
+>
+> **Assets are the exception.** Textures, models, sounds, music and names have to be ours. That is a legal line, not a creative one — see "The End Product".
 
 ### ⬜ M18 — Inventory and items · **Core**
 ### ⬜ M19 — Crafting and resource progression · **Core**
 
-An original crafting and progression system. **Do not port Minecraft's recipe tree, tool tiers, or material hierarchy.**
+A crafting and progression system. Following the familiar shape — a crafting grid, material tiers, tools gating access to better materials — is fine and expected. Recipes and balance are a conversation with the user, not something to improvise.
 
 ### ⬜ M20 — Entities and creatures · **Core**
 
-Entity system, animation, pathfinding, spawning, and original creature designs and behaviours.
+Entity system, animation, pathfinding, spawning, and creature behaviours. Behaviours can follow the genre; the **models, textures and names must be ours**.
 
 ### ⬜ M21 — Survival systems · **Core**
 
-Health, damage, hazards, and whatever resource-pressure mechanics fit the game's own identity.
+Health, damage, hazards, and resource pressure.
 
 ### ⬜ M22 — Audio · **Core**
 
@@ -602,7 +621,7 @@ These are not milestones; they run continuously and are everyone's responsibilit
 | **Performance** | Record a measurement whenever a milestone changes cost. Never optimize without a before-number. |
 | **Validation** | Debug builds must stay at zero Vulkan validation errors. This is an acceptance bar, not an aspiration. |
 | **Tooling** | When something is debugged the hard way twice, build the tool the third time. |
-| **Originality** | From Phase 5 on, actively check that mechanics and content are ours. "How does Minecraft do it?" is a fine engineering question and a bad design one. |
+| **Assets** | Every texture, model, sound and name that ships must be ours. Third-party material may be used as reference and lives in `reference/`, never in `assets/`. Mechanics carry no such restriction. |
 | **Documentation** | `SYSTEM_MEMORY.md` after structural change; `CLAUDE.md` when a decision was contested or a bug was misleading. |
 
 ---
@@ -630,9 +649,9 @@ If the dependency count approaches ~5, revisit the vcpkg-versus-FetchContent dec
 Things deliberately not decided yet. Do not silently resolve these — raise them.
 
 - **The project name.** `VoxelGame` is a placeholder. Needed before M35, harmless until then.
-- **Creative direction.** Required before Phase 5 begins. See that phase's note.
-- **Art direction.** Whether blocks are stylized, realistic, or something else drives M9, M17, and all of Phase 6.
-- **The biome roster.** M15b built the machinery and shipped seven placeholders. Which regions the finished game actually has is Phase 5 work.
+- **Creative direction.** Not a blocker. The game follows the genre by default; ask the user where they want it to differ rather than assuming it must.
+- **Art direction.** Whether blocks are stylized, realistic, or something else drives M9, M17, and all of Phase 6. Assets must be original regardless of which way this goes.
+- **The biome roster.** M15b built the machinery and shipped seven placeholders. Which regions the finished game actually has is a conversation with the user, not a blocker.
 - **Rivers.** M15c delivered oceans, shorelines and inland water where terrain dips below sea level. Winding rivers cutting through highlands need a separate carving pass and were not done.
 
 **Resolved:** chunk dimensions are 32³, settled at M4 and confirmed by M8's streaming behaviour. Worker count is a restart-only setting, settled at M12. Render distance is adjustable while playing, settled at M13b.
