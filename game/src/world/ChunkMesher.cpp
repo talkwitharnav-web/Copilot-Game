@@ -139,6 +139,10 @@ struct FaceSample {
     /// be merged with its neighbours.
     bool flat = false;
     bool translucent = false;
+    /// Emitted with both windings, so looking through the holes in the near side
+    /// of a leaf block shows the inside of its far side rather than straight
+    /// through the block.
+    bool doubleSided = false;
     float alpha = 1.0f;
     /// How far the top of this block is lowered, for partly filled water.
     float surfaceDrop = 0.0f;
@@ -189,16 +193,31 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     const BlockId ahead = volume.blockAt(front.x, front.y, front.z);
                     // Water shows against air, and against thinner water, whose
                     // lower surface would otherwise leave a gap to see through.
+                    //
+                    // Cutout blocks deliberately keep the faces they share with
+                    // their own kind. Culling those is the cheaper "fast" style
+                    // of foliage, and it makes a canopy a hollow shell: every
+                    // hole in the near face shows the sky instead of more leaves
+                    // behind it.
+                    //
+                    // Both neighbours would otherwise emit that shared boundary,
+                    // leaving two coplanar quads fighting over the same depth,
+                    // so only the positive-facing side of the pair emits it. It
+                    // is double-sided, so the other neighbour is still covered.
+                    const bool sharedWithOwnKind = isCutout(block) && ahead == block;
+                    const bool positiveFacing =
+                        face.neighbourOffset.x + face.neighbourOffset.y + face.neighbourOffset.z > 0;
                     const bool visible =
                         isTranslucent(block)
                             ? (ahead == BlockId::Air || (isWater(ahead) && waterLevel(ahead) > waterLevel(block)))
-                            : !isOpaque(ahead);
+                            : (!isOpaque(ahead) && (positiveFacing || !sharedWithOwnKind));
                     if (!visible) {
                         continue;
                     }
 
                     sample.layer = blockTextureLayer(block, face.facing);
                     sample.translucent = isTranslucent(block);
+                    sample.doubleSided = isCutout(block);
                     sample.alpha = sample.translucent ? kWaterAlpha : 1.0f;
                     // Thinner flows sit lower, so a stream visibly tapers away
                     // from its source rather than running at full depth.
@@ -307,9 +326,17 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                 if (lit0 + lit2 > lit1 + lit3) {
                     mesh.indices.insert(mesh.indices.end(),
                                         {base + 1, base + 2, base + 3, base + 1, base + 3, base + 0});
+                    if (sample.doubleSided) {
+                        mesh.indices.insert(mesh.indices.end(),
+                                            {base + 3, base + 2, base + 1, base + 0, base + 3, base + 1});
+                    }
                 } else {
                     mesh.indices.insert(mesh.indices.end(),
                                         {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
+                    if (sample.doubleSided) {
+                        mesh.indices.insert(mesh.indices.end(),
+                                            {base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
+                    }
                 }
             };
 
@@ -333,7 +360,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     const auto matches = [&](const FaceSample& other) {
                         return other.layer == sample.layer && other.flat && other.sky[0] == sample.sky[0] &&
                                other.block[0] == sample.block[0] && other.shading[0] == sample.shading[0] &&
-                               other.translucent == sample.translucent && other.surfaceDrop == sample.surfaceDrop;
+                               other.translucent == sample.translucent && other.doubleSided == sample.doubleSided &&
+                               other.surfaceDrop == sample.surfaceDrop;
                     };
 
                     int width = 1;

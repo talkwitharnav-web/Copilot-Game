@@ -143,11 +143,11 @@ $barkWeights = @(7, 14, 15, 42, 16, 5)
 $logCorePalette = @('8A6C42', '9A7A4C', 'A78754', 'AF8E5B', 'B89862')
 $logCoreWeights = @(2, 4, 6, 4, 2)
 
-# Darker and more varied than grass: foliage reads as depth rather than as a
-# flat surface, and the spread of tones is what suggests that.
-$leafPalette = @('2F5220', '386127', '41702E', '4A7F35', '558E3E', '629C48')
-$leafWeights = @(4, 5, 6, 5, 3, 2)
-$leafGapColor = '1B3714'
+# Four tones and a third of the tile missing, matching the reference's
+# structure. Weights follow its distribution: the two lighter tones carry most
+# of the surface, which is what stops foliage reading as a flat dark mass.
+$leafPalette = @('3B6328', '47762F', '5D9A3D', '74BC4B')
+$leafWeights = @(34, 36, 57, 45)
 
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
@@ -479,24 +479,33 @@ function New-LogTopTexture {
     Save-Bitmap -Bitmap $bitmap -Name 'log_top'
 }
 
-# Foliage is clumped and high-contrast, with dark gaps standing in for the holes
-# the reference gets from transparency. Alpha-tested leaves arrive at M17.
+# Foliage is clumped and high-contrast, and roughly a third of it is nothing at
+# all. The reference stores four greys and tints them per biome at runtime; we
+# have no tinting stage, so the green is baked in.
 function New-LeavesTexture {
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $hole = [System.Drawing.Color]::FromArgb(0, 0, 0, 0)
 
     for ($y = 0; $y -lt $size; $y++) {
         for ($x = 0; $x -lt $size; $x++) {
             $cx = [Math]::Floor($x / 2)
             $cy = [Math]::Floor($y / 2)
-            $roll = Get-Hash01 -x $cx -y $cy -salt 151
-            $jitter = (Get-Hash01 -x $x -y $y -salt 163) * 0.45 - 0.225
-            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll + $jitter))
+
+            # Per pixel, nudged by its 2x2 clump rather than decided by it.
+            # Letting the clump decide paints obvious 2x2 squares, and doing the
+            # colour and the holes on the same grid doubles the effect.
+            $roll = (Get-Hash01 -x $x -y $y -salt 163) + ((Get-Hash01 -x $cx -y $cy -salt 151) - 0.5) * 0.35
+            $roll = [Math]::Max(0.0, [Math]::Min(0.999, $roll))
             $index = Get-WeightedIndex -Roll $roll -Weights $leafWeights
             $color = ConvertTo-Color $leafPalette[$index]
 
-            # Gaps you would see sky through, until transparency exists.
-            if ((Get-Hash01 -x $x -y $y -salt 179) -gt 0.86) {
-                $color = ConvertTo-Color $leafGapColor
+            # The reference is a third hole. Clustered only slightly, and on a
+            # grid offset from the colour one so the two do not line up.
+            $gx = [Math]::Floor(($x + 1) / 2)
+            $gy = [Math]::Floor(($y + 1) / 2)
+            $gap = (Get-Hash01 -x $x -y $y -salt 191) * 0.65 + (Get-Hash01 -x $gx -y $gy -salt 179) * 0.35
+            if ($gap -gt 0.7515) {
+                $color = $hole
             }
             $bitmap.SetPixel($x, $y, $color)
         }

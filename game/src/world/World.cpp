@@ -194,7 +194,7 @@ void World::seedColumnLight(int chunkX, int chunkZ) {
                 const BlockId block =
                     inside ? column[static_cast<std::size_t>(y / size)]->blocks.at(lx, y % size, lz)
                            : blockAt(worldX, y, worldZ);
-                if (!isLightTransparent(block)) {
+                if (!isSkyTransparent(block)) {
                     floorY = y + 1;
                     break;
                 }
@@ -235,7 +235,14 @@ void World::seedColumnLight(int chunkX, int chunkZ) {
                           skyFloor[static_cast<std::size_t>(lz) * span + lx + 1],
                           skyFloor[static_cast<std::size_t>(lz + 2) * span + lx + 1]});
 
-            for (int y = floorY; y < highestDarkNeighbour && y <= worldTop; ++y) {
+            // The lowest full-sky cell always gets queued: whatever stopped the
+            // free fall may still be something light seeps into, such as a
+            // canopy, and nothing else would ever push light down into it.
+            if (floorY <= worldTop) {
+                m_skyAdditions.push_back({worldX, floorY, worldZ});
+            }
+
+            for (int y = floorY + 1; y < highestDarkNeighbour && y <= worldTop; ++y) {
                 m_skyAdditions.push_back({worldX, y, worldZ});
             }
         }
@@ -340,8 +347,12 @@ void World::propagateLight(const BudgetCheck& budgetSpent) {
                 continue;
             }
 
-            // Straight down keeps full strength; every other direction dims.
-            const int reaching = (step.y == -1 && level == kMaxLight) ? kMaxLight : level - 1;
+            // Straight down keeps full strength, but only through cells that
+            // are sky-transparent. A canopy breaks the free fall, and from there
+            // light dims one level per block downward like any other direction.
+            const int reaching =
+                (step.y == -1 && level == kMaxLight && isSkyTransparent(blockAt(n.x, n.y, n.z))) ? kMaxLight
+                                                                                                 : level - 1;
             if (reaching <= 0 || skyLightAt(n.x, n.y, n.z) >= reaching) {
                 continue;
             }

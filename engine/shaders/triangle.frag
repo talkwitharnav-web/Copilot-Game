@@ -32,8 +32,23 @@ void main() {
     }
 
     vec3 rgb = texel.rgb * fragColor.rgb;
+    float alpha = texel.a * fragColor.a;
 
     if (push.lighting.z > 0.5) {
+        // Cutout: a hole in the texture is thrown away outright rather than
+        // blended. What survives still writes depth, so this needs no sorting -
+        // unlike the translucent pass.
+        if (texel.a < 0.5) {
+            discard;
+        }
+
+        // A surviving cutout pixel is fully present, never partly. Mip levels
+        // average alpha, so distant foliage arrives with values like 0.6 which
+        // pass the test and then blend with the sky behind - which turned every
+        // distant tree pale grey. World transparency comes from the vertex
+        // instead, which is where water keeps its.
+        alpha = fragColor.a;
+
         // Recovered from how world position changes across the triangle, rather
         // than carried per vertex. Every face here is flat, so this is exact,
         // and it keeps a normal out of the vertex format entirely.
@@ -51,5 +66,5 @@ void main() {
         rgb = texel.rgb * fragColor.b * (push.lighting.w + (1.0 - push.lighting.w) * lit);
     }
 
-    outColor = vec4(rgb, texel.a * fragColor.a);
+    outColor = vec4(rgb, alpha);
 }

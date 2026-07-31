@@ -62,11 +62,18 @@ constexpr bool isSolid(BlockId id) {
     return id != BlockId::Air && !isWater(id);
 }
 
+/// Drawn in the *opaque* pass, but with its fully transparent pixels thrown
+/// away by the shader. Not the same thing as translucent: nothing is blended,
+/// depth is still written, and so no sorting is needed.
+constexpr bool isCutout(BlockId id) {
+    return id == BlockId::Leaves;
+}
+
 /// Hides whatever is behind it. Kept separate from `isSolid` because water is
 /// neither solid nor invisible, and conflating the two is how you end up either
 /// walking on water or unable to see the seabed.
 constexpr bool isOpaque(BlockId id) {
-    return id != BlockId::Air && !isWater(id);
+    return id != BlockId::Air && !isWater(id) && !isCutout(id);
 }
 
 /// Drawn in the transparent pass, after everything opaque.
@@ -86,6 +93,17 @@ constexpr int blockLightEmission(BlockId id) {
 /// Whether light passes through. Currently the exact opposite of solid, but kept
 /// separate because glass and water will be solid *and* transparent.
 constexpr bool isLightTransparent(BlockId id) {
+    return id == BlockId::Air || isWater(id) || isCutout(id);
+}
+
+/// Whether sky light falls through at **full strength**.
+///
+/// Narrower than `isLightTransparent`, and that gap is the whole reason a
+/// canopy shades the ground: light drops straight down for free until it meets
+/// something that is not sky-transparent, and from then on it dims one level
+/// per block in every direction, downward included. Leaves therefore cast shade
+/// without needing an attenuation value of their own.
+constexpr bool isSkyTransparent(BlockId id) {
     return id == BlockId::Air || isWater(id);
 }
 

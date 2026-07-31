@@ -518,11 +518,37 @@ Release build, render distance 12: **2,829,100 triangles, 1.06 ms GPU, 121 fps.*
 
 **Leaves are opaque.** They read correctly at distance, but the dark pixels standing in for gaps are a placeholder until M17 brings alpha-tested rendering. Trees are also the only structure so far — villages, dungeons and ruins are Phase 5 content.
 
-### ⬜ M17 — Flexible block system · **Core**
+### ✅ M17a — Cutout transparency · **Core**
 
-Move beyond full cubes: slabs, stairs, cross-shaped plants, fences, models with arbitrary geometry, transparency and alpha-tested rendering.
+Alpha-tested rendering, so a texture can have genuine holes in it.
 
-**Why now:** this changes both block data and meshing. Doing it before the content phase means content is authored once, against the final system.
+**Done when:** leaves have real gaps you can see through, and a canopy shades the ground beneath it.
+
+**Why it is separate:** *cutout* is not blending. The fragment shader throws a pixel away entirely with `discard`, so what survives still writes depth and needs no sorting — which means cutout geometry rides in the ordinary opaque pass. Water's blending, by contrast, forced a whole second pass at M15c. Getting that distinction wrong is the expensive mistake here, so it ships on its own.
+
+**Result:** leaves are see-through and layered — **3,024,166 triangles, 1.45 ms GPU, 121 fps**, which is +6.9% geometry over M16.
+
+**A cutout pixel must be written fully opaque.** The first attempt kept the texture's alpha, and every distant tree turned pale grey — mip levels average alpha, so distant foliage arrived at ~0.6, passed the `< 0.5` test, and then blended with the sky behind it. Sampled pixels sat exactly halfway between leaf green and sky blue, which is what identified it. World transparency now comes from the vertex alpha, which is where water already kept its.
+
+**Leaves keep the faces they share with other leaves**, unlike every other block. Culling those is the cheap "fast foliage" style and it makes a canopy a hollow shell, where every hole shows sky instead of more leaves. They are also **double-sided**, so looking through a hole in the near side of a block shows the inside of its far side rather than straight through it. Each shared boundary is emitted once, by the positive-facing neighbour, or the two would be coplanar quads fighting over the same depth — that dedup alone saved 4%.
+
+**Canopies shade the ground** via a new distinction: sky light falls at full strength only through *sky-transparent* blocks. Leaves are light-transparent but not sky-transparent, so they break the free fall and everything below dims one level per block. No per-block attenuation value was needed.
+
+**Not yet:** mip levels still erode alpha coverage, so canopies thin slightly with distance. The standard fix is rescaling alpha per mip to preserve coverage, and it belongs with the renderer work at M23 rather than here.
+
+### ⬜ M17b — Block shapes · **Core**
+
+Blocks that are not full cubes: cross-shaped plants, slabs, stairs.
+
+**Done when:** a slab is half-height to stand on and to look at, and plants render as crossed quads visible from both sides.
+
+**Why it is separate:** this is the half that touches *collision* as well as meshing, and it breaks the "every block is a unit cube" assumption the mesher's face culling and greedy merging both rest on.
+
+### ⬜ M17c — Connected shapes · **Optional**
+
+Fences, panes and anything whose geometry depends on its neighbours.
+
+May fold into M17b if the shape system makes it trivial. Listed separately so it cannot quietly expand that milestone.
 
 ---
 

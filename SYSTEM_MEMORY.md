@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–16 complete, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, and trees that grow. `TIMELINE.md` M17 (flexible block system) is next.
+> **Status:** Milestones 1–16 complete plus M17a, including the inserted M10b (hotbar) and M14c (placeholder sun). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, swims, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, and trees whose leaves are alpha-tested. `TIMELINE.md` M17b (block shapes) is next.
 
 ---
 
@@ -430,6 +430,18 @@ Three predicates that are easy to confuse and must stay separate:
 
 Conflating the first two gets you either walking on water or an invisible seabed.
 
+### Cutout blocks
+
+A third category beside opaque and translucent. **Cutout** geometry is drawn in the *opaque* pass, and the fragment shader `discard`s any texel below half alpha. What survives writes depth normally, so it needs no sorting — which is the whole reason it is not simply translucent. Leaves are the only one so far.
+
+**A surviving cutout pixel is written fully opaque.** Mip levels average alpha, so distant foliage arrives with partial values that pass the test and would then blend with the sky behind, turning every distant tree pale grey. World alpha therefore comes from the *vertex*, never the texture. The texture's alpha is consumed entirely by the discard test.
+
+**Cutout blocks keep the faces they share with their own kind**, which is the opposite of every other block. Culling them is the cheaper "fast foliage" style and leaves a canopy as a hollow shell, with every hole showing sky rather than more leaves. They are also **double-sided** — emitted with both windings — so a hole in the near face shows the inside of the far face instead of straight through the block.
+
+Each shared boundary is emitted **once**, by whichever neighbour faces the positive direction. Both emitting it leaves two coplanar quads at identical depth; the double-sided winding means the other neighbour is still covered.
+
+`discard` compiles to `OpDemoteToHelperInvocation` against Vulkan 1.3, so `shaderDemoteToHelperInvocation` must stay enabled on the device. Without it the shader still runs on this driver but validation rejects the module.
+
 ### Flow
 
 Event-driven and incremental. Generated oceans are already settled, so nothing runs until an edit disturbs them; `setBlock` queues the changed cell and its six neighbours, and the queue is drained against the same per-frame budget as everything else.
@@ -497,6 +509,8 @@ Sky colour is blue overhead, warm near the horizon and dark at night, driven by 
 Every block stores one byte of light: **sky in the high nibble, block in the low one**, 0-15 each. This doubles a chunk to 64 KB. It is stored rather than recomputed per mesh because light crosses chunk boundaries, so it cannot be derived from a single chunk's contents.
 
 Sky light falls **straight down at full strength** and dims only when spreading sideways, which is what makes open ground uniformly bright. Block light dims in every direction. The two are independent: a surface takes the **brighter** of them, not the sum, which would blow out anywhere both reach.
+
+The free fall only happens through **sky-transparent** blocks, which is a narrower set than light-transparent. Leaves let light through but are not sky-transparent, so a canopy breaks the fall and everything under it dims one level per block like any other direction. That is what shades a forest floor, and it means no per-block attenuation value is needed.
 
 They are also kept apart **all the way into the fragment shader**, and that is load-bearing rather than tidiness. Only sky light answers to the sun's direction and the time of day; block light must not, or a glowstone underground gets multiplied by the ambient term and lights nothing. See `CLAUDE.md`.
 
@@ -719,6 +733,7 @@ Verified 2026-07-31 on this machine.
 - **M14c result:** a visible sun crosses the sky, surfaces take a directional term, and sky colour follows the sun's elevation. No cast shadows.
 - **M15 result:** caves, seven biomes, oceans and flowing water. Release build at render distance 12: 2,742,884 triangles, 1.15 ms GPU, 121 fps, ~1.9 s startup, 575–630 MB.
 - **M16 result:** trees. Release build at render distance 12: **2,829,100 triangles, 1.06 ms GPU, 121 fps**, generate+mesh 1275 ms on 11 workers. The determinism check is the one that matters here — 2,829,100 triangles at 0, 4 and 11 workers, so structures straddling chunk borders come out identical regardless of scheduling.
+- **M17a result:** alpha-tested, double-sided, layered leaves. **3,024,166 triangles, 1.45 ms GPU, 121 fps** — +6.9% geometry over M16. Zero validation errors once `shaderDemoteToHelperInvocation` was enabled.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

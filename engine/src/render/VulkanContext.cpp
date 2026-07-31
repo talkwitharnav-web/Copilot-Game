@@ -302,6 +302,11 @@ void VulkanContext::createLogicalDevice() {
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.dynamicRendering = VK_TRUE;
+    // `discard` compiles to OpDemoteToHelperInvocation when targeting Vulkan
+    // 1.3, which is a capability the device has to be told we intend to use.
+    // Without it the cutout shader still runs on this driver but validation
+    // rejects the shader module outright.
+    features13.shaderDemoteToHelperInvocation = VK_TRUE;
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
