@@ -98,6 +98,27 @@ World::World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSyst
 /// buffer nobody will read. Nothing needs to be waited for.
 World::~World() = default;
 
+void World::setVisibleRadius(int chunks) {
+    const int radius = std::clamp(chunks, 1, 64);
+    if (radius == m_visibleRadius) {
+        return;
+    }
+
+    const int previous = m_visibleRadius;
+    m_visibleRadius = radius;
+    m_loadRadius = m_visibleRadius + 1;
+    m_unloadRadius = m_loadRadius + 2;
+
+    // Chunks are kept loaded a few rings past the visible radius so pacing back
+    // and forth does not thrash them. That band would otherwise stay on screen
+    // after shrinking, making the change look like it did nothing.
+    m_radiusShrunk = radius < previous;
+
+    // Forces the next update to run its recentre path, which is what unloads
+    // what no longer fits and re-queues what is newly wanted.
+    m_hasCentre = false;
+}
+
 void World::saveIfModified(const ChunkCoord& coord, ChunkSlot& slot) {
     if (!slot.modified) {
         return;
@@ -415,6 +436,16 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
                             m_pendingMesh.end());
 
         refreshQueues(centre);
+    }
+
+    if (m_radiusShrunk) {
+        m_radiusShrunk = false;
+        for (auto& [coord, slot] : m_chunks) {
+            if (slot.meshed && chebyshevDistance(coord, centre) > m_visibleRadius) {
+                slot.meshed = false;
+                updates.push_back(ChunkMeshUpdate{coord, {}, true});
+            }
+        }
     }
 
     collectFinishedJobs();

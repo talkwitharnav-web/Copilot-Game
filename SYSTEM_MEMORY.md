@@ -4,7 +4,7 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–12 and M13a complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. World generation and meshing run on a worker-thread pool, and mesh uploads are batched. Still unlit, by design. `TIMELINE.md` M13b (mesh and render optimization) is next.
+> **Status:** Milestones 1–13 complete, including the inserted M10b (hotbar). The game is playable: an endless seeded world streams in around the player, who walks, jumps, sprints, crouches, flies, and breaks and places textured blocks from a nine-slot hotbar. Edits and player position survive a restart, and `F5` shows per-frame diagnostics. Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled. Still unlit, by design. `TIMELINE.md` M14 (voxel lighting) is next.
 
 ---
 
@@ -400,8 +400,53 @@ The overlay mesh rebuilds at **20 Hz**, not every frame. It changes constantly, 
 
 ---
 
-## Threading
+## Meshing
 
+A face is emitted only where a solid block touches air. That alone is what makes voxel worlds affordable; interior faces are never created.
+
+**Adjacent identical faces are merged into single quads** (greedy meshing), which cut geometry ~6.4×. For each of the six directions the mesher walks slice by slice, builds a mask of visible faces on that slice, and grows each run as far as it can horizontally and then vertically.
+
+The merge key is the **texture layer**, which already encodes both block type and which way the face points, so nothing else needs comparing.
+
+**No vertex format change was needed.** The sampler repeats, so a quad covering N×M blocks takes texture coordinates of 0→N and 0→M and tiles correctly. A merged quad is built by scaling the original unit-face corners, which is deliberate: scaling by positive factors cannot flip the winding, so the culling orientation that was verified on screen still holds. **Do not rewrite this to construct corners from scratch** — see `CLAUDE.md` on backface winding.
+
+Each face's `uAxis`/`vAxis` say which world axes the texture coordinates run along, read off the corner tables rather than derived. Getting them wrong stretches textures instead of tiling them, silently.
+
+> Ambient occlusion at M14 will need the merge key to include per-corner light, since faces with different lighting cannot merge. Expect merging to become less effective then.
+
+---
+
+## Culling
+
+Every mesh gets a world-space bounding box when it is uploaded. Before drawing, the box is tested against the six planes of the view-projection matrix, extracted by the Gribb-Hartmann method. Roughly 70% of draw calls disappear.
+
+The test is conservative — it rejects only boxes provably outside — because a false rejection means geometry vanishing at the edge of the screen, which is much worse than drawing a few extra chunks.
+
+GLM is column-major and the project builds with `GLM_FORCE_DEPTH_ZERO_TO_ONE`, so the near plane is row 2 alone rather than `w + row2`. That detail is Vulkan-specific and wrong in most OpenGL-era references.
+
+**Verify culling by the fraction of geometry drawn**, not by looking for gaps: at a 100° horizontal field of view about 28% of a full circle is visible, and the measured figure was 29.4%.
+
+---
+
+## Settings
+
+`settings.cfg` sits next to the executable. One `key=value` per line, `#` for comments, read once at startup.
+
+| Key | Effect | Changeable while playing |
+|---|---|---|
+| `worker_threads` | Background threads for generation and meshing | **No** — restart |
+| `render_distance` | How far the world is drawn, in chunks | Yes, `F6`/`F7` |
+| `frame_cap` | Target frames per second, 0 for uncapped | Yes, `F1`/`F2` |
+
+Render distance is safe to change live because nothing ends up half-migrated: the next update loads or unloads the difference. Shrinking also drops meshes outside the new radius immediately, rather than waiting for those chunks to leave the unload radius, or the change appears to do nothing.
+
+The worker count is different and deliberately restart-only — see `CLAUDE.md`.
+
+> `tools/benchmark.ps1` sweeps a setting and **restores the file afterwards**. Benchmarks write to the same file the game is played from, and a leftover `frame_cap=0` looks exactly like a broken frame limiter.
+
+---
+
+## Threading
 `engine::JobSystem` is a worker pool with a single job queue. It takes a callable and runs it elsewhere; it knows nothing about chunks, and deciding what is safe to run in parallel is entirely the caller's problem.
 
 **The pool size is fixed for the lifetime of the process.** `settings.cfg` next to the executable holds `worker_threads`, read once at startup, defaulting to half the machine's hardware threads. Zero is a supported value and means every job runs inline on the calling thread — the lowest-resource mode, and a way to reproduce a bug without threads in the picture. Changing it requires a restart; see `CLAUDE.md` for why resizing a live pool was rejected.

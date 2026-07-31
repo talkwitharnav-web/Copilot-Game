@@ -59,6 +59,13 @@ public:
     int visibleRadius() const { return m_visibleRadius; }
     int loadRadius() const { return m_loadRadius; }
 
+    /// Changes the render distance while playing.
+    ///
+    /// Safe mid-session, unlike the worker count: nothing is in a half-migrated
+    /// state, and the next update simply loads or unloads the difference.
+    /// Shrinking returns removal updates for every chunk that leaves.
+    void setVisibleRadius(int chunks);
+
     /// Anything not currently loaded reads as air.
     BlockId blockAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
@@ -198,6 +205,9 @@ private:
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;
+    /// Set when the render distance shrinks, so the next update drops meshes
+    /// that are now out of range instead of leaving them on screen.
+    bool m_radiusShrunk = false;
     std::size_t m_savedChunkCount = 0;
 };
 

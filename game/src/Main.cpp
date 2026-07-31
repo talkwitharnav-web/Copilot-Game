@@ -117,7 +117,8 @@ const char* describeBlock(game::BlockId block) {
 
 int main() {
     try {
-        const game::Settings settings = game::loadSettings(engine::executableDirectory() / "settings.cfg");
+        const std::filesystem::path settingsPath = engine::executableDirectory() / "settings.cfg";
+        game::Settings settings = game::loadSettings(settingsPath);
 
         // Declared before the world, and therefore destroyed after it: the world
         // submits jobs to this pool and must not outlive it.
@@ -249,6 +250,7 @@ int main() {
         engine::logInfo("Double-tap Space to fly. Descend onto the ground to land.");
         engine::logInfo("Escape releases the mouse; click to recapture.");
         engine::logInfo("F5 toggles the diagnostics overlay.");
+        engine::logInfo("F6/F7 change render distance.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
         using Clock = std::chrono::steady_clock;
@@ -328,6 +330,21 @@ int main() {
                     hudDirty = true;
                     continue;
                 }
+                if (key == engine::Key::F6 || key == engine::Key::F7) {
+                    const int step = (key == engine::Key::F7) ? 1 : -1;
+                    const int wanted = world.visibleRadius() + step;
+                    world.setVisibleRadius(wanted);
+
+                    if (world.visibleRadius() != static_cast<int>(settings.renderDistance)) {
+                        settings.renderDistance = static_cast<unsigned>(world.visibleRadius());
+                        renderer.setFarPlane(static_cast<float>(world.loadRadius() * game::Chunk::kSize) * 1.8f);
+                        game::saveSettings(settingsPath, settings);
+                        engine::logInfo("Render distance: " + std::to_string(world.visibleRadius()) + " chunks (" +
+                                        std::to_string(world.visibleRadius() * game::Chunk::kSize) + " blocks)");
+                        hudDirty = true;
+                    }
+                    continue;
+                }
                 if (key >= engine::Key::Num1 && key <= engine::Key::Num9) {
                     selectedSlot = static_cast<std::size_t>(key) - static_cast<std::size_t>(engine::Key::Num1);
                     hudDirty = true;
@@ -388,6 +405,7 @@ int main() {
                 stats.drawCalls = renderer.stats().drawCalls;
                 stats.triangles = renderer.stats().triangles;
                 stats.workerThreads = jobs.threadCount();
+                stats.renderDistance = world.visibleRadius();
 
                 rebuildHud(stats);
                 lastHudRebuild = now;

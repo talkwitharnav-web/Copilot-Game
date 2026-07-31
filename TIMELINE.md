@@ -332,11 +332,35 @@ Upload is **5.6× faster** and startup overall is **4.2×** better than the pre-
 
 **Deliberately not done:** device-local buffers are still one allocation per mesh. That is the sub-allocator question, and it belongs with M13b/VMA rather than here.
 
-### ⬜ M13b — Mesh and render optimization · **Core**
+### ✅ M13b — Mesh and render optimization · **Core**
 
 Greedy meshing or equivalent face merging, frustum culling, level-of-detail for distant chunks, draw-call batching, indirect drawing.
 
 **Done when:** render distance increases substantially at the same frame rate versus the M12 baseline, with numbers recorded.
+
+**Result:** two changes, both measured on the release build.
+
+**Greedy meshing.** The mesher merged adjacent identical faces into single quads instead of emitting two triangles per block face. No vertex format change was needed: the sampler already repeats, so a merged quad takes texture coordinates of 0→N and tiles. Geometry fell **~6.4×**.
+
+**Frustum culling.** Each mesh gets a world-space bounding box on upload, tested against the six planes of the view-projection matrix. Draw calls fell ~70%.
+
+| Distance | Triangles | RAM | GPU | Draws | FPS uncapped |
+|---|---|---|---|---|---|
+| 12 before | 3,060,162 | — | 1.77 ms | 813 | 552 |
+| **12 after** | **486,420** | **331 MB** | **0.04 ms** | **243** | **1903** |
+| 24 before | 11,671,250 | 1663 MB | 4.89 ms | 2924 | 205 |
+| **24 after** | **1,790,004** | **696 MB** | **0.53 ms** | **813** | **1460** |
+| **32 after** | 3,152,346 | 1061 MB | 0.57 ms | 1416 | 1188 |
+
+The default render distance went from **5 to 12**, and 32 (1024 blocks) is now usable. Against the M12 baseline of distance 5, that is more than six times further at better frame times.
+
+Culling was verified by the fraction of geometry drawn: 29.4% of triangles, against the ~28% a 100° horizontal field of view should cover. A culling bug shows up as geometry vanishing at screen edges, which that ratio would expose.
+
+**Render distance is adjustable while playing** (`F6`/`F7`), unlike the worker count. Growing streams chunks in with no frame-rate dip; shrinking immediately drops meshes outside the new radius rather than waiting for the chunks to unload, and mesh and triangle counts return exactly to their previous values.
+
+**Cost:** greedy meshing roughly doubles per-chunk meshing CPU, which is now the dominant startup cost (3.0 s at distance 32).
+
+**Deliberately not done:** level-of-detail and indirect drawing. GPU time is 0.57 ms against an 8.3 ms budget at distance 32, so neither has anything to fix yet. Revisit when something actually hurts.
 
 ---
 
