@@ -11,6 +11,10 @@
 namespace engine {
 namespace {
 
+/// Enough for any field we will show; beyond it keystrokes are dropped rather
+/// than queued, so a frame that forgets to drain cannot grow the buffer.
+constexpr std::size_t kMaxTypedText = 256;
+
 void glfwErrorCallback(int code, const char* description) {
     logError("GLFW error " + std::to_string(code) + ": " + (description ? description : "unknown"));
 }
@@ -72,6 +76,16 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_F6;
     case Key::F7:
         return GLFW_KEY_F7;
+    case Key::F8:
+        return GLFW_KEY_F8;
+    case Key::F9:
+        return GLFW_KEY_F9;
+    case Key::F10:
+        return GLFW_KEY_F10;
+    case Key::Backspace:
+        return GLFW_KEY_BACKSPACE;
+    case Key::Enter:
+        return GLFW_KEY_ENTER;
     }
     return GLFW_KEY_UNKNOWN;
 }
@@ -159,6 +173,21 @@ bool fromGlfwKey(int glfwKey, Key& out) {
     case GLFW_KEY_F7:
         out = Key::F7;
         return true;
+    case GLFW_KEY_F8:
+        out = Key::F8;
+        return true;
+    case GLFW_KEY_F9:
+        out = Key::F9;
+        return true;
+    case GLFW_KEY_F10:
+        out = Key::F10;
+        return true;
+    case GLFW_KEY_BACKSPACE:
+        out = Key::Backspace;
+        return true;
+    case GLFW_KEY_ENTER:
+        out = Key::Enter;
+        return true;
     default:
         return false;
     }
@@ -201,6 +230,13 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
         Key mapped{};
         if (fromGlfwKey(key, mapped)) {
             self->recordKeyPress(mapped);
+        }
+    });
+
+    glfwSetCharCallback(m_handle, [](GLFWwindow* handle, unsigned int codepoint) {
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
+        if (self != nullptr) {
+            self->recordTypedCharacter(codepoint);
         }
     });
 
@@ -289,6 +325,22 @@ bool Window::isKeyDown(Key key) const {
     return glfwGetKey(m_handle, toGlfwKey(key)) == GLFW_PRESS;
 }
 
+void Window::recordTypedCharacter(unsigned int codepoint) {
+    if (codepoint < 0x20 || codepoint > 0x7E) {
+        return;
+    }
+    if (m_typedText.size() >= kMaxTypedText) {
+        return;
+    }
+    m_typedText.push_back(static_cast<char>(codepoint));
+}
+
+std::string Window::consumeTypedText() {
+    std::string typed;
+    typed.swap(m_typedText);
+    return typed;
+}
+
 bool Window::isMouseButtonDown(MouseButton button) const {
     return m_mouseButtonDown[static_cast<std::size_t>(button)];
 }
@@ -304,6 +356,8 @@ void Window::clearInputState() {
     m_mouseButtonDown.fill(false);
     m_mouseButtonPresses.clear();
     m_keyPresses.clear();
+    // A character typed while alt-tabbing away must not arrive on the way back.
+    m_typedText.clear();
     m_scrollDelta = 0.0f;
 }
 

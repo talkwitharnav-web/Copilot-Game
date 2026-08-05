@@ -52,7 +52,23 @@ enum class BlockId : std::uint8_t {
     /// block instead, so this is only ever a lone half.
     StoneSlabTop,
     PlanksFence,
+    CraftingTable,
+    /// Burning is not a property the furnace stores separately: it *is* a
+    /// different block, the same way a water level is. That keeps the lit front
+    /// texture and the light it gives off out of the block-entity data.
+    Furnace,
+    FurnaceLit,
+    Torch,
 };
+
+constexpr bool isFurnace(BlockId id) {
+    return id == BlockId::Furnace || id == BlockId::FurnaceLit;
+}
+
+/// Opens a screen when it is right-clicked, rather than being placed against.
+constexpr bool isInteractive(BlockId id) {
+    return id == BlockId::CraftingTable || isFurnace(id);
+}
 
 /// Highest flowing level. Water at this depth cannot spread any further, which
 /// is what stops a single source flooding the world.
@@ -82,7 +98,7 @@ constexpr bool isWaterSource(BlockId id) {
 /// away by the shader. Not the same thing as translucent: nothing is blended,
 /// depth is still written, and so no sorting is needed.
 constexpr bool isCutout(BlockId id) {
-    return id == BlockId::Leaves || id == BlockId::TallGrass;
+    return id == BlockId::Leaves || id == BlockId::TallGrass || id == BlockId::Torch;
 }
 
 /// Which way a stair's low step faces. The tall half sits on the opposite side.
@@ -142,7 +158,7 @@ constexpr BlockShape blockShape(BlockId id) {
     if (id == BlockId::Air || isWater(id)) {
         return BlockShape::Empty;
     }
-    if (id == BlockId::TallGrass) {
+    if (id == BlockId::TallGrass || id == BlockId::Torch) {
         return BlockShape::Cross;
     }
     if (id == BlockId::StoneSlab || id == BlockId::StoneSlabTop) {
@@ -362,7 +378,19 @@ constexpr int kMaxLight = 15;
 
 /// How much light a block gives off. Zero for everything that is not a source.
 constexpr int blockLightEmission(BlockId id) {
+    if (id == BlockId::FurnaceLit) {
+        return 13;
+    }
+    if (id == BlockId::Torch) {
+        return 14;
+    }
     return id == BlockId::Glowstone ? 14 : 0;
+}
+
+/// Falls if whatever it was standing on goes away. True for the flat things
+/// that have nothing to hold themselves up with.
+constexpr bool needsSupportBelow(BlockId id) {
+    return blockShape(id) == BlockShape::Cross;
 }
 
 /// Whether light passes through. Currently the exact opposite of solid, but kept
@@ -421,7 +449,37 @@ enum class TextureLayer : std::uint32_t {
     /// item icons in it costs nothing where a second array would need its own
     /// binding and sampler.
     Stick = 18,
+    CraftingTableTop = 19,
+    CraftingTableFront = 20,
+    CraftingTableSide = 21,
+    FurnaceTop = 22,
+    FurnaceSide = 23,
+    FurnaceFront = 24,
+    FurnaceFrontLit = 25,
+    Charcoal = 26,
+    Torch = 27,
+    WoodenPickaxe = 28,
+    WoodenAxe = 29,
+    WoodenShovel = 30,
+    WoodenSword = 31,
+    WoodenHoe = 32,
+    StonePickaxe = 33,
+    StoneAxe = 34,
+    StoneShovel = 35,
+    StoneSword = 36,
+    StoneHoe = 37,
+    /// One spawn egg per creature, **in `CreatureKind` order**, which is what
+    /// lets an egg's item id, its sprite layer and the species it produces all
+    /// be the same offset from their respective firsts. Only the first is
+    /// named: the rest are reached by adding the species index, and a name for
+    /// each would be thirty-six chances to get the order wrong.
+    SpawnEggFirst = 38,
 };
+
+/// How many sprite layers the spawn egg run occupies. Kept beside the enum
+/// because the loader has to reserve exactly this many, and `Creature.hpp`
+/// static-asserts it against `CreatureKind::Count`.
+constexpr int kSpawnEggLayers = 36;
 
 inline float blockTextureLayer(BlockId id, BlockFace face) {
     if (isStairs(id)) {
@@ -432,12 +490,41 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(TextureLayer::Stone);
     case BlockId::TallGrass:
         return static_cast<float>(TextureLayer::TallGrass);
+    case BlockId::Torch:
+        return static_cast<float>(TextureLayer::Torch);
     case BlockId::StoneSlab:
         return static_cast<float>(TextureLayer::Stone);
     case BlockId::StoneSlabTop:
         return static_cast<float>(TextureLayer::Stone);
     case BlockId::PlanksFence:
         return static_cast<float>(TextureLayer::Planks);
+    case BlockId::CraftingTable:
+        // The reference puts the tooled face on two sides and a plainer one on
+        // the other two, which needs a face direction the mesher does not
+        // supply. One texture on all four sides is the deliberate simplification
+        // - `CraftingTableSide` exists for when `BlockFace` gains a direction.
+        switch (face) {
+        case BlockFace::Top:
+            return static_cast<float>(TextureLayer::CraftingTableTop);
+        case BlockFace::Bottom:
+            return static_cast<float>(TextureLayer::Planks);
+        case BlockFace::Side:
+            return static_cast<float>(TextureLayer::CraftingTableFront);
+        }
+        return static_cast<float>(TextureLayer::CraftingTableFront);
+    case BlockId::Furnace:
+    case BlockId::FurnaceLit:
+        // Same simplification as the crafting table: the mesher cannot say
+        // which way a side face points, so the mouth appears on all four.
+        switch (face) {
+        case BlockFace::Top:
+        case BlockFace::Bottom:
+            return static_cast<float>(TextureLayer::FurnaceTop);
+        case BlockFace::Side:
+            return static_cast<float>(id == BlockId::FurnaceLit ? TextureLayer::FurnaceFrontLit
+                                                                : TextureLayer::FurnaceFront);
+        }
+        return static_cast<float>(TextureLayer::FurnaceFront);
     case BlockId::Dirt:
         return static_cast<float>(TextureLayer::Dirt);
     case BlockId::Grass:
@@ -483,6 +570,61 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         break;
     }
     return static_cast<float>(TextureLayer::Stone);
+}
+
+/// What a block is called, for the HUD and for logs.
+///
+/// Lives beside the block definition rather than in whichever screen happens to
+/// need it, so a new block is named once.
+constexpr const char* blockName(BlockId id) {
+    if (isStairs(id)) {
+        return "Cobblestone Stairs";
+    }
+    if (isWater(id)) {
+        return "Water";
+    }
+    if (isFurnace(id)) {
+        return "Furnace";
+    }
+    switch (id) {
+    case BlockId::Stone:
+        return "Stone";
+    case BlockId::Dirt:
+        return "Dirt";
+    case BlockId::Grass:
+        return "Grass";
+    case BlockId::Sand:
+        return "Sand";
+    case BlockId::Cobblestone:
+        return "Cobblestone";
+    case BlockId::Gravel:
+        return "Gravel";
+    case BlockId::Snow:
+        return "Snow";
+    case BlockId::Planks:
+        return "Planks";
+    case BlockId::Bricks:
+        return "Bricks";
+    case BlockId::Glowstone:
+        return "Glowstone";
+    case BlockId::Log:
+        return "Log";
+    case BlockId::Leaves:
+        return "Leaves";
+    case BlockId::TallGrass:
+        return "Tall Grass";
+    case BlockId::Torch:
+        return "Torch";
+    case BlockId::StoneSlab:
+    case BlockId::StoneSlabTop:
+        return "Stone Slab";
+    case BlockId::PlanksFence:
+        return "Fence";
+    case BlockId::CraftingTable:
+        return "Crafting Table";
+    default:
+        return "Air";
+    }
 }
 
 } // namespace game

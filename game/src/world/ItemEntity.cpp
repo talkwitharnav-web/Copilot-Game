@@ -34,6 +34,10 @@ constexpr float kRestitution = 0.42f;
 constexpr float kSettleSpeed = 2.0f;
 constexpr float kGroundFriction = 0.6f;
 
+/// Five minutes, as the reference has it. Ours runs on wall time rather than
+/// pausing when a chunk stops ticking, because drops are not saved anyway.
+constexpr float kDespawnSeconds = 300.0f;
+
 glm::vec3 eyeLevel(const glm::vec3& feet) {
     return {feet.x, feet.y + 0.9f, feet.z};
 }
@@ -60,6 +64,16 @@ void ItemEntities::spawn(const glm::vec3& position, ItemId item, int count, cons
 
 void ItemEntities::update(const World& world, const glm::vec3& playerFeet, float deltaSeconds) {
     const glm::vec3 target = eyeLevel(playerFeet);
+
+    // Anything nobody came back for is gone after five minutes, matching the
+    // reference. Without it a long session accumulates every drop it ever made
+    // - and each one rebuilds its geometry every frame.
+    for (std::size_t i = m_drops.size(); i-- > 0;) {
+        if (m_drops[i].age > kDespawnSeconds) {
+            m_drops[i] = m_drops.back();
+            m_drops.pop_back();
+        }
+    }
 
     for (Drop& drop : m_drops) {
         drop.age += deltaSeconds;
@@ -156,10 +170,19 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds) 
     engine::MeshData mesh;
 
     for (const Drop& drop : m_drops) {
-        if (drop.item == ItemId::None || !isBlockItem(drop.item)) {
+        if (drop.item == ItemId::None) {
             continue;
         }
-        const BlockId block = blockForItem(drop.item);
+        // Anything that is not a block has no cube to build, so it draws as a
+        // sprite. Until spawn eggs arrived nothing ever tested this: a dropped
+        // pickaxe existed, fell, could be picked up and rendered **nothing at
+        // all**, which is a bug you can only see by throwing one on the floor.
+        const bool blockLike = isBlockItem(drop.item);
+        const int spriteLayer = blockLike ? -1 : itemTextureLayer(drop.item);
+        if (!blockLike && spriteLayer < 0) {
+            continue;
+        }
+        const BlockId block = blockLike ? blockForItem(drop.item) : BlockId::Air;
 
         const float bob = drop.onGround ? (std::sin(timeSeconds * kBobSpeed + drop.position.x) * 0.5f + 0.5f) * kBobHeight
                                         : 0.0f;
@@ -193,12 +216,29 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds) 
                 mesh.vertices.push_back(engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
                                                        {sky, blockLight, shade, 1.0f},
                                                        {uvs[i].x, uvs[i].y},
-                                                       blockTextureLayer(block, face)});
+                                                       blockLike ? blockTextureLayer(block, face)
+                                                                 : static_cast<float>(spriteLayer)});
             }
             // Both windings: the cube spins, so either side can face the camera.
             mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
                                                      base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
         };
+
+        // A plant is two crossed quads, the same shape it has once placed and
+        // the same reason the hotbar icon is flat: wrapping the artwork around a
+        // cube shows a box of grass rather than the thing you are holding.
+        // Crossed rather than one sprite because the drop spins, and a single
+        // quad turns edge-on and disappears twice a revolution.
+        //
+        // A tool or a spawn egg takes the same path, for the same reason.
+        if (!blockLike || blockShape(block) == BlockShape::Cross) {
+            constexpr float kSquare = 0.70710678f; // 1/sqrt(2), so the diagonal matches a cube face
+            const glm::vec3 a = (right + forward) * kSquare;
+            const glm::vec3 b = (right - forward) * kSquare;
+            quad(centre - a - up, centre + a - up, centre + a + up, centre - a + up, BlockFace::Side, 1.0f);
+            quad(centre - b - up, centre + b - up, centre + b + up, centre - b + up, BlockFace::Side, 1.0f);
+            continue;
+        }
 
         quad(centre - right - forward - up, centre + right - forward - up, centre + right - forward + up,
              centre - right - forward + up, BlockFace::Side, 0.86f);

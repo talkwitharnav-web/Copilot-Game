@@ -154,6 +154,10 @@ bool World::columnLoaded(int chunkX, int chunkZ) const {
     return true;
 }
 
+bool World::columnResident(int x, int z) const {
+    return columnLoaded(floorDiv(x, Chunk::kSize), floorDiv(z, Chunk::kSize));
+}
+
 void World::seedColumnLight(int chunkX, int chunkZ) {
     const std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
                               static_cast<std::uint32_t>(chunkZ);
@@ -837,6 +841,15 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
                 // Must happen before the erase, or an edited chunk is lost the
                 // moment the player walks away from it.
                 saveIfModified(it->first, it->second);
+
+                // A column is only "lit" while all of it is resident. Leaving
+                // the key behind makes `seedColumnLight` return immediately when
+                // the chunk comes back, so it reloads with no sky light at all -
+                // which is what lowering render distance and raising it again
+                // used to do.
+                m_litColumns.erase((static_cast<std::uint64_t>(static_cast<std::uint32_t>(it->first.x))
+                                    << 32) |
+                                   static_cast<std::uint32_t>(it->first.z));
 
                 if (it->second.meshed) {
                     updates.push_back(ChunkMeshUpdate{it->first, {}, {}, true});

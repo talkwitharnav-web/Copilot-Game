@@ -127,6 +127,9 @@ Settings loadSettings(const std::filesystem::path& file) {
         if (key == "spawn_underground") {
             settings.spawnUnderground = (value == "1" || value == "true");
         }
+        if (key == "creature_showcase") {
+            settings.creatureShowcase = std::atoi(value.c_str());
+        }
         if (key == "creative_mode") {
             settings.creativeMode = (value == "1" || value == "true");
         }
@@ -164,9 +167,13 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "# spawn_underground: start on the floor of the deepest cave in that\n"
         << "#   column instead of on the surface. Only useful for testing.\n"
         << "#\n"
-        << "# creative_mode: 1 starts you with a full hotbar and blocks never run\n"
-        << "#   out. 0 starts you empty-handed, which until crafting exists means\n"
-        << "#   you can only place what you have already broken.\n"
+        << "# creature_showcase: 0 off, 1 lines every species up in front of\n"
+        << "#   spawn and leaves the spawner alone, 2 and up show one species on\n"
+        << "#   its own. Only useful for reviewing models.\n"
+        << "#\n"
+        << "# creative_mode: 1 starts you with a full hotbar and placing never\n"
+        << "#   runs a stack down. 0 starts you empty-handed. Blocks drop when\n"
+        << "#   broken either way.\n"
         << "#\n"
         << "# All of these take effect on restart.\n"
         << "worker_threads=" << settings.workerThreads << "\n"
@@ -176,6 +183,7 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "spawn_x=" << settings.spawnX << "\n"
         << "spawn_z=" << settings.spawnZ << "\n"
         << "spawn_underground=" << (settings.spawnUnderground ? 1 : 0) << "\n"
+        << "creature_showcase=" << settings.creatureShowcase << "\n"
         << "creative_mode=" << (settings.creativeMode ? 1 : 0) << "\n";
 }
 

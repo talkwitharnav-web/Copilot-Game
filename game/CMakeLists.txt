@@ -9,7 +9,12 @@ add_executable(game
     src/hud/InventoryScreen.cpp
     src/item/Inventory.cpp
     src/item/Recipe.cpp
+    src/item/Smelting.cpp
     src/item/SlotOps.cpp
+    src/item/Tool.cpp
+    src/world/Creature.cpp
+    src/world/Explosion.cpp
+    src/world/Furnace.cpp
     src/world/ItemEntity.cpp
     src/world/Noise.cpp
     src/world/Biome.cpp

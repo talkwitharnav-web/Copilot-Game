@@ -1,10 +1,49 @@
 # Reference Asset Library
 
+> **Reading a texture's layout, or authoring one of ours? Read `TEXTURING.md` first.** This file says what is *in* `reference/`; that one says what to *do* with it — how to derive a box net from an image, which measurements to take, and the traps that make a skin look broken.
+
 Map of `reference/minecraft-assets-26.2/` — a complete extraction of Minecraft 26.2's assets and data, ~553 MB.
 
 > **This folder is gitignored and nothing in it may ever ship.** It is reference material only. Mechanics, dimensions and recipe shapes are functional designs and may be reimplemented freely; textures, models, sounds and names are expressive work and must be ours. See `CLAUDE.md` → "Architecture Rules".
 
 The real root is nested one level down: `reference/minecraft-assets-26.2/minecraft-assets-26.2/`. Everything below is relative to that.
+
+---
+
+## Also in `reference/`, outside the dump
+
+Loose files sitting directly under `reference/`, not part of the 26.2 extraction:
+
+| File | What it is |
+|---|---|
+| `crafting-ui.avif` | **A 1280×720 console capture of the crafting-table screen.** The single most useful UI reference we have — it is vanilla's layout at **exactly 3×** (slot pitch measures 54 px = 18 × 3), so every measurement divides back to whole units. `INTERFACE.md` §5.7 lists what it settled. |
+| `crafting-ui.png` | The same, converted. **System.Drawing cannot open AVIF**; `tools/convert-image.ps1` reads it through WIC. |
+| `ui-icons/` | **21 regions cropped out of that capture**, written by `tools/extract-ui-icons.ps1`. See below. |
+| `inv-concept.png`, `concept art for inv*.webp` | The user's own inventory mock-ups, which the current panel art was built from |
+| `inv-9col.png`, `inv-native.png`, `hud-native.png`, `hud-source.png`, `furnace-ui.png` | Sources for `tools/make-hud-sheet.ps1` |
+
+### `reference/ui-icons/` — the extracted UI set
+
+Regenerate with `powershell -File tools\extract-ui-icons.ps1`. Every region is written **twice**: `<name>@3x.png` at the capture's own resolution, which is what you look at, and `<name>.png` divided by three, which is the native pixel grid and what you measure. The 1× is *indicative* — the source is lossy AVIF, so it recovers the grid, not clean texels.
+
+| Group | Files | Size (units) |
+|---|---|---|
+| **Category tabs** | `tab-construction`, `tab-equipment`, `tab-items`, `tab-nature`, `tab-search` | 22 × 25 each |
+| **Layout switch** | `layout-book-inventory` (recipe book **and** inventory), `layout-inventory-only` | 29 × 19, 27 × 19 |
+| **Toolbar** | `button-help`, `button-close`, `bumper-zl`, `bumper-zr`, `toolbar-strip` | |
+| **Craftable filter** | `toggle-craftable` | 28 × 19 |
+| **Widgets** | `scrollbar`, `slot-empty`, `slot-red-uncraftable`, `slot-output-red`, `panel-corner`, `armour-slot-glyphs` | slots are 18 × 18 |
+| **Whole cards** | `card-left-full`, `card-right-full` | 149 × 193, 178 × 169 |
+
+**The tab icons are not sprites and never were.** Each is a *rendered item composition* — Equipment is a sword crossed with a helmet, Nature is a grass block carrying a sapling and a flower, Items is a bed with a bucket. There is no artwork to port, which means our own tabs can be built from `appendBlockIcon` and cost nothing.
+
+**The extractor refuses to write under `assets/`**, mechanically, the same way `tools/make-reference-creature-atlas.ps1` does.
+
+### Staging these as proof art
+
+`tools/make-reference-hud.ps1` composites the five tab crops over a copy of our own `assets/textures/hud.png` and writes **`hud-reference.png` beside each `game.exe`**, which the game prefers whenever it exists. It carries the same `assets/` guard, never resizes a crop (the 22 × 25 check *is* the proof that the capture is a clean 3×), and `run.ps1` rebuilds it whenever the sheet it was composited from is newer.
+
+This exists so the catalogue's layout is proven against pixels known to be right. **Author our own art after the layout is settled, not while it is being settled** — otherwise a tab that looks wrong could equally be bad geometry or bad art, which is the same two-unknowns trap as debugging a box net alongside its skin.
 
 ---
 
@@ -116,6 +155,11 @@ Smelting is simpler:
 | Wooden tools ×5 | ✅ **now available** | `textures/item/wooden_{pickaxe,axe,shovel,sword,hoe}.png` |
 | Stone tools ×5 | ✅ **now available** | `textures/item/stone_{...}.png` |
 | **Chest** | ✅ | `textures/entity/chest/normal.png` — **64×64 UV sheet**, not four faces |
+| **Spawn eggs ×36** | ✅ **in use as placeholders** | `textures/item/<mob>_spawn_egg.png`, 16×16 each |
+| **Creature skins ×32** | ✅ **in use as placeholders** | `textures/entity/<family>/<mob>.png` |
+| **Charged creeper shell** | ✅ **in use** | `textures/entity/creeper/creeper_armor.png` — the same net as the creeper, mostly transparent |
+
+**Two of these are staged beside the executable rather than copied into `assets/`**, which is the rule for reference art: `tools/make-spawn-egg-sprites.ps1` writes `spawn-eggs/`, and `tools/make-reference-creature-atlas.ps1` writes `creatures-reference.png`. Both refuse to write under `assets/`. See `START-HERE.md` §5.
 
 **Nothing on the critical path lacks reference any more.** The earlier conclusion that the artist was needed for Stick and the tool icons is now obsolete — those were only missing because the old dump held block textures exclusively.
 
@@ -128,6 +172,8 @@ Every recipe in `CRAFTABLE.md` was confirmed by reading its JSON directly, which
 ### Still genuinely missing
 
 Nothing needed for M19. Longer term, `data/minecraft/loot_table/blocks/` will settle tool-tier drop rules when mining requirements land, and `worldgen/` is worth revisiting at ore generation.
+
+**Two folders have earned their keep since and are worth knowing about:** `models/entity/` and the Bedrock `.geo.json` equivalents behind `ANIMATION.md`'s pivot tables, and `data/minecraft/loot_table/entities/` for what a creature drops — which is the first thing M21 will want.
 
 ---
 

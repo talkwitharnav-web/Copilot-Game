@@ -49,10 +49,12 @@ struct RenderStats {
 class Renderer {
 public:
     /// `blockTextures` are loaded into a texture array in the order given; the
-    /// index into that list is what a vertex's `layer` refers to. `hudTexture`
-    /// and `fontTexture` are separate sheets, selected by negative layers.
+    /// index into that list is what a vertex's `layer` refers to. `hudTexture`,
+    /// `fontTexture` and `skinTexture` are separate sheets, selected by negative
+    /// layers, because a texture array needs every layer the same size.
     Renderer(const VulkanContext& context, Window& window, const std::vector<std::filesystem::path>& blockTextures,
-             const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture);
+             const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture,
+             const std::filesystem::path& skinTexture);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -186,6 +188,7 @@ private:
     std::unique_ptr<TextureArray> m_blockTextures;
     std::unique_ptr<TextureArray> m_hudTexture;
     std::unique_ptr<TextureArray> m_fontTexture;
+    std::unique_ptr<TextureArray> m_skinTexture;
     std::unique_ptr<UploadContext> m_uploads;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;

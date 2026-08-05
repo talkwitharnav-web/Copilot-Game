@@ -89,7 +89,8 @@ VkImageMemoryBarrier makeColorImageBarrier(VkImage image, VkImageLayout oldLayou
 
 Renderer::Renderer(const VulkanContext& context, Window& window,
                    const std::vector<std::filesystem::path>& blockTextures,
-                   const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture)
+                   const std::filesystem::path& hudTexture, const std::filesystem::path& fontTexture,
+                   const std::filesystem::path& skinTexture)
     : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
       m_depthImage(std::make_unique<DepthImage>(context, m_swapchain.extent())) {
     createCommandResources();
@@ -99,6 +100,7 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
     m_blockTextures = std::make_unique<TextureArray>(context, m_commandPool, blockTextures);
     m_hudTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{hudTexture});
     m_fontTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{fontTexture});
+    m_skinTexture = std::make_unique<TextureArray>(context, m_commandPool, std::vector{skinTexture});
     createDescriptorResources();
 
     // 16 MB holds a good many chunk meshes at once. Bigger only raises the
@@ -182,6 +184,7 @@ Renderer::~Renderer() {
     m_blockTextures.reset();
     m_hudTexture.reset();
     m_fontTexture.reset();
+    m_skinTexture.reset();
     m_uploads.reset();
 
     destroySyncObjects();
@@ -215,7 +218,7 @@ void Renderer::createCommandResources() {
 }
 
 void Renderer::createDescriptorResources() {
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
     for (std::uint32_t index = 0; index < bindings.size(); ++index) {
         bindings[index].binding = index;
         bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -251,7 +254,7 @@ void Renderer::createDescriptorResources() {
 
     // Neither texture ever changes, so the set is written once here rather than
     // per frame.
-    std::array<VkDescriptorImageInfo, 3> images{};
+    std::array<VkDescriptorImageInfo, 4> images{};
     images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     images[0].imageView = m_blockTextures->view();
     images[0].sampler = m_blockTextures->sampler();
@@ -261,8 +264,11 @@ void Renderer::createDescriptorResources() {
     images[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     images[2].imageView = m_fontTexture->view();
     images[2].sampler = m_fontTexture->sampler();
+    images[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    images[3].imageView = m_skinTexture->view();
+    images[3].sampler = m_skinTexture->sampler();
 
-    std::array<VkWriteDescriptorSet, 3> writes{};
+    std::array<VkWriteDescriptorSet, 4> writes{};
     for (std::uint32_t index = 0; index < writes.size(); ++index) {
         writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[index].dstSet = m_descriptorSet;

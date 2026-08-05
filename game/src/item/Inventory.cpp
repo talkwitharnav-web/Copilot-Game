@@ -28,7 +28,7 @@ int Inventory::add(ItemId item, int count) {
         }
         if (stack.empty()) {
             stack.item = item;
-            stack.count = std::min(count, kMaxStack);
+            stack.count = std::min(count, maxStackFor(item));
             count -= stack.count;
         }
     }
@@ -43,7 +43,7 @@ bool Inventory::hasRoomFor(ItemId item, int count) const {
 
     int room = 0;
     for (const ItemStack& stack : m_slots) {
-        room += stack.empty() ? kMaxStack : (stack.item == item ? stack.space() : 0);
+        room += stack.empty() ? maxStackFor(item) : (stack.item == item ? stack.space() : 0);
         if (room >= count) {
             return true;
         }

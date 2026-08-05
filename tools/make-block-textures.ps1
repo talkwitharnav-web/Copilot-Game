@@ -187,6 +187,40 @@ $leafWeights = @(34, 36, 57, 45)
 $tallGrassPalette = @('4A7A2E', '55892F', '629B36', '6FAD3E', '7EC048', '8FD456')
 $tallGrassWeights = @(8, 20, 28, 25, 40, 19)
 
+# Crafting table. The worktop is deliberately redder and darker than the plank
+# body it sits on, or the grid lines have nothing to read against.
+#
+# The body spans 21 luminance across three tones and leans hard on the lightest,
+# because the reference's worktop is 86% one colour over a spread of 16. A wider
+# range here is what turns a flat painted surface into noise.
+$craftTopPalette = @('8E5A34', '9A6540', 'A46E46')
+$craftTopWeights = @(1, 3, 12)
+$craftGridColor = '523320'
+$craftGridDark = '43291A'
+# The corner diagonal is a single flat tone: in the reference it is exactly the
+# 20 pixels of the four cut corners, with no variation at all.
+$craftRimColor = '412812'
+# Where the worktop meets the tile edge. Lighter than the corner diagonal, which
+# is the opposite of what a rim usually does and is what the reference shows.
+$craftEdgeColor = '6E3A20'
+$craftShadowPalette = @('16100A', '1C150C')
+
+# Darkened plank tones, one per entry of $planksPalette, so the post and the
+# block's shadowed edges keep the grain of the board they are cut from.
+$craftPostPalette = @('20170A', '281D0D', '2F2310', '362913', '3D2F16')
+$craftPostSeam = '1A1408'
+$craftEdgePalette = @('191209', '1F160C')
+
+# Tool sprites, drawn below as character maps. Glyphs never differ only by case:
+# PowerShell hash keys are case-insensitive and silently collide.
+$toolKey = @{
+    'L' = 'D9D9D9' # lit metal
+    'M' = 'AFAFAF' # metal
+    'D' = '7A7A7A' # shadowed metal
+    'H' = '55391B' # handle
+    '+' = '6B4823' # handle highlight
+}
+
 # Pebbles in soil, and the darkest crumbs. Sparse by design.
 $pebbleColor = ConvertTo-Color '82817C'
 $crumbColor  = ConvertTo-Color '4E3625'
@@ -297,9 +331,15 @@ function New-ClumpedTexture {
 }
 
 # Four boards, each with a hard dark seam beneath it and horizontal grain within.
-function New-PlanksTexture {
+#
+# Returns the palette index chosen for every pixel, seam rows as -1, so anything
+# drawn over a plank surface can darken *that tone* instead of painting a flat
+# band across the grain.
+function Set-PlankBase {
+    param([System.Drawing.Bitmap]$Bitmap)
+
     $boardHeight = 4
-    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $indices = New-Object 'int[]' ($size * $size)
 
     for ($y = 0; $y -lt $size; $y++) {
         $board = [Math]::Floor($y / $boardHeight)
@@ -312,7 +352,8 @@ function New-PlanksTexture {
                 # 16-pixel run, and the reference's longest is 8 - a solid line
                 # is what made these read as painted stripes rather than wood.
                 $shade = if ((Get-Hash01 -x $x -y $y -salt 411) -gt 0.42) { $plankSeamColor } else { $plankSeamDark }
-                $bitmap.SetPixel($x, $y, (ConvertTo-Color $shade))
+                $Bitmap.SetPixel($x, $y, (ConvertTo-Color $shade))
+                $indices[$y * $size + $x] = -1
                 continue
             }
 
@@ -330,11 +371,476 @@ function New-PlanksTexture {
             if ((Get-Hash01 -x $x -y $y -salt 313) -gt 0.965) {
                 $color = ConvertTo-Color $plankSeamColor
             }
-            $bitmap.SetPixel($x, $y, $color)
+            $Bitmap.SetPixel($x, $y, $color)
+            $indices[$y * $size + $x] = $index
         }
     }
 
+    # Comma stops PowerShell unrolling the array into the pipeline.
+    return , $indices
+}
+
+function New-PlanksTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    Set-PlankBase -Bitmap $bitmap | Out-Null
     Save-Bitmap -Bitmap $bitmap -Name 'planks'
+}
+
+# Stamps a sprite given as rows of characters, leaving '.' cells untouched so
+# the wood behind shows through. Drawing tools as a character map keeps the
+# shape visible in the source, which a stream of SetPixel calls does not.
+function Set-ToolSprite {
+    param([System.Drawing.Bitmap]$Bitmap, [string[]]$Rows, [int]$Left, [int]$Top)
+
+    for ($r = 0; $r -lt $Rows.Count; $r++) {
+        for ($c = 0; $c -lt $Rows[$r].Length; $c++) {
+            $glyph = [string]$Rows[$r][$c]
+            if ($glyph -eq '.') { continue }
+            $Bitmap.SetPixel($Left + $c, $Top + $r, (ConvertTo-Color $toolKey[$glyph]))
+        }
+    }
+}
+
+# The table's body: plank boards split by a post down the middle, shadowed at
+# the block's own edges, with tools hung on the panels between.
+#
+# The post and edges **darken the plank tone underneath** rather than painting a
+# flat band over it, so the grain and the board seams still read through. A
+# solid stripe here is exactly what turns a wooden post back into a drawn line.
+function New-CraftingSideTexture {
+    param([string]$Name,
+          [string[]]$LeftTool, [int]$LeftX = 2, [int]$LeftTop,
+          [string[]]$RightTool, [int]$RightX = 11, [int]$RightTop)
+
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $plank = Set-PlankBase -Bitmap $bitmap
+
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $isPost = ($x -eq 7 -or $x -eq 8)
+            $isEdge = ($x -eq 0 -or $x -eq 15)
+            if (-not $isPost -and -not $isEdge) { continue }
+
+            $index = $plank[$y * $size + $x]
+            if ($isPost) {
+                # -1 is a seam row, which stays the darkest tone: the post is
+                # made of boards too, so it keeps their rhythm.
+                $hex = if ($index -lt 0) { $craftPostSeam } else { $craftPostPalette[$index] }
+            } else {
+                $hex = $craftEdgePalette[[int]((Get-Hash01 -x $x -y $y -salt 733) -gt 0.5)]
+            }
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $hex))
+        }
+    }
+
+    if ($LeftTool) { Set-ToolSprite -Bitmap $bitmap -Rows $LeftTool -Left $LeftX -Top $LeftTop }
+    if ($RightTool) { Set-ToolSprite -Bitmap $bitmap -Rows $RightTool -Left $RightX -Top $RightTop }
+
+    Save-Bitmap -Bitmap $bitmap -Name $Name
+}
+
+# The worktop: a square surface with its four corners cut back at 45 degrees,
+# ruled into the 3x3 the block is for.
+#
+# The silhouette is measured, not designed. Distance is taken from the *nearest
+# corner*, not from the centre: a centred Manhattan radius draws a diamond whose
+# boundary has to be traced with a rim, and tracing it is what rounded this into
+# a circle on the first attempt. Corner distance gives a 45-degree step directly.
+#
+# Every band below was confirmed against the reference by pixel count - 20 rim,
+# 24 border, 64 grid - so these are facts about the shape rather than choices.
+function New-CraftingTopTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    Set-PlankBase -Bitmap $bitmap | Out-Null
+
+    $last = $size - 1
+    # Where the cut begins. 4 leaves a 10-pixel flat edge on each side, which is
+    # exactly wide enough for the grid plus its border.
+    $cut = 4
+
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $cornerDistance = [Math]::Min(
+                [Math]::Min($x + $y, ($last - $x) + $y),
+                [Math]::Min($x + ($last - $y), ($last - $x) + ($last - $y)))
+            $onBorder = ($x -eq 0 -or $y -eq 0 -or $x -eq $last -or $y -eq $last)
+
+            if ($cornerDistance -lt $cut) {
+                # Past the cut the block's own planks show through, so only the
+                # outermost pixels are darkened into a shadow.
+                if ($onBorder) {
+                    $hex = $craftShadowPalette[[int]((Get-Hash01 -x $x -y $y -salt 733) -gt 0.5)]
+                    $bitmap.SetPixel($x, $y, (ConvertTo-Color $hex))
+                }
+                continue
+            }
+
+            if ($cornerDistance -eq $cut) {
+                $bitmap.SetPixel($x, $y, (ConvertTo-Color $craftRimColor))
+                continue
+            }
+
+            # Rules at 3, 6, 9 and 12 on both axes, bounded to the grid's own
+            # box: four lines each way leave nine 2x2 cells.
+            $onGrid = ($x -ge 3 -and $x -le 12 -and $y -ge 3 -and $y -le 12) -and
+                      (@(3, 6, 9, 12) -contains $x -or @(3, 6, 9, 12) -contains $y)
+
+            if ($onBorder) {
+                $hex = $craftEdgeColor
+            } elseif ($onGrid) {
+                $hex = if ((Get-Hash01 -x $x -y $y -salt 941) -gt 0.35) { $craftGridColor } else { $craftGridDark }
+            } else {
+                $roll = Get-Hash01 -x $x -y $y -salt 953
+                $hex = $craftTopPalette[(Get-WeightedIndex -Roll $roll -Weights $craftTopWeights)]
+            }
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $hex))
+        }
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'crafting_table_top'
+}
+
+# Furnace. A smoother, darker stone than our cobble so it reads as worked rather
+# than piled, with a bright ledge running round the block at mid height.
+$furnacePalette = @('5E5E5E', '6A6A6A', '767676', '828282')
+$furnaceWeights = @(3, 6, 6, 3)
+$furnaceLedge = @('9C9C9C', 'A8A8A8', 'B4B4B4')
+$furnaceLedgeWeights = @(4, 6, 3)
+$furnaceMouth = '141414'
+$furnaceMouthRim = '242424'
+
+# Every face carries the same dark one-pixel edge, which is what gives the block
+# defined corners instead of melting into its neighbours. Two tones rather than
+# one, because the reference's border alternates between its two darkest greys
+# and a flat line reads as drawn on.
+$furnaceBorder = @('3C3C3C', '4E4E4E')
+# The fire in the lit front, sharing the HUD flame's ramp so the block and the
+# burn indicator agree about what fire looks like.
+$furnaceFire = @('E06414', 'FFC81E', 'FFE87A')
+
+# Openings, as the first and last lit column of each row. Both arch: narrow at
+# the top, full width below, which is what makes them read as a mouth rather
+# than a punched rectangle.
+$furnaceUpperMouth = @{ 3 = @(5, 10); 4 = @(4, 11); 5 = @(3, 12); 6 = @(3, 12) }
+$furnaceLowerMouth = @{ 11 = @(6, 9); 12 = @(4, 11); 13 = @(3, 12); 14 = @(3, 12) }
+
+# The band of bright stone between the two mouths, carried round every side.
+$furnaceLedgeRows = 8..10
+
+function Set-FurnaceBase {
+    param([System.Drawing.Bitmap]$Bitmap, [int]$Salt)
+
+    $grid = New-IndexGrid -Weights $furnaceWeights -Salt $Salt -RunChance 0.34
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            if ($furnaceLedgeRows -contains $y) {
+                $roll = Get-Hash01 -x $x -y $y -salt ($Salt + 17)
+                $hex = $furnaceLedge[(Get-WeightedIndex -Roll $roll -Weights $furnaceLedgeWeights)]
+            } else {
+                $hex = $furnacePalette[$grid[$y * $size + $x]]
+            }
+            $Bitmap.SetPixel($x, $y, (ConvertTo-Color $hex))
+        }
+    }
+}
+
+function Set-FurnaceBorder {
+    param([System.Drawing.Bitmap]$Bitmap)
+
+    # Four explicit edges rather than a list of coordinate pairs: PowerShell
+    # binds `,` tighter than `-`, so `@($i, $size - 1)` quietly parses as
+    # `($i, $size) - 1` and throws at runtime instead of at parse time.
+    $last = $size - 1
+    $tone = {
+        param([int]$x, [int]$y)
+        return ConvertTo-Color $furnaceBorder[[int]((Get-Hash01 -x $x -y $y -salt 641) -gt 0.42)]
+    }
+
+    # Drawn last, so it sits over the ledge and the mouths rather than under them.
+    for ($i = 0; $i -lt $size; $i++) {
+        $Bitmap.SetPixel($i, 0, (& $tone $i 0))
+        $Bitmap.SetPixel($i, $last, (& $tone $i $last))
+        $Bitmap.SetPixel(0, $i, (& $tone 0 $i))
+        $Bitmap.SetPixel($last, $i, (& $tone $last $i))
+    }
+}
+
+function New-FurnaceTopTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    # No ledge on the top face: it is the lid, not a wall.
+    $grid = New-IndexGrid -Weights $furnaceWeights -Salt 617 -RunChance 0.28
+    for ($y = 0; $y -lt $size; $y++) {
+        for ($x = 0; $x -lt $size; $x++) {
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $furnacePalette[$grid[$y * $size + $x]]))
+        }
+    }
+    Set-FurnaceBorder -Bitmap $bitmap
+    Save-Bitmap -Bitmap $bitmap -Name 'furnace_top'
+}
+
+function New-FurnaceSideTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    Set-FurnaceBase -Bitmap $bitmap -Salt 623
+    Set-FurnaceBorder -Bitmap $bitmap
+    Save-Bitmap -Bitmap $bitmap -Name 'furnace_side'
+}
+
+# `Lit` fills the lower mouth with fire, which is the only difference between the
+# two front faces.
+function New-FurnaceFrontTexture {
+    param([switch]$Lit)
+
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    Set-FurnaceBase -Bitmap $bitmap -Salt 631
+
+    $carve = {
+        param($spans)
+        foreach ($row in $spans.Keys) {
+            $from = $spans[$row][0]
+            $to = $spans[$row][1]
+            for ($x = $from; $x -le $to; $x++) {
+                # The topmost row of a mouth keeps a lighter rim, so the opening
+                # reads as having depth rather than being a flat hole.
+                $rim = ($x -eq $from) -or ($x -eq $to)
+                $hex = if ($rim) { $furnaceMouthRim } else { $furnaceMouth }
+                $bitmap.SetPixel($x, $row, (ConvertTo-Color $hex))
+            }
+        }
+    }
+
+    & $carve $furnaceUpperMouth
+    & $carve $furnaceLowerMouth
+
+    if ($Lit) {
+        $rows = ($furnaceLowerMouth.Keys | Sort-Object)
+        $bottom = $rows[-1]
+        foreach ($row in $rows) {
+            $from = $furnaceLowerMouth[$row][0]
+            $to = $furnaceLowerMouth[$row][1]
+            for ($x = $from; $x -le $to; $x++) {
+                # Hotter toward the middle of the mouth and toward its floor,
+                # with a ragged top edge so the fire does not read as a bar.
+                $centre = ($from + $to) * 0.5
+                $lateral = 1.0 - ([Math]::Abs($x - $centre) / [Math]::Max(1.0, ($to - $centre)))
+                $depth = ($row - $rows[0] + 1) / [double]($bottom - $rows[0] + 1)
+                $heat = $lateral * 0.55 + $depth * 0.45 + (Get-Hash01 -x $x -y $row -salt 811) * 0.22
+
+                if ($heat -lt 0.45) { continue } # Left dark: the fire has not reached here.
+                $index = if ($heat -gt 0.95) { 2 } elseif ($heat -gt 0.68) { 1 } else { 0 }
+                $bitmap.SetPixel($x, $row, (ConvertTo-Color $furnaceFire[$index]))
+            }
+        }
+    }
+
+    $name = 'furnace_front'
+    if ($Lit) { $name = 'furnace_front_on' }
+    Set-FurnaceBorder -Bitmap $bitmap
+    Save-Bitmap -Bitmap $bitmap -Name $name
+}
+
+# Charcoal: a rounded lump of burnt wood. Almost all of it sits in a narrow dark
+# band, with rare lighter faces catching the light - the reference spends 108 of
+# its 139 solid pixels between luminance 17 and 44, and only two above 90.
+$charcoalRim = '13110D'
+$charcoalPalette = @('1D1A14', '231F18', '2B261D', '312B21')
+$charcoalWeights = @(9, 5, 6, 3)
+$charcoalGlints = @('423B2F', '564C3B')
+
+# First and last solid column of each row. Nothing outside these is drawn at all,
+# so the icon keeps a clean transparent surround.
+$charcoalSpans = @{
+    1 = @(7, 9); 2 = @(5, 10); 3 = @(4, 11); 4 = @(3, 12); 5 = @(3, 13); 6 = @(3, 14)
+    7 = @(2, 14); 8 = @(2, 14); 9 = @(2, 14); 10 = @(2, 14); 11 = @(2, 14)
+    12 = @(3, 13); 13 = @(4, 12); 14 = @(5, 9)
+}
+
+function New-CharcoalTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    $solid = {
+        param([int]$x, [int]$y)
+        if (-not $charcoalSpans.ContainsKey($y)) { return $false }
+        return ($x -ge $charcoalSpans[$y][0]) -and ($x -le $charcoalSpans[$y][1])
+    }
+
+    foreach ($y in $charcoalSpans.Keys) {
+        $from = $charcoalSpans[$y][0]
+        $to = $charcoalSpans[$y][1]
+        for ($x = $from; $x -le $to; $x++) {
+            # The rim is derived from where the neighbouring rows stop rather
+            # than drawn separately, so it cannot end up thicker on one side.
+            $edge = ($x -eq $from) -or ($x -eq $to) -or
+                    (-not (& $solid $x ($y - 1))) -or (-not (& $solid $x ($y + 1)))
+            if ($edge) {
+                $hex = $charcoalRim
+            } else {
+                $glint = Get-Hash01 -x $x -y $y -salt 977
+                if ($glint -gt 0.93) {
+                    $hex = $charcoalGlints[[int]($glint -gt 0.975)]
+                } else {
+                    $roll = Get-Hash01 -x $x -y $y -salt 983
+                    $hex = $charcoalPalette[(Get-WeightedIndex -Roll $roll -Weights $charcoalWeights)]
+                }
+            }
+            $bitmap.SetPixel($x, $y, (ConvertTo-Color $hex))
+        }
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'charcoal'
+}
+
+# Torch: a two-pixel stick with a flame on top, everything else transparent so
+# the block can be drawn as a cross and cut out.
+#
+# The stick is lit from the flame above it, so it darkens downward, and its left
+# column is brighter than its right - the reference spends a full 90 luminance
+# on that one-pixel difference, which is what stops it reading as a flat bar.
+$torchLit = @('A38253', '9A7A4C', '8F7145', '846838', '795F32', '6E562C', '634D26', '584420')
+$torchShade = @('6D5736', '654F31', '5C482C', '544027', '4B3822', '43301D', '3A2818', '322014')
+# Outer flame above, hottest part low against the wood.
+$torchFlame = @{ '7,6' = 'FFC81E'; '8,6' = 'E06414'; '7,7' = 'FFE87A'; '8,7' = 'FFF3B4' }
+
+function New-TorchTexture {
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+
+    foreach ($key in $torchFlame.Keys) {
+        $parts = $key -split ','
+        $bitmap.SetPixel([int]$parts[0], [int]$parts[1], (ConvertTo-Color $torchFlame[$key]))
+    }
+
+    for ($row = 0; $row -lt $torchLit.Count; $row++) {
+        $y = 8 + $row
+        $bitmap.SetPixel(7, $y, (ConvertTo-Color $torchLit[$row]))
+        $bitmap.SetPixel(8, $y, (ConvertTo-Color $torchShade[$row]))
+    }
+
+    Save-Bitmap -Bitmap $bitmap -Name 'torch'
+}
+
+# Tools. Five shapes, each drawn once and recoloured per material, which is what
+# keeps ten icons to five character maps.
+#
+# Glyphs never differ only by case: PowerShell hash keys are case-insensitive
+# and silently collide. Digits sidestep that entirely.
+#   1/2/3  head, dark to light      7/8  handle, dark to light
+#
+# Every tool shares the same handle running down-left, so a row of them in the
+# hotbar reads as a set rather than as five unrelated pictures.
+$toolShapes = @{
+    'pickaxe' = @(
+        '................',
+        '................',
+        '....1111111.....',
+        '...132222231....',
+        '...121.....121..',
+        '...11.......11..',
+        '.........178....',
+        '........178.....',
+        '.......178......',
+        '......178.......',
+        '.....178........',
+        '....178.........',
+        '...178..........',
+        '..178...........',
+        '..17............',
+        '................')
+    'axe' = @(
+        '................',
+        '................',
+        '...11111........',
+        '...123331.......',
+        '...1233331......',
+        '...1233331......',
+        '...123331178....',
+        '...11111178.....',
+        '.......178......',
+        '......178.......',
+        '.....178........',
+        '....178.........',
+        '...178..........',
+        '..178...........',
+        '..17............',
+        '................')
+    'shovel' = @(
+        '................',
+        '................',
+        '........111.....',
+        '.......13231....',
+        '.......13231....',
+        '.......13231....',
+        '........111.....',
+        '........178.....',
+        '.......178......',
+        '......178.......',
+        '.....178........',
+        '....178.........',
+        '...178..........',
+        '..178...........',
+        '..17............',
+        '................')
+    'sword' = @(
+        '................',
+        '...........123..',
+        '..........1231..',
+        '.........1231...',
+        '........1231....',
+        '.......1231.....',
+        '......1231......',
+        '.....1231.......',
+        '....1231........',
+        '...1111111......',
+        '...1178111......',
+        '....178.........',
+        '...178..........',
+        '..178...........',
+        '..17............',
+        '................')
+    'hoe' = @(
+        '................',
+        '................',
+        '.....111111.....',
+        '.....133331.....',
+        '.....111111.....',
+        '.........178....',
+        '........178.....',
+        '.......178......',
+        '......178.......',
+        '.....178........',
+        '....178.........',
+        '...178..........',
+        '..178...........',
+        '..17............',
+        '................',
+        '................')
+}
+
+# Heads differ by material; handles are always the same stick.
+$toolHeads = @{
+    'wooden' = @{ '1' = '6B5228'; '2' = '8B6A3F'; '3' = 'A88253' }
+    'stone'  = @{ '1' = '4E4E4E'; '2' = '6E6E6E'; '3' = '8C8C8C' }
+}
+$toolHandleTones = @{ '7' = '4A3620'; '8' = '6B4E2C' }
+
+function New-ToolTextures {
+    foreach ($material in $toolHeads.Keys) {
+        $palette = $toolHeads[$material].Clone()
+        foreach ($glyph in $toolHandleTones.Keys) {
+            $palette[$glyph] = $toolHandleTones[$glyph]
+        }
+
+        foreach ($shape in $toolShapes.Keys) {
+            $rows = $toolShapes[$shape]
+            $bitmap = New-Object System.Drawing.Bitmap $size, $size
+            for ($y = 0; $y -lt $rows.Count; $y++) {
+                for ($x = 0; $x -lt $rows[$y].Length; $x++) {
+                    $glyph = [string]$rows[$y][$x]
+                    if ($glyph -eq '.') { continue }
+                    $bitmap.SetPixel($x, $y, (ConvertTo-Color $palette[$glyph]))
+                }
+            }
+            Save-Bitmap -Bitmap $bitmap -Name "${material}_${shape}"
+        }
+    }
 }
 
 # Running bond: every other row is offset by half a brick.
@@ -644,6 +1150,49 @@ New-LeavesTexture
 New-TallGrassTexture
 New-StickTexture
 
+# Tools hung on the table's panels, drawn as character maps so the shape is
+# legible in the source. A saw tapering to its teeth and a claw hammer on the
+# busy face; a pair of chisels on the quiet one, so walking around the block
+# shows something different.
+#
+# Kept to one- and three-pixel widths, which is what the reference uses. A tool
+# four or five wide at this size stops reading as a tool and becomes a blob.
+$saw = @(
+    'HHH',
+    'H+H',
+    'HHH',
+    'LMM',
+    'LMM',
+    '.MM',
+    '.MM',
+    '.LM',
+    '..M',
+    '..L')
+$hammer = @(
+    '.H.',
+    '.+.',
+    '.H.',
+    '.H.',
+    'MLM',
+    'DMD')
+$chisels = @(
+    'H.H',
+    '+.H',
+    '.L.',
+    'L.L',
+    'M.M')
+
+New-CraftingTopTexture
+New-CraftingSideTexture -Name 'crafting_table_front' -LeftTool $hammer -LeftX 2 -LeftTop 5 -RightTool $saw -RightX 11 -RightTop 3
+New-CraftingSideTexture -Name 'crafting_table_side' -LeftTool $chisels -LeftX 3 -LeftTop 5
+
+New-FurnaceTopTexture
+New-FurnaceSideTexture
+New-FurnaceFrontTexture
+New-FurnaceFrontTexture -Lit
+New-CharcoalTexture
+New-TorchTexture
+
 # Flat white, for geometry that supplies its own colour: the targeting cage, the
 # crosshair, and anything else that must not pick up a material.
 $white = New-Object System.Drawing.Bitmap $size, $size
@@ -653,3 +1202,5 @@ for ($y = 0; $y -lt $size; $y++) {
     }
 }
 Save-Bitmap -Bitmap $white -Name 'white'
+
+New-ToolTextures

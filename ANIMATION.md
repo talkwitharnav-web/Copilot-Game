@@ -1,0 +1,1053 @@
+# ANIMATION.md
+
+How Minecraft rigs and animates its mobs, measured from primary sources, written for **this** engine — axis-aligned boxes rebuilt every frame, no rotation hierarchy, legs translated rather than rotated.
+
+**Bedrock is the primary reference.** Java values are marked `[JE]`. Where both editions are given, they usually agree exactly, because Bedrock's data files are a direct transcription of Java's hardcoded model code from degrees into Molang. That agreement is the strongest evidence in this document and it is shown explicitly in §0.3.
+
+Companion documents: `RESEARCH.md` (physics, AI, spawning), `TEXTURING.md` (box nets and the §14 formula reference), `SYSTEM_MEMORY.md` (what we actually have).
+
+> **▶ Where we stand (2026-08-04).** Built since this was written: **head yaw separate from body yaw**, eased and clamped, driven by `LookAtPlayer` (§3.1–3.2, §3.5); the **chicken's wing oscillator and slow fall**, verbatim from §5.1; **`uprightBox` gained a `roll` axis** — the first rotation in the model system about the *forward* axis, which is what a wing needs; and **a real jump**, so `stepHeight` and `jumpHeight` are per species.
+>
+> **§(b)1 and §(b)2 are now done.** Limbs **rotate about a joint** instead of sliding: `legBox` hangs a limb from a pivot derived from the box's own extent, and `barBox` pivots the spider's sideways legs at their inner end. `CreatureSpecies::gaitSwing` is **radians, not metres**, and the roster is held to 0.70 rad — half the reference's 1.4 — because rotating lifts a foot by `L(1 − cos θ)`. The eased `limbSwingAmount` replaced the old two-valued `urgency`, saturating against each species' **own `runSpeed`** rather than the reference's flat 5 m/s, since our roster moves at about a third of Minecraft's speeds. §(b)3's **idle biped arm sway** is in on eight of the eleven bipeds; the three excluded are the villager, witch and wandering trader, whose arms are a *folded assembly* that is deliberately closed (`CLAUDE.md`).
+>
+> **Still outstanding:** the death fall (§7.1), the wolf's tail as a mood signal (§5.2), and the zombie's arm raise on acquiring a target (§5.5).
+>
+> **§3.3's head pitch is done, and §1.5's pivot tables now apply properly.** The head used to rotate its frame about the **creature's origin**, so anything forward of centre orbited — heads and necks visibly swung out and lunged while looking. `beginHead(neckForward, neckUp)` turns the group about the **neck joint** instead, taken from the head box's own numbers: rear face for a head carried in front, bottom face for one sat on top, base of the neck for the long-necked. That pivot is also exactly what pitch needed, so the two landed together.
+
+---
+
+## 0. Ground rules before any number is used
+
+### 0.1 Two coordinate systems, one set of numbers
+
+| | Bedrock (`.geo.json`) | Java `[JE]` (`ModelPart` / `PartPose`) |
+|---|---|---|
+| Y axis | **up** | **down** |
+| Origin | at the entity's **feet** | 24 units **above** the feet |
+| Units | 1 unit = 1/16 block | 1 unit = 1/16 block |
+| Rotation units | **degrees** | **radians** |
+| Model faces | −Z | −Z |
+
+Conversion between the two: `y_bedrock = 24 − y_java`, and `angle_bedrock = angle_java × 180/π`.
+
+Bedrock files are littered with the literal `57.3` (= 180/π to 3 s.f.) and `2.865` (= 0.05 rad) and `80.22` (= 1.4 rad). Those are Java's radian constants converted at transcription time. **When you see `57.3` in a Molang expression, it is a radians→degrees conversion, not a magic number.**
+
+Molang's `math.sin` / `math.cos` take **degrees**.
+
+### 0.2 What "pivot" means
+
+Both editions use the same idea:
+
+- A **bone** / `ModelPart` has a **pivot** — a point in model space. All of the bone's rotation happens about that point.
+- A **cube** inside the bone has its **own origin and size**, expressed in the *same* model space, not relative to the pivot.
+- Therefore the box's offset from the pivot is implicit: `offset = cube.origin − bone.pivot`.
+
+Bedrock geometry schema, verbatim:
+
+> `pivot` — "The bone pivots around this point (in model space units)."
+> `origin` — "This point declares the unrotated lower corner of cube (smallest x/y/z value in model space units)."
+> `parent` — "Bone that this bone is relative to. If the parent bone moves, this bone will move along with it."
+
+*(source: [geometry:1.12.0 schema](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/schemasreference/schemas/minecraftschema_geometry_1.12.0))*
+
+The practical consequence, and it is the whole answer to question 1: **a leg's pivot is at the TOP of the leg box, not its centre.** Sheep `leg0`: pivot `[-3, 12, 7]`, cube origin `[-5, 0, 5]`, size `[4, 12, 4]` — the cube spans y = 0…12 and the pivot sits at y = 12, exactly the top face. The leg hangs from the hip.
+
+### 0.3 Verification status
+
+Everything in the Bedrock column below was read this session out of Mojang's own published vanilla resource pack, [`Mojang/bedrock-samples`](https://github.com/Mojang/bedrock-samples). Java values marked ✅ agree with it after unit conversion, which makes them double-sourced. Java values marked ⚠ are from decompiled `net.minecraft.client.model.*` and were **not** independently confirmed in this session — treat them as likely-correct rather than proven.
+
+| Quantity | Bedrock (verified) | Java `[JE]` | Agreement |
+|---|---|---|---|
+| Walk frequency | `38.17` °/unit | `0.6662` rad/unit | ✅ 0.6662 rad = 38.17° |
+| Quadruped leg amplitude | `80.0` ° | `1.4` rad | ✅ 1.4 rad = 80.21° |
+| Biped leg amplitude | `tcos0 × 1.4` | `1.4 × amount` rad | ✅ |
+| Biped arm amplitude | `tcos0` (=`28.65`→`57.3` scaled) | `2.0 × 0.5 = 1.0` rad | ✅ 1.0 rad = 57.3° |
+| Villager leg amplitude | `40.0` ° | `1.4 × 0.5 = 0.7` rad | ✅ 0.7 rad = 40.1° |
+| Villager crossed arms | `−42.97` ° | `−0.75` rad | ✅ 0.75 rad = 42.97° |
+| Spider outer leg default | `±45` y, `∓45` z | `π/8×2`, `π/4` | ✅ |
+| Spider middle leg default | `±22.5` y, `∓33.3` z | `π/8×1`, `π/4 × 0.74` | ✅ 0.74×45 = 33.3 |
+| Spider walk amplitude | `22.92` ° | `0.4` rad | ✅ 0.4 rad = 22.92° |
+| Wolf sitting: upper body | `72` ° | `1.2566371` rad | ✅ |
+| Wolf sitting: body | `45` ° | `π/4` rad | ✅ |
+| Wolf sitting: hind legs | `270` ° | `1.5π` rad | ✅ |
+| Wolf sitting: front legs | `333` ° | `5.811947` rad | ✅ 5.811947 rad = 333.0° |
+| Wolf shake | `sin(p×180)·sin(p×1980)·27` | `sin(fπ)·sin(11fπ)·0.15π` | ✅ 0.15π = 27° |
+| Idle arm bob (z) | `cos(life×103.13244)×2.865` | `cos(age×0.09)×0.05` | ✅ 0.09 rad/tick × 20 = 103.13 °/s |
+| Idle arm bob (x) | `sin(life×76.776372)×2.865` | `sin(age×0.067)×0.05` | ✅ 0.067 rad/tick × 20 = 76.78 °/s |
+| Riding legs | `−81`, `±18` ° | `−1.4137167`, `±π/10` rad | ✅ |
+| Riding arms | `−36` ° | `−π/5` rad | ✅ |
+| Sheep graze angle | `36` ° base, `12.6` ° wobble | `π/5`, `0.21991149` rad | ✅ |
+| Sheep graze duration | `animation_length: 2.0` s | 40-tick counter | ✅ |
+| Humanoid pivots | `head [0,24,0]` `arm [∓5,22,0]` `leg [∓1.9,12,0]` | `head [0,0,0]` `arm [∓5,2,0]` `leg [∓1.9,12,0]` | ✅ under `y↦24−y` |
+
+Twenty independent agreements. That is why I am comfortable quoting the Java formulas.
+
+---
+
+# 1. The rig: pivots and hierarchy
+
+**This is the section that matters most for us, so it is the longest.**
+
+## 1.1 Rotated, not translated — always
+
+Every limb in Minecraft is **rotated about a pivot**. Nothing in the vanilla walk cycle is a translation. Translations do appear, but only for *pose changes* (sneaking moves the legs back and down; the wolf's sitting pose repositions every bone; the sheep's head drops 9 units to graze) — never for the swing itself.
+
+## 1.2 The pivot is at the joint, and which end that is varies by part
+
+| Part | Where the pivot sits | Which end of the box |
+|---|---|---|
+| Quadruped leg | hip / shoulder | **top face**, centred |
+| Biped leg | hip | **top face**, centred |
+| Biped arm | shoulder | 2 units **below** the top — the box extends 2 above the pivot and 10 below |
+| Head | base of the skull / neck | **bottom face**, centred (bipeds); at the neck joint, *outside* the box (quadrupeds) |
+| Tail | root, at the rump | **top face** |
+| Wing (chicken) | shoulder | **top face** |
+| Spider leg | body attachment, at the inner end | **inner end**, mid-height |
+
+Note the biped arm: pivot `[-5, 22, 0]`, cube origin `[-8, 12, -2]`, size `[4, 12, 4]` → the cube spans y = 12…24 while the pivot is at y = 22. So **2 units of the arm stick up above the shoulder joint**. That overhang is what stops a gap opening at the shoulder when the arm swings, and it is a deliberate rigging decision worth copying.
+
+Note also the quadruped head: sheep head pivot `[0, 18, -8]`, cube origin `[-3, 16, -14]`. The pivot is at the *back* of the head box, at the neck. The head swings on the end of a notional neck rather than rotating in place.
+
+## 1.3 Hierarchy: it exists, and it is used sparingly
+
+Bedrock bones have an optional `parent`. Java `ModelPart`s can hold children. Both are used, but far less than you would expect:
+
+| Model | Hierarchy present? | What is parented to what |
+|---|---|---|
+| Sheep (`geometry.sheep.sheared.v1.8`) | yes | `leg0..leg3` → `body`. `head` is **top-level**. |
+| Chicken (`geometry.chicken.v1.12`) | yes | `comb` → `head`, `beak` → `head`. Legs, wings, body all top-level. |
+| Spider (`geometry.spider.v1.8`) | yes | `head`, `body1`, `leg0..leg7` → `body0`. |
+| Wolf (`geometry.wolf`) | **no** | every bone is top-level, including `head`, `tail` and all four legs. |
+| Player armour (`player_armor.json`) | yes | `head`, `arms`, `legs` → `body`; `hat` → `head`; `rightItem` → `rightArm`. |
+
+The important observation for us: **the wolf has no hierarchy at all**, and it is one of the most expressively animated mobs in the game — sitting, shaking, tail-as-mood, head tilt. Mojang achieves the sitting pose not by rotating a parent but by writing an **absolute position and rotation for every bone**:
+
+```jsonc
+// animation.wolf.sitting — every bone set explicitly, no parenting
+"body":      { "position": ["-this", "-18 - this", "-this"],       "rotation": ["45.0 - this", 0, 0] },
+"leg0":      { "position": ["-2.5 - this", "-22 - this", "2 - this"],  "rotation": ["270 - this", 0, 0] },
+"leg1":      { "position": ["0.5 - this",  "-22 - this", "2 - this"],  "rotation": ["270 - this", 0, 0] },
+"leg2":      { "position": ["-2.49 - this","-17 - this", "-4 - this"], "rotation": ["333 - this", 0, 0] },
+"leg3":      { "position": ["0.51 - this", "-17 - this", "-4 - this"], "rotation": ["333 - this", 0, 0] },
+"tail":      { "position": ["-1.0 - this", "-21 - this", "6.0 - this"],"rotation": [0, 0, 0] },
+"upperbody": { "position": ["-1.0 - this", "-16 - this", "-3.0 - this"],"rotation": ["72 - this", "-this", 0] }
+```
+
+*(`"X - this"` is Molang for "set the value to X", where `this` is the current value — it is how a 1.8-format animation writes an absolute rather than an additive value.)*
+
+**Conclusion for our engine: we do not need a hierarchy.** A flat list of boxes, each with its own pivot, reproduces everything except:
+
+1. **Head children.** A beak, comb, ear, horn, snout or nose must turn with the head. We already solve this by swapping the local `forward`/`side` axes in `headParts()` — that is a one-level hierarchy implemented as an axis swap, and it is the right shape.
+2. **Whole-body pose changes** (sitting, sleeping). Minecraft handles those by hand-authoring every bone, and so can we.
+
+## 1.4 What rotating actually looks like versus translating
+
+This is the crux. A leg of length `L` with the pivot at its top:
+
+| | Rotate about the hip by θ | Translate fore/aft by d |
+|---|---|---|
+| Foot moves forward | `L·sin θ` | `d` |
+| Foot moves **up** | `L·(1 − cos θ)` | **0** |
+| Top of leg moves | **not at all** — welded to the hip | by `d` — detaches from the body |
+| Leg silhouette height | `L·cos θ` — shortens toward the extremes | constant |
+| Leg stays vertical | no, it tilts | yes |
+| Foot's horizontal speed | fastest at mid-stride, zero at the extremes | constant |
+
+Four visible consequences, in descending order of how much they matter:
+
+1. **The foot lifts.** At Minecraft's full amplitude (θ = 80°), `1 − cos 80° = 0.826`, so the foot rises **83% of a leg length** at the extremes of the stride. That vertical arc is the single strongest cue that says "this creature is stepping" rather than "this creature is sliding". A translated leg keeps its foot planted at ground level while travelling forward, which is precisely the definition of skating.
+2. **The stride eases.** The foot traces an arc, so it decelerates into each extreme and accelerates through the middle. A linear translation shuttles at constant speed and reads as mechanical.
+3. **Foreshortening reads as depth.** A rotated far leg is visibly shorter than a near leg at rest; that difference is what separates the four legs of a quadruped visually. Translation leaves all four the same height.
+4. **The hip gap.** A translated leg slides out from under the body. On a sheep (4-wide legs under an 8-wide body) the overhang hides it. On anything whose legs sit at the body's edge — horse, wolf, chicken, biped — it opens a visible seam at maximum swing, and given every quad in our creature meshes is double-sided, you see straight into it.
+
+**The gain from adding pivots is large, and it is almost entirely items 1 and 2.**
+
+## 1.5 Exact pivot coordinates
+
+All Bedrock, Y-up with the origin at the feet. Read `leg0/1/2/3` as **left-hind / right-hind / left-front / right-front** (the model faces −Z; +X is the model's right).
+
+### Quadruped — sheep, `geometry.sheep.sheared.v1.8`
+
+| Bone | Pivot | Cube origin | Cube size | Parent |
+|---|---|---|---|---|
+| `body` | `[0, 19, 2]` | `[-4, 13, -5]` | `[8, 16, 6]` | — (`bind_pose_rotation [90,0,0]`) |
+| `head` | `[0, 18, -8]` | `[-3, 16, -14]` | `[6, 6, 8]` | — |
+| `leg0` (L hind) | `[-3, 12, 7]` | `[-5, 0, 5]` | `[4, 12, 4]` | `body` |
+| `leg1` (R hind) | `[3, 12, 7]` | `[1, 0, 5]` | `[4, 12, 4]` | `body` |
+| `leg2` (L front) | `[-3, 12, -5]` | `[-5, 0, -7]` | `[4, 12, 4]` | `body` |
+| `leg3` (R front) | `[3, 12, -5]` | `[1, 0, -7]` | `[4, 12, 4]` | `body` |
+
+`[JE]` ⚠ `QuadrupedModel.createBodyMesh(bodyYOffset, …)` parameterises this: leg pivots at `(±3, 24 − bodyYOffset, 7 / −5)`, leg box `addBox(-2, 0, -2, 4, bodyYOffset, 4)`, head at `(0, 18 − bodyYOffset, −6)`, body at `(0, 17 − bodyYOffset, 2)` with `xRot = π/2`. **Cow and sheep use `bodyYOffset = 12`; pig uses `6`.** Converting the sheep's 12 through `y ↦ 24 − y` reproduces the Bedrock table exactly.
+
+### Biped — `player_armor.json` (identical for zombie, skeleton, villager, husk, stray, drowned, pillager)
+
+| Bone | Pivot | Cube origin | Cube size |
+|---|---|---|---|
+| `body` | `[0, 24, 0]` | `[-4, 12, -2]` | `[8, 12, 4]` |
+| `head` | `[0, 24, 0]` | `[-4, 24, -4]` | `[8, 8, 8]` |
+| `rightArm` | `[-5, 22, 0]` | `[-8, 12, -2]` | `[4, 12, 4]` |
+| `leftArm` | `[5, 22, 0]` | `[4, 12, -2]` | `[4, 12, 4]` |
+| `rightLeg` | `[-1.9, 12, 0]` | `[-3.9, 0, -2]` | `[4, 12, 4]` |
+| `leftLeg` | `[1.9, 12, 0]` | `[-0.1, 0, -2]` | `[4, 12, 4]` |
+| `waist` | `[0, 12, 0]` | (never rendered) | — |
+| `rightItem` | `[-6, 15, 1]` | — | parented to `rightArm` |
+
+The `±1.9` rather than `±2` for the legs is deliberate: it overlaps the two leg boxes by 0.2 units at the crotch so no seam opens when they swing apart. **Note this against our own z-fighting problem** — Mojang can overlap freely because it never draws an inward-facing surface; we draw both sides of every quad, so copying `±1.9` verbatim would give us a flickering strip up the inside of both legs. Use `±2.0` and separate on another axis.
+
+### Chicken — `geometry.chicken.v1.12`
+
+| Bone | Pivot | Cube origin | Cube size | Parent |
+|---|---|---|---|---|
+| `body` | `[0, 8, 0]` | `[-3, 4, -3]` | `[6, 8, 6]` (cube `rotation [90,0,0]`) | — |
+| `head` | `[0, 9, -4]` | `[-2, 9, -6]` | `[4, 6, 3]` | — |
+| `comb` | `[0, 9, -4]` | `[-1, 9, -7]` | `[2, 2, 2]` | `head` |
+| `beak` | `[0, 9, -4]` | `[-2, 11, -8]` | `[4, 2, 2]` | `head` |
+| `leg0` | `[-2, 5, 1]` | `[-3, 0, -2]` | `[3, 5, 3]` | — |
+| `leg1` | `[1, 5, 1]` | `[0, 0, -2]` | `[3, 5, 3]` | — |
+| `wing0` | `[-3, 11, 0]` | `[-4, 7, -3]` | `[1, 4, 6]` | — |
+| `wing1` | `[3, 11, 0]` | `[3, 7, -3]` | `[1, 4, 6]` | — |
+
+The wing pivot is at its **top** (y = 11, box spans 7…11), so the wing swings out and up about the shoulder. Comb and beak share the head's pivot exactly — they are the head-children case.
+
+### Wolf — `geometry.wolf` (no parenting anywhere)
+
+| Bone | Pivot | Cube origin | Cube size |
+|---|---|---|---|
+| `head` | `[-1, 10.5, -7]` | `[-3, 7.5, -9]` | `[6, 6, 4]` (+ two ears + snout) |
+| `body` | `[0, 10, 2]` | `[-3, 3, -1]` | `[6, 9, 6]` |
+| `upperBody` | `[-1, 10, 2]` | `[-4, 7, -1]` | `[8, 6, 7]` |
+| `leg0` (L hind) | `[-2.5, 8, 7]` | `[-2.5, 0, 6]` | `[2, 8, 2]` |
+| `leg1` (R hind) | `[0.5, 8, 7]` | `[0.5, 0, 6]` | `[2, 8, 2]` |
+| `leg2` (L front) | `[-2.5, 8, -4]` | `[-2.5, 0, -5]` | `[2, 8, 2]` |
+| `leg3` (R front) | `[0.5, 8, -4]` | `[0.5, 0, -5]` | `[2, 8, 2]` |
+| `tail` | `[-1, 12, 8]` | `[-1, 4, 7]` | `[2, 8, 2]` |
+
+The wolf is asymmetric on X by design (the whole model is offset −1). The tail pivot is at its top (y = 12, box 4…12), so the tail swings from the rump.
+
+### Spider — `geometry.spider.v1.8`
+
+| Bone | Pivot | Cube origin | Cube size | Parent |
+|---|---|---|---|---|
+| `body0` (thorax) | `[0, 9, 0]` | `[-3, 6, -3]` | `[6, 6, 6]` | — |
+| `head` | `[0, 9, -3]` | `[-4, 5, -11]` | `[8, 8, 8]` | `body0` |
+| `body1` (abdomen) | `[0, 9, 9]` | `[-5, 5, 3]` | `[10, 8, 12]` | `body0` |
+| `leg0` (L, rear) | `[-4, 9, 2]` | `[-19, 8, 1]` | `[16, 2, 2]` | `body0` |
+| `leg1` (R, rear) | `[4, 9, 2]` | `[3, 8, 1]` | `[16, 2, 2]` | `body0` |
+| `leg2` (L) | `[-4, 9, 1]` | `[-19, 8, 0]` | `[16, 2, 2]` | `body0` |
+| `leg3` (R) | `[4, 9, 1]` | `[3, 8, 0]` | `[16, 2, 2]` | `body0` |
+| `leg4` (L) | `[-4, 9, 0]` | `[-19, 8, -1]` | `[16, 2, 2]` | `body0` |
+| `leg5` (R) | `[4, 9, 0]` | `[3, 8, -1]` | `[16, 2, 2]` | `body0` |
+| `leg6` (L, front) | `[-4, 9, -1]` | `[-19, 8, -2]` | `[16, 2, 2]` | `body0` |
+| `leg7` (R, front) | `[4, 9, -1]` | `[3, 8, -2]` | `[16, 2, 2]` | `body0` |
+
+All eight legs are the **same 16×2×2 box**, pivoted at the inner end, all eight pivots at y = 9 and only 1 unit apart in Z. The entire spread of the spider comes from rotation, not from geometry. That is the cheapest expressive rig in the game and it is worth studying for exactly that reason.
+
+---
+
+# 2. The walk cycle — the exact maths
+
+## 2.1 `limbSwing` and `limbSwingAmount`, precisely
+
+`[JE]` ⚠ From `LivingEntity`'s per-tick tail (modern versions wrap this in `WalkAnimationState`, with identical numbers):
+
+```java
+// once per tick, on the entity
+float distThisTick = sqrt(dx*dx + dz*dz);        // dy included only for FlyingAnimal
+float target       = min(distThisTick * 4.0f, 1.0f);
+animationSpeed    += (target - animationSpeed) * 0.4f;   // limbSwingAmount
+animationPosition += animationSpeed;                     // limbSwing
+```
+
+and in the renderer, per frame:
+
+```java
+limbSwingAmount = lerp(partialTick, animationSpeedOld, animationSpeed);
+limbSwing       = animationPosition - animationSpeed * (1.0f - partialTick);
+if (entity.isBaby()) limbSwing *= 3.0f;
+if (limbSwingAmount > 1.0f) limbSwingAmount = 1.0f;
+if (entity.isDeadOrDying() || shouldSit) { limbSwing = 0; limbSwingAmount = 0; }
+```
+
+So, plainly:
+
+- **`limbSwingAmount` is a 0…1 amplitude** derived from *speed*, eased with a first-order lag of factor **0.4 per tick**. That is a ~2.5-tick time constant: it reaches 95% of a new value in about 6 ticks (0.3 s). It is what makes the legs spin up and wind down instead of popping on and off.
+- **`limbSwing` is an accumulated phase**, incremented by `limbSwingAmount` each tick — *not* by distance directly. Because `limbSwingAmount ≈ 4 × distance` below the cap, `limbSwing ≈ 4 × total distance walked` in the normal case.
+- **A baby's phase is multiplied by 3** at render time, so babies scurry.
+
+Bedrock's equivalents are engine-provided Molang queries: **`query.modified_distance_moved`** (= `limbSwing`) and **`query.modified_move_speed`** (= `limbSwingAmount`).
+
+## 2.2 What `0.6662` means physically
+
+`limbSwing × 0.6662` is a phase in radians. Substituting `limbSwing ≈ 4 × distance`:
+
+```
+phase = 4 × distance × 0.6662 = 2.6648 × distance   radians
+```
+
+One full cycle is 2π rad, so:
+
+> **One complete leg cycle every 2π / 2.6648 = 2.358 blocks travelled.**
+
+This holds until `limbSwingAmount` saturates. It caps at 1.0 when `distThisTick ≥ 0.25` blocks, i.e. **5.0 m/s**. Above that, `limbSwing` grows by exactly 1 per tick and the cadence locks at `2π / 0.6662 = 9.43 ticks = 0.47 s` per cycle (2.12 Hz), regardless of how fast the entity is actually moving.
+
+**Useful calibration for us:** our `gaitRate` is radians (of `sin`) per metre. Minecraft's equivalent is **2.665 rad/m**. `CLAUDE.md` records our old hardcoded value as `distance * 6` — that is 2.25× faster per metre than the reference, which is why one gait for every species looked wrong.
+
+## 2.3 The quadruped formula
+
+Bedrock, verbatim from `resource_pack/animations/quadruped.animation.json`:
+
+```jsonc
+"animation.quadruped.walk": {
+  "anim_time_update": "query.modified_distance_moved",
+  "loop": true,
+  "bones": {
+    "leg0": { "rotation": ["math.cos(query.anim_time * 38.17) *  80.0", 0, 0] },  // left hind
+    "leg1": { "rotation": ["math.cos(query.anim_time * 38.17) * -80.0", 0, 0] },  // right hind
+    "leg2": { "rotation": ["math.cos(query.anim_time * 38.17) * -80.0", 0, 0] },  // left front
+    "leg3": { "rotation": ["math.cos(query.anim_time * 38.17) *  80.0", 0, 0] }   // right front
+  }
+}
+```
+
+`[JE]` ⚠ the same thing in `QuadrupedModel.setupAnim`:
+
+```java
+rightHindLeg .xRot = cos(limbSwing * 0.6662f)      * 1.4f * limbSwingAmount;
+leftHindLeg  .xRot = cos(limbSwing * 0.6662f + PI) * 1.4f * limbSwingAmount;
+rightFrontLeg.xRot = cos(limbSwing * 0.6662f + PI) * 1.4f * limbSwingAmount;
+leftFrontLeg .xRot = cos(limbSwing * 0.6662f)      * 1.4f * limbSwingAmount;
+head.xRot = headPitch  * PI/180;
+head.yRot = netHeadYaw * PI/180;
+```
+
+Three facts worth stating explicitly:
+
+1. **The phase offset is exactly π, and it is a sign flip.** `cos(x + π) = −cos(x)`, which is why Bedrock writes `−80.0` instead of adding 180°. There is no quarter-phase, no four-beat gait — it is a two-phase trot.
+2. **The pairing is diagonal.** Left-hind and right-front swing together; right-hind and left-front swing together. That is a trot, and it is what makes Minecraft quadrupeds read as animals rather than as tables.
+3. **Only `xRot` moves.** No yaw, no roll, no vertical bob on the body. The entire quadruped walk cycle is four numbers on one axis.
+
+Amplitude in Java is `1.4 rad = 80.2°`, applied as a multiplier. Bedrock bakes `80.0` into the formula and supplies the amplitude as the animation's **blend weight** instead — see §6.2.
+
+## 2.4 The biped formula
+
+Bedrock, from `humanoid.animation.json` / `player.animation.json`:
+
+```jsonc
+"animation.humanoid.move": {
+  "bones": {
+    "leftarm":  { "rotation": ["variable.tcos0", 0, 0] },
+    "rightarm": { "rotation": ["-variable.tcos0", 0, 0] },
+    "leftleg":  { "rotation": ["variable.tcos0 * -1.4", -0.1, -0.1] },
+    "rightleg": { "rotation": ["variable.tcos0 *  1.4",  0.1,  0.1] }
+  }
+}
+```
+
+with `tcos0` computed in the entity's `pre_animation` script (this exact line appears in `pillager.entity.json`, `piglin_brute.entity.json`, `vex.entity.json` and others):
+
+```js
+variable.tcos0 = (Math.cos(query.modified_distance_moved * 38.17)
+                  * query.modified_move_speed
+                  / variable.gliding_speed_value) * 57.3;
+```
+
+`[JE]` ⚠ `HumanoidModel.setupAnim`:
+
+```java
+rightArm.xRot = cos(limbSwing * 0.6662f + PI) * 2.0f * limbSwingAmount * 0.5f;
+leftArm .xRot = cos(limbSwing * 0.6662f)      * 2.0f * limbSwingAmount * 0.5f;
+rightLeg.xRot = cos(limbSwing * 0.6662f)      * 1.4f * limbSwingAmount;
+leftLeg .xRot = cos(limbSwing * 0.6662f + PI) * 1.4f * limbSwingAmount;
+rightArm.zRot = leftArm.zRot = 0;
+rightLeg.yRot = leftLeg.yRot = 0;
+```
+
+The two agree: **arm amplitude = 1.0 rad (57.3°), leg amplitude = 1.4 rad (80.2°), ratio exactly 1.4.**
+
+**Counter-swing.** The arms are π out of phase with the legs *on the same side*: `rightArm` uses `+π`, `rightLeg` uses `+0`. So the right arm goes forward when the right leg goes back, and the right arm matches the **left** leg. That is human gait, and it is one sign flip.
+
+The `±0.1` on the legs' yaw and roll in Bedrock (and `∓0.1` in Java's `damage_nearby_mobs`) is a tiny 0.1° splay that stops the two leg boxes from being exactly coplanar. Same purpose as the `±1.9` hip offset.
+
+## 2.5 Sprinting, sneaking, riding, babies
+
+**Sprinting does not change the formula at all.** Walk speed is 4.317 m/s → `0.2159 blocks/tick × 4 = 0.864`, just under the cap. Sprint is 5.612 m/s → `0.2806 × 4 = 1.12`, **clamped to 1.0**. So sprinting simply saturates `limbSwingAmount`: the swing reaches full 80°/57.3° amplitude and the *cadence stops increasing*. The visible difference between walking and sprinting is amplitude, not frequency. (The player-only FOV change and the sprint body-lean are separate camera effects, not model animation.)
+
+**Sneaking** is a pose override, not a cycle change. Bedrock `animation.humanoid.sneaking`:
+
+```jsonc
+"body":     { "rotation": ["0.5 - this", 0, 0] },
+"head":     { "position": [0, 1.0, 0] },
+"leftarm":  { "rotation": [72.0, 0, 0] },
+"rightarm": { "rotation": [72.0, 0, 0] },
+"leftleg":  { "position": [0, -3.1, 3.9] },
+"rightleg": { "position": [0, -2.9, 4.1] }
+```
+
+`[JE]` ⚠ Java's crouch instead uses `body.xRot = 0.5f` **radians** (28.6°), `arms.xRot += 0.4f`, `legs.z = 4.0f`, `legs.y = 12.2f`, `head.y = 4.2f`, `body.y = 3.2f`. **The two editions genuinely differ here** and I could not reconcile Bedrock's literal `0.5` (which as degrees is imperceptible) with Java's `0.5 rad`. Reported as found; do not port the Bedrock number.
+
+**Riding** — both editions agree exactly:
+
+| Part | Bedrock | Java `[JE]` |
+|---|---|---|
+| legs xRot | `−81.0°` | `−1.4137167` rad |
+| legs yRot | `∓18.0°` | `∓π/10` |
+| arms xRot | `−36.0°` | `−π/5` |
+
+**Babies** multiply `limbSwing` by 3 at render time (`[JE]` ⚠) — one cycle every 0.79 blocks instead of 2.36. Bedrock achieves the same look by scaling the whole model (`"scale": "query.is_baby ? 2.0 : 1.0"` on the head bone) plus dedicated `animation.<mob>.baby_*` clips.
+
+---
+
+# 3. Head movement
+
+## 3.1 Two yaws, and the body chases the head
+
+There are three yaw values on a mob:
+
+| Value | Meaning |
+|---|---|
+| `yRot` | where the entity is *heading* (movement direction) |
+| `yBodyRot` | where the torso is pointing |
+| `yHeadRot` | where the head is pointing |
+
+The renderer passes the model **`netHeadYaw = yHeadRot − yBodyRot`** and applies it to the head bone. Bedrock does the same thing declaratively:
+
+```jsonc
+// look_at_target.animation.json — the entire head-look system, verbatim
+"animation.common.look_at_target": {
+  "loop": true,
+  "bones": {
+    "head": {
+      "relative_to": { "rotation": "entity" },
+      "rotation": ["query.target_x_rotation - this", "query.target_y_rotation - this", 0.0]
+    }
+  }
+}
+```
+
+`"relative_to": { "rotation": "entity" }` is the schema field that means *"make the bone rotation relative to the entity instead of the bone's parent"* — i.e. exactly `yHeadRot − yBodyRot`. This is what we already implement with a separate `headYaw`.
+
+**The catch-up.** `[JE]` ⚠ Mobs delegate to `BodyRotationControl.clientTick()`:
+
+- **While moving:** the body snaps to the movement heading each tick, then the *head* is clamped to within `getMaxHeadYRot()` of the body. Moving forces the body to lead.
+- **While standing still:** if the head has swung more than **15°** since the last stable reading, the *body* rotates toward the head, clamped to `getMaxHeadYRot()` per step. Otherwise a counter increments, and after **10 ticks (0.5 s)** of a stable head the body eases back to face front.
+
+That is the behaviour you see when a cow watches you walk past: the head turns first, and once it has swung far enough the whole body pivots to follow.
+
+## 3.2 The clamps
+
+| Limit | Value | Confidence |
+|---|---|---|
+| `[JE]` `Mob.getMaxHeadYRot()` default | **75°** | ⚠ decompiled only — **not verified this session** |
+| `[JE]` `Mob.getMaxHeadXRot()` default | **40°** | ⚠ decompiled only — **not verified this session** |
+| Body-follow trigger while standing | 15° of head drift | ⚠ |
+| Body eases back to front after | 10 ticks | ⚠ |
+
+Bedrock does not publish a numeric clamp. `minecraft:behavior.look_at_player` is documented only as *"Compels an entity to look at the player by rotating the `head` bone pose **within a set limit**"* — the limit is engine-internal.
+
+**Per-mob overrides exist but I could not enumerate them reliably, so I am not going to list any.** The only one I would state is that mobs with no separate head bone (slime, silverfish, magma cube) have no clamp because they have no head to clamp.
+
+Our current ±52° sits inside the 75° figure and is a reasonable, slightly conservative choice. I would not change it on the strength of an unverified constant.
+
+## 3.3 Pitch
+
+Pitch is far simpler than yaw: there is no body-follow, no easing, no separate accumulator. The head's `xRot` is set **directly from the entity's own pitch**, lerped only for the partial tick:
+
+```java
+// [JE] ⚠ LivingEntityRenderer
+float headPitch = lerp(partialTick, entity.xRotO, entity.getXRot());
+model.setupAnim(entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch);
+// and in every model:
+head.xRot = headPitch * (PI / 180);
+```
+
+Bedrock: `query.target_x_rotation`, applied to the head's X in the same expression as the yaw.
+
+**So head pitch costs one extra float and one extra rotation.** There is no machinery behind it. For a mob, the pitch comes from the look-target: `pitch = −atan2(dy, horizontalDistance)` toward the thing being looked at, clamped to `getMaxHeadXRot()`, and eased by the same rotation-speed control that eases yaw.
+
+Two special cases in Bedrock worth knowing, because they show pitch being *overridden* rather than clamped:
+
+```jsonc
+"animation.humanoid.look_at_target.gliding":  { "head": { "rotation": [-45.0, "query.target_y_rotation", 0] } },
+"animation.humanoid.look_at_target.swimming": { "head": { "rotation": ["math.lerp(query.target_x_rotation, -45.0, variable.swim_amount)",
+                                                                       "query.target_y_rotation", 0] } }
+```
+
+A gliding or swimming humanoid has its head forced to −45° pitch regardless of where it is looking.
+
+## 3.4 Head pivots
+
+Given in §1.5. Summary: biped `[0, 24, 0]` (base of skull, at the neck); chicken `[0, 9, -4]`; wolf `[-1, 10.5, -7]`; sheep `[0, 18, -8]`; spider `[0, 9, -3]`.
+
+In every case the pivot is at the **rear-bottom** of the head box — the neck joint — not the head's centre. That matters: rotating a head about its centre makes it swivel like a turret; rotating it about the neck makes the muzzle swing on an arc, which is what reads as "looking".
+
+## 3.5 `look_at_player` and `random_look_around`
+
+These are Bedrock AI goals that *produce* a look target; the animation above then consumes it.
+
+`minecraft:behavior.look_at_player`:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `probability` | **0.02** | chance **per tick** of starting to look |
+| `look_time` | **{min: 2, max: 4}** seconds | how long to hold the look |
+| `look_distance` | **8** blocks | how far away a player is still looked at |
+| `angle_of_view_horizontal` | 360° | detection cone, **not** the head clamp |
+| `angle_of_view_vertical` | 360° | detection cone |
+| `control_flags` | `[]` | empty — see below |
+| `priority` | 0 | lower = higher priority |
+
+Observed values: cave spider `look_distance: 6`, breeze `16`, ravager `angle_of_view_horizontal: 45`, allay/axolotl/camel `target_distance: 6, probability: 0.02`, armadillo `min_look_time: 40, max_look_time: 80`.
+
+`minecraft:behavior.random_look_around`:
+
+| Parameter | Default |
+|---|---|
+| `look_time` | **{min: 20, max: 40}** seconds |
+| `probability` | **0.02** per tick |
+| `min_angle_of_view_horizontal` | **−180°** |
+| `max_angle_of_view_horizontal` | **+180°** |
+
+**Convert the probability or it scales with frame rate.** `0.02` is *per tick*, and a Bedrock tick is a fixed 1/20 s. As a per-second rate that is `0.02 / 0.05 = 0.4` — i.e. a chicken starts a glance about **0.4 times per second**, or once every 2.5 s on average. Used raw against our variable-length frame, a mob at 120 fps would glance six times as often as one at 20 fps. (Same family of conversion as `RESEARCH.md` §1.2's ×20 / ×400.)
+
+**Both goals take `control_flags: []` — no controller at all.** That is not an oversight; it is the mechanism. Because they claim nothing, they can never conflict with movement, so a chicken can walk and watch you simultaneously without any special case. `CLAUDE.md` already records this as the key insight behind M20c; the same applies to look behaviours.
+
+---
+
+# 4. Idle and secondary motion
+
+## 4.1 What actually moves when a mob is standing still
+
+Honest answer: **for most mobs, nothing.** A stationary cow, pig, sheep, horse, goat or zombie is a completely static set of boxes except for the head tracking a look target. There is no breathing, no weight shift, no body bob. Minecraft's idle read comes almost entirely from head turns and from the AI wandering, not from procedural idle motion.
+
+The exceptions are worth listing because they are short:
+
+| Mob | Idle motion | Formula |
+|---|---|---|
+| **All bipeds** | arm sway | see below |
+| **Chicken** | wings | driven by the flap oscillator, which runs even at rest |
+| **Wolf** | tail height as a mood signal; head roll when interested | §5.2 |
+| **Fox** | tail wag while wiggling / sleeping | keyframed |
+| **Silverfish** | serpentine body wriggle | §5.6 |
+| **Ghast, squid, bat, allay, vex, parrot** | continuous flight/tentacle motion | out of our roster's scope |
+| **Everything else** | genuinely nothing | — |
+
+## 4.2 The biped idle arm sway — the one universal idle
+
+This is on the player, zombie, skeleton, villager, pillager, drowned, husk, stray, piglin. `[JE]` ⚠ `AnimationUtils.bobArms`:
+
+```java
+rightArm.zRot += cos(ageInTicks * 0.09f)  * 0.05f + 0.05f;
+leftArm .zRot -= cos(ageInTicks * 0.09f)  * 0.05f + 0.05f;
+rightArm.xRot += sin(ageInTicks * 0.067f) * 0.05f;
+leftArm .xRot -= sin(ageInTicks * 0.067f) * 0.05f;
+```
+
+Bedrock, verbatim from `zombie.animation.json`, cross-validating every constant:
+
+```
+z: math.cos(query.life_time * 103.13244) * 2.865 + 2.865      // 0.09 rad/tick × 20 = 103.13 °/s;  0.05 rad = 2.865°
+x: math.sin(query.life_time *  76.776372) * 2.865             // 0.067 rad/tick × 20 =  76.78 °/s
+```
+
+Read it plainly: **the arms rock outward by 0…5.7° on a 61-second… no — on a 3.5-second period, and forward/back by ±2.9° on a 4.7-second period.** The two periods are deliberately incommensurate (0.09 vs 0.067) so the motion never visibly repeats. The `+ 0.05` offset means the arms rest *slightly* splayed rather than flush against the body — which is also what stops them z-fighting with the torso.
+
+Periods: `2π / 0.09 = 69.8 ticks = 3.49 s` for the roll, `2π / 0.067 = 93.8 ticks = 4.69 s` for the pitch.
+
+**This is the highest value-per-line idle motion in the game.** Four lines, applies to every biped, and it is the difference between "a person standing there" and "a statue".
+
+---
+
+# 5. Per-mob specifics
+
+## 5.1 Chicken
+
+**The wings do not use the walk cycle.** They use a separate oscillator that keeps running in mid-air.
+
+`[JE]` ⚠ `Chicken.aiStep()` — the oscillator:
+
+```java
+oFlap = flap;  oFlapSpeed = flapSpeed;
+flapSpeed  = clamp(flapSpeed + (onGround ? -1 : 4) * 0.3, 0.0, 1.0);
+if (!onGround && flapping < 1.0) flapping = 1.0;
+flapping *= 0.9;
+if (!onGround && velocity.y < 0) velocity.y *= 0.6;   // the slow-fall
+flap += flapping * 2.0;
+```
+
+`[JE]` ⚠ `ChickenRenderer.getBob()` then feeds the model:
+
+```java
+bob = (sin(flap) + 1.0f) * flapSpeed;
+// ChickenModel.setupAnim:
+rightWing.zRot =  ageInTicks;   // ageInTicks IS the bob value, not a clock
+leftWing .zRot = -ageInTicks;
+body.xRot = PI / 2;             // the body is permanently laid on its back
+head.xRot = headPitch  * PI/180;   beak.xRot = redThing.xRot = head.xRot;
+head.yRot = netHeadYaw * PI/180;   beak.yRot = redThing.yRot = head.yRot;
+rightLeg.xRot = cos(limbSwing * 0.6662f)      * 1.4f * limbSwingAmount;
+leftLeg .xRot = cos(limbSwing * 0.6662f + PI) * 1.4f * limbSwingAmount;
+```
+
+Bedrock does the same thing with two engine queries, and the parrot's `pre_animation` publishes the formula in the open:
+
+```js
+variable.wing_flap = ((math.sin(query.wing_flap_position * 57.3) + 1) * query.wing_flap_speed);
+```
+
+```jsonc
+// chicken.animation.json
+"wing0": { "rotation": [0, 0, "variable.wing_flap - this"] },
+"wing1": { "rotation": [0, 0, "-variable.wing_flap - this"] },
+"body":  { "rotation": ["90.0 - this", 0, 0] },
+// chicken move: legs are the plain ±80° quadruped cycle
+```
+
+⚠ **One thing I could not settle:** Java applies `(sin(flap)+1) × flapSpeed` as **radians** (so up to ~2 rad ≈ 114° of wing swing), while Bedrock applies the identical expression as **degrees**. Either `query.wing_flap_speed` is scaled differently from Java's 0…1 `flapSpeed`, or the two editions really do flap by wildly different amounts. **Port the Java version — its units are unambiguous.**
+
+**Beak, comb and wattle simply copy the head's rotation exactly.** No independent motion. Our `headParts()` axis swap already covers this.
+
+> **▶ Built 2026-08-04.** All of the above except the leg cycle. `flap`, `flapSpeed` and `flapping` are three fields on `Creature` — three, because the beat has to keep running for a moment *after* landing — and the wing angle is `(sin(flap) + 1) × flapSpeed` applied as **radians**, taking the recommendation above. The wings hinge at the **shoulder** using the new `roll` axis; rotating them about their own centre swung the tip out and the root into the body.
+>
+> The slow fall is in too, at the reference's 1.95 m/s terminal descent — but **the 0.6 is re-solved for our timestep rather than used verbatim**. `v = (v - g·dt)·k` settles at `g·dt·k/(1-k)`, so applying 0.6 per *frame* lands at 2.55 m/s at 120 fps. Working back from the speed the reference's constant produces gives `k = terminal/(terminal + g·dt)`, which is exactly 0.6 when a frame happens to be a tick. **Chicks are covered for free**, since `scale` never enters into it.
+
+## 5.2 Wolf
+
+The wolf is the most animated mob in our roster's weight class and every piece of it is cheap.
+
+**Tail angle as a mood signal.** `[JE]` ⚠ `Wolf.getTailAngle()`:
+
+| State | Tail `xRot` | In degrees |
+|---|---|---|
+| Angry | `1.5393804` rad | **88.2°** — held straight out, rigid |
+| Wild / untamed | `π / 5` rad | **36°** — low |
+| Tame | `(0.55 − (maxHealth − health) × 0.02) × π` rad | **99°** at full health, **dropping as it is hurt** |
+
+That last row is the good one: a tamed wolf's tail *falls* as its health drops, at 0.02π = 3.24° per half-heart. It is a health bar made of geometry. Bedrock: `animation.wolf.tail_default` → `"query.tail_angle * 57.3 - this"`, i.e. the engine hands the same radian value to the animation and it converts.
+
+**Tail sway.** Bedrock `animation.wolf.angry`:
+
+```jsonc
+"tail": { "rotation": [0, "query.is_angry ? -this : (math.cos(query.modified_distance_moved * 38.17) * query.modified_move_speed * 80.22 - this)", 0] }
+```
+
+The tail **yaws** side to side with the walk cycle at the same frequency and amplitude as the legs — **unless angry, in which case it locks to zero.** That is one conditional and it changes the whole read of the animal.
+
+**Shake-off-water.** The best-value effect in the game per line. `[JE]` ⚠:
+
+```java
+// shakeAnim runs 0 → 2 at 0.05 per tick = 40 ticks = 2.0 seconds, then resets
+float bodyRoll(float partialTick, float offset) {
+    float f = clamp((lerp(partialTick, shakeAnimO, shakeAnim) + offset) / 1.8f, 0, 1);
+    return sin(f * PI) * sin(f * PI * 11.0f) * 0.15f * PI;   // 0.15π = 27°
+}
+```
+
+Bedrock, from `wolf.entity.json`'s `pre_animation`, identical:
+
+```js
+variable.body_shake_angle   = 0.05 * query.frame_alpha + query.shake_angle;
+variable.body_roll_progress = Math.clamp((variable.body_shake_angle - 0.16) / 1.8, 0, 1);
+variable.body_rot_z         = Math.sin(variable.body_roll_progress * 180)
+                            * Math.sin(variable.body_roll_progress * 1980) * 27;
+```
+
+The structure: `sin(p·π)` is an **envelope** that fades the shake in and out over the 2 seconds; `sin(11·p·π)` is the **carrier**, eleven oscillations inside that envelope; `27°` is the amplitude. The offsets stagger the body parts so the shake travels down the animal:
+
+| Part | Offset | Bedrock |
+|---|---|---|
+| head | 0 | `body_shake_angle` |
+| upper body | −0.08 | `− 0.08` |
+| body | −0.16 | `− 0.16` |
+| hind legs `[JE]` / tail (BE) | −0.20 | `− 0.2` |
+
+*(the one place the two editions differ: Java staggers the legs, Bedrock staggers the tail)*
+
+**Head tilt when interested** (you are holding a bone). `[JE]` ⚠ `interestedAngle += (target − interestedAngle) × 0.4` per tick, target 1 or 0; then `head.zRot = interestedAngle × 0.15π` → **up to 27° of head roll**. Bedrock: `animation.wolf.head_rot_z` → `"(query.is_interested ? (query.head_roll_angle * 57.3) : 0) + …"`.
+
+**Head-down stalk posture:** ⚠ **not found.** I could find no separate stalk/crouch pose for the wolf in either edition. The wolf's aggression reads through the *tail* (locked out at 88°) and its texture swap, not through a body pose. What we do today — pitching the tail up when targeting — is the right idea and matches the reference's intent.
+
+**Sitting pose:** given in full in §1.3. Angles: body 45°, upper body 72°, hind legs 270°, front legs 333°, plus a repositioning of every bone.
+
+## 5.3 Spider
+
+Eight identical boxes, all of the shape from rotation. Two layers: a **default pose** applied always, and a **walk** layered on top.
+
+Default pose (Bedrock `animation.spider.default_leg_pose`, `[JE]` ⚠ `SpiderModel` with `f = π/4`, `f2 = π/8`):
+
+| Legs | yaw | roll |
+|---|---|---|
+| `leg0`/`leg1` (rear pair) | `±45°` (`f2 × 2`) | `∓45°` (`f`) |
+| `leg2`/`leg3` | `±22.5°` (`f2 × 1`) | `∓33.3°` (`f × 0.74`) |
+| `leg4`/`leg5` | `∓22.5°` | `∓33.3°` |
+| `leg6`/`leg7` (front pair) | `∓45°` | `∓45°` |
+
+The `0.74` factor on the two middle pairs is what tucks them in slightly so the eight legs fan rather than star.
+
+Walk (Bedrock verbatim, `n` = 0,1,2,3 for the four pairs front-to-back):
+
+```jsonc
+"legN":   { "rotation": [0, "-math.abs(math.cos(query.anim_time * 76.34 + 90 * n) * 22.92)",
+                            "math.abs(math.sin(query.anim_time * 38.17 + 90 * n) * 22.92)"] }
+"legN+1": { "rotation": [0,  "math.abs(math.cos(query.anim_time * 76.34 + 90 * n) * 22.92)",
+                           "-math.abs(math.sin(query.anim_time * 38.17 + 90 * n) * 22.92)"] }
+```
+
+Three things make this work and all three are transferable:
+
+1. **The four pairs are 90° apart in phase** (`90 * 0/1/2/3`) — a proper travelling wave down the body, not a two-phase trot.
+2. **The yaw term runs at double frequency** (`76.34` = 2 × `38.17`) — the leg sweeps fore-and-aft twice per lift.
+3. **`math.abs`** on both terms. Rectifying the sine means the leg only ever lifts *up* and only ever swings *one way* — it never dips below its rest pose. That is what turns a sine wave into a step.
+
+`[JE]` ⚠ identical: `-(cos(limbSwing * 0.6662f * 2.0f + phase) * 0.4f) * limbSwingAmount` for yaw and `abs(sin(limbSwing * 0.6662f + phase) * 0.4f) * limbSwingAmount` for roll, `0.4 rad = 22.92°`.
+
+## 5.4 Rabbit and frog — the hop
+
+**The model reads its pose out of a single scalar the engine publishes.** Bedrock `animation.rabbit.move`:
+
+```jsonc
+"frontlegleft"  / "frontlegright": { "rotation": ["variable.jump_rotation * -40.0 - 11.0 - this", 0, 0] },
+"haunchleft"    / "haunchright":   { "rotation": ["variable.jump_rotation *  50.0 - 21.0 - this", 0, 0] },
+"rearfootleft"  / "rearfootright": { "rotation": ["variable.jump_rotation *  50.0 - this", 0, 0] },
+"earleft":  { "rotation": ["query.target_x_rotation - this", "query.target_y_rotation - this + 15.0", 0] },
+"earright": { "rotation": ["query.target_x_rotation - this", "query.target_y_rotation - this - 15.0", 0] },
+"nose":     { "rotation": ["query.target_x_rotation - this", "query.target_y_rotation - this", 0] }
+```
+
+Read it as: one number, `jump_rotation`, drives **six** bones with different gains and different rest offsets. Front legs get −40 and rest at −11°; haunches get +50 and rest at −21°; rear feet get +50 and rest at 0.
+
+**We already do the equivalent and arguably better.** `Creature.cpp` reads the pose from `velocity.y / hopLaunch` — real ballistic state rather than an animation counter — so the legs extend at launch and landing and fold at the apex without any of that being authored. `CLAUDE.md` records why. **Do not replace this with a `jump_rotation` counter.** The only thing worth taking is the *pattern*: one scalar, several bones, different gains and offsets per bone.
+
+The **ears** are worth taking directly: they follow the head's look target with a **±15° yaw splay**, so they never perfectly overlap and the rabbit reads as alert.
+
+**Frog:** ⚠ **not found.** Java's frog uses the newer keyframed `AnimationDefinition` system (see §6.4), not a formula, and I did not retrieve the Bedrock frog animation. I am not going to invent keyframes.
+
+## 5.5 Bipeds — zombie arms and villager arms
+
+**Zombie arms-out.** Bedrock `animation.zombie.attack_bare_hand`:
+
+```jsonc
+"leftarm":  { "rotation": ["-90.0 - (attack swing) - (idle bob)", "5.73 - …", "…"] },
+"rightarm": { "rotation": ["90.0 * (variable.is_brandishing_spear - 1.0) - (attack swing) + (idle bob)", "-5.73 + …", "…"] }
+```
+
+With no spear, `90 × (0 − 1) = −90`, so **both arms sit at a flat −90° in Bedrock** — straight out, always.
+
+`[JE]` ⚠ Java differs and is more interesting:
+
+```java
+float f2 = -PI / (isAggressive ? 1.5f : 2.25f);   // -120° when aggressive, -80° when not
+rightArm.xRot = leftArm.xRot = f2;
+rightArm.yRot = -(0.1f - f * 0.6f);   leftArm.yRot = 0.1f - f * 0.6f;   // f = sin(attackTime × π)
+rightArm.xRot += f * 1.2f - f1 * 0.4f;   // f1 = sin((1 - (1-attackTime)²) × π)
+leftArm .xRot += f * 1.2f - f1 * 0.4f;
+bobArms(rightArm, leftArm, ageInTicks);
+```
+
+**So a Java zombie raises its arms from 80° to 120° when it acquires a target** — a genuinely useful "I have seen you" signal that Bedrock does not have. Our roster already has an arms-out flag; adding the aggressive/idle distinction is one conditional.
+
+The `±0.1 rad` (5.73°) base yaw on the arms is confirmed by Bedrock's literal `5.73` / `-5.73`.
+
+**Villager crossed arms.** Bedrock `animation.villager.general`:
+
+```jsonc
+"arms": { "position": [0, -1.0, -1.0], "rotation": ["-42.97 - this", 0, 0] }
+```
+
+`[JE]` ⚠ `VillagerModel`: `arms.xRot = -0.75f` (= 42.97°). Note the villager has a **single `arms` bone** carrying both forearms plus a crossbar, not two independent arms — which is exactly the rig we built, and is why the join geometry was fiddly. `CLAUDE.md` records that join as **closed, not solved**; nothing in the reference changes that.
+
+Villager legs use **half** the normal biped amplitude: `40°` in Bedrock, `1.4 × 0.5 = 0.7 rad` in Java. Villagers shuffle.
+
+**Raised arms** (villager panicking / celebrating): `"arms": { "rotation": ["variable.raise_arms * -15.0", 0, 0] }` — a 15° lift, blended by a 0…1 variable.
+
+## 5.6 Sheep and cow — grazing
+
+Fully cross-validated between editions.
+
+**Duration: exactly 40 ticks = 2.0 seconds.** Bedrock sets `"animation_length": 2.0`; Java counts `eatAnimationTick` down from 40.
+
+**Head drop: 9 units (0.5625 blocks) for an adult, 2.5 for a lamb**, ramping over the first and last 4 ticks:
+
+```java
+// [JE] ⚠ Sheep.getHeadEatPositionScale — a 0..1 envelope
+if (tick <= 0)                  return 0;
+if (tick >= 4 && tick <= 36)    return 1;
+if (tick < 4)                   return  (tick - partialTick) / 4.0f;      // ramp in,  4 ticks
+else                            return -((tick - 40) - partialTick) / 4.0f; // ramp out, 4 ticks
+// SheepModel: head.y = 6.0f + scale * 9.0f;
+```
+
+**Head angle: 36° down, with a 12.6° nibble wobble:**
+
+```java
+// [JE] ⚠ Sheep.getHeadEatAngleScale
+if (tick > 4 && tick <= 36) {
+    float f = ((tick - 4) - partialTick) / 32.0f;          // 0..1 across the 32-tick hold
+    return PI/5 + 0.21991149f * sin(f * 28.7f);            // 36° ± 12.6°
+}
+return tick > 0 ? PI/5 : getXRot() * PI/180;
+```
+
+Bedrock, verbatim from `sheep.animation.json`, confirming every number:
+
+```jsonc
+"animation.sheep.grazing.v2": {
+  "animation_length": 2.0,
+  "bones": { "head": {
+    "position": { "0": [0,0,0], "0.2": [0, "query.is_baby ? -2.5 : -9.0", 0],
+                  "1.8": [0, "query.is_baby ? -2.5 : -9.0", 0], "2": [0,0,0] },
+    "rotation": { "0.2": { "pre": [36.0,0,0],
+                           "post": ["180.0 * (0.2 + 0.07 * math.sin(query.key_frame_lerp_time * 1644.39))", 0, 0] },
+                  "1.8": { "pre":  ["180.0 * (0.2 + 0.07 * math.sin(query.key_frame_lerp_time * 1644.39))", 0, 0],
+                           "post": [36.0,0,0] } } } }
+}
+```
+
+`180 × 0.2 = 36°` base, `180 × 0.07 = 12.6°` wobble, `28.7 rad = 1644.39°`. The wobble runs about 4.57 cycles across the hold — roughly **2.3 nibbles per second.**
+
+**How it is triggered:** the sheep's animation controller reads `query.is_grazing` and transitions from `default` to `grazing`, then back on `query.all_animations_finished`. That controller is the canonical example in Mojang's own docs (§6.1).
+
+**Cow:** ⚠ **not found** — I have no evidence a cow has a grazing animation at all. Only sheep eat grass (it converts grass to dirt and regrows their wool). Do not give a cow this animation on the assumption that it has one.
+
+---
+
+# 6. Bedrock's data-driven animation system
+
+## 6.1 The three files
+
+**1. Geometry** (`models/entity/*.geo.json`) — the rig. Bones with `name`, `parent`, `pivot`, initial `rotation`, and a list of `cubes` each with `origin`, `size`, `uv`, `inflate`, `mirror`. Plus optional `locators` (named points that track a bone — where a lead attaches, where a held item goes) and `poly_mesh` / `texture_meshes` (experimental, ignore).
+
+**2. Animation** (`animations/*.animation.json`) — the motion. Per the `actor_animation:1.8.0` schema:
+
+```jsonc
+"animation.<id>": {
+  "loop": true | false | "hold_on_last_frame",
+  "animation_length": 2.0,                       // seconds; else inferred from the last keyframe
+  "anim_time_update": "query.anim_time + query.delta_time",   // DEFAULT: real time
+  "blend_weight": <molang>,
+  "override_previous_animation": false,          // reset bones to bind pose first
+  "bones": {
+    "<bone>": {
+      "relative_to": { "rotation": "entity" },   // yHeadRot − yBodyRot, in one field
+      "rotation": <molang> | [x,y,z] | { "<time>": [x,y,z] | {"pre":…, "post":…, "lerp_mode":"linear"|"catmullrom"} },
+      "position": …,  "scale": …
+    }
+  },
+  "particle_effects": { "<time>": {…} },
+  "sound_effects":    { "<time>": {…} },
+  "timeline":         { "<time>": "<molang script>" }
+}
+```
+
+The single most important field is **`anim_time_update`**. Its default is real time, but setting it to `"query.modified_distance_moved"` makes the animation's clock **distance travelled** instead. That one line is how every walk cycle in the game is tied to movement rather than to the wall clock, and it is why the legs never desync from the feet.
+
+Values can be **keyframed** (a time-indexed map, lerped or Catmull-Rom) or **procedural** (a Molang expression evaluated every frame). Mojang uses procedural for cyclic motion and keyframes for one-shots. The fox's pounce is 60+ keyframes; the quadruped's walk is four expressions.
+
+**3. Animation controller** (`animation_controllers/*.json`) — a **state machine over animations**. From Mojang's own documentation:
+
+```jsonc
+"controller.animation.sheep.move": {
+  "states": {
+    "default": {
+      "animations": [ { "walk": "query.modified_move_speed" } ],   // name : blend weight
+      "transitions": [ { "grazing": "query.is_grazing" } ],
+      "blend_transition": 0.2                                       // cross-fade seconds on leaving
+    },
+    "grazing": {
+      "animations": [ "grazing" ],
+      "transitions": [ { "default": "query.all_animations_finished" } ]
+    }
+  }
+}
+```
+
+> "A state can specify any number of transition scripts, listed in order. Each transition has a target state to switch to, and a script for whether it should switch or not. For each transition in order, evaluate the script, and if it returns non-zero, switch to the specified state immediately. **NOTE: Only one transition will be processed per frame.**"
+
+## 6.2 Blending — three separate mechanisms, and the distinction matters
+
+1. **Per-animation blend weight**, `{"walk": "query.modified_move_speed"}`. The animation's output is scaled by a Molang expression every frame. **This is where `limbSwingAmount` lives in Bedrock** — the amplitude is not inside the formula, it is the weight. Compare `quadruped.animation.json` (no `modified_move_speed` in the formula, because the controller supplies it) against `wolf.animations.json` (which *does* multiply by `query.modified_move_speed` inline, because the wolf's walk runs at full weight).
+2. **`blend_transition`** — a cross-fade time in seconds when leaving a state. Documented as "a simple lerp between the two states over the time specified." Plus `blend_via_shortest_path` to avoid the 359°→1° problem.
+3. **Additive stacking.** An entity's `scripts.animate` list plays several animations at once and they compose. The chicken's is three lines: `["general", {"move": "query.modified_move_speed"}, "look_at_target"]` — a permanent setup pose, a speed-weighted walk, and the head look. That is the entire chicken.
+
+**The layering is the good idea, more than the state machine is.** `look_at_target` is one file, shared by the chicken, wolf, rabbit and spider alike, and it composes with whatever else is playing.
+
+## 6.3 Honest engineering judgement: should we copy the shape at 36 species?
+
+**No. Keep hardcoded per-species C++ functions. But steal three ideas out of it.**
+
+The case *for* the data-driven system is real: content without recompiling, artists iterating in Blockbench, and clean composition. The case against, for us specifically:
+
+- **We have no second consumer.** Mojang built this because third parties author add-ons against a shipped binary. We are one person with a compiler. `CLAUDE.md`'s standing rule — no abstraction without a second implementation in sight — applies exactly.
+- **Molang is a whole language.** A parser, an evaluator, a variable scope, `query.*` bindings, `this`, `??`, keyframe interpolation modes, `pre`/`post` tangents. That is weeks, and every hour of it is spent reaching parity with what a C++ `switch` already does for free.
+- **The runtime cost goes the wrong way.** We rebuild every creature's mesh every frame already. Adding an interpreted expression evaluation per bone per frame, on top, buys nothing.
+- **`RESEARCH.md` §8.7 already made this call for AI** — take the architecture, skip the JSON, skip the component groups, skip the filter language. The same reasoning applies verbatim here, and consistency between the two subsystems is worth something on its own.
+- **Our art pipeline is PowerShell + measurement, not Blockbench.** The workflow the JSON exists to serve is not the workflow we have.
+
+**The three things to steal, all of which are C++ concepts, not file formats:**
+
+1. **Drive the walk clock with distance, not time.** Bedrock's `anim_time_update: "query.modified_distance_moved"` is the single best idea in the system, and we already do it (`gait += ground * gaitRate`). Keep it and never regress it.
+2. **Amplitude as a weight, applied outside the formula.** One eased 0…1 scalar per creature, multiplied into every animated term. That is `limbSwingAmount`, it is four lines, and it is what makes motion start and stop smoothly. §8 recommends this.
+3. **Layering, as separate functions that compose.** `walkCycle()`, `lookAt()`, `idleBob()` each writing into a per-frame pose, rather than one monolithic `buildMesh` branch per species. We already half-have this — `headParts()` is a layer. Growing it to three or four named layers is refactoring, not architecture.
+
+**What to explicitly not take:** JSON at runtime, Molang, animation *controllers* as data (a C++ `switch` on our existing `CreatureTarget` / `running` state is the same state machine with a compiler checking it), `blend_via_shortest_path` (we ease `headYaw` through `std::remainder` already, which is the same fix), and keyframe tangent modes.
+
+## 6.4 One trend worth knowing: Java is moving toward keyframes too
+
+`[JE]` Since 1.19, new Java mobs (warden, frog, camel, sniffer, armadillo, breeze, creaking) use `AnimationDefinition` — a declarative keyframe format compiled into the jar, played by `KeyframeAnimations.animate`, replacing hand-written `setupAnim` trigonometry. The older mobs still use `setupAnim`.
+
+**What that means for us:** the formula-based approach we would be copying is the *legacy* approach even in Java. It is still the right one for us, because every animal in our roster is an old-style mob whose motion is genuinely a sine wave — but do not assume the formulas will keep being the reference for anything Mojang adds next.
+
+---
+
+# 7. Death, hurt and attack
+
+## 7.1 Death
+
+`[JE]` ⚠ `LivingEntityRenderer.setupRotations`:
+
+```java
+if (entity.deathTime > 0) {
+    float f = ((deathTime + partialTick - 1.0f) / 20.0f) * 1.6f;
+    f = sqrt(f);
+    if (f > 1.0f) f = 1.0f;
+    poseStack.mulPose(Axis.ZP.rotationDegrees(f * getFlipDegrees()));   // getFlipDegrees() == 90.0f
+}
+```
+
+| Quantity | Value |
+|---|---|
+| Total rotation | **90° about the model's Z axis** — it falls sideways, it does not spin |
+| `deathTime` runs | 0 → 20 ticks, entity removed at 20 |
+| Total death duration | **1.0 s** |
+| Time to reach full 90° | `(t/20)×1.6 ≥ 1` → **t = 12.5 ticks = 0.625 s** |
+| Remaining 7.5 ticks | lying flat |
+| Easing | `sqrt` — **fast at the start, slowing into the ground.** Not linear, not ease-in. |
+| Limb animation during death | **frozen** — `limbSwing` and `limbSwingAmount` are forced to 0 while dying |
+
+The `sqrt` is what makes it read as a collapse rather than a topple: at t = 1 tick the model has already rotated `sqrt(0.08) × 90 = 25°`.
+
+Exceptions ⚠: `getFlipDegrees()` returns 180 for the spider and cave spider (they flip onto their backs), and villagers/bats have their own overrides. I did not verify these individually.
+
+## 7.2 Hurt
+
+| Quantity | Value | Source |
+|---|---|---|
+| Red tint duration (`hurtTime`) | **10 ticks = 0.5 s** | ⚠ `[JE]` `LivingEntity.hurtDuration` |
+| Invulnerability window | **10 ticks = 0.5 s** | `RESEARCH.md` §2.4 |
+| Tint colour | red at ~30% strength, applied as a texture overlay | ⚠ `[JE]` `OverlayTexture` |
+| Additional motion | the hurt-direction camera tilt is **player-only**; mobs do not lurch | ⚠ |
+
+**We already have this** — `kSkinHurtLayer` (−4) plus `hurtTimer`, per `SYSTEM_MEMORY.md`. Nothing to do.
+
+## 7.3 Melee attack swing
+
+The swing is driven by a single 0…1 progress value, `attackTime` `[JE]` / `variable.attack_time` (BE), which runs over **6 ticks = 0.3 s** ⚠ and then resets.
+
+Two derived quantities appear everywhere:
+
+```
+f  = sin(attackTime × π)                              // symmetric bump, peaks at t = 0.5
+f1 = sin((1 − (1 − attackTime)²) × π)                 // skewed bump, peaks early
+```
+
+Applied to a zombie/biped arm (Bedrock and Java agree exactly):
+
+```
+arm.xRot += f × 1.2 − f1 × 0.4          // the strike:  forward fast, recover slow
+arm.yRot  = ±(0.1 − f × 0.6)            // the arm sweeps inward across the body
+```
+
+`[JE]` ⚠ the player/humanoid version additionally twists the torso:
+
+```
+body.yRot  = sin(sqrt(attackTime) × 2π) × 0.2         // 11.46° of body counter-rotation
+arm .yRot += body.yRot × 2                            // and the arm gets double that
+```
+
+Bedrock's `animation.humanoid.attack.rotations` confirms: `math.sin(math.sqrt(variable.attack_time) * 360) * 11.46` on the body, `× 2.0` on the arm. `0.2 rad = 11.46°`.
+
+**The `sqrt(attackTime)` is the interesting part** — it front-loads the twist so the body snaps around at the start of the swing and unwinds slowly. Same trick as the death fall.
+
+**Mobs without arms** (spider, silverfish, slime) have **no attack animation at all.** They lunge via movement and that is the whole cue.
+
+---
+
+# What is worth taking, and what is not
+
+## (a) Should we add pivot-based rotation, and how big is it?
+
+**Yes. It is the single highest-value change in this document, and it is smaller than it looks.**
+
+**Why it is small for us specifically.** We already build eight corners per box in a local frame, and `uprightBox` already takes a `pitch` that rotates the corners about the box's **centre**. Rotating about an arbitrary point instead is the same operation with an offset:
+
+```
+corner' = pivot + R·(corner − pivot)
+```
+
+That is a change to one function, not to the architecture. There is **no skeleton to introduce, no transform hierarchy, no bind pose** — because we rebuild from a box list every frame, a pivot is just "which point do these eight corners turn around". Mojang's own wolf proves a flat bone list with per-bone pivots is enough for a fully expressive mob (§1.3).
+
+**Derive the pivot, do not author it.** This codebase's most repeated bug is a shape derived somewhere other than the one table that owns it — the slab bounce, the stair teleport, the hovering creatures. A leg's pivot is *always* the top-centre of its own box, so a `legBox(...)` helper should compute it from the box's own extent. Never let a species row carry a pivot as a separate number that can drift from the geometry it belongs to.
+
+**Rough size:**
+
+| Piece | Size |
+|---|---|
+| Rotate-about-pivot in `uprightBox`/`lyingBox` (generalise the existing `pitch`) | small — one function |
+| `legBox()` helper that derives the pivot from the box and takes an angle | small |
+| Convert `swing` from a metre offset to a radian angle in the species table | mechanical — 36 rows, one column's meaning changes |
+| Audit the 36 species' leg call sites | the actual cost — **this is most of the work** |
+
+**The trap to plan for:** rotating a leg lifts its foot by `L(1 − cos θ)`, which at Minecraft's 80° amplitude is 83% of a leg length. Feet will leave the ground far more than they do today. That is correct and is the whole point, but it means every species' rest height and leg length is now visible in a way it was not — expect one round of the user saying an animal looks like it is high-stepping. Start at half Minecraft's amplitude and let them tune it.
+
+**A second trap, specific to us:** rotated boxes sweep through space that untilted boxes did not occupy. Anywhere two boxes currently sit flush (leg against belly), a rotation can push them into a shared plane and produce the flickering diagonal that `TEXTURING.md` §14.5b and the repo memory both warn about. Scan for shared extents *after* the change, not before.
+
+**What we do not need:** a parent/child hierarchy. The one case that needs it — head children — is already solved by the `headParts()` axis swap.
+
+## (b) The three highest gain-per-line improvements
+
+**1. Rotate legs about the hip instead of translating them.** (§1.4)
+
+Everything above. It fixes the skating read, it fixes the hip gap, and it gives foreshortening for free. Reference numbers to aim at: **2.665 radians of phase per metre travelled** and **1.4 rad (80°) of amplitude at full speed**, with quadruped legs paired **diagonally** and biped arms **counter-swinging** against the same-side leg.
+
+**2. An eased 0…1 amplitude, applied outside the formula.** (§2.1)
+
+We currently multiply the swing by an `urgency` term. Minecraft's `limbSwingAmount` is better in two ways and both are cheap:
+
+```cpp
+// once per tick, per creature
+float target = std::min(distanceThisTick * 4.0f, 1.0f);
+creature.swingAmount += (target - creature.swingAmount) * 0.4f;   // ~0.3 s to settle
+// then every animated term is multiplied by swingAmount
+```
+
+Two floats and one lerp. It is what stops the leg cycle popping on and off when a creature starts or stops walking, and it is *also* the thing that lets a single amplitude scale a walk into a run without a second animation. Bedrock treats this same number as a blend weight (§6.2), which is the same idea expressed as data.
+
+**3. Head pitch, plus the idle biped arm sway.** (§3.3, §4.2)
+
+Two small things that together buy a lot because we are 90% of the way to both:
+
+- **Head pitch is nearly free.** We already have `headYaw` with easing and a clamp. Pitch has no body-follow, no separate accumulator, no state machine — it is one more angle applied to the same box group, taken from the look target and clamped (Minecraft's default is ⚠ 40°). One float on `Creature`, one rotation in `headParts()`. It is the difference between a mob that turns to face you and a mob that *looks at* you.
+- **The idle arm sway is four lines and applies to every biped we have** — zombie, skeleton, villager, husk, stray, bogged, Blackbone, zombie villager, witch, wandering trader, Princepin. `zRot ±(cos(t × 0.09) × 0.05 + 0.05)`, `xRot ±(sin(t × 0.067) × 0.05)`, in radians against a seconds clock scaled by 20. The two periods (3.49 s and 4.69 s) are deliberately incommensurate so it never visibly loops.
+
+**Honourable mentions, in order, if there is appetite for a fourth and fifth:**
+
+- **The death fall** (§7.1) — `sqrt` eased, 90° about Z, 0.625 s, limbs frozen. Perhaps ten lines, and "things die properly" is a large readability win for a combat game.
+- **The wolf's tail as a mood signal** (§5.2) — 36° wild, 88° angry, and dropping with health when tame. We already pitch the tail on target; the health-linked version is one expression and turns geometry into a health bar.
+- **The zombie's 80° → 120° arm raise on acquiring a target** (§5.5) — one conditional, and it is the clearest "I have seen you" tell in the game.
+
+**What I would not bother with:** the swimming poses, `blend_via_shortest_path`, keyframe tangent modes, and any attempt at a generic animation-blending layer before there are two things that actually need to blend.
+
+---
+
+## Sources
+
+**Primary, read this session:**
+
+- [`Mojang/bedrock-samples`](https://github.com/Mojang/bedrock-samples) — Mojang's published vanilla Bedrock resource pack. Files used: `resource_pack/animations/{quadruped,chicken,sheep,wolf,spider,rabbit,villager,zombie,humanoid,silverfish,fox,look_at_target}.animation.json`; `resource_pack/models/entity/{sheep,chicken,wolf,spider,player_armor}.geo.json`; `resource_pack/entity/{chicken,rabbit,wolf,parrot,pillager,piglin_brute,vex,enderman}.entity.json`; `documentation/Molang.html`.
+- [geometry:1.12.0 schema](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/schemasreference/schemas/minecraftschema_geometry_1.12.0) — bone `pivot`/`parent`, cube `origin`/`size`.
+- [actor_animation:1.8.0 schema](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/schemasreference/schemas/minecraftschema_actor_animation_1.8.0) — `loop`, `anim_time_update`, `blend_weight`, `bones`, `relative_to`, keyframes.
+- [Animation Controllers](https://github.com/MicrosoftDocs/minecraft-creator/blob/main/creator/Reference/Content/AnimationsReference/Examples/AnimationController.md) — states, transitions, `blend_transition`.
+- [`minecraft:behavior.look_at_player`](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/entityreference/examples/entitygoals/minecraftbehavior_look_at_player) and [`random_look_around`](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/entityreference/examples/entitygoals/minecraftbehavior_random_look_around).
+
+**Secondary, marked ⚠ throughout:** decompiled Java `net.minecraft.client.model.*` and `net.minecraft.world.entity.*` under Mojang's official mappings (`QuadrupedModel`, `HumanoidModel`, `ChickenModel`, `WolfModel`, `SpiderModel`, `VillagerModel`, `AnimationUtils`, `LivingEntityRenderer`, `LivingEntity`, `Mob`, `BodyRotationControl`, `Sheep`, `Chicken`, `Wolf`). Every ⚠ value that also appears in the Bedrock data is promoted to ✅ in §0.3; the rest are flagged where they appear.
+
+**Explicitly not found, rather than guessed:** the frog's hop keyframes; a cow grazing animation; per-mob head-clamp overrides; a wolf stalk posture; the unit relationship between Bedrock `query.wing_flap_speed` and Java `flapSpeed`; independent confirmation of `getMaxHeadYRot` = 75° / `getMaxHeadXRot` = 40°.

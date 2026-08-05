@@ -1,0 +1,210 @@
+#include "world/Explosion.hpp"
+
+#include "world/Raycast.hpp"
+#include "world/World.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
+
+namespace game {
+namespace {
+
+/// The march's two fixed costs. `0.22500001` rather than `0.225` is the
+/// reference's own literal, nudged off the boundary to dodge a float edge case;
+/// divided by the 0.3 step it means a ray loses 0.75 intensity per block of
+/// open air travelled.
+constexpr float kStep = 0.3f;
+constexpr float kDecayPerStep = 0.22500001f;
+
+/// A ray samples the same cell about three times over, because the step is 0.3
+/// and a cell is 1. Paying the resistance every sample is deliberate and is why
+/// the reference notes that blasts inside a non-full block are heavily damped.
+constexpr float kResistanceOffset = 0.3f;
+constexpr float kResistanceScale = 0.3f;
+
+/// Sample points across an entity box are spaced `1/(2·size + 1)` apart.
+constexpr float kExposureSpacing = 2.0f;
+
+/// The published damage curve is Java's. Bedrock hits measurably softer — 27.5
+/// point-blank against Java's 43 on Normal — and does not publish a formula, so
+/// the curve is scaled to land on the edition we follow.
+constexpr float kBedrockDamageScale = 27.5f / 43.0f;
+
+std::uint32_t nextRandom(std::uint32_t& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+float randomUnit(std::uint32_t& state) {
+    return static_cast<float>(nextRandom(state) & 0xFFFFFFu) / static_cast<float>(0x1000000u);
+}
+
+/// The 1352 ray directions, built once.
+///
+/// Points on the *surface* of a 16³ index grid, normalised. Uniform on a cube
+/// rather than on a sphere, so rays crowd toward the six face centres — that
+/// unevenness is the reference's and is part of why craters look the way they
+/// do.
+const std::vector<glm::vec3>& rayDirections() {
+    static const std::vector<glm::vec3> directions = [] {
+        std::vector<glm::vec3> built;
+        built.reserve(1352);
+        for (int j = 0; j < 16; ++j) {
+            for (int k = 0; k < 16; ++k) {
+                for (int l = 0; l < 16; ++l) {
+                    if (j != 0 && j != 15 && k != 0 && k != 15 && l != 0 && l != 15) {
+                        continue;
+                    }
+                    glm::vec3 direction{static_cast<float>(j) / 15.0f * 2.0f - 1.0f,
+                                        static_cast<float>(k) / 15.0f * 2.0f - 1.0f,
+                                        static_cast<float>(l) / 15.0f * 2.0f - 1.0f};
+                    built.push_back(glm::normalize(direction));
+                }
+            }
+        }
+        return built;
+    }();
+    return directions;
+}
+
+std::uint64_t packCell(const glm::ivec3& cell) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x)) << 42) ^
+           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y)) << 21) ^
+           static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z));
+}
+
+/// True if anything solid stands between the two points. Water is not solid, so
+/// it shelters nothing — the reference's rule, arrived at for free.
+bool shielded(const World& world, const glm::vec3& from, const glm::vec3& to) {
+    const glm::vec3 offset = to - from;
+    const float distance = glm::length(offset);
+    if (distance < 0.0001f) {
+        return false;
+    }
+    return raycast(world, from, offset / distance, distance).hit;
+}
+
+} // namespace
+
+float blastResistance(BlockId block) {
+    if (isWater(block)) {
+        // 100, and it is the whole reason a blast underwater breaks nothing:
+        // a single 0.3 step costs 30, which no creeper ray can pay.
+        return 100.0f;
+    }
+    switch (block) {
+    case BlockId::Air:
+        return 0.0f;
+    case BlockId::Torch:
+    case BlockId::TallGrass:
+        return 0.0f;
+    case BlockId::Snow:
+        return 0.1f;
+    case BlockId::Leaves:
+        return 0.2f;
+    case BlockId::Dirt:
+    case BlockId::Sand:
+        return 0.5f;
+    case BlockId::Grass:
+    case BlockId::Gravel:
+        return 0.6f;
+    case BlockId::Log:
+        return 2.0f;
+    case BlockId::CraftingTable:
+        return 2.5f;
+    case BlockId::Planks:
+    case BlockId::PlanksFence:
+        return 3.0f;
+    case BlockId::Glowstone:
+        return 0.3f;
+    case BlockId::Furnace:
+    case BlockId::FurnaceLit:
+        return 3.5f;
+    case BlockId::Bricks:
+        return 6.0f;
+    default:
+        break;
+    }
+    // Stone, cobblestone and everything cut from them - slabs and stairs
+    // inherit their material's resistance, and the march ignores shape anyway.
+    return 6.0f;
+}
+
+std::vector<glm::ivec3> explosionBlocks(const World& world, const glm::vec3& centre, float power,
+                                        std::uint32_t seed) {
+    std::vector<glm::ivec3> destroyed;
+    std::unordered_set<std::uint64_t> seen;
+    std::uint32_t random = seed | 1u;
+
+    for (const glm::vec3& direction : rayDirections()) {
+        // Rolled fresh per ray, not once per blast. That is what stops the
+        // crater being a clean sphere.
+        float intensity = power * (0.7f + randomUnit(random) * 0.6f);
+        glm::vec3 position = centre;
+
+        while (intensity > 0.0f) {
+            const glm::ivec3 cell{static_cast<int>(std::floor(position.x)),
+                                  static_cast<int>(std::floor(position.y)),
+                                  static_cast<int>(std::floor(position.z))};
+            const BlockId block = world.blockAt(cell.x, cell.y, cell.z);
+            if (block != BlockId::Air) {
+                intensity -= (blastResistance(block) + kResistanceOffset) * kResistanceScale;
+                // Taken only if the ray survived paying for it, so whatever
+                // finally stops a ray is left standing.
+                if (intensity > 0.0f) {
+                    if (seen.insert(packCell(cell)).second) {
+                        destroyed.push_back(cell);
+                    }
+                }
+            }
+            position += direction * kStep;
+            intensity -= kDecayPerStep;
+        }
+    }
+    return destroyed;
+}
+
+float explosionExposure(const World& world, const glm::vec3& centre, const Aabb& box) {
+    const glm::vec3 size = box.max - box.min;
+    const glm::vec3 spacing{1.0f / (kExposureSpacing * size.x + 1.0f),
+                            1.0f / (kExposureSpacing * size.y + 1.0f),
+                            1.0f / (kExposureSpacing * size.z + 1.0f)};
+
+    int total = 0;
+    int clear = 0;
+    for (float u = 0.0f; u <= 1.0f; u += spacing.x) {
+        for (float v = 0.0f; v <= 1.0f; v += spacing.y) {
+            for (float w = 0.0f; w <= 1.0f; w += spacing.z) {
+                const glm::vec3 sample{box.min.x + size.x * u, box.min.y + size.y * v,
+                                       box.min.z + size.z * w};
+                ++total;
+                if (!shielded(world, centre, sample)) {
+                    ++clear;
+                }
+            }
+        }
+    }
+    return total == 0 ? 0.0f : static_cast<float>(clear) / static_cast<float>(total);
+}
+
+float explosionImpact(const glm::vec3& centre, float power, const glm::vec3& feet, float exposure) {
+    const float distance = glm::length(feet - centre);
+    const float reach = 2.0f * power;
+    if (distance >= reach) {
+        return 0.0f;
+    }
+    return (1.0f - distance / reach) * exposure;
+}
+
+int explosionDamage(float power, float impact) {
+    if (impact <= 0.0f) {
+        return 0;
+    }
+    const float raw = 7.0f * power * (impact * impact + impact) + 1.0f;
+    return static_cast<int>(std::round(raw * kBedrockDamageScale));
+}
+
+} // namespace game

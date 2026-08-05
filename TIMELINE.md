@@ -593,6 +593,8 @@ Fences, walls and panes, whose geometry depends on their neighbours rather than 
 > **Reference the genre freely.** "How does Minecraft do it?" is a perfectly good question here, for design as well as engineering — it is a well-tested set of answers and there is no prize for ignoring them. Ask the user where they want something to differ; do not invent divergence for its own sake.
 >
 > **Assets are the exception.** Textures, models, sounds, music and names have to be ours. That is a legal line, not a creative one — see "The End Product".
+>
+> **But only *coined* names.** *Sheep*, *cow*, *pig*, *wolf*, *stone*, *bread* are ordinary English for ordinary things and nobody owns them — use them plainly. It is the invented ones that need replacing: *Creeper*, *Enderman*, *Ghast*, *Shulker*, *Blaze*, *Wither*, *Redstone*.duct".
 
 ### ✅ M18a — Items and drops · **Core**
 
@@ -654,7 +656,7 @@ Plants were held 0.15 off each cell wall where the reference spans `0.8–15.2`,
 
 **Dimensions are not colours.** M19a's lesson was that a matching statistic does not make something look right. A matching *hitbox* genuinely is right, because it is a fact about geometry rather than a judgement about appearance — which is why this milestone could follow the reference exactly where the last one could not.
 
-### 🔶 M19c — Crafting and resource progression · **Core**
+### ✅ M19c — Crafting and resource progression · **Core**
 
 A crafting and progression system: a grid, material tiers, tools gating access to better materials.
 
@@ -678,20 +680,152 @@ Recipes are settled facts — see `CRAFTABLE.md`, verified against the reference
 
 **Four bugs fell out of playtesting**, all recorded in `CLAUDE.md`: horizontal collision resolution ignoring the shape table (stairs threw the player backwards), creative mode skipping item pickup (drops bounced off the player forever), drag committing on release only, and a drag armed by the click that filled the cursor.
 
-**Still to do — this is where a fresh session should pick up:**
+**Complete (2026-08-01).** Landed in order: the recipe matcher and 2×2 grid, then the crafting table and its 3×3, then the furnace and smelting, then torches, then tools and mining tiers.
 
-1. **The crafting table.** A new block with three face textures (reference: `crafting_table_{top,side,front}`), right-click to open, and a 3×3 layout. The matcher needs no changes; the screen does. `4 Planks → 1 Crafting Table` is already in `CRAFTABLE.md`.
-2. **Shift-click quick-move** between hotbar and storage, and double-click to gather a stack.
-3. **The rest of Tier 1** from `CRAFTABLE.md`: furnace and smelting, then torches.
-4. **Tools and mining tiers**, which is the part that turns crafting into progression.
+**The matcher was never changed after it was first written.** `craftResult` took the grid size and patterns were stored at their own size from the start, so the 3×3 was a layout change and the ten tool recipes were a table entry each. That design decision paid for itself twice.
 
-### ⬜ M20 — Entities and creatures · **Core**
+**Digging became timed**, which is what turns tools into progression rather than decoration. Hardness, tool speed and an under-tier penalty combine in `breakSeconds`; whether anything drops is a separate question in `yieldsDrop`. Stone withholding its drop from bare hands is the gate that makes the first pickaxe matter.
 
-Entity system, animation, pathfinding, spawning, and creature behaviours. Behaviours can follow the genre; the **models, textures and names must be ours**.
+**The furnace forced the block-entity question** that M17c deferred. Contents live in a position-keyed map saved to `furnaces.dat`, deliberately outside `World` so nothing block-entity shaped goes near the threaded chunk path. Whether a furnace is *lit* stayed in the block id, because the lit face and the light it casts are properties of the block. See `SYSTEM_MEMORY.md`.
+
+**Drops are no longer mode-dependent.** Creative used to suppress them; on the user's instruction (2026-07-31) breaking yields its drop in every mode, and creative now means only that placing and digging cost nothing.
+
+**Deliberately not done:** wall torches (need a tilted shape and orientation ids), glass (needs a transparent block), and the chest (needs a non-cube model). All three are recorded in `CRAFTABLE.md`.
+
+### ✅ M20a — Entity foundation and first creature · **Core**
+
+**Split from M20 (2026-08-01).** The original milestone bundled the entity system, animation, pathfinding, spawning and a roster of creatures into one item — far too large to end in something playable, which rule 1 forbids. This slice is the part that can: one creature you can walk up to.
+
+**Done when:** creatures spawn around the player, walk about, collide with the world, are lit by it, can be struck, and retire when you leave them behind.
+
+**Result:** the **Grazer** — a small four-legged herbivore, our own design, name and texture. Fourteen at a time within 12–30 blocks, retired past 90.
+
+**It is the general entity dropped items deliberately were not.** A drop has a position and resolves only downward; a creature has size, so it collides on all three axes, faces a direction, steps up ledges, turns away from walls and cliffs, and decides where to go. All of that lives in one struct rather than a base class, because there is exactly one kind so far.
+
+**Rendering reuses the drop-item approach:** the mesh is rebuilt every frame from boxes in world space, because world geometry is drawn with an identity model matrix and the shader recovers its normals from world position. The model turns with the creature for free, since every box is placed along its own forward and side axes.
+
+Release build, render distance 12: **121 fps, 14 creatures, 144 triangles each**, no measurable GPU cost.
+
+**Deliberately not done:** drops or loot (there is no food item yet, and hunger is M21), pathfinding beyond obstacle avoidance, and any second creature.
+
+### 🟨 M20b — Creature roster and behaviour · **Core** · *in progress*
+
+**Slice done so far:** thirty-six species exist, are told apart by where and when they appear, sixteen are hostile and two are neutral. This is now a broad land roster on working machinery, **not the finished milestone** — see "Still owed" below.
+
+**Result:** thirty-six species. Ordinary animal names remain ordinary English; the coined ones are ours.
+
+**Two movement archetypes rather than one.** Most of the roster walks with a leg swing whose rate and amplitude are per-species, because one hardcoded gait makes a camel mince and a chicken plod. The rabbit, the frog and the slimes instead **hop for real** — a launch velocity into the existing gravity and collision, so the arc height, the airtime and the hop length all fall out of the physics rather than a sine wave. Their legs read their pose back out of `velocity.y`, and a slime squashes on landing from the same number.
+
+**A neutral temperament with no new flag.** `hostile` means it hunts you on sight. A species that is not hostile but has `attackDamage > 0` is neutral: it ignores you until struck, then chases for a six-second grudge instead of bolting. That is the whole of the wolf, and it cost four lines. Pack-wide anger — the original propagates it through a 33×21×33 box — is *not* done, and is the same machinery as the herding below.
+
+| | lives in | active | temperament |
+|---|---|---|---|
+| **Sheep** | plains, beach, desert | day | passive; bolts when struck |
+| **Cow** | plains, rocky | day | passive; bolts when struck |
+| **Pig** | plains, beach | day | passive; bolts when struck |
+| **Bramble** | any land | night, **does not burn** | **hostile**; hunts on sight and **detonates**. 5% arrive charged, at twice the power. Runs from cats |
+| **Chicken** | plains, beach, rocky | day | passive; bolts when struck. **Falls slowly, flapping** — chicks too |
+| **Cat** | plains, beach, desert | day | passive; bolts when struck. **Brambles flee it within 6 m** |
+| **Camel** | desert, beach | day | passive; bolts when struck |
+| **Horse** | plains, rocky | day | passive; bolts when struck |
+| **Mule** | rocky, mountains | day | passive; bolts when struck |
+| **Llama** | rocky, mountains, snowy peaks | day | passive; bolts when struck |
+| **Donkey** | plains, rocky | day | passive; bolts when struck |
+| **Goat** | rocky, mountains, snowy peaks | day | passive; bolts when struck |
+| **Rabbit** | plains, beach, desert, snowy peaks | day | passive; bolts when struck |
+| **Wolf** | plains, rocky, mountains, snowy peaks | day | **neutral**; ignores you until struck, then fights back |
+| **Frog** | plains, beach | day | passive; bolts when struck |
+| **Fox** | plains, rocky, snowy peaks | day | passive; bolts when struck |
+| **Ocelot** | plains, beach | day | passive; bolts when struck. **Brambles flee it too** |
+| **Polar Bear** | mountains, snowy peaks | day | **neutral**; 30 HP and hits for 6 |
+| **Panda** | plains, rocky | day | passive; bolts when struck |
+| **Slime** ×3 sizes | plains, beach | spawns dark, stays | **hostile**; splits into 2-4 of the next size down when killed |
+| **Spider** | any land | spawns dark, stays | **hostile in the dark, neutral in the light**; climbs walls |
+| **Cave Spider** | any land | spawns dark, stays | as the spider, at two thirds the size |
+| **Zombie** | any land | night, burns at dawn | **hostile**; first biped |
+| **Skeleton** | any land | night, burns at dawn | **hostile**; melee only, no bow yet |
+| **Villager** | plains | day | passive; **model and texture only** — trading and villages are their own milestone |
+| **Husk** | desert | night, **does not burn** | **hostile**; the zombie's rig, and the only hunter still about at midday |
+| **Silverfish** | rocky, mountains, snowy peaks | spawns dark, stays | **hostile**; seven segments, no legs, a travelling wriggle |
+| **Blackbone** | any land | night, **does not burn** | **hostile**; the skeleton's rig at 1.20 scale, rare and hits hard |
+| **Stray** | mountains, snowy peaks | night, burns at dawn | **hostile**; the cold uplands' skeleton, the tougher of the pair |
+| **Bogged** | plains, beach | night, burns at dawn | **hostile**; the lowland skeleton, weaker and faster |
+| **Zombie Villager** | any land | night, burns at dawn | **hostile**; the villager's rig posed with the arms held out |
+| **Witch** | any land | night, **does not burn** | **hostile**; the villager's rig under a four-box pointed hat |
+| **Wandering Trader** | any land | day | passive and rare; a traveller, not a resident. Trading is its own milestone |
+| **Princepin** | rocky, mountains | **day** | **hostile**; the only one that spawns in daylight, so the uplands are never safe |
+
+*Sheep* and *cow* are ordinary English for ordinary animals and stay as they are; only coined names like the reference's hostile needed replacing, hence **Bramble**.
+
+**The table is the feature, not the animals.** Every difference between species — size, health, speed, sense range, which regions accept it, whether it needs darkness, how likely it is — is one row in `kSpecies`. The update loop never asks which kind it is holding. Model geometry is the deliberate exception: box layouts live in `buildMesh`, because a shape is not a number.
+
+**Models are built from unwrapped skin nets**, not flat per-face tiles. A box face reads one rectangle out of a shared sheet, so a face lands on the face and nowhere else, and texel density stays constant across parts of different sizes. This replaced an earlier approach that put the same tile on all six sides of every box — which put eyes on the back of every head. `TEXTURING.md` documents the method.
+
+**Three states rather than a behaviour tree:** Wander, Flee, Chase. A tree is the right answer at ten behaviours and pure overhead at three. *(Superseded by M20c, which replaced the switch once the roster had grown past what three states could carry.)*
+
+**A local planner rather than A\*.** A chaser tries a fan of headings either side of the one it wants and takes the first that is walkable, so it rounds a tree instead of grinding into it. Full pathfinding solves mazes, and terrain is not a maze — it is obstacles with a way around them, which a fan finds for a fraction of the cost. The same probe rejects headings that walk off a cliff, so populations no longer drain downhill.
+
+**Night is genuinely different, not merely darker.** Nocturnal species spawn only when the sun is down and refuse to spawn near a torch. Whether they *burn* at dawn is a separate flag, because it is a separate rule, and the list is much shorter than instinct suggests: `RESEARCH.md` §13.4 names it exactly — **only the ordinary undead catch fire**, which here is the zombie, zombie villager, skeleton, stray and bogged. **The Bramble does not burn**, nor do the slimes, spiders, husk, witch, silverfish or Blackbone; they spawn in the dark and simply stay, so meeting one at noon is a real possibility rather than a bug. Light is a defence either way, and for the spider it is the whole of its temperament: hostile below light 11, ordinary neutral above it.
+
+**Two mechanics that are not just another animal.** Slimes **split into 2-4 of the next size down when killed**, so one large slime is up to twenty fights, and the sizes are three species rows rather than a field because health, damage and scale all differ. The spider **climbs**, treating the side of whatever blocked it as a ladder while hunting — the first movement in the game that a wall does not stop.
+
+Release build: **120 fps**, no measurable cost.
+
+**Still owed before M20b can be called done.** The original M20 was "entity system, animation, pathfinding, spawning, and creature behaviours", and what exists is the thin end of most of those:
+
+- **Nothing lives in water and nothing flies**, so the world still lacks two whole movement archetypes. The land roster is broad — sixteen hostiles, two neutrals — and bipeds now exist as models, though not as behaviour.
+- **Animation.** Limbs **rotate about a joint** rather than sliding, on an eased amplitude, and every biped but the folded-arm three has the reference's idle sway. Heads turn **about the neck** and now **pitch** as well as yaw, so a creature looks at you rather than merely facing you. Climbing a step rises to the real surface and the drawn body eases up. Still owed: a grazing or eating pose, and a death animation — a struck creature still simply vanishes. `ANIMATION.md` is the reference for the rest.
+- **Flee is a straight line away.** It does not run *toward* anything safer, and it gives up on a fixed timer rather than when it is actually clear.
+- **Pathfinding is a local planner.** It can now jump a block and get out of a one-deep pit, but it still cannot route around a wall longer than its probe or find its way off a ledge it stepped down.
+
+**Landed since the roster was written:** babies as a share of every natural spawn, herd alerting (one mechanism serving both pack anger and group flight), soft entity separation, spawning at chunk generation, creature persistence across a restart, **the AI restructure (M20c)**, **the Bramble's explosion and charged variant**, **line of sight**, **per-species step height and jumping**, **the chicken's slow fall and wing beat**, **thirty-six spawn eggs**, and **real limb joints, head pitch and smoothed step-ups**. See `SYSTEM_MEMORY.md`.
+
+**Two long-standing complaints from this list are now closed.** The Bramble could be outrun at a walk — it is 4.25 m/s against a player's 4.317, so a head start still saves you and standing still does not. And nothing had line of sight, so every hunter tracked you through solid rock; `hasLineOfSight` now reads `isOpaque` rather than the aiming ray's selection shapes.
+
+### ✅ M20c — The AI restructure · **Core**
+
+**Agreed and built on 2026-08-04.** Everything above was behaviour bolted onto a three-state switch. This replaced the switch, and it was the last structural thing M20 owed.
+
+**Result:** the switch is gone. Eight behaviours in a `constexpr` table — `Panic`, `HurtByTarget`, `NearestAttackableTarget`, `Swell`, `AvoidFeline`, `MeleeAttack`, `Wander`, `LookAtPlayer` — selected by priority with `Move` / `Look` / `Jump` control flags. `CreatureState` is deleted; in its place a `CreatureTarget` slot written by the producers and read by `MeleeAttack`, plus a `provokedTimer` that `strike` and `alertNeighbours` set instead of choosing a mood themselves. Creatures turn their heads independently of their bodies. Both presets build clean at `/W4` with **zero Vulkan validation errors**. `SYSTEM_MEMORY.md` "How a creature decides what to do" documents the shape.
+
+**The acceptance test was that nothing changed** — retaliation, the six-second grudge, `huntsBelowLight`, herd alerting, slime splitting, the ballistic hop, wall climbing and the steering fan all had to survive the move unaltered. The one intentional new thing was a creature glancing at you while it walks, which is the proof that disjoint control flags coexist.
+
+**What the shape then paid for immediately**, none of which needed new machinery: the creeper's fuse became a behaviour that claims both controllers; running from cats became a row that sits *below* the fuse so a lit countdown is not called off by a passing cat; and the reference's rule that sneaking only helps you *avoid being noticed* fell straight out of `canStart` versus `canContinue`.
+
+§8.8's steps 1–4 are done. **Step 5** — unifying the chunk-generation spawner with the continuous cycle — is untouched and orthogonal; **step 6** (the `Mode` bitmask) is explicitly deferred until taming or babies need it.
+
+**The two ideas that carried the win:**
+
+- **Control flags** — three bits, `Move` / `Look` / `Jump`, naming which controllers a behaviour claims while it runs. Disjoint claims coexist; identical claims are exclusive and resolved by priority. **A row claiming nothing always runs**, which is how targeting works rather than a degenerate case.
+- **Target-production split from target-consumption.** One behaviour writes the target slot; attack behaviours read it. That turned retaliation, pack anger and hunting-on-sight into three rows that never mention each other.
+
+**The step to do first is step 3** (split `Chase` into `NearestAttackableTarget` + `MeleeAttack`, add `HurtByTarget`), because it is also the one that pays immediately. **Step 4 is the validation**: add `LookAtPlayer` at low priority with `Look` only — if chickens now walk and watch at once, the flag arbitration is correct; if they stop walking, it is not. Cheapest possible proof that step 2 works.
+
+**Explicitly skip**, per §8.7: JSON at runtime, component groups and entity events as a general mechanism, a filter expression language, and navigation/movement as class hierarchies. The value is the *shape*, not the format — a `constexpr` array of structs gives compile-time checking, no parse cost and no schema versioning. At thirty-six species we want **eight to ten behaviours, not a hundred and ninety**.
+
+**Must not regress:** neutral temperament falling out of `attackDamage`, `huntsBelowLight` for the spiders, the six-second grudge, herd alerting, slime splitting, the ballistic hop, wall climbing, and the local steering fan. Several of those should get *shorter* as table rows.
+
+**Deferred on purpose, not owed here:** loot drops (M21 owns food and survival), taming and breeding, and sound (M22).
+
+### ✅ M20d — Explosions, jumping and spawn eggs · **Core**
+
+**Not a planned milestone** — a run of work the user asked for directly on 2026-08-04, recorded here because it is substantial and because most of it was only cheap *because* M20c had landed first.
+
+**The Bramble detonates.** `world/Explosion.hpp` carries the reference's algorithm exactly: 1352 rays for the block destruction, an exposure test so cover genuinely protects, and `7 × power × (impact² + impact) + 1` for damage, scaled to Bedrock's point-blank figure rather than Java's harsher one. **`blastResistance` is kept strictly apart from mining hardness** — stone is 1.5 to a pickaxe and 6 to a blast. The fuse needs line of sight for its whole countdown, stops the creature dead, gives up past 7 m, and a hard landing shortens it. **Charged Brambles** carry the reference's `creeper_armor` overlay as a translucent second shell and twice the power; 5% spawn that way, since there is no lightning until M27.
+
+**Its stats were wrong in four places** and were corrected against `RESEARCH.md` §6.3: health 10→20, follow range 14→16, swell 2.5→3 m, cancel 6→7 m, and run speed 2.4→4.25 m/s.
+
+**Creatures jump.** Two mechanisms kept apart as the reference keeps them: `stepHeight` walks up a rise with no airtime (0.6 default, 1.0 for the horse family and the frog, 1.5 for the camel), and `jumpHeight` is a real ballistic launch for everything else. Hoppers boost their own hop when a ledge is too tall for it.
+
+**The chicken falls slowly and flaps**, at the reference's 1.95 m/s terminal descent — which is exactly why it needs no fall-damage exemption. This added a **roll axis** to `uprightBox`, the first rotation in the model system about the forward axis.
+
+**Thirty-six spawn eggs**, one per species, right-click to place. `F10` swaps them for the block kit because 36 eggs fill all 36 inventory slots.
+
+**Two latent bugs surfaced and were fixed:** dropped non-block items rendered **nothing at all** (a thrown pickaxe had been invisible since tools existed), and the spiders' wall-climb had been testing "did either axis fail to move", which is never true when sliding along a wall — so it only ever worked diagonally.
 
 ### ⬜ M21 — Survival systems · **Core**
 
-Health, damage, hazards, and resource pressure.
+Health, damage, hazards, and resource pressure. **Blasts and blows already compute damage and apply knockback; the damage is discarded** until there is a player to apply it to, which is the first thing this milestone changes.
 
 ### ⬜ M22 — Audio · **Core**
 

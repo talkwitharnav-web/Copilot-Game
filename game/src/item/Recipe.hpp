@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <vector>
 
 namespace game {
 
@@ -26,13 +27,44 @@ constexpr std::size_t kMaxCraftSlots = kMaxCraftSize * kMaxCraftSize;
 struct Recipe {
     /// Rows of the pattern, top to bottom, each `width` long. `ItemId::None`
     /// means the cell must be empty.
+    ///
+    /// **Every ingredient is one concrete item, and the craftable check relies
+    /// on that.** "Do I have the materials?" is bipartite matching in general,
+    /// not a greedy count: given a recipe wanting `any plank` + `oak plank`
+    /// while the player holds one oak and one spruce, greedy spends the oak on
+    /// `any plank`, fails `oak plank`, and reports "not craftable" — wrongly.
+    /// A matcher reassigns `any plank` to the spruce and succeeds. Greedy is
+    /// correct for exactly as long as no ingredient names a *set*, so the day
+    /// this array stops holding plain `ItemId`s, the check has to be rewritten.
     std::array<ItemId, kMaxCraftSlots> pattern{};
     int width = 0;
     int height = 0;
     bool shapeless = false;
 
     ItemStack result{};
+
+    /// Which catalogue tab this recipe is listed under.
+    ///
+    /// Per **recipe**, not per item: one item can be produced by recipes that
+    /// belong in different places. It defaults to the result item's own
+    /// category, so the item table stays the one owner and a recipe only says
+    /// anything when it disagrees.
+    ItemCategory category = ItemCategory::Items;
+
+    /// Whether the pattern fits the player's own 2x2 grid.
+    ///
+    /// The recipe book in the inventory shows only these; a crafting table
+    /// shows everything. Precomputed once, because it is a fact about the
+    /// pattern and a shapeless recipe stores its ingredient *count* in `width`,
+    /// which is exactly the sort of thing a caller re-deriving it gets wrong.
+    bool fitsInTwoByTwo = false;
 };
+
+/// Every recipe in the game, in declaration order.
+///
+/// Order is the display order: neither edition sorts alphabetically and neither
+/// has a display-order field.
+const std::vector<Recipe>& recipes();
 
 /// The recipe a grid currently makes, or an empty stack for none.
 ///

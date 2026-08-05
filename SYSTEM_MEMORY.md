@@ -2,15 +2,15 @@
 
 Current technical truth for this voxel sandbox project: what exists, where it lives, what version it is, and how to build and run it.
 
-Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. The milestone route and the long-term vision live in `TIMELINE.md`. Every planned recipe lives in `CRAFTABLE.md`, and `ASSETS-REFERENCE.md` maps the reference asset dump. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
+Narrative history, rejected approaches, and debugging lessons live in `CLAUDE.md`. **If you are new to this project, read `START-HERE.md` first** — one page covering the current state, the build, and the traps. The milestone route and the long-term vision live in `TIMELINE.md`. Every planned recipe lives in `CRAFTABLE.md`, `ASSETS-REFERENCE.md` maps the reference asset dump, `TEXTURING.md` covers box nets and creature models (its §14 is a formula reference), and **`RESEARCH.md` records how the original's mechanics actually work — exact physics constants, spawn rules, mob behaviour and the AI architecture worth copying.** **Bedrock Edition is our primary reference**; `RESEARCH.md` marks Java-only values `[JE]`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–18 complete, plus the inserted M10b (hotbar) and M14c (placeholder sun), M17d (fences), M19a (texture fidelity) and M19b (geometry fidelity). **M19c (crafting) is in progress.**
+> **Status:** Milestones 1–19 complete. **M20 is in progress** — split into M20a (entity foundation, done), M20b (roster and behaviour, *partly* done: thirty-six species on working machinery, with richer animation, stronger pathfinding and non-land archetypes still outstanding) and **M20c (the AI restructure, done 2026-08-04)**. See `TIMELINE.md` for what M20b still owes.
 >
-> The game is playable: an endless seeded world streams in behind a loading bar, and the player walks, jumps, sprints, crouches, flies, swims, and breaks and places blocks. Broken blocks drop as items collected into a 36-slot inventory, opened with `E` and drawn from the artist's panel, with the full set of click, right-click and click-drag slot interactions. A 2×2 crafting grid works and makes planks and sticks. Edits and player position survive a restart, and `F5` shows per-frame diagnostics.
+> The game is playable: an endless seeded world streams in behind a loading bar, and the player walks, jumps, sprints, crouches, flies, swims, and digs and places blocks. **Digging takes time** — how long depends on the block and the tool — and stone withholds its drop until you hold a pickaxe. **Thirty-six creatures share the world:** eighteen animals plus a villager and a wandering trader graze, wander or hop by day in the regions that suit them; the wolf and the polar bear are neutral and fight back when struck; Brambles, zombies, skeletons and Blackbones hunt after dark, and only the ordinary undead among them burn off at dawn — a Bramble or a Blackbone caught out at sunrise keeps coming; the husk hunts the desert through the day because it does not burn; slimes hop in three sizes and split when killed; the silverfish wriggles through the stony uplands; and the spider and cave spider climb walls, hunting in the dark and ignoring you in the light. They **turn their heads to watch you, jump ledges a step cannot clear, and lose sight of you behind anything opaque**. The **Bramble detonates**, and a charged one does it twice as hard. The first four wear art of ours; the other thirty-two are on placeholder reference art pending an artist. Broken blocks drop as items collected into a 36-slot inventory, opened with `E`, with the full set of click, right-click, click-drag, shift-click and double-click slot interactions and a name label on hover. **Thirty-six spawn eggs** place a creature on right-click. Crafting works in the inventory's 2×2 and a crafting table's 3×3, a furnace smelts with fuel over time, torches light caves, and ten tools wear out with use. Edits, player position, furnace contents and the creature population survive a restart, and `F5` shows per-frame diagnostics.
 >
 > Generation and meshing run on worker threads, mesh uploads are batched, geometry is greedily merged and frustum culled, the world is lit with sky light, block light, smooth lighting and ambient occlusion, and a placeholder sun crosses the sky. Terrain is divided into seven biomes with caves underneath, oceans that flow, trees whose leaves are alpha-tested, tall grass, slabs, stairs and fences. Every block texture and every non-cube shape has been measured against the reference dump.
 >
-> **Next:** the crafting table and its 3×3 grid, then smelting and tools — see `TIMELINE.md` M19c for the ordered list.
+> **Next:** M20b still owes **richer animation, stronger pathfinding and the water/flying archetypes** — `ANIMATION.md` is the reference for the first, and `TIMELINE.md` scopes the rest. **M21 (survival systems) is the first thing that gives the player health**, which is what every blast and blow already computes and currently throws away.
 
 ---
 
@@ -76,13 +76,24 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 ├── tools/
 │   ├── dev-env.ps1         Loads the MSVC environment into the current shell
 │   ├── make-block-textures.ps1  Generates the block and item sprites
+│   ├── make-creature-skins.ps1  Generates creatures.png rows 0-191, then calls the roster stage
+│   ├── make-roster-skins.ps1     Rows 192-767: chicken, cat, camel, horse, mule, llama, donkey, goat, rabbit
+│   ├── measure-skin.ps1          Colour count, luminance span, saturation and per-rect means
+│   ├── make-reference-creature-atlas.ps1  Temporary proof atlas of reference skins, written beside the exe
+│   ├── make-spawn-egg-sprites.ps1     The 36 reference spawn egg sprites, staged beside the exe
+│   ├── analyze-alpha.ps1         Lists a texture's connected opaque islands - finds unwrapped model nets
+│   ├── alpha-runs.ps1            Per-row opaque runs - step 1 of the model procedure, and what islands cannot do
+│   ├── preview-grid.ps1          Magnifies one texture with coordinate lines, for reading net boundaries
+│   ├── compare-skin.ps1          Our skins vs reference: nets, structure, patches, flatness, saturation, overlap
 │   ├── compare-texture.ps1       Ours against the reference: palette, spread, saturation, run lengths
 │   ├── preview-textures.ps1     Magnifies textures into a labelled sheet for review
 │   ├── make-font.ps1            Regenerates the ASCII font atlas
 │   ├── make-hud-sheet.ps1       Composites the HUD and inventory art into one sheet
-│   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys
+│   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys or placing the pointer
+│   ├── dump-pixels.ps1          Prints a texture as a character grid with a luminance-sorted legend and counts
 │   ├── benchmark.ps1            Sweeps a setting and restores settings.cfg afterwards
-│   ├── convert-image.ps1        Any Windows-decodable image (incl. WebP) to PNG, with crop and integer downscale
+│   ├── convert-image.ps1        Any Windows-decodable image (incl. WebP and AVIF) to PNG, with crop and integer downscale
+│   ├── extract-ui-icons.ps1     Crops the UI reference capture into reference/ui-icons/, at 3× and 1×. Refuses to write under assets/
 │   └── probe-image.ps1          Dumps pixel runs along a row or column
 ├── engine/                 The reusable engine — a static library, knows nothing about the game
 │   ├── CMakeLists.txt
@@ -94,6 +105,8 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 ```
 
 **Why the `include/` vs `src/` split:** headers under `engine/include/engine/` are the engine's public surface — anything the game can call. Everything in `engine/src/` is internal. This makes it structurally obvious when the game starts depending on engine internals it should not.
+
+**What sits beside the built executable and is not in the tree.** `build/{debug,release}/bin/` holds `assets/` (copied), `settings.cfg`, `saves/`, `shaders/`, and **two placeholder art drops that must never be moved under `assets/`**: `creatures-reference.png` and `spawn-eggs/`. Both are regenerable, both are restored by `run.ps1`, and both are reference art — see `START-HERE.md` §5.
 
 ---
 
@@ -147,9 +160,9 @@ Fetched by CMake at configure time via `FetchContent`, pinned to exact Git tags.
 
 ---
 
-## Engine Architecture (current)
+## Engine Architecture
 
-Milestone 1 only. Each type owns its Vulkan resources and destroys them in its destructor.
+Every type owns its Vulkan resources and destroys them in its destructor.
 
 | Component | Header | Responsibility |
 |---|---|---|
@@ -186,26 +199,32 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 
 | Component | Header | Responsibility |
 |---|---|---|
-| `Block` | `world/Block.hpp` | The block ID enum plus the three predicates that must stay distinct: solid (blocks movement), opaque (blocks vision), light-transparent. Also which texture layer each face uses — `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher. Water encodes its depth in the id. |
+| `Block` | `world/Block.hpp` | The block ID enum plus the three predicates that must stay distinct: solid (blocks movement), opaque (blocks vision), light-transparent. Also which texture layer each face uses — `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher — and `blockName`, the one place a block is named. Water encodes its depth in the id. |
+| `Collision` | `world/Collision.hpp` | The box-versus-world tests, shared by the player and by creatures: `overlapsSolid` and `highestSurfaceBelow`, both reading `collisionBoxes`. **Anything that collides with the world goes through here** — a second copy of "where is this block" is the recurring bug in this project, and creature physics carried one until it was folded in. |
 | `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`, plus a parallel light array. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
 | `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion in 2D and 3D. An integer hash, so it is reproducible on any machine without storing anything. |
 | `Biome` | `world/Biome.hpp` | The table that answers "which block goes here, and why", and the temperature/humidity selection that picks between rows. |
 | `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what lets generation run on a worker thread. |
 | `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a padded chunk volume into opaque and translucent mesh data, emitting only faces that can be seen. The volume is passed in rather than looked up, which keeps meshing pure. |
 | `World` | `world/World.hpp` | Owns every loaded chunk, streams them around the player, and runs light propagation and water flow. The single owner of block state, and the only thing that mutates it. |
-| `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction. |
-| `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. |
+| `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction, the furnaces, and the creature population. Each side table is its own file with its own magic, version and seed, all checked on load. **A save record is always an explicit struct, never the live one** — `SavedCreature` names the six fields worth keeping, so the format cannot change silently when `Creature` gains a field, and everything transient is discarded on reload by construction. |
+| `Raycast` | `world/Raycast.hpp` | Walks the view ray cell by cell to find the block being aimed at, and the empty cell in front of it where a new block goes. Steps block to block rather than sampling at intervals, so it cannot skip a block at any angle. **Two questions, one walker:** `raycast` reads `selectionBoxes` because aiming must be able to pick a tuft of grass, while `hasLineOfSight` reads `isOpaque` because sight must not be blocked by one. Using the aiming ray for vision is what made tall grass hide the player from a creeper. |
 | `Sky` | `world/Sky.hpp` | Placeholder day cycle: sun direction over time, sky colour, and the billboarded sun quad. |
 | `BlockOutline` | `world/BlockOutline.hpp` | The wireframe cage marking the targeted block. Built from thin solid bars so it needs no second pipeline or line-width support. Sized from the targeted block's selection box, and rebuilt only when that height changes. |
 | `Settings` | `core/Settings.hpp` | `settings.cfg` next to the executable. Read once at startup. **`creative_mode` defaults to 1** — survival with no crafting lets you place only what you have already dug up, so flip it once progression exists. |
-| `Item` | `item/Item.hpp` | `ItemId`, stacks, and what a block drops when broken. Block items share the block's numbering; anything else starts at `kFirstToolItem`. Non-block items name a sprite layer through `itemTextureLayer`. |
+| `Item` | `item/Item.hpp` | `ItemId`, stacks, and what a block drops when broken. Block items share the block's numbering; anything else starts at `kFirstToolItem`. Non-block items name a sprite layer through `itemTextureLayer`. `itemDisplayName` names either kind, deferring to `blockName` for blocks — casting an item id straight to a block id works only for block items and reported everything else as "Air". |
 | `Inventory` | `item/Inventory.hpp` | 36 slots, the first 9 being the hotbar. `add()` tops up matching stacks before using an empty slot. |
 | `Recipe` | `item/Recipe.hpp` | Shaped and shapeless recipes in one struct, and the matcher. **Patterns are stored at their own size**, so the matcher slides them around a larger grid — a 1×2 recipe works anywhere in a 3×3 without changes. `craftResult` takes the grid size, which is what lets a crafting table reuse it unchanged. |
-| `slots` | `item/SlotOps.hpp` | What a click does to one slot given what the cursor holds: left takes or merges a whole stack, right takes half and places one, and `distribute` spreads a stack over several slots. Free functions over two stacks, because the crafting grid is not part of the inventory but obeys the same rules. |
-| `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, and isometric block icons. |
+| `Smelting` | `item/Smelting.hpp` | What an item smelts into, and how long a fuel burns. Two separate questions, because a log is both an input and a fuel and most things are exactly one. Every recipe takes the same ten seconds. |
+| `Furnace` | `world/Furnace.hpp` | One furnace's three slots and its burn and cook timers, plus the tick that advances them. **A block entity** — state belonging to a block that is not part of which block it is. Fuel is only lit when there is something worth cooking. |
+| `Tool` | `item/Tool.hpp` | How mining works: what each tool is and how fast, how hard each block is, which tool suits it, and the tier it demands before it drops anything. `breakSeconds` and `yieldsDrop` are the two answers the game actually asks for. |
+| `Creature` | `world/Creature.hpp` | Thirty-six species on one entity system: three-axis collision through `world/Collision.hpp`, step-up and jumping, a priority-sorted behaviour table with control flags, local steering, spawning both continuously and with a chunk, retiring, striking, splitting, herd alerting and soft separation. Species policy stays in `kSpecies` — how it moves (`gaitRate` plus `gaitSwing`, which is **radians of limb rotation about the joint**, or `hops` plus `hopLaunch`/`hopGather` for a real ballistic jump), how big it renders (`modelScale`, which is how one horse model serves the mule and donkey), whether it `climbs`, what it `splitInto`s when killed, its `babyChance`, and the `groupSize` it is generated with. **Temperament falls out of existing fields rather than a flag:** `hostile` hunts on sight; not hostile but `attackDamage > 0` is *neutral*, ignoring you until struck then fighting back for a six-second grudge; and `huntsBelowLight` makes a neutral hunt wherever the light reaching it is dark enough, which is the spider. `burnsInDay` is kept separate from `nocturnal` because spawning in the dark and burning at dawn are different rules, and the burn list is far shorter than instinct suggests — `RESEARCH.md` §13.4 names it, and **only the ordinary undead are on it**: zombie, zombie villager, skeleton, stray, bogged. The Bramble, Blackbone, husk, witch, spiders, slimes and silverfish all spawn dark and stay. **The field defaults to `true`, so a row that does not restate it burns** — which is exactly how the Bramble and the Blackbone were wrong until 2026-08-04. **Every field with a default sits at the end of the struct**, so rows written before it existed still compile; adding one in the middle silently shifts every brace-initialised row after it. `Creature::scale` is the one per-individual number and multiplies the collision box and the model together. Box layouts stay in `buildMesh`, where `uprightBox` takes an optional nose-down `pitch`: a level muzzle reads as a cheek patch and a level rabbit reads as a brick. It also takes `growSide`, which extends the side axis alone — `grow` swells every axis at once, so reaching toward a neighbour with it thickens the part as much as it lengthens it. Models sample the 128×1888 `assets/textures/creatures.png` net sheet through layer `-3.0` (`-4.0` while hurt); anything see-through goes to a second, translucent mesh, which so far is only a slime's shell. Every net origin is measured off the reference alpha. The per-second census is generated from the enum rather than hardcoded names. See `TEXTURING.md`. |
+| `Explosion` | `world/Explosion.hpp` | What a blast removes, and what it does to whatever is standing in it. **`blastResistance` is not mining hardness and the two must never be conflated** — stone is 1.5 to a pickaxe and 6 to an explosion, obsidian 50 against 1200; `Tool.hpp` owns one number and this owns the other. `explosionBlocks` is the reference's algorithm exactly: 1352 rays toward the faces of a 16³ grid, each starting at `power × [0.7, 1.3)`, advancing 0.3 blocks and paying a flat 0.225 per step plus `(resistance + 0.3) × 0.3` for what it passes through — a block is taken only if the ray still has intensity *after* paying, which is what makes a crater ragged rather than spherical. `explosionExposure` is the share of sample points on a box the blast can see, so cover genuinely protects; `explosionImpact` combines it with distance, and both damage and knockback read that one number rather than recomputing it. Damage is `7 × power × (impact² + impact) + 1`, scaled by `27.5 / 43` to land on **Bedrock's** point-blank figure instead of Java's harsher one. The trailing `+1` means everything inside twice the power takes at least a point even fully shielded. |
+| `slots` | `item/SlotOps.hpp` | What a click does to one slot given what the cursor holds: left takes or merges a whole stack, right takes half and places one, `distribute` spreads a stack over several slots, `quickMove` sends one elsewhere (shift-click) and `gather` pulls matching items in (double-click). Free functions over stacks, because the crafting grid is not part of the inventory but obeys the same rules. |
+| `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, isometric block icons, a slot's item-and-count, and the hover label. The label sizes its frame from the text and clamps itself to the window, flipping above the cursor rather than overflowing the bottom edge. `kSheetSize` is the **single owner** of the HUD sheet's dimensions (currently 185 × 773) and must follow whatever `tools/make-hud-sheet.ps1` reports; a stale copy silently skews every sprite on the sheet, so `Main.cpp` reads the PNG header and logs an error on mismatch. The game loads `hud-reference.png` from beside the executable in place of `assets/textures/hud.png` whenever it exists — the same proof-atlas arrangement the creature skins use, and it currently supplies the five catalogue tabs. |
 | `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
 | `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. |
-| `InventoryScreen` | `hud/InventoryScreen.hpp` | The inventory panel, drawn as one sprite from the artist's art with icons composited on top. Owns the 2×2 crafting grid's layout; every slot position is measured off the art in its own pixels and scaled through one constant. |
+| `InventoryScreen` | `hud/InventoryScreen.hpp` | **Every** container screen: the player's inventory, a crafting table and a furnace. One `Kind` picks a small layout table — which panel sprite to draw, where the slots sit, and how wide the grid is — so the slot interaction exists once rather than three times. A furnace borrows the crafting region for its input and fuel, which is why it needed no new click handling. Every position is measured off the art in its own pixels and scaled through one constant. The inventory and crafting-table screens also draw the **catalogue card** beside the panel: a 146 × 166 second card, a 4-unit fold and a 176-unit inventory card, centred as one 326-unit block. **`toScreen(Kind, x, y)` is the single owner of that horizontal offset** — every slot centre, hit test and panel bound comes through it, so widening the screen was a translation rather than a rewrite of the click handling. Its scroll position, search text and selection live in a `CatalogueState` the caller owns, keeping `build` a pure function of its arguments. |
 | `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and labelled rows. |
 | `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
 
@@ -245,7 +264,7 @@ Geometry is wound **counter-clockwise seen from outside**, and the pipeline uses
 
 ### Camera and projection
 
-Projection is built by the renderer from the **swapchain's** extent, not the window's, so the aspect ratio cannot disagree with what is actually drawn. Vertical FOV is 45°; wider than about 60° visibly warps nearby geometry. `projection[1][1] *= -1` converts GLM's OpenGL-style Y-up clip space to Vulkan's Y-down. `GLM_FORCE_DEPTH_ZERO_TO_ONE` is defined **PUBLIC** on the engine target because every translation unit doing matrix maths must agree on the depth convention.
+Projection is built by the renderer from the **swapchain's** extent, not the window's, so the aspect ratio cannot disagree with what is actually drawn. **Vertical FOV is 70°**, set by the game (`kDefaultFov` in `Main.cpp`) and stepped by `F3`/`F4` between 50 and 110; `Renderer` clamps anything it is given to 30–130. It was 45° up to M3, when the camera sat close to a single cube and 60° visibly warped it — that is a near-subject artefact, not a limit, and it stopped applying once there was a world to stand in. `projection[1][1] *= -1` converts GLM's OpenGL-style Y-up clip space to Vulkan's Y-down. `GLM_FORCE_DEPTH_ZERO_TO_ONE` is defined **PUBLIC** on the engine target because every translation unit doing matrix maths must agree on the depth convention.
 
 Scene geometry is supplied in world space, so `Renderer::drawFrame` takes only a view matrix.
 
@@ -263,17 +282,22 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `Left Shift` | Sneak (walking) / descend (flying) |
 | `Left Ctrl` | Sprint (also sprint-fly) |
 | Double-tap `Space` | Toggle flight |
-| Left click | Break the targeted block (hold to repeat) |
-| Right click | Place against the targeted face (hold to repeat) |
+| Left click | Dig the targeted block. **Hold** — how long depends on the block and what you are holding, shown by a bar under the crosshair |
+| Right click | Place against the targeted face (hold to repeat), **release a held spawn egg**, or open an interactive block such as a crafting table or furnace |
+| `Left Shift` + right click | Place against an interactive block instead of opening it |
 | `1` – `9` / scroll | Select a hotbar slot |
-| `Q` | Throw one of the held item (hold to repeat); empties the cursor while the inventory is open |
+| `Q` | Throw one of the held item (hold to repeat); empties the cursor while a screen is open |
 | `E` | Open and close the inventory |
-| `Escape` | Release the mouse cursor |
+| `Escape` | Close an open screen, or release the mouse cursor when none is open |
 | Left click | Recapture the cursor when released |
 | `F1` / `F2` | Lower / raise the frame cap |
 | `F3` / `F4` | Narrow / widen the field of view (default 70°) |
 | `F5` | Toggle the diagnostics overlay |
 | `F6` / `F7` | Decrease / increase render distance (saved to `settings.cfg`) |
+| `F8` / `F9` | Spawn a Bramble 12 m ahead / a charged one. **Debug** |
+| `F10` | Swap the creative inventory between the 36 spawn eggs and the block kit. **Debug** |
+
+**The debug keys are deliberately their own keys, not modifiers.** `Shift+F8` spawned a charged Bramble for about an hour, and because `Shift` is *sneak* the act of spawning one left the player crouched at 1.3 m/s against a creeper doing 2.4 — so backing away, which is the entire defence against an exploder, could not work. It read as a fuse bug and was an input one.
 
 **Inventory screen**, following the rules the genre established — anyone who has played one of these already knows them, and getting them subtly wrong is more jarring than not having them at all:
 
@@ -283,9 +307,14 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | Right click a slot | Take **half**, rounded up (7 leaves 3); or place **one** at a time |
 | Left click and sweep | Spread the carried stack **evenly** over every slot crossed |
 | Right click and sweep | Place **one** in each slot crossed |
+| `Left Shift` + left click | Send the stack to the other half: hotbar to storage, storage to hotbar, crafting grid to the inventory. On the result slot it crafts **as many as will fit** |
+| Double left click | Pull every matching item in the inventory onto the cursor, smallest stacks first |
+| Hover a slot | Shows the item's name in a floating label, whenever the cursor is not carrying anything |
 | Click outside the panel | Left throws the whole carried stack into the world, right throws one |
 
 A sweep only starts from a cursor that was *already* carrying something, and only counts slots that are empty or hold the same item. The distribution is applied live and replayed from scratch as the sweep grows, so what you see during the drag is what you get.
+
+**Closing a screen always empties it back into the inventory** — the cursor stack and every crafting slot, whether you close with `E` or `Escape`. Anything that will not fit is thrown into the world rather than destroyed.
 
 Movement is scaled by delta time and the direction vector is normalised, so diagonal movement is not faster than straight movement. Movement direction is flattened to the horizontal plane, so looking down does not drive the player into the ground.
 
@@ -345,6 +374,200 @@ A vertex carries a texture coordinate and a layer index. The layer is declared `
 
 `Vertex::color` is no longer material colour; it is **face shading** multiplied with the sampled texel, so white leaves a texture untouched.
 
+**The reference's own block and item art is currently staged over ours**, in `blocks-reference/` beside each executable, chosen per texture so `white.png` and `sun.png` — which have no counterpart — keep ours. `tools/make-reference-blocks.ps1` writes it and **never rescales anything**: `water_still.png` is a 16×512 strip of 32 animation frames and is cropped to frame 0, and every output is asserted 16×16 or the script stops, because a texture array needs one size and a silent resize would blur exactly one layer. Five reference textures ship **greyscale** because the game tints them at runtime — `grass_block_top`, `grass_block_side_overlay`, `oak_leaves`, `short_grass` and `water_still` — so the plains tints are applied on the way through; stone, cobblestone and the furnace look grey to a naive test but are naturally grey and must not be tinted. `grass_side` is two reference images composited into one of ours. Delete the folder to return to our own art everywhere.
+
+### Creature skins
+
+All thirty-six models read their box faces out of `assets/textures/creatures.png`, one net per species at a named row offset. **Every net origin and box dimension is recorded in `TEXTURING.md` §13** and the code must agree with it exactly.
+
+The sheet is generated in **two stages, by two scripts with disjoint row ownership**:
+
+```powershell
+powershell -NoProfile -File tools\make-creature-skins.ps1   # runs both stages
+```
+
+`make-creature-skins.ps1` draws rows 0-191 — sheep, cow, pig, Bramble — saves the sheet, then calls `make-roster-skins.ps1`, which reopens it and paints the rest. They are separate files because both grew a `Set-Solid` and a `Set-Vignette` with different signatures; merging them verbatim would silently redraw four species that are already signed off. Each stage prints which rows it wrote.
+
+**Rows 0-767 are the only ones our scripts paint. Rows 768-1343 — wolf, frog, fox, ocelot, polar bear, panda, the slimes, both spiders, the zombie, the skeleton and the villager — carry no art of ours at all** and render entirely from the reference proof atlas, which is why `creatures-reference.png` sits beside each executable. **This is sanctioned and temporary, not a mistake to clean up** — see `START-HERE.md` §5 for the arrangement and why it exists. Do not re-author these skins; keeping `TEXTURING.md` §13 and §14 accurate is the useful contribution.
+
+**The reference-art boundary:** reference art may be **measured from**, must **never live under `assets/`**, and must **never ship in a release**. `tools/make-reference-creature-atlas.ps1` enforces the second mechanically — it refuses to write under `assets/`. It composites over our own sheet from row 192 up, so **rows 0-191 (sheep, cow, pig, Bramble) always render our art, and the nine species on rows 192-767 have our art in the sheet but are covered while the atlas exists.** Deleting the atlas returns those nine to our skins and leaves everything above row 767 untextured. `assets/textures/hud.png` is the other sanctioned exception, also to be replaced before release.
+
+Dropping in finished art means replacing `assets/textures/creatures.png` (or having `make-roster-skins.ps1` stamp the new pixels), then deleting `creatures-reference.png` from both `build/*/bin/`. The game prefers the atlas only while it exists, and `run.ps1` rebuilds it whenever the sheet is newer — so a stale atlas cannot silently serve old art, which it did once for a whole session.
+
+### Reviewing a model
+
+`creature_showcase` in `settings.cfg` freezes the spawner and lines the roster up in front of spawn: `1` is every species in a staggered grid, and **`2` and above is one species alone in three copies** — profile, facing the camera, facing away. The value is the `CreatureKind` index + 2, because 0 is off and 1 is the grid:
+
+| value | species | value | species | value | species | value | species |
+|---|---|---|---|---|---|---|---|
+| 2 | Sheep | 9 | Horse | 16 | Frog | 23 | Slime, large |
+| 3 | Cow | 10 | Mule | 17 | Fox | 24 | Spider |
+| 4 | Pig | 11 | Llama | 18 | Ocelot | 25 | Cave Spider |
+| 5 | Bramble | 12 | Donkey | 19 | Polar Bear | 26 | Zombie |
+| 6 | Chicken | 13 | Goat | 20 | Panda | 27 | Skeleton |
+| 7 | Cat | 14 | Rabbit | 21 | Slime, small | 28 | Villager |
+| 8 | Camel | 15 | Wolf | 22 | Slime, medium | 29 | **Husk** |
+| | | | | | | 30 | **Silverfish** |
+| | | | | | | 31 | **Blackbone** |
+| | | | | | | 32 | **Stray** |
+| | | | | | | 33 | **Bogged** |
+| | | | | | | 34 | **Zombie Villager** |
+| | | | | | | 35 | **Witch** |
+| | | | | | | 36 | **Wandering Trader** |
+| | | | | | | 37 | **Princepin** |
+
+Two things to know before using it. **Creatures are frozen**, so they never settle onto the terrain — a copy standing on a slope will look half-buried, and that is the showcase, not the model. And **the camera and creature yaw conventions are 90° apart** (`Camera::forward()` is `(cos yaw, sin pitch, sin yaw)`; a creature's is `(sin yaw, 0, cos yaw)`), which is why the showcase lays its rows out along its own axis rather than the camera's.
+
+**Anything that writes `settings.cfg` must restore it.** A benchmark once left `frame_cap=0` behind and the user reported the frame limiter broken — twice. Back the file up and restore it in a `finally`.
+
+### How a population arrives, and what happens to it
+
+**Two spawn systems, not one**, which is how the reference does it too.
+
+- **At chunk generation.** The first time the player comes within two chunks of one it has not populated, a chunk rolls for its own group of animals and places them, **ignoring the ordinary population cap**. It is a pure function of `(seed, chunkCoord)`, so a given chunk always produces the same herd however you approach it — the same rule the terrain generator follows. Ten percent of chunks get anything at all; which species and how many come from `groupSize` in the table. This is most of what makes a world feel inhabited on arrival rather than filling in behind you.
+- **The continuous cycle**, every 2.5 s within 12–30 m of the player, held to a cap of 14. Unchanged.
+
+`m_populated` records which chunks have had their one-off group and **only ever grows** — a chunk gets its animals once per session, and re-populating on re-entry would breed a herd out of walking back and forth. A separate `kGeneratedCeiling` stops a long walk across grassland stacking herds without limit.
+
+**A share of every natural spawn is young.** `babyChance` is per species, matching the reference's rates — 5% for most farm animals, 10% wolf and llama, 20% the horse family, 25% cat. A baby is one number, `Creature::scale`, which multiplies the **collision box as well as the model**, plus a slightly quicker walk. So a calf fits through gaps its mother cannot, and a herd reads as a family.
+
+**Striking one rouses its own kind nearby** — 16 m out and 10 m up. Neighbours that can bite turn on the player; those that cannot bolt with it. One mechanism, and it is both pack anger and herd flight. **A blow that kills outright propagates nothing**, which is the reference's own exemption and stops one-shotting a lone animal turning its whole species on you.
+
+**Creatures push each other apart** with a soft horizontal impulse after the world collision has run, never vertically — again the reference's choice. It is a nudge, not a constraint, so one standing on another stays there rather than being squeezed out. The pass is quadratic, which is fine at this cap; past a hundred it would want a grid.
+
+**The population survives a restart.** It is written to `creatures.dat` beside `player.dat` and `furnaces.dat` on save, as an explicit `SavedCreature` record rather than the live struct — a save format has to be a stated list of fields, and everything transient (gait, timers, what it was thinking) is exactly what a reload should throw away. Anything the player has since walked away from is retired by the first `manage`, so a stale saved position corrects itself.
+
+### How a creature decides what to do
+
+**A priority-sorted behaviour table with control flags, not a state machine.** Bedrock's shape, not Bedrock's format — the table is a `constexpr` array of structs in `Creature.cpp`, so the compiler checks it and it costs nothing to load. `RESEARCH.md` §8.7 records what was deliberately skipped: runtime JSON, component groups, a filter language, and navigation class hierarchies. There are six rows, not a hundred and ninety.
+
+A row is a **priority** (lower is higher, matching Bedrock), a **control-flag mask**, and `canStart` / `tick` / `canContinue`. `canContinue` exists because *why a behaviour keeps running* is a looser question than *why it started* — a hunter gives up further out than it engages, which is the hysteresis that used to be an `if` inside the mood block.
+
+**Control flags are the whole difference between this and a switch.** Three bits — `Move`, `Look`, `Jump`. Rows claiming *disjoint* flags run at the same time; rows claiming the *same* flag are exclusive and the higher priority wins. A row claiming **nothing** always runs when it can, which is not a degenerate case but the mechanism by which targeting works.
+
+| Priority | Behaviour | Claims | What it does |
+|---|---|---|---|
+| 1 | `Panic` | Move | Prey bolting. Only species that cannot bite. |
+| 1 | `HurtByTarget` | — | Struck, or a neighbour of its kind was. Writes the target. |
+| 2 | `NearestAttackableTarget` | — | Hostile, or `huntsBelowLight` satisfied, and in range. Writes the target. |
+| 3 | `MeleeAttack` | Move + Look | Closes on whatever is in the target slot and bites it. |
+| 6 | `Wander` | Move | Ambling. Always able to start, so it is the floor. |
+| 7 | `LookAtPlayer` | Look | An occasional glance. Bedrock's 8 m, 2–4 s numbers. |
+
+**Target production is split from target consumption**, and that split is why retaliation, pack anger and hunting on sight are three rows rather than three branches. The producers write `Creature::target`; `MeleeAttack` reads it and never asks why it is set. `strike` and `alertNeighbours` no longer decide anything — they set `provokedTimer`, the six-second grudge, and the table works out whether that means fighting back or running.
+
+**`target` and `running` are re-derived from nothing every tick**, so neither can go stale: a producer that stops running stops asserting the target, and the consumers simply find nothing there.
+
+**A creature's head turns separately from its body.** `LookAtPlayer` claims `Look` alone and sits *below* `Wander`, which claims `Move` — so the two must run together, and a chicken that walks and watches at once is the proof that flag arbitration works. In `buildMesh` the head parts are drawn between `beginHead(neckForward, neckUp)` and `endHead()`, which swap the three local axes for the duration; a species that never calls them renders exactly as it did before, which is what let this be rolled out one animal at a time. The frog, the slimes and the silverfish have no separable head and do not turn one.
+
+**The head turns about the neck joint, and getting that wrong is very visible.** It used to rotate the head's frame about the *creature's own origin*, so anything placed forward of centre **orbited** rather than turning — the head physically swung out sideways and lunged forward as it looked, dragging the neck with it. `beginHead` now takes the neck joint in model units and the frame turns about that, so the neck stays planted and the head turns on top of it. The pivot is taken from the head box's own numbers by one of three rules: the **rear face** for a head carried out in front, the **bottom face** for one sat on top, and the **base of the neck** for anything long-necked, where the neck is part of what turns. Splitting the old single `headParts(bool)` into two lambdas is what makes that safe — a head group that forgets its pivot does not compile.
+
+**Heads pitch as well as yaw**, clamped to 40° against the yaw's 52°, eased on the same clock, and aimed eye to eye so a creature looks at the player's face rather than their feet. Pitch is far cheaper than yaw: no wrapping, no body-follow, no separate accumulator.
+
+### What a Bramble's blast actually does
+
+The creature system **reports** a detonation and never performs it: `update` fills a `blasts` list and the owning loop rewrites the world, because `Creatures` reads the world and must never write it. That split is why the damage arrives in three separate places.
+
+1. **Blocks** — `explosionBlocks`, then `setBlock` to air. A furnace caught in it spills its contents exactly as breaking one does, and **one block in `power` survives as an item**, which is the reference's rule and the reason a blast is a net loss rather than a mining technique.
+2. **Creatures** — `Creatures::applyExplosion`. Damage, a hurt flash, and a throw aimed at the body's middle so a close blast lifts as well as shoves. Anything reduced to zero is retired by the next `manage`, so **a slime caught in a blast still splits**.
+3. **The player** — knockback only. There is no player health until M21, and a hostile that shoves you is honest feedback until then.
+
+**Two traps this has already fallen into.** The damage maths was written and only ever run for the player, so the first playtest levelled the terrain around a completely unharmed goat — *a function that is only defined is untested; call it or it is not a feature.* And both throws are **assigned or taken as the strongest of the frame, never accumulated**: several blasts each adding their own is the same accumulator bug that once launched the player far enough to despawn the entire map.
+
+**A blast does not provoke.** `provokedTimer` can only ever mean "the player did this", because the target slot has no way to name anything else — so rousing an animal a Bramble blew up would send it after the player for something they did not do. Revisit when a creature can target another creature.
+
+**A charged Bramble doubles the blast and nothing else.** Power 3 becomes 6; health stays at twenty, which is worth writing down because the obvious guess is that it is tougher. Its energy shell is the reference's `creeper_armor` overlay on the **same net as the Bramble itself**, living in the sheet's last 32 rows — the same boxes drawn again three quarters of a texel larger, in the translucent pass at 45% alpha. It needed no shader change at all, because creature skins are already alpha-tested cutouts and the overlay is mostly transparent. That is the sheep's fleece arrangement exactly. **`charged` is the one per-individual property besides `scale` that persists**, so a charged one does not quietly reload as ordinary. The reference makes them with lightning; we have no weather until M27, so 5% of Brambles arrive charged instead.
+
+### How limbs move
+
+**A limb hangs from a joint and turns about it.** It used to be an axis-aligned box slid back and forth, which is why animals read as skating: a translated foot travels forward without ever leaving the ground, and the top of the leg slides out from under the body. Rotating fixes all of that at once — the foot lifts by `L(1 − cos θ)`, it eases into each end of the stride instead of shuttling at constant speed, and the near and far legs foreshorten differently, which is what separates the four legs of a quadruped visually.
+
+**The pivot is derived from the box, never authored.** `legBox` puts it on the limb's own centre line, below the top face by half the limb's thinner cross-section. That overhang is the point rather than a detail: tilting swings the top corners, so material has to stay above the joint or a wedge opens at the hip every stride — which is exactly why the reference's biped arm sticks 2 texels up past its shoulder. A pivot written into `kSpecies` would be a second copy of a number the geometry already owns, and that is this codebase's most repeated bug.
+
+**`barBox` is the second pivot location.** A spider's leg runs sideways and hinges at its inner end, so its swing is a yaw rather than a tilt — it turns the local axes the way the head turn does. The silverfish is the one genuine exception: it has no limb to turn, so its wriggle stays a sideways *distance* and lives in `buildMesh` beside the segments rather than in the species row.
+
+**Amplitude is eased, and it does two jobs.** `limbSwingAmount` chases the speed the creature actually achieved — not the speed it wanted — with the reference's ~0.3 s lag, so legs spin up and wind down instead of popping between still and striding, and one amplitude covers both a walk and a run with no second animation. It saturates against the species' **own `runSpeed`** rather than the reference's flat 5 m/s, because our roster moves at about a third of Minecraft's speeds; measured against theirs, nothing here would lift a foot. Being driven by distance actually covered means being blocked, shoved or knocked back winds the legs down for free.
+
+**Amplitudes are capped at 0.70 rad, half the reference's 1.4.** Rotating lifts a foot a long way — at the reference's 80° it is 83% of a leg length — so a full-amplitude roster prances. The several species sitting on the cap are the short-legged and the fast, which is the set the reference gives one flat amplitude anyway.
+
+**Every biped but three carries the reference's idle arm sway**: a roll of 0…5.7° on a 3.5 s period and a pitch of ±2.9° on a 4.7 s one, deliberately incommensurate so it never visibly loops, against a per-creature age so a crowd does not sway in unison. The three left out are the villager, witch and wandering trader, whose arms are a folded three-box assembly that is closed rather than solved.
+
+### Getting up a hill
+
+**Two mechanisms, kept apart exactly as the reference keeps them.** `stepHeight` is how high a rise a creature simply walks up, with no airtime — 0.6 for almost everything, **1.0** for the horse family, the llama and the frog, **1.5** for the camel. `jumpHeight` is how high it can jump when a rise is taller than that, and it is `1.2522` m for everything else, derived from the reference's `jump_strength` of 0.42. **Anything whose step height already clears a full block never jumps**, which is why a horse flows over a ledge and a chicken hops it.
+
+A jump is real physics: the launch speed is whatever reaches that height under creature gravity, so the arc, the airtime and the landing all fall out rather than being animated.
+
+**A step rises to the surface, not by the step height.** Those are different numbers and using the second for the first is what made a step a teleport: `stepHeight` is how high a creature *can* climb, while how far it *should* rise is a fact about the block it is climbing onto, which the world owns. Lifting by the whole allowance overshot every slab and stair by the difference and then dropped back under gravity — a stutter on every step — and for a camel, whose allowance is a block and a half, it was a launch. The destination surface now comes from the same `highestSurfaceBelow` that landing uses.
+
+**What eases is the drawn body, never the box.** A step-up has to move the collision box in one go; ramping it would leave a creature part-way inside a block and is a fresh source of stuck states. So `Creature::stepSmooth` records how far the *rendered* body still trails behind and decays over about a sixth of a second. It is deliberately a lie told to the eye: physics, targeting, reach and separation all read the true position, and only `buildMesh` may touch it. Descent needs no equivalent — walking off a ledge is already gravity.
+
+Three things make it actually work, and each was a separate bug on the way:
+
+- **The steering fan has to agree.** It rejected any heading blocked at foot height, so creatures routed *around* every rise and the jump could never fire. It now accepts anything clearable by a step or a jump.
+- **"Which axis failed to move" is not a test for being blocked.** Walking along a wall blocks one axis and slides freely on the other. The trigger probes ahead instead — blocked at foot height, still blocked at step height, clear at jump height. The spiders' wall-climb had been on the same broken test since M20b and only worked diagonally.
+- **Hoppers needed their own answer.** A rabbit's ordinary hop reaches 0.34 m, so it nudged into every ledge forever. A hop that meets something it cannot clear launches to the same 1.2522 m; every other hop is untouched.
+
+**A chicken comes down slowly and flaps the whole way**, and the two are one mechanism rather than two — `fallDrag` scales the descent and the same airborne state drives the wing beat. Terminal descent is **1.95 m/s** against the 60 everything else reaches, which is exactly why the reference needs no fall-damage exemption for chickens: they never land hard. **Chicks are covered for free**, because `scale` never enters into it. The drag factor is re-solved for our timestep rather than applied per frame, since `v = (v - g·dt)·k` settles at a different speed when a frame is not a tick; the form used reduces to the reference's 0.6 at 20 Hz. The wings hinge at the shoulder using a **roll** axis on `uprightBox` — the first rotation in the model system about the forward axis — because rotating a box about its own centre swings the tip out and the root into the body.
+
+### Spawn eggs
+
+**One per species, right-click to place that creature.** The egg's item id, its sprite layer and the `CreatureKind` it produces are all **the same offset from their respective firsts**, so `spawnEggFor(kind)` and `creatureForSpawnEgg(item)` are arithmetic rather than a thirty-six row table that nobody would keep in step. `ItemId::SpawnEggFirst`, `TextureLayer::SpawnEggFirst` and `CreatureKind` are one order, and a `static_assert` ties the count to `CreatureKind::Count`.
+
+**They are appended after every tool, deliberately.** `isTool` is a range test bounded by `StoneHoe`; an egg inserted among the tools would become a one-slot item that wears out and has mining power.
+
+**The sprites are Mojang's, staged beside the exe** in `spawn-eggs/`, exactly like `creatures-reference.png` and for the same reason — reference art may be measured from and used as a placeholder, but must never live under `assets/` and must never ship. `tools/make-spawn-egg-sprites.ps1` refuses to write under `assets/`, and `run.ps1` restores them if the folder is missing. A sprite that cannot be found **falls back to blank rather than being skipped**, because the list index is the layer index and dropping one would shift every layer after it.
+
+**Right-click reuses `placeTimer`.** Without a cooldown one click at 120 fps drops seven creatures on the same square — the same shape as the instant-dig bug that stripped a row of blocks per click.
+
+**Thirty-six eggs fill all thirty-six inventory slots**, so the egg set and the block kit cannot coexist. Creative starts on eggs and **F10 swaps between the two** rather than either being quietly truncated.
+
+### Creature sizes
+
+Two different numbers, and conflating them is a bug either way. The **collision height** in `kSpecies` is the original's hitbox; the **model top** is where the tallest box actually reaches. Models are allowed to exceed their boxes — a horse's head is well above its 1.6 m hitbox in the original too — but an animal whose silhouette contradicts its neighbours is wrong. The llama once reached 2.57 m against the horse's 2.15 and towered over it, which is backwards.
+
+| species | collision | model top | render scale | matches |
+|---|---|---|---|---|
+| Sheep / Cow / Pig / Bramble | 1.40 / 1.50 / 1.05 / 1.70 | ≈ as boxed | 1.00 | playtested, not the reference |
+| Chicken | 0.80 | 0.84 | 1.00 | Bedrock |
+| Cat | 0.70 | 1.03 (tail up) | 1.00 | both |
+| Camel | 2.375 | 2.72 | 1.00 | both |
+| Horse | 1.60 | 2.15 | 1.00 | both |
+| Mule | 1.60 | 2.22 | **0.92** | both |
+| Donkey | 1.60 | 2.10 | **0.87** | Bedrock |
+| Llama | 1.87 | 2.31 | 1.00 | both |
+| Goat | 1.30 | 1.67 (horn tips) | 1.00 | both |
+| Rabbit | 0.60 | 0.64 (ear tips) | **0.48** | Bedrock |
+| Wolf | 0.80 | 0.97 (ear tips) | 1.00 | Bedrock |
+| Frog | 0.50 | 0.44 (eye tops) | 1.00 | both |
+| Fox | 0.70 | 0.70 (crown) | **0.93** | both |
+| Ocelot | 0.70 | 1.03 (tail up) | 1.00 | both |
+| Polar Bear | 1.40 | 1.71 (ear tips) | **1.25** | both |
+| Panda | 1.25 | 1.52 (ear tips) | **1.10** | both |
+| Slime, small | 0.52 | 0.52 | **1.04** | both |
+| Slime, medium | 1.04 | 1.04 | **2.08** | both |
+| Slime, large | 2.08 | 2.08 | **4.16** | both |
+| Spider | 0.90 | 0.74 (abdomen) | **1.10** | both |
+| Cave Spider | 0.50 | 0.47 (abdomen) | **0.70** | both |
+| Zombie | 1.95 | 2.00 (crown) | 1.00 | both |
+| Skeleton | 1.99 | 2.00 (crown) | 1.00 | both |
+| Villager | 1.95 | 1.96 (crown) | **0.92** | both |
+| Husk | 1.95 | 2.00 (crown) | 1.00 | both |
+| Silverfish | 0.30 | 0.26 (thorax) | 1.00 | both |
+| Blackbone | 2.40 | 2.41 (crown) | **1.20** | both |
+| Stray | 1.99 | 2.00 (crown) | 1.00 | both |
+| Bogged | 1.99 | 2.00 (crown) | 1.00 | both |
+| Zombie Villager | 1.95 | 1.96 (crown) | **0.92** | both |
+| Witch | 1.95 | 2.65 (hat tip) | **0.92** | both |
+| Wandering Trader | 1.95 | 1.96 (crown) | **0.92** | both |
+| Princepin | 1.95 | 2.01 (crown) | 1.00 | both |
+
+`modelScale` multiplies geometry and placement only, never UV rectangles. The rabbit's scale is far below the rest because it is the only model stood on end — upright it is more than twice as tall as it is long, so the same nets need a much smaller multiplier to stay rabbit-sized. The frog is the one model *shorter* than its hitbox, which is correct: the original's 0.5 cube is generous around a flat animal.
+
+**Only heights come from the reference. Half-widths are ours and are deliberately narrower** — a horse is 0.9 across here against Bedrock's 1.4 — because a wide box catches on doorways and trunks far more than it reads as bulk. Do not "correct" the widths to match a wiki table; the divergence is the design.
+
+Chicken, donkey, rabbit and wolf were moved from Java's heights to Bedrock's on 2026-08-03, so the chicken and rabbit grew, the donkey grew to match the horse (as Bedrock has it), and the wolf shrank slightly. Cow and Bramble stay on their playtested boxes deliberately.
+
 ### Adding a block type
 
 1. Put a 16×16 PNG in `assets/textures/blocks/`.
@@ -382,7 +605,9 @@ Drops are **thrown**, not released: without a forward impulse a dropped stack la
 
 Landing **bounces**, keeping 42% of the impact speed, and anything slower than 2 m/s settles outright. That threshold is what makes it terminate; removing it to get a bouncier feel turns the animation into the infinite loop described in `CLAUDE.md`.
 
-`creative_mode` in `settings.cfg` keeps infinite blocks and **suppresses drops from breaking**, but items are still picked up in creative. Skipping collection instead leaves anything you drop orbiting you forever, which is the bug recorded in `CLAUDE.md`.
+**A drop nobody collects is gone after five minutes.** Without that a long session accumulates every item it ever made, and each one rebuilds its geometry every frame. The reference pauses the timer when a chunk stops ticking; ours runs on wall time, which is simpler and equivalent because drops are not saved.
+
+`creative_mode` in `settings.cfg` keeps infinite blocks: placing never runs a stack down. **It changes nothing else.** Breaking drops, and drops are collected, in every mode — both halves of that were once suppressed in creative and both produced bugs, recorded in `CLAUDE.md`.
 
 Stack counts are drawn in the **bottom-left** of a slot, and only when there is more than one — a count of one reads as simply having the thing.
 
@@ -396,7 +621,49 @@ Shapeless matching **counts leftovers**: after ticking off each ingredient it ch
 
 Recipes live in one table in `item/Recipe.cpp`. Shapes and yields come from the reference recipe JSON — `CRAFTABLE.md` records every recipe, whether we can build it today, and what art it still needs.
 
-Closing the inventory **returns crafting ingredients** to the inventory, not just the cursor stack. Items left in a grid the player cannot see are items that quietly vanish.
+Closing a screen **returns crafting ingredients** to the inventory, not just the cursor stack. Items left in a grid the player cannot see are items that quietly vanish.
+
+### The crafting table
+
+`BlockId::CraftingTable` answers `isInteractive`, which is what makes right-clicking it open a screen rather than place against it. Sneaking suppresses that, so a block can still be put down on top of one.
+
+Its panel is **generated from the inventory panel** by `tools/make-hud-sheet.ps1`: same frame, same backdrop, same storage rows and hotbar, with the top section cleared and the *same 18×18 slot cell* stamped into a 3×3 and a result position. The cells are not a lookalike, they are the same pixels, so the two screens cannot drift apart. Positions came from measuring the reference GUI, which turned out to share our panel's rows exactly and differ by one pixel in its columns.
+
+The matcher needed no changes at all — `craftResult` already took the grid size, and patterns are already stored at their own size.
+
+### The furnace
+
+Smelting is deliberately dull machinery: every recipe takes **ten seconds**, fuel is measured in how many items it will smelt (charcoal 8, wood 1½, a stick ½), and the two are unrelated tables. Recipes today are `Cobblestone → Stone` and `Log → Charcoal`; glass is missing because sand needs a transparent block we do not have, not because the recipe is unknown.
+
+**Fuel is only lit when there is something worth cooking**, so a furnace loaded with charcoal and nothing else sits cold instead of quietly burning through it. Cook progress slides back rather than resetting, so pulling an item out for a moment does not throw away its cooking.
+
+**Lit and unlit are two different blocks.** `Furnace` and `FurnaceLit` differ in their front texture and in the light they cast (13), and both of those are properties of the block itself — the same reasoning that puts water levels and stair facings in the id.
+
+**The contents are a block entity**, which is the thing the id trick cannot do. They live in a map keyed by block position in `Main.cpp`, not in `World`: chunks are loaded and saved on worker threads, and there is no reason to route block-entity data through that. The cost is that they are written on world save rather than when a chunk unloads, and that entries outlive their chunk being unloaded — both cheap for something a player places a handful of. They persist to `furnaces.dat` beside `player.dat`, and the record is `static_assert`ed trivially copyable because it is written as raw bytes.
+
+**A furnace's output slot is storage, not a preview.** Unlike a crafting result you can only take from it, never put into it, so the shared click handling branches there and nowhere else.
+
+Both progress indicators are the **lit sprite drawn over the spent one** baked into the panel, clipped to how far along the furnace is: the flame is cut from the top because it burns downward, the arrow from the right because it fills rightward.
+
+**Known gap:** a furnace's lit state lives in the block and its contents live in `furnaces.dat`, so if that file is lost or rejected the block stays lit forever with nothing behind it. Opening it creates a fresh entry and the next tick puts it out. Not worth architecture to prevent, but worth knowing when a furnace looks stuck.
+
+### Mining and tools
+
+**Digging takes time.** `breakSeconds(block, item)` multiplies the block's hardness by the tool's speed and by a penalty for being under-tiered; `yieldsDrop(block, item)` answers separately whether anything comes out. Creative pays no time cost and always drops — the one place mode is allowed to matter besides placing.
+
+The multipliers are the reference's own pair, and so is the hardness table: **×1.5 with the kit a block demands, ×5 without**. The ratio is what makes a tool a decision rather than a convenience — a block still comes away bare-handed, it just takes long enough to be worth avoiding.
+
+**The tier demand is the whole progression.** Stone, cobblestone, bricks, slabs, stairs and furnaces require a wooden pickaxe or better; without one they still come away, three times slower, and give nothing. Everything else drops bare-handed, or a fresh world would be unplayable.
+
+Tools are wood (speed 2, 60 uses) and stone (speed 4, 132 uses). Wear is counted per block broken and only on blocks that resist — plants and torches cost nothing. **Tools do not stack**, because two with different wear are not interchangeable, which is why `maxStackFor` exists rather than a bare `kMaxStack`.
+
+Dig progress is drawn as a bar under the crosshair. The HUD only rebuilds when asked, so the frame digging *stops* has to ask too — otherwise the last bar drawn stays on screen forever, which is exactly what happened first time.
+
+### Torches
+
+A torch is a **cutout cross**, the same shape tall grass uses, so it needed no new geometry: the texture is transparent apart from a two-pixel stick and its flame, and the existing alpha-tested pass does the rest. It emits light 14 and, like plants, needs something solid beneath it — placing without support is refused, and breaking that support drops it.
+
+**Wall torches are deliberately absent.** They need either a tilted box or an offset cross plus four orientations in the block id, and floor torches light a cave perfectly well in the meantime.
 
 ---
 
@@ -425,8 +692,6 @@ The inventory art arrives as an **integer upscale** of its real pixel grid, so t
 `assets/textures/font.png` is a **third texture binding**, selected by layer `-2.0` (the HUD sheet is `-1.0`). It is a 128×84 atlas: printable ASCII 32–126 in a 16×6 grid of 8×14 cells, rendered from Consolas with hinted 1-bit rasterisation so every glyph lands on whole pixels. `tools/make-font.ps1` regenerates it.
 
 `hud::appendText` emits one textured quad per character at a fixed advance. Sizes should be chosen so a cell maps to whole pixels — `14.0f / 360.0f` is 1:1 at 720p — because the sampler is nearest-neighbour and any other ratio doubles some rows and not others.
-
-> The sheet is recognisably Minecraft's HUD widget art and is a placeholder to replace before any release.
 
 ### Hotbar
 
@@ -496,7 +761,7 @@ Everything before M17b was a unit cube, and both meshing and collision assumed i
 
 Dimensions match the reference models exactly, verified at M19b against `models/block/*.json`: slabs at `0–8` and `8–16` sixteenths, a stair's step at `[8,8,0]→[16,16,16]`, the fence post at `[6,0,6]→[10,16,10]`, its rails at `6–9` and `12–15`, and a plant's blades spanning `0.8–15.2`.
 
-**`collisionBoxes` is the single source of truth for a block's extent**, read by the mesher, by physics and by the targeting raycast. Keep it that way: the moment two of them compute a shape independently, they will disagree.
+**`collisionBoxes` is the single source of truth for a block's extent**, read by the mesher, by physics — the player and creatures share `world/Collision.hpp` for exactly this reason — and by the targeting raycast. Keep it that way: the moment two of them compute a shape independently, they will disagree.
 
 **Two deliberate exceptions**, both of which earned their place by having a real second case rather than an anticipated one:
 
@@ -569,7 +834,7 @@ A chunk is flagged `modified` the moment `setBlock` changes something, and only 
 
 Each chunk is one file under `saves/world_<seed>/chunks/`, written to a `.tmp` name and then **renamed**. Rename is atomic on Windows and POSIX, so the file on disk is always either the complete old version or the complete new one, never a mixture.
 
-Every file carries a header with magic, format version, seed, its own coordinates and block count, **all four checked on load**. This is the only place the game reads bytes it did not produce this run, so it validates rather than assumes. Player position and view direction live in `player.dat` beside the chunks.
+Every file carries a header with magic, format version, seed, its own coordinates and block count, **all four checked on load**. This is the only place the game reads bytes it did not produce this run, so it validates rather than assumes. Player position and view direction live in `player.dat` beside the chunks, furnace contents in `furnaces.dat`, and the creature population in `creatures.dat`. All three side tables follow the same shape: magic, version, seed, count, then fixed-size records written as raw bytes and `static_assert`ed trivially copyable. An empty table deletes its file rather than leaving a stale one — a leftover would restore furnaces the player has broken, or repopulate a world they have cleared.
 
 One file per chunk is deliberately crude: a bad write damages exactly one chunk and it needs no index to stay consistent. A packed region format belongs with M13 if file count ever becomes the problem.
 
@@ -737,9 +1002,11 @@ Chunks live in a `std::unordered_map` keyed by world chunk coordinate. The world
 
 | Radius | Chunks | Meaning |
 |---|---|---|
-| Load | 6 | Generated and kept in memory |
-| Visible | 5 | Meshed and drawn |
-| Unload | 8 | Erased past this |
+| Load | visible + 1 | Generated and kept in memory |
+| **Visible** | **`render_distance`** | Meshed and drawn |
+| Unload | visible + 3 | Erased past this |
+
+**The three radii are derived from one number.** `kDefaultVisibleRadiusChunks = 5` in `World.hpp` is only a fallback — in practice `Settings::renderDistance` always overrides it, and it **defaults to 12** (`settings.cfg` in the current debug build says 12). So the table's real content is the *relationship*, not the absolute values.
 
 **Visible is one less than load on purpose.** A chunk is only meshed once its four horizontal neighbours exist; meshing against a missing neighbour emits a full sheet of faces at the frontier that has to be thrown away when the neighbour arrives. **Unload is larger than load** so pacing back and forth across the boundary does not thrash chunks in and out.
 
@@ -767,6 +1034,8 @@ The per-second log line reports `chunks | meshes | pending | retired`. Each catc
 - **meshes** — must track chunks; divergence means slots are not reclaimed.
 - **pending** — must return to zero when standing still; otherwise queues refill faster than they drain.
 - **retired** — must sit at zero; sustained growth means the release pass stopped running.
+- **creatures** — must settle at the cap (14) and never exceed it. This one has already earned its place twice: it read 16 against a cap of 14 after a scripted edit deleted a `return;`, and the per-species breakdown (`s` sheep, `c` cows, `b` Brambles) settled an apparent "passives are broken" in one run by showing the spawn was simply a region neither passive lives in.
+- **drops** — one per block broken, so it doubles as a count of how many blocks a click actually destroyed. Added while chasing the creative instant-break bug, where a single click broke twelve.
 
 ---
 
@@ -810,8 +1079,6 @@ Milestone 1 program flow:
 
 **Waiting for GPU idle before shutdown is mandatory**, not a nicety — destroying resources the GPU is still using is undefined behavior.
 
-The window shows a solid dark blue and nothing else. That is the intended and complete result for this milestone.
-
 ---
 
 ## Current Validation Baseline
@@ -842,6 +1109,9 @@ Verified 2026-07-31 on this machine.
 - **M17a result:** alpha-tested, double-sided, layered leaves. **3,024,166 triangles, 1.45 ms GPU, 121 fps** — +6.9% geometry over M16. Zero validation errors once `shaderDemoteToHelperInvocation` was enabled.
 - **M17b result:** block shapes. Tall grass and stone slabs. **3,146,576 triangles, 1.35 ms GPU, 120 fps.** Verified numerically: a player dropped onto a slab platform rests at 40.501 where the surface is 40.5.
 - **M17c result:** oriented shapes. Cobblestone stairs in eight orientations, plus top slabs and slab merging. **3,146,570 triangles, 1.48 ms GPU, 120 fps.** Slabs were rewritten onto the shared box table and reproduced a bit-identical triangle count, which is the check that the rewrite changed nothing.
+- **M20b result:** thirty-six species. Release build holds **120 fps** with no measurable cost from creatures. The counter that matters is the per-second census — `creatures N (breakdown) hunting M` — which is what makes "is the behaviour actually running?" answerable without a debugger, and which has twice settled a bug that looked like something else entirely.
+- **M20c result:** the three-state switch replaced by eight behaviours in a `constexpr` table. **The acceptance test was that nothing changed**, so the evidence is negative by design: both presets clean at `/W4`, a debug soak with zero validation errors, and every prior behaviour intact. The one visible addition — a creature glancing at you while it keeps walking — is the proof that disjoint control flags coexist.
+- **M20d result:** explosions, jumping, the chicken's slow fall and thirty-six spawn eggs. Debug soaks of 20–45 s at **100–121 fps**, zero validation errors, population stable, and the sprite array grown from 38 to **74 layers** with a startup check that the egg run still begins where the block list ends.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

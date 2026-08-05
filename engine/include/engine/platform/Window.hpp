@@ -46,6 +46,13 @@ enum class Key {
     F5,
     F6,
     F7,
+    F8,
+    F9,
+    F10,
+    /// Editing commands are not characters: the OS never sends them to the
+    /// character callback, so text editing needs them from the key path.
+    Backspace,
+    Enter,
 };
 
 enum class MouseButton {
@@ -95,6 +102,19 @@ public:
     /// `consumeKeyPresses` for one-shot actions.
     bool isKeyDown(Key key) const;
 
+    /// Characters typed since the last call, in order. Clears the queue.
+    ///
+    /// This is deliberately **not** derived from `consumeKeyPresses`. A key
+    /// reports a physical button; a character is what the OS produces after
+    /// applying the keyboard layout, the shift state and any dead keys — so
+    /// mapping keys to letters ourselves would type the wrong thing on every
+    /// layout that is not US QWERTY.
+    ///
+    /// Restricted to printable ASCII, because the font atlas holds nothing
+    /// else. Filtering at the boundary means a caller can never be handed a
+    /// character it has no glyph for.
+    std::string consumeTypedText();
+
     /// Whether a mouse button is held right now.
     ///
     /// Tracked from press and release events rather than polled from the OS, so
@@ -135,6 +155,9 @@ public:
     /// Called by the platform key callback. Not intended for game code.
     void recordKeyPress(Key key) { m_keyPresses.push_back(key); }
 
+    /// Called by the platform character callback. Not intended for game code.
+    void recordTypedCharacter(unsigned int codepoint);
+
     /// Called by the platform mouse callback. Not intended for game code.
     void recordMouseButton(MouseButton button, bool down);
 
@@ -150,6 +173,9 @@ private:
     GLFWwindow* m_handle = nullptr;
     bool m_resized = false;
     std::vector<Key> m_keyPresses;
+    /// Capped, so a frame that never drains it cannot grow without bound while
+    /// someone leans on the keyboard.
+    std::string m_typedText;
     std::vector<MouseButton> m_mouseButtonPresses;
     std::array<bool, 2> m_mouseButtonDown{};
 

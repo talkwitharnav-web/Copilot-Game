@@ -1,5 +1,6 @@
 #pragma once
 
+#include "item/Item.hpp"
 #include "world/Block.hpp"
 
 #include <engine/render/MeshData.hpp>
@@ -13,6 +14,14 @@ namespace game::hud {
 /// Layer value that tells the shader to sample the HUD sprite sheet rather than
 /// the block texture array.
 constexpr float kHudLayer = -1.0f;
+
+/// Pixel dimensions of assets/textures/hud.png.
+///
+/// Sprite rectangles are given in sheet pixels and normalised against this, so
+/// it has to follow the image. It lives here rather than in each screen because
+/// the sheet grows whenever a panel is added, and a stale copy silently skews
+/// every sprite that reads from it.
+constexpr glm::vec2 kSheetSize{185.0f, 773.0f};
 
 /// Layer value selecting the font atlas.
 constexpr float kFontLayer = -2.0f;
@@ -55,7 +64,28 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
 float appendText(engine::MeshData& mesh, std::string_view text, float leftX, float centreY, float charHeight,
                  float depth, const glm::vec4& color);
 
+/// Draws what a slot holds: the item's icon, and a count where there is more
+/// than one.
+///
+/// `slotHalf` is half a slot's extent, and the icon and label are sized from
+/// it. The reference uses one 18-unit cell pitch for the entire screen -
+/// storage, hotbar and catalogue alike - so one parameter is genuinely all the
+/// scale information any caller has.
+void appendStack(engine::MeshData& mesh, const ItemStack& stack, const glm::vec2& centre, float slotHalf,
+                 float iconDepth, float countDepth);
+
 /// Width `appendText` would consume, for laying out before drawing.
 float textWidth(std::string_view text, float charHeight);
+
+/// A floating label beside the cursor: dark panel, bright inner rule, text.
+///
+/// Sits clear of the cursor so it never covers what it describes, and is clamped
+/// to the window, so a slot against an edge still gets a readable label rather
+/// than one running off screen.
+///
+/// `depth` is the nearest layer it occupies; it draws itself and its frame in
+/// front of that, so pass the smallest depth in use.
+void appendTooltip(engine::MeshData& mesh, std::string_view text, float cursorX, float cursorY, float aspect,
+                   float charHeight, float depth);
 
 } // namespace game::hud

@@ -38,11 +38,12 @@ struct Settings {
     /// watching the cycle without waiting.
     unsigned dayLengthSeconds = 600;
 
-    /// Drops off, and one of everything placeable in the hotbar. Useful while
-    /// developing anything that is not the inventory itself.
-    /// On by default until there is a way to obtain blocks other than breaking
-    /// them. Survival with no crafting lets you place only what you have
-    /// already dug up, which is not a game. Flip this once M19c lands.
+    /// One of everything placeable in the hotbar, and placing never runs a
+    /// stack down. Useful while developing anything that is not the inventory.
+    ///
+    /// **Breaking still drops, and drops are still collected** - the mode
+    /// changes what placing costs, not whether items exist. Suppressing either
+    /// half of that produced bugs twice.
     bool creativeMode = true;
 
     /// Where the player starts, in world blocks. Height is still found from the
@@ -58,6 +59,14 @@ struct Settings {
     /// column instead of the surface. Underground lighting is impossible to
     /// judge from above ground.
     bool spawnUnderground = false;
+
+    /// Lines the roster up in front of the spawn point and stops the spawner
+    /// touching them. Comparing a model against its reference net otherwise
+    /// means waiting for the right biome to produce the right animal.
+    ///
+    /// 0 is off, 1 shows every species in a grid, and anything higher shows
+    /// `creatureShowcase - 2` on its own, close enough to judge.
+    int creatureShowcase = 0;
 
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.

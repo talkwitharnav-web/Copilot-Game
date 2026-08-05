@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <vector>
 
 namespace game {
 namespace {
@@ -27,17 +28,91 @@ Recipe shapeless(std::array<ItemId, kMaxCraftSlots> ingredients, int used, ItemI
     return recipe;
 }
 
+/// Every tool is its material over a stick or two, and every shape is the same
+/// for both materials - so the table is generated rather than written out
+/// twenty times.
+Recipe tool(ItemId material, ItemId result, const char* pattern) {
+    std::array<ItemId, kMaxCraftSlots> cells{};
+    for (std::size_t i = 0; i < kMaxCraftSlots; ++i) {
+        switch (pattern[i]) {
+        case 'M':
+            cells[i] = material;
+            break;
+        case 'S':
+            cells[i] = ItemId::Stick;
+            break;
+        default:
+            cells[i] = kNone;
+            break;
+        }
+    }
+    Recipe recipe;
+    recipe.pattern = cells;
+    recipe.width = 3;
+    recipe.height = 3;
+    recipe.result = ItemStack{result, 1};
+    return recipe;
+}
+
+} // namespace
+
 /// Every recipe in the game.
 ///
 /// Shapes and yields are taken from the reference recipe data - see
 /// `CRAFTABLE.md`, which records each one and where it came from.
-const std::array<Recipe, 2>& recipes() {
-    static const std::array<Recipe, 2> table{{
-        shapeless({itemForBlock(BlockId::Log)}, 1, itemForBlock(BlockId::Planks), 4),
-        shaped(1, 2, {itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks)}, ItemId::Stick, 4),
-    }};
+const std::vector<Recipe>& recipes() {
+    static const std::vector<Recipe> table = [] {
+        std::vector<Recipe> all{
+            shapeless({itemForBlock(BlockId::Log)}, 1, itemForBlock(BlockId::Planks), 4),
+            shaped(1, 2, {itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks)}, ItemId::Stick, 4),
+            shaped(2, 2,
+                   {itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks),
+                    itemForBlock(BlockId::Planks)},
+                   itemForBlock(BlockId::CraftingTable), 1),
+            // A ring of eight, hollow in the middle - which is why the pattern
+            // has to be stored at 3x3 and cannot be trimmed to its filled cells.
+            shaped(3, 3,
+                   {itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::Cobblestone),
+                    itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::Cobblestone), kNone,
+                    itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::Cobblestone),
+                    itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::Cobblestone)},
+                   itemForBlock(BlockId::Furnace), 1),
+            // Charcoal comes from smelting a log, so torches need no ore at all.
+            shaped(1, 2, {ItemId::Charcoal, ItemId::Stick}, itemForBlock(BlockId::Torch), 4),
+        };
+
+        struct ToolShape {
+            const char* pattern;
+            ItemId wooden;
+            ItemId stone;
+        };
+        constexpr std::array<ToolShape, 5> shapes{{
+            {"MMM.S..S.", ItemId::WoodenPickaxe, ItemId::StonePickaxe},
+            {"MM.MS..S.", ItemId::WoodenAxe, ItemId::StoneAxe},
+            {".M..S..S.", ItemId::WoodenShovel, ItemId::StoneShovel},
+            {".M..M..S.", ItemId::WoodenSword, ItemId::StoneSword},
+            {"MM..S..S.", ItemId::WoodenHoe, ItemId::StoneHoe},
+        }};
+        for (const ToolShape& shape : shapes) {
+            all.push_back(tool(itemForBlock(BlockId::Planks), shape.wooden, shape.pattern));
+            all.push_back(tool(itemForBlock(BlockId::Cobblestone), shape.stone, shape.pattern));
+        }
+
+        // Derived here rather than at each recipe, so neither can be forgotten
+        // on a new row. A shapeless recipe keeps its ingredient *count* in
+        // `width`, so it fits the player's grid when it uses four or fewer -
+        // comparing it against the pattern extents would be wrong.
+        for (Recipe& recipe : all) {
+            recipe.category = categoryFor(recipe.result.item);
+            recipe.fitsInTwoByTwo =
+                recipe.shapeless ? recipe.width <= 4 : recipe.width <= 2 && recipe.height <= 2;
+        }
+        return all;
+    }();
     return table;
 }
+
+namespace {
 
 /// Bounding box of the occupied cells, so a pattern can be compared where it
 /// actually sits rather than where it was dropped.

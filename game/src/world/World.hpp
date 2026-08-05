@@ -72,6 +72,11 @@ public:
     BlockId blockAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
 
+    /// Whether the whole vertical column at a block position is resident.
+    /// Anything that falls under gravity must ask this first: an absent chunk
+    /// reads as air, so a creature over one drops straight through the world.
+    bool columnResident(int x, int z) const;
+
     /// Highest solid block in a column, or -1 if empty or not loaded.
     int highestSolid(int x, int z) const;
 

@@ -1,5 +1,6 @@
 #include "world/Player.hpp"
 
+#include "world/Collision.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
@@ -22,46 +23,11 @@ constexpr float kMaxStepDistance = 0.4f;
 
 /// Keeps the box a hair away from surfaces it is resting against, so a resolved
 /// contact does not immediately re-report as a collision.
-constexpr float kSkin = 0.001f;
-
-struct Aabb {
-    glm::vec3 min{0.0f};
-    glm::vec3 max{0.0f};
-};
+constexpr float kSkin = kCollisionSkin;
 
 Aabb boxAt(const glm::vec3& feet, float height) {
     constexpr float half = kWidth * 0.5f;
     return Aabb{{feet.x - half, feet.y, feet.z - half}, {feet.x + half, feet.y + height, feet.z + half}};
-}
-
-/// True if any solid block overlaps the box. Subtracting the skin from the upper
-/// bound stops a box resting exactly on a boundary from counting the next block.
-bool overlapsSolid(const World& world, const Aabb& box) {
-    const int minX = static_cast<int>(std::floor(box.min.x));
-    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
-    const int minY = static_cast<int>(std::floor(box.min.y));
-    const int maxY = static_cast<int>(std::floor(box.max.y - kSkin));
-    const int minZ = static_cast<int>(std::floor(box.min.z));
-    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
-
-    for (int y = minY; y <= maxY; ++y) {
-        for (int z = minZ; z <= maxZ; ++z) {
-            for (int x = minX; x <= maxX; ++x) {
-                // Not every solid block fills its cell, and stairs do not even
-                // fill one box, so the cell test is only the first step.
-                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
-                for (int i = 0; i < shape.count; ++i) {
-                    const BlockBox& b = shape.boxes[i];
-                    if (box.min.x < static_cast<float>(x) + b.maxX && box.max.x > static_cast<float>(x) + b.minX &&
-                        box.min.y < static_cast<float>(y) + b.maxY && box.max.y > static_cast<float>(y) + b.minY &&
-                        box.min.z < static_cast<float>(z) + b.maxZ && box.max.z > static_cast<float>(z) + b.minZ) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
 }
 
 /// True if solid ground sits directly under the player's footprint.
@@ -95,43 +61,6 @@ bool submerged(const World& world, const glm::vec3& feet, float height) {
         }
     }
     return false;
-}
-
-/// Highest surface under `box` that the feet may come to rest on.
-///
-/// Not every solid block fills its cell, so the landing plane is not simply the
-/// block boundary. Snapping to the boundary above a slab drops the player onto
-/// thin air, the ground probe finds nothing, and they fall again - a bounce that
-/// repeats forever.
-float highestSurfaceBelow(const World& world, const Aabb& box, float notAbove) {
-    const int minX = static_cast<int>(std::floor(box.min.x));
-    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
-    const int minZ = static_cast<int>(std::floor(box.min.z));
-    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
-    const int minY = static_cast<int>(std::floor(box.min.y));
-    const int maxY = static_cast<int>(std::floor(notAbove));
-
-    float best = -std::numeric_limits<float>::infinity();
-    for (int y = minY; y <= maxY; ++y) {
-        for (int z = minZ; z <= maxZ; ++z) {
-            for (int x = minX; x <= maxX; ++x) {
-                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
-                for (int i = 0; i < shape.count; ++i) {
-                    const BlockBox& b = shape.boxes[i];
-                    // Only boxes actually under the footprint can be landed on.
-                    if (box.min.x >= static_cast<float>(x) + b.maxX || box.max.x <= static_cast<float>(x) + b.minX ||
-                        box.min.z >= static_cast<float>(z) + b.maxZ || box.max.z <= static_cast<float>(z) + b.minZ) {
-                        continue;
-                    }
-                    const float top = static_cast<float>(y) + b.maxY;
-                    if (top <= notAbove + kSkin && top > best) {
-                        best = top;
-                    }
-                }
-            }
-        }
-    }
-    return best;
 }
 
 /// The face that stopped motion along `axis`, or infinity if nothing did.

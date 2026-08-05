@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world/Chunk.hpp"
+#include "world/Furnace.hpp"
 #include "world/TerrainGenerator.hpp"
 
 #include <glm/glm.hpp>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <vector>
 
 namespace game {
 
@@ -16,6 +18,33 @@ struct SavedPlayer {
     glm::vec3 position{0.0f};
     float yaw = 0.0f;
     float pitch = 0.0f;
+};
+
+/// A furnace and the block it belongs to.
+struct PlacedFurnace {
+    glm::ivec3 position{0};
+    Furnace furnace;
+};
+
+/// One creature as it goes to disk.
+///
+/// Deliberately its own record rather than the live `Creature`. A save format
+/// has to be an explicit list of fields, or it changes silently every time the
+/// struct gains one - and everything transient (gait, timers, what it was
+/// thinking) is exactly what a reload should throw away.
+struct SavedCreature {
+    std::uint8_t kind = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float yaw = 0.0f;
+    std::int32_t health = 0;
+    float scale = 1.0f;
+    /// Whether a Bramble is carrying a charge. Kept because it is the one
+    /// per-individual property that is not transient and not derivable - a
+    /// charged one that reloaded as ordinary would look like the charge simply
+    /// wearing off.
+    std::uint8_t charged = 0;
 };
 
 /// Stores only the chunks the player actually changed.
@@ -46,6 +75,19 @@ public:
     /// Nothing on a world that has never been played.
     std::optional<SavedPlayer> loadPlayer() const;
     void savePlayer(const SavedPlayer& player) const;
+
+    /// Block entities, in one file for the whole world rather than split across
+    /// the chunk files.
+    ///
+    /// Deliberate: a chunk is loaded and saved by worker threads, and threading
+    /// block-entity data through that path buys a whole class of ordering bugs
+    /// for something a player only ever has a handful of. The cost is that these
+    /// are written when the world is saved rather than when a chunk unloads.
+    std::vector<PlacedFurnace> loadFurnaces() const;
+    void saveFurnaces(const std::vector<PlacedFurnace>& furnaces) const;
+
+    std::vector<SavedCreature> loadCreatures() const;
+    void saveCreatures(const std::vector<SavedCreature>& creatures) const;
 
     const std::filesystem::path& directory() const { return m_directory; }
     std::uint32_t seed() const { return m_seed; }

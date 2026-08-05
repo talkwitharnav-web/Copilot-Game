@@ -65,7 +65,7 @@ const Biome& biomeInfo(BiomeId id);
 ///
 /// Height must be blended or neighbouring regions meet at a cliff. The surface
 /// blocks come from the single strongest biome instead, because a blend of two
-/// block types is not a thing â€” the boundary still looks natural because the
+/// block types is not a thing — the boundary still looks natural because the
 /// selection noise makes it a wandering contour rather than a straight line.
 struct BiomeSample {
     BiomeId dominant;

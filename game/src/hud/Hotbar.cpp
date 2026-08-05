@@ -9,11 +9,6 @@
 namespace game {
 namespace {
 
-/// Pixel dimensions of assets/textures/hud.png.
-// The widget art sits at the sheet's origin; the inventory panel is stacked
-// below it, so these pixel coordinates are unaffected by the sheet growing.
-constexpr glm::vec2 kSheetSize{185.0f, 207.0f};
-
 /// One cell of the sprite sheet, and where its open interior sits inside it.
 ///
 /// The frame is drawn as four edge strips rather than one quad, because the
@@ -77,7 +72,7 @@ void appendCellPiece(engine::MeshData& mesh, const CellSprite& cell, float cellC
                              (localMin + localSize * 0.5f - cell.tileSize * 0.5f) * scale;
 
     hud::appendSprite(mesh, centre.x, centre.y, half.x, half.y, depth, cell.tileMin + localMin, localSize,
-                      kSheetSize);
+                      hud::kSheetSize);
 }
 
 void appendCellFrame(engine::MeshData& mesh, const CellSprite& cell, float centreX, float centreY, float cellSize,

@@ -2,7 +2,9 @@
 
 #include "world/Block.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <string>
 
 namespace game::hud {
 namespace {
@@ -166,6 +168,76 @@ float appendText(engine::MeshData& mesh, std::string_view text, float leftX, flo
     }
 
     return textWidth(text, charHeight);
+}
+
+void appendStack(engine::MeshData& mesh, const ItemStack& stack, const glm::vec2& centre, float slotHalf,
+                 float iconDepth, float countDepth) {
+    if (stack.empty()) {
+        return;
+    }
+    const float iconHalf = slotHalf * 0.72f;
+    if (isBlockItem(stack.item)) {
+        appendBlockIcon(mesh, blockForItem(stack.item), centre.x, centre.y, iconHalf, iconDepth);
+    } else if (const int layer = itemTextureLayer(stack.item); layer >= 0) {
+        // Flat, because there is no block to build a little cube out of.
+        appendQuad(mesh, centre.x, centre.y, iconHalf, iconHalf, iconDepth, {1.0f, 1.0f, 1.0f, 1.0f},
+                   static_cast<float>(layer), true);
+    }
+
+    if (stack.count > 1) {
+        const float countHeight = slotHalf * 0.84f;
+        const std::string label = std::to_string(stack.count);
+        appendText(mesh, label, centre.x - slotHalf + 0.006f, centre.y + slotHalf - countHeight * 0.5f - 0.006f,
+                   countHeight, countDepth, {1.0f, 1.0f, 1.0f, 1.0f});
+    }
+}
+
+void appendTooltip(engine::MeshData& mesh, std::string_view text, float cursorX, float cursorY, float aspect,
+                   float charHeight, float depth) {
+    if (text.empty()) {
+        return;
+    }
+
+    // Proportional to the text, so the box keeps its shape whatever size the
+    // label is drawn at.
+    const float padding = charHeight * 0.45f;
+    const float rule = charHeight * 0.11f;
+    const float gap = charHeight * 0.35f;
+
+    // Layers are a twentieth of the gap between the screen's own depth bands,
+    // which is the same margin the hotbar's selected cell already relies on.
+    constexpr float kLayer = 0.00005f;
+
+    const glm::vec4 panel{0.05f, 0.03f, 0.09f, 0.94f};
+    const glm::vec4 edge{0.32f, 0.16f, 0.62f, 1.0f};
+    const glm::vec4 label{0.94f, 0.94f, 0.98f, 1.0f};
+
+    const float innerHalfWidth = textWidth(text, charHeight) * 0.5f + padding;
+    const float innerHalfHeight = charHeight * 0.5f + padding;
+    const float outerHalfWidth = innerHalfWidth + rule * 2.0f;
+    const float outerHalfHeight = innerHalfHeight + rule * 2.0f;
+
+    // Offset down and to the right of the pointer, the way a pointer's own
+    // label sits, then pulled back inside the window if that would overflow.
+    float centreX = cursorX + gap + outerHalfWidth;
+    float centreY = cursorY + gap + outerHalfHeight;
+
+    centreX = std::min(centreX, aspect - outerHalfWidth);
+    centreX = std::max(centreX, -aspect + outerHalfWidth);
+    // Flips above the cursor rather than merely clamping, or a label near the
+    // bottom edge would sit on top of the slot it describes.
+    if (centreY + outerHalfHeight > 1.0f) {
+        centreY = cursorY - gap - outerHalfHeight;
+    }
+    centreY = std::max(centreY, -1.0f + outerHalfHeight);
+
+    const float white = static_cast<float>(TextureLayer::White);
+    appendQuad(mesh, centreX, centreY, outerHalfWidth, outerHalfHeight, depth, panel, white, false);
+    appendQuad(mesh, centreX, centreY, outerHalfWidth - rule, outerHalfHeight - rule, depth - kLayer, edge, white,
+               false);
+    appendQuad(mesh, centreX, centreY, innerHalfWidth, innerHalfHeight, depth - kLayer * 2.0f, panel, white, false);
+
+    appendText(mesh, text, centreX - innerHalfWidth + padding, centreY, charHeight, depth - kLayer * 3.0f, label);
 }
 
 } // namespace game::hud

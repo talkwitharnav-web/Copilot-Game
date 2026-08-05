@@ -7,11 +7,16 @@ namespace {
 
 /// Moves what fits from `from` into `to`, assuming they hold the same item.
 void merge(ItemStack& to, ItemStack& from, int limit) {
-    const int moved = std::min({limit, from.count, to.space()});
+    // Capacity comes from what is being moved, because an empty destination has
+    // no item of its own to ask - and a tool's capacity is one.
+    const int capacity = maxStackFor(from.item);
+    const int room = to.empty() ? capacity : capacity - to.count;
+    const int moved = std::min({limit, from.count, room});
     if (moved <= 0) {
         return;
     }
     to.item = from.item;
+    to.damage = from.damage;
     to.count += moved;
     from.count -= moved;
     if (from.count <= 0) {
@@ -85,6 +90,62 @@ void distribute(const std::vector<ItemStack*>& targets, ItemStack& cursor, bool 
             break;
         }
         merge(*target, cursor, share);
+    }
+}
+
+int quickMove(ItemStack& from, const std::vector<ItemStack*>& targets) {
+    if (from.empty()) {
+        return 0;
+    }
+
+    // Matching stacks before empty ones, or moving into a half-full inventory
+    // opens a second stack of something already carried.
+    for (ItemStack* target : targets) {
+        if (from.empty()) {
+            break;
+        }
+        if (target->empty() || target->item != from.item) {
+            continue;
+        }
+        merge(*target, from, from.count);
+    }
+    for (ItemStack* target : targets) {
+        if (from.empty()) {
+            break;
+        }
+        if (!target->empty()) {
+            continue;
+        }
+        merge(*target, from, from.count);
+    }
+    return from.count;
+}
+
+void gather(ItemStack& cursor, const std::vector<ItemStack*>& sources) {
+    if (cursor.empty() || cursor.space() <= 0) {
+        return;
+    }
+
+    std::vector<ItemStack*> matching;
+    matching.reserve(sources.size());
+    for (ItemStack* source : sources) {
+        if (!source->empty() && source->item == cursor.item) {
+            matching.push_back(source);
+        }
+    }
+    std::sort(matching.begin(), matching.end(),
+              [](const ItemStack* a, const ItemStack* b) { return a->count < b->count; });
+
+    for (ItemStack* source : matching) {
+        if (cursor.space() <= 0) {
+            break;
+        }
+        const int taken = std::min(source->count, cursor.space());
+        cursor.count += taken;
+        source->count -= taken;
+        if (source->count <= 0) {
+            *source = ItemStack{};
+        }
     }
 }
 

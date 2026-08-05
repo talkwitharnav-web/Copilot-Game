@@ -20,11 +20,17 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 ## What exists right now
 
-**Blocks:** Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab (bottom + top), Cobblestone Stairs (8 orientations), Plank Fence.
+**Blocks:** Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab (bottom + top), Cobblestone Stairs (8 orientations), Plank Fence, **Crafting Table**, **Furnace** (lit and unlit), **Torch**.
 
-**Items:** none. Every item id is currently a block item. **There is no Stick**, and that single gap blocks fences, every tool, and torches.
+**Items:** **Stick**, **Charcoal**, and ten tools — wooden and stone pickaxe, axe, shovel, sword and hoe. Everything else is a block item.
 
-**Crafting UI:** the inventory's 2×2 grid is drawn but inert. No recipe system exists yet — that is M19.
+**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works**: `Cobblestone → Stone` and `Log → Charcoal`, fuelled by charcoal, logs, planks, fences or sticks.
+
+**Mining is timed and tiered.** Stone-family blocks need a pickaxe or they drop nothing.
+
+**Recipes shipped (15):** `Log → 4 Planks`, `2 Planks → 4 Sticks`, `4 Planks → Crafting Table`, `8 Cobblestone → Furnace`, `Charcoal + Stick → 4 Torches`, and all ten tools.
+
+**Still missing:** wall torches (need a tilted shape), glass (needs a transparent block), chest (needs a non-cube model), and the whole of Tier 2's slab and stair variants.
 
 ---
 

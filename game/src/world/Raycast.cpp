@@ -126,4 +126,55 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
     }
 }
 
+bool hasLineOfSight(const World& world, const glm::vec3& from, const glm::vec3& to) {
+    const glm::vec3 delta = to - from;
+    const float length = glm::length(delta);
+    if (length < 1e-4f) {
+        return true;
+    }
+    const glm::vec3 dir = delta / length;
+
+    glm::ivec3 cell{static_cast<int>(std::floor(from.x)), static_cast<int>(std::floor(from.y)),
+                    static_cast<int>(std::floor(from.z))};
+
+    constexpr float infinity = std::numeric_limits<float>::infinity();
+    glm::ivec3 step{0};
+    glm::vec3 tMax{infinity};
+    glm::vec3 tDelta{infinity};
+
+    for (int axis = 0; axis < 3; ++axis) {
+        if (dir[axis] > 0.0f) {
+            step[axis] = 1;
+            tMax[axis] = (static_cast<float>(cell[axis] + 1) - from[axis]) / dir[axis];
+            tDelta[axis] = 1.0f / dir[axis];
+        } else if (dir[axis] < 0.0f) {
+            step[axis] = -1;
+            tMax[axis] = (static_cast<float>(cell[axis]) - from[axis]) / dir[axis];
+            tDelta[axis] = -1.0f / dir[axis];
+        }
+    }
+
+    // Whole cells rather than block geometry: sight is blocked by a cube being
+    // there at all, and a slab or a fence post is a gap you can see past.
+    while (true) {
+        int axis = 0;
+        if (tMax.y < tMax[axis]) {
+            axis = 1;
+        }
+        if (tMax.z < tMax[axis]) {
+            axis = 2;
+        }
+        if (tMax[axis] > length) {
+            return true;
+        }
+
+        cell[axis] += step[axis];
+        tMax[axis] += tDelta[axis];
+
+        if (isOpaque(world.blockAt(cell.x, cell.y, cell.z))) {
+            return false;
+        }
+    }
+}
+
 } // namespace game
