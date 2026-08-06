@@ -29,6 +29,9 @@ struct Face {
     /// derived, because getting them wrong is silent.
     int uAxis;
     int vAxis;
+    /// Which way this face points, for blocks whose sides differ. The table
+    /// already names all six, so it costs a column rather than a derivation.
+    FaceDirection direction;
 };
 
 constexpr std::array<glm::vec2, 4> kBottomLeftWinding{glm::vec2{0, 1}, glm::vec2{1, 1}, glm::vec2{1, 0},
@@ -43,7 +46,8 @@ constexpr std::array<Face, 6> kFaces{{
      0.72f,
      0,
      2,
-     1},
+     1,
+     FaceDirection::PosX},
     // -X
     {{-1, 0, 0},
      {glm::vec3{0, 0, 0}, glm::vec3{0, 0, 1}, glm::vec3{0, 1, 1}, glm::vec3{0, 1, 0}},
@@ -52,7 +56,8 @@ constexpr std::array<Face, 6> kFaces{{
      0.72f,
      0,
      2,
-     1},
+     1,
+     FaceDirection::NegX},
     // +Y
     {{0, 1, 0},
      {glm::vec3{0, 1, 1}, glm::vec3{1, 1, 1}, glm::vec3{1, 1, 0}, glm::vec3{0, 1, 0}},
@@ -61,7 +66,8 @@ constexpr std::array<Face, 6> kFaces{{
      1.00f,
      1,
      0,
-     2},
+     2,
+     FaceDirection::Unknown},
     // -Y
     {{0, -1, 0},
      {glm::vec3{0, 0, 0}, glm::vec3{1, 0, 0}, glm::vec3{1, 0, 1}, glm::vec3{0, 0, 1}},
@@ -70,7 +76,8 @@ constexpr std::array<Face, 6> kFaces{{
      0.45f,
      1,
      0,
-     2},
+     2,
+     FaceDirection::Unknown},
     // +Z
     {{0, 0, 1},
      {glm::vec3{0, 0, 1}, glm::vec3{1, 0, 1}, glm::vec3{1, 1, 1}, glm::vec3{0, 1, 1}},
@@ -79,7 +86,8 @@ constexpr std::array<Face, 6> kFaces{{
      0.86f,
      2,
      0,
-     1},
+     1,
+     FaceDirection::PosZ},
     // -Z
     {{0, 0, -1},
      {glm::vec3{1, 0, 0}, glm::vec3{0, 0, 0}, glm::vec3{0, 1, 0}, glm::vec3{1, 1, 0}},
@@ -88,7 +96,8 @@ constexpr std::array<Face, 6> kFaces{{
      0.60f,
      2,
      0,
-     1},
+     1,
+     FaceDirection::NegZ},
 }};
 
 /// Empty slot in the merge mask. Texture layers are never negative.
@@ -218,14 +227,16 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         face.neighbourOffset.x + face.neighbourOffset.y + face.neighbourOffset.z > 0;
                     const bool visible =
                         isTranslucent(block)
-                            ? (ahead == BlockId::Air || (isWater(ahead) && waterLevel(ahead) > waterLevel(block)))
+                            ? (ahead == BlockId::Air ||
+                               (isWater(ahead) && face.neighbourOffset.y <= 0 &&
+                                waterLevel(ahead) > waterLevel(block)))
                             : (!occludesFace(ahead, face.neighbourOffset.y) &&
                                (positiveFacing || !sharedWithOwnKind));
                     if (!visible) {
                         continue;
                     }
 
-                    sample.layer = blockTextureLayer(block, face.facing);
+                    sample.layer = blockTextureLayer(block, face.facing, face.direction);
                     sample.translucent = isTranslucent(block);
                     sample.doubleSided = isCutout(block);
                     sample.alpha = sample.translucent ? kWaterAlpha : 1.0f;
@@ -521,7 +532,31 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                             }
                             lightOf(ahead, sky, blockLight);
                         } else {
-                            lightOf({x, y, z}, sky, blockLight);
+                            // **Not the block's own cell.** A partial block's
+                            // cell is solid, so light never propagates into it
+                            // and reads as zero - which painted every stair
+                            // step, slab top and fence rail pure black. The
+                            // face is lit by whatever it actually looks at, and
+                            // where that is solid too, by the brightest cell
+                            // touching this one, so a fence inside a wall does
+                            // not go dark either.
+                            const glm::ivec3 ahead{x + face.neighbourOffset.x, y + face.neighbourOffset.y,
+                                                   z + face.neighbourOffset.z};
+                            if (!isOpaque(volume.blockAt(ahead.x, ahead.y, ahead.z))) {
+                                lightOf(ahead, sky, blockLight);
+                            } else {
+                                sky = 0.0f;
+                                blockLight = 0.0f;
+                                for (const Face& around : kFaces) {
+                                    float neighbourSky = 0.0f;
+                                    float neighbourBlock = 0.0f;
+                                    lightOf({x + around.neighbourOffset.x, y + around.neighbourOffset.y,
+                                             z + around.neighbourOffset.z},
+                                            neighbourSky, neighbourBlock);
+                                    sky = std::max(sky, neighbourSky);
+                                    blockLight = std::max(blockLight, neighbourBlock);
+                                }
+                            }
                         }
 
                         // Faces buried inside another box of the same block are
@@ -561,7 +596,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                             corners[c] = cellOrigin + local;
                             uvs[c] = {local[uAxis], flipV ? 1.0f - local[vAxis] : local[vAxis]};
                         }
-                        pushQuad(corners, uvs, blockTextureLayer(block, face.facing), sky, blockLight, face.shade,
+                        pushQuad(corners, uvs, blockTextureLayer(block, face.facing, face.direction), sky,
+                                 blockLight, face.shade,
                                  false);
                     }
                 }

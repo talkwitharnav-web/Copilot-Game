@@ -29,7 +29,7 @@ constexpr float kCharHeight = 0.055f;
 
 } // namespace
 
-engine::MeshData makeLoadingScreen(float progress, float aspect) {
+engine::MeshData makeLoadingScreen(float progress, const char* phase, float aspect) {
     engine::MeshData mesh;
     const float shown = std::clamp(progress, 0.0f, 1.0f);
 
@@ -48,7 +48,8 @@ engine::MeshData makeLoadingScreen(float progress, float aspect) {
                    kHudLayer, false);
     }
 
-    const std::string label = "Generating world  " + std::to_string(static_cast<int>(shown * 100.0f + 0.5f)) + "%";
+    const std::string label =
+        std::string{phase} + "  " + std::to_string(static_cast<int>(shown * 100.0f + 0.5f)) + "%";
     // Y grows downward, so this sits under the bar.
     appendText(mesh, label, -textWidth(label, kCharHeight) * 0.5f, kBarHalfHeight + 0.075f, kCharHeight, kTextDepth,
                kText);

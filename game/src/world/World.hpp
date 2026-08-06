@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -81,6 +82,19 @@ public:
     int highestSolid(int x, int z) const;
 
     /// Changes one block and marks every affected chunk for re-meshing.
+    /// A block a spreading flow destroyed, and what it was.
+    struct WashedBlock {
+        glm::ivec3 position;
+        BlockId block;
+    };
+
+    /// Hands over everything water swept aside since the last call.
+    ///
+    /// Returned rather than dropped here, because `World` has no idea items
+    /// exist - the owning loop turns these into drops, exactly as it does for a
+    /// plant left hanging when you mine the block under it.
+    std::vector<WashedBlock> takeWashedBlocks();
+
     void setBlock(int x, int y, int z, BlockId block);
 
     /// Loads, unloads and re-meshes around the player, stopping once the time
@@ -101,11 +115,27 @@ public:
     std::uint32_t seed() const { return m_seed; }
     std::size_t loadedChunkCount() const { return m_chunks.size(); }
 
-    /// How far through filling the load radius the world is, 0 to 1.
+    /// Where the initial load has actually got to, checkpoint by checkpoint.
     ///
-    /// Generation is the bulk of the work and meshing trails it, so the two are
-    /// weighted rather than one standing in for both. Reaches 1 only once every
-    /// queue is empty, which is what the loading screen waits on.
+    /// Measured rather than estimated: `drawn` counts meshed chunks over the
+    /// whole *visible box*, so it starts at zero and reaches one only when every
+    /// chunk you could look at is built and uploaded.
+    struct LoadStatus {
+        /// Chunks present, over what the load radius asked for.
+        float generated = 0.0f;
+        /// Visible chunks meshed, over how many the visible radius holds.
+        float drawn = 0.0f;
+        /// Every queue drained - chunk work, light and water alike.
+        bool settled = false;
+        /// All three. **The only thing the loading screen may finish on.**
+        bool complete = false;
+    };
+    LoadStatus loadStatus() const;
+
+    /// How far through the initial load the world is, 0 to 1.
+    ///
+    /// A weighted blend of `LoadStatus`'s checkpoints, held below 1 until
+    /// `complete`, so the bar can never finish ahead of the world.
     float initialLoadProgress() const;
 
     /// Everything not yet drawable: queued, running on a worker, or waiting to
@@ -231,6 +261,17 @@ private:
     /// runs until something disturbs them.
     void updateFluids(const BudgetCheck& budgetSpent);
     void scheduleFluidUpdate(int x, int y, int z);
+    /// A cell water may occupy, one it may still drain downward out of, and
+    /// whether it spreads sideways at all. **The last two are different
+    /// questions**: a cell resting on water can neither drain nor pool.
+    bool fluidCanEnter(int x, int y, int z) const;
+    bool fluidCanDrainFrom(int x, int y, int z) const;
+    bool fluidFeedsSideways(int x, int y, int z) const;
+    /// Steps to the nearest cell water could fall from, or 1000 within four.
+    int slopeDistance(int x, int z, int y, int fromDirection) const;
+    /// Whether water at `from` runs this way - true only for the direction or
+    /// directions whose way down is nearest.
+    bool fluidSpreadsToward(const glm::ivec3& from, std::size_t direction) const;
     /// Notes that a chunk's light changed. Collected rather than acted on, then
     /// applied once per frame.
     void lightChangedAt(int x, int y, int z);
@@ -280,8 +321,17 @@ private:
     /// Chunks needing a rebuild because light moved through them.
     std::unordered_set<ChunkCoord> m_lightDirty;
 
-    /// Water cells whose supply may have changed.
-    std::deque<glm::ivec3> m_fluidUpdates;
+    /// Water cells whose supply may have changed, each held back until its own
+    /// due time. The reference spreads one block every five ticks, and without
+    /// that pacing a stream simply appears at its full extent in one frame.
+    struct PendingFluid {
+        glm::ivec3 position;
+        std::chrono::steady_clock::time_point due;
+    };
+    std::deque<PendingFluid> m_fluidUpdates;
+
+    /// Plants a flow destroyed this frame, waiting to be turned into drops.
+    std::vector<WashedBlock> m_washedBlocks;
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;

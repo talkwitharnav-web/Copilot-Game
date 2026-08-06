@@ -170,6 +170,7 @@ Renderer::~Renderer() {
     m_freeSlots.clear();
     m_overlayMesh = GpuMesh{};
     m_screenMesh = GpuMesh{};
+    m_clippedScreenMesh = GpuMesh{};
     m_skyMesh = GpuMesh{};
 
     // Before the pool: freeing the pool invalidates the set allocated from it.
@@ -408,6 +409,12 @@ void Renderer::setScreenMesh(const MeshData& mesh) {
     uploadInto(m_screenMesh, mesh);
 }
 
+void Renderer::setClippedScreenMesh(const MeshData& mesh, const glm::vec2& min, const glm::vec2& max) {
+    uploadInto(m_clippedScreenMesh, mesh);
+    m_screenClipMin = min;
+    m_screenClipMax = max;
+}
+
 void Renderer::setSkyMesh(const MeshData& mesh) {
     uploadInto(m_skyMesh, mesh);
 }
@@ -421,6 +428,16 @@ void Renderer::setSunLighting(float ambient, float sun, float ambientFloor) {
     m_ambientLight = ambient;
     m_sunLight = sun;
     m_ambientFloor = ambientFloor;
+}
+
+void Renderer::setAnimatedLayer(float meshedLayer, float currentLayer) {
+    m_animatedLayer = meshedLayer;
+    m_animatedFrame = currentLayer;
+}
+
+void Renderer::setFog(const glm::vec3& colour, float distance) {
+    m_fogColour = colour;
+    m_fogDistance = distance;
 }
 
 void Renderer::createSyncObjects() {
@@ -585,7 +602,7 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->layout(), 0, 1,
                             &m_descriptorSet, 0, nullptr);
 
-    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit) {
+    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit, bool fogged = true) {
         if (mesh.indexCount == 0) {
             return;
         }
@@ -596,6 +613,8 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
         push.modelViewProjection = transform;
         push.sunDirection = glm::vec4{m_sunDirection, 0.0f};
         push.lighting = glm::vec4{m_ambientLight, m_sunLight, lit ? 1.0f : 0.0f, m_ambientFloor};
+        push.animation = glm::vec4{m_animatedLayer, m_animatedFrame, 0.0f, 0.0f};
+        push.fog = glm::vec4{m_fogColour, fogged ? m_fogDistance : 0.0f};
         vkCmdPushConstants(commandBuffer, m_trianglePipeline->layout(), VK_SHADER_STAGE_VERTEX_BIT |
                                                                            VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(MeshPushConstants), &push);
@@ -641,11 +660,38 @@ void Renderer::recordCommands(VkCommandBuffer commandBuffer, std::uint32_t image
 
     // Screen space: no view, no projection. Only an aspect correction, so
     // geometry authored in height-relative units is not stretched horizontally.
+    const float aspect =
+        extent.height == 0 ? 1.0f : static_cast<float>(extent.width) / static_cast<float>(extent.height);
+    const glm::mat4 screenTransform =
+        glm::scale(glm::mat4{1.0f}, glm::vec3{1.0f / aspect, 1.0f, 1.0f});
     if (m_screenMesh.indexCount != 0) {
-        const float aspect = extent.height == 0
-                                 ? 1.0f
-                                 : static_cast<float>(extent.width) / static_cast<float>(extent.height);
-        drawMesh(m_screenMesh, glm::scale(glm::mat4{1.0f}, glm::vec3{1.0f / aspect, 1.0f, 1.0f}), false);
+        drawMesh(m_screenMesh, screenTransform, false, false);
+    }
+
+    // Anything that has to stop at an edge. The mesh units are the screen
+    // ones, so the rectangle converts through the same aspect correction the
+    // geometry does and then out of clip space into pixels.
+    if (m_clippedScreenMesh.indexCount != 0) {
+        const auto toPixels = [&](const glm::vec2& point) {
+            return glm::vec2{(point.x / aspect * 0.5f + 0.5f) * static_cast<float>(extent.width),
+                             (point.y * 0.5f + 0.5f) * static_cast<float>(extent.height)};
+        };
+        const glm::vec2 lo = toPixels(m_screenClipMin);
+        const glm::vec2 hi = toPixels(m_screenClipMax);
+
+        VkRect2D clip{};
+        clip.offset.x = std::max(0, static_cast<std::int32_t>(std::floor(std::min(lo.x, hi.x))));
+        clip.offset.y = std::max(0, static_cast<std::int32_t>(std::floor(std::min(lo.y, hi.y))));
+        const auto right = static_cast<std::int32_t>(std::ceil(std::max(lo.x, hi.x)));
+        const auto bottom = static_cast<std::int32_t>(std::ceil(std::max(lo.y, hi.y)));
+        clip.extent.width = static_cast<std::uint32_t>(
+            std::clamp(right - clip.offset.x, 0, static_cast<std::int32_t>(extent.width) - clip.offset.x));
+        clip.extent.height = static_cast<std::uint32_t>(
+            std::clamp(bottom - clip.offset.y, 0, static_cast<std::int32_t>(extent.height) - clip.offset.y));
+
+        vkCmdSetScissor(commandBuffer, 0, 1, &clip);
+        drawMesh(m_clippedScreenMesh, screenTransform, false, false);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
     }
 
     vkCmdEndRendering(commandBuffer);

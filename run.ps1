@@ -69,9 +69,12 @@ if ((-not (Test-Path $hudPlaceholder) -or $hudStale) -and (Test-Path $uiIcons)) 
 
 # And again for the block and item textures. Nothing is composited from our own
 # art here, so there is no staleness to chase - they are either present or the
-# game falls back to ours, per texture.
+# game falls back to ours, per texture. The last water frame stands in for the
+# whole set: a folder staged before the animation existed is missing thirty-two
+# layers, and every one of them would draw blank.
 $blockPlaceholder = Join-Path (Split-Path -Parent $exe) "blocks-reference"
-if (-not (Test-Path (Join-Path $blockPlaceholder "stone.png")) -and (Test-Path $referenceRoot)) {
+if ((-not (Test-Path (Join-Path $blockPlaceholder "stone.png")) -or
+     -not (Test-Path (Join-Path $blockPlaceholder "water31.png"))) -and (Test-Path $referenceRoot)) {
     & (Join-Path $root "tools\make-reference-blocks.ps1") | Out-Null
     Write-Host "Restored placeholder block and item textures." -ForegroundColor DarkGray
 }

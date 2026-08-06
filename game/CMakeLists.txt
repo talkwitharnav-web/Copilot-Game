@@ -18,6 +18,7 @@ add_executable(game
     src/world/ItemEntity.cpp
     src/world/Noise.cpp
     src/world/Biome.cpp
+    src/world/Pathfinder.cpp
     src/world/Structures.cpp
     src/world/World.cpp
     src/world/WorldStore.cpp

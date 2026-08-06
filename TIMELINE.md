@@ -33,6 +33,8 @@ What cannot be copied is the **expressive** work: textures, models, sounds, musi
 | Textures, models, sounds, music | | ✅ |
 | Names, lore, characters | | ✅ |
 
+**Only *coined* names count.** *Sheep*, *cow*, *pig*, *wolf*, *stone*, *bread* are ordinary English for ordinary things and nobody owns them — use them plainly, and do not invent a synonym to feel safe. It is the invented ones that need replacing: *Creeper*, *Enderman*, *Ghast*, *Shulker*, *Blaze*, *Wither*, *Piglin*, *Redstone*. That is why the creeper is a **Bramble** and the sheep is a sheep.
+
 Where something feels genuinely better done differently, do it differently — because it is better, not because it must differ.
 
 The bar on *engineering* is still deliberately higher than "Minecraft clone with shaders." The renderer should be a genuinely modern hybrid renderer — rasterization, compute, and ray tracing each doing what they are best at — not a retrofit of pretty effects onto a naive engine. **That** is where this project earns its keep.
@@ -234,7 +236,7 @@ Voxel raycasting, block breaking and placing, a highlight on the targeted block,
 
 **Done when:** breaking and placing update instantly, including across chunk boundaries, with no holes or stale geometry.
 
-**Result:** 12 m reach, hold-to-repeat breaking (0.15 s) and placing (0.18 s), a wireframe cage on the targeted block, and keys 1–4 to choose the block placed. Playtesting immediately surfaced a stuck-mouse-button bug and a movement tunnelling bug — exactly the point of shipping something playable this early.
+**Result:** hold-to-repeat breaking (0.15 s) and placing (0.18 s), a wireframe cage on the targeted block, and keys 1–4 to choose the block placed. Reach shipped at **12 m** here and was corrected to Bedrock's 5 m at M20e. Playtesting immediately surfaced a stuck-mouse-button bug and a movement tunnelling bug — exactly the point of shipping something playable this early.
 
 ---
 
@@ -466,7 +468,7 @@ The machinery that decides which blocks belong where: rule tables, low-frequency
 
 **Done when:** regions are large, coherent and reproducible from the seed, transitions are not visible as lines, and adding a block type means adding a row rather than a branch.
 
-**Result:** five biomes — Plains, Desert, Rocky, Mountains, Snowy Peaks — each a row in one table carrying its surface block, filler, filler depth, terrain base height, amplitude and snow line.
+**Result:** five biomes — Plains, Desert, Rocky, Mountains, Snowy Peaks — each a row in one table carrying its surface block, filler, filler depth, terrain base height, amplitude and snow line. *(Ocean and Beach followed at M15c, making seven.)*
 
 Selection uses **two independent low-frequency noise fields**, temperature and humidity. One field could only order biomes along a line, which is why a single "climate" value cannot separate desert from plains from tundra convincingly. Each biome sits at a point in that 2D space and claims territory by proximity.
 
@@ -495,6 +497,8 @@ Sea level, ocean basins, shorelines, and water that actually behaves like water.
 **Transparency needed a second render pass.** Blending depends on draw order, so water cannot sit in the same buffer as the terrain behind it. Each chunk now owns two meshes and the renderer draws every opaque one before any translucent one.
 
 **Swimming:** buoyancy nearly cancels gravity, holding jump climbs, and letting go drifts down. Water is survivable rather than a hole you fall into.
+
+> **▶ Replaced wholesale on 2026-08-05.** That description was a fudge and the user's verdict was that it felt like falling slowly, which was exactly right. Water now uses the reference's model: a per-tick drag multiplier plus a fixed impulse, quoted as a terminal speed so the conversion is exact at any frame rate. Sinking is 0.5 m/s, swimming 1.96, sprint-swimming 3.92 with water gravity skipped entirely, and entry momentum is kept so a dive plunges. Flowing cells carry you at 1.4 m/s along a gradient that aims at the cliff edge. Breath is 15 seconds off the eye block; creatures drown, the player's meter shows on F5 until M21 gives it something to damage. Creatures carry the reference's `float` / `sink` / `amphibious` / `breathes_water` / `avoid_water` flags, and dropped items float. **The spread rules were rewritten in the same pass** — falling water is its own full block, a cell that can drop never runs sideways, and a four-deep search steers a stream toward the nearest hole — and being under it became real distance fog. `world/Fluid.hpp` owns the constants; `RESEARCH.md` §9.1–c is the research and **M20h** is the milestone entry.
 
 Release build, render distance 12: **2,742,884 triangles, 1.15 ms GPU, 121 fps.**
 
@@ -590,11 +594,7 @@ Fences, walls and panes, whose geometry depends on their neighbours rather than 
 
 *Goal: the systems that turn a world into something you play rather than something you look at.*
 
-> **Reference the genre freely.** "How does Minecraft do it?" is a perfectly good question here, for design as well as engineering — it is a well-tested set of answers and there is no prize for ignoring them. Ask the user where they want something to differ; do not invent divergence for its own sake.
->
-> **Assets are the exception.** Textures, models, sounds, music and names have to be ours. That is a legal line, not a creative one — see "The End Product".
->
-> **But only *coined* names.** *Sheep*, *cow*, *pig*, *wolf*, *stone*, *bread* are ordinary English for ordinary things and nobody owns them — use them plainly. It is the invented ones that need replacing: *Creeper*, *Enderman*, *Ghast*, *Shulker*, *Blaze*, *Wither*, *Redstone*.duct".
+> **Reference the genre freely.** "How does Minecraft do it?" is a perfectly good question here, for design as well as engineering — it is a well-tested set of answers and there is no prize for ignoring them. Ask the user where they want something to differ; do not invent divergence for its own sake. **Assets are the exception, and only *coined* names count** — see "The End Product" above for the boundary and why *sheep* and *stone* are free while *Creeper* is not.
 
 ### ✅ M18a — Items and drops · **Core**
 
@@ -690,7 +690,7 @@ Recipes are settled facts — see `CRAFTABLE.md`, verified against the reference
 
 **Drops are no longer mode-dependent.** Creative used to suppress them; on the user's instruction (2026-07-31) breaking yields its drop in every mode, and creative now means only that placing and digging cost nothing.
 
-**Deliberately not done:** wall torches (need a tilted shape and orientation ids), glass (needs a transparent block), and the chest (needs a non-cube model). All three are recorded in `CRAFTABLE.md`.
+**Deliberately not done:** wall torches (need a tilted shape and orientation ids) and the chest (needs a non-cube model). Both are recorded in `CRAFTABLE.md`. Glass followed at M20e, once a transparent full cube existed.
 
 ### ✅ M20a — Entity foundation and first creature · **Core**
 
@@ -698,7 +698,7 @@ Recipes are settled facts — see `CRAFTABLE.md`, verified against the reference
 
 **Done when:** creatures spawn around the player, walk about, collide with the world, are lit by it, can be struck, and retire when you leave them behind.
 
-**Result:** the **Grazer** — a small four-legged herbivore, our own design, name and texture. Fourteen at a time within 12–30 blocks, retired past 90.
+**Result:** the **Grazer** — a small four-legged herbivore, our own design, name and texture. Fourteen at a time within 12–30 blocks, retired past 90. *(It became the sheep at M20b, once ordinary animal names were settled as fine to use — see "The End Product".)*
 
 **It is the general entity dropped items deliberately were not.** A drop has a position and resolves only downward; a creature has size, so it collides on all three axes, faces a direction, steps up ledges, turns away from walls and cliffs, and decides where to go. All of that lives in one struct rather than a base class, because there is exactly one kind so far.
 
@@ -710,7 +710,7 @@ Release build, render distance 12: **121 fps, 14 creatures, 144 triangles each**
 
 ### 🟨 M20b — Creature roster and behaviour · **Core** · *in progress*
 
-**Slice done so far:** thirty-six species exist, are told apart by where and when they appear, sixteen are hostile and two are neutral. This is now a broad land roster on working machinery, **not the finished milestone** — see "Still owed" below.
+**Slice done so far:** fifty-six species exist, are told apart by where and when they appear, sixteen are hostile and two are neutral. This is now a broad land roster on working machinery, **plus the water archetype from M20i**, but **not the finished milestone** — see "Still owed" below.
 
 **Result:** thirty-six species. Ordinary animal names remain ordinary English; the coined ones are ours.
 
@@ -773,8 +773,8 @@ Release build: **120 fps**, no measurable cost.
 
 **Still owed before M20b can be called done.** The original M20 was "entity system, animation, pathfinding, spawning, and creature behaviours", and what exists is the thin end of most of those:
 
-- **Nothing lives in water and nothing flies**, so the world still lacks two whole movement archetypes. The land roster is broad — sixteen hostiles, two neutrals — and bipeds now exist as models, though not as behaviour.
-- **Animation.** Limbs **rotate about a joint** rather than sliding, on an eased amplitude, and every biped but the folded-arm three has the reference's idle sway. Heads turn **about the neck** and now **pitch** as well as yaw, so a creature looks at you rather than merely facing you. Climbing a step rises to the real surface and the drawn body eases up. Still owed: a grazing or eating pose, and a death animation — a struck creature still simply vanishes. `ANIMATION.md` is the reference for the rest.
+- **Nothing flies**, so the world still lacks one whole movement archetype. **Water landed at M20i** — nine aquatic species on a real swimming controller. The land roster is broad — sixteen hostiles, two neutrals — and bipeds now exist as models, though not as behaviour. **M20j made the hostiles actually fight**: they close, stop when they arrive, and swing.
+- **Animation.** Limbs **rotate about a joint** rather than sliding, on an eased amplitude, and every biped but the folded-arm three has the reference's idle sway. Heads turn **about the neck** and now **pitch** as well as yaw, so a creature looks at you rather than merely facing you. Climbing a step rises to the real surface and the drawn body eases up — and the **player's camera** does the same since 2026-08-05. Still owed: a grazing or eating pose, and a death animation — a struck creature still simply vanishes. `ANIMATION.md` is the reference for the rest.
 - **Flee is a straight line away.** It does not run *toward* anything safer, and it gives up on a fixed timer rather than when it is actually clear.
 - **Pathfinding is a local planner.** It can now jump a block and get out of a one-deep pit, but it still cannot route around a wall longer than its probe or find its way off a ledge it stepped down.
 
@@ -799,11 +799,7 @@ Release build: **120 fps**, no measurable cost.
 - **Control flags** — three bits, `Move` / `Look` / `Jump`, naming which controllers a behaviour claims while it runs. Disjoint claims coexist; identical claims are exclusive and resolved by priority. **A row claiming nothing always runs**, which is how targeting works rather than a degenerate case.
 - **Target-production split from target-consumption.** One behaviour writes the target slot; attack behaviours read it. That turned retaliation, pack anger and hunting-on-sight into three rows that never mention each other.
 
-**The step to do first is step 3** (split `Chase` into `NearestAttackableTarget` + `MeleeAttack`, add `HurtByTarget`), because it is also the one that pays immediately. **Step 4 is the validation**: add `LookAtPlayer` at low priority with `Look` only — if chickens now walk and watch at once, the flag arbitration is correct; if they stop walking, it is not. Cheapest possible proof that step 2 works.
-
-**Explicitly skip**, per §8.7: JSON at runtime, component groups and entity events as a general mechanism, a filter expression language, and navigation/movement as class hierarchies. The value is the *shape*, not the format — a `constexpr` array of structs gives compile-time checking, no parse cost and no schema versioning. At thirty-six species we want **eight to ten behaviours, not a hundred and ninety**.
-
-**Must not regress:** neutral temperament falling out of `attackDamage`, `huntsBelowLight` for the spiders, the six-second grudge, herd alerting, slime splitting, the ballistic hop, wall climbing, and the local steering fan. Several of those should get *shorter* as table rows.
+**Explicitly skipped**, per §8.7: JSON at runtime, component groups and entity events as a general mechanism, a filter expression language, and navigation/movement as class hierarchies. The value is the *shape*, not the format — a `constexpr` array of structs gives compile-time checking, no parse cost and no schema versioning. At thirty-six species we want **eight to ten behaviours, not a hundred and ninety**.
 
 **Deferred on purpose, not owed here:** loot drops (M21 owns food and survival), taming and breeding, and sound (M22).
 
@@ -813,15 +809,154 @@ Release build: **120 fps**, no measurable cost.
 
 **The Bramble detonates.** `world/Explosion.hpp` carries the reference's algorithm exactly: 1352 rays for the block destruction, an exposure test so cover genuinely protects, and `7 × power × (impact² + impact) + 1` for damage, scaled to Bedrock's point-blank figure rather than Java's harsher one. **`blastResistance` is kept strictly apart from mining hardness** — stone is 1.5 to a pickaxe and 6 to a blast. The fuse needs line of sight for its whole countdown, stops the creature dead, gives up past 7 m, and a hard landing shortens it. **Charged Brambles** carry the reference's `creeper_armor` overlay as a translucent second shell and twice the power; 5% spawn that way, since there is no lightning until M27.
 
-**Its stats were wrong in four places** and were corrected against `RESEARCH.md` §6.3: health 10→20, follow range 14→16, swell 2.5→3 m, cancel 6→7 m, and run speed 2.4→4.25 m/s.
+**Its stats were wrong in four places** and were corrected against `RESEARCH.md` §6.3: health 10→20, follow range 14→16, swell 2.5→3 m, cancel 6→7 m, and run speed 2.4→4.25 m/s. **The two swell distances were then wrong again, the other way**, and went back to 2.5 and 6 on 2026-08-05: `RESEARCH.md` §6.3 quotes the wiki there, while `creeper.json` in `Mojang/bedrock-samples` — the shipped behaviour pack — says 2.5 and 6 twice over.
 
 **Creatures jump.** Two mechanisms kept apart as the reference keeps them: `stepHeight` walks up a rise with no airtime (0.6 default, 1.0 for the horse family and the frog, 1.5 for the camel), and `jumpHeight` is a real ballistic launch for everything else. Hoppers boost their own hop when a ledge is too tall for it.
 
 **The chicken falls slowly and flaps**, at the reference's 1.95 m/s terminal descent — which is exactly why it needs no fall-damage exemption. This added a **roll axis** to `uprightBox`, the first rotation in the model system about the forward axis.
 
-**Thirty-six spawn eggs**, one per species, right-click to place. `F10` swaps them for the block kit because 36 eggs fill all 36 inventory slots.
+**Thirty-six spawn eggs**, one per species, right-click to place. They are taken from the catalogue on the inventory's left card rather than filling the hotbar.
 
 **Two latent bugs surfaced and were fixed:** dropped non-block items rendered **nothing at all** (a thrown pickaxe had been invisible since tools existed), and the spiders' wall-climb had been testing "did either axis fail to move", which is never true when sliding along a wall — so it only ever worked diagonally.
+
+### ✅ M20e — The catalogue card, the block roster and ores · **Core**
+
+**Not a planned milestone**, like M20d — a run of work asked for directly on 2026-08-04/05. It delivers `INTERFACE.md`'s first three slices and the content those slices immediately made worth having.
+
+**The inventory grew a second card.** `INTERFACE.md` slices 1–3: typed text in `engine::Window` (a character callback, not a key→letter map, because a key is a physical button and a character is what the OS produces after layout, shift and dead keys); `allItems()`, a public `recipes()`, and per-recipe `category` / `fitsInTwoByTwo` **derived at table construction** so a new recipe cannot forget them; then the card itself, five tabs, a static 7-wide grid and hover tooltips. Clicking an entry gives you the item and the empty space around the entries destroys what you carry — both creative-only, both measured from `Mojang/bedrock-samples`, where a catalogue cell turns out to be a `creative_no_coalesce_container_slot_button` and therefore a **source**, never a container.
+
+**`toScreen(Kind, x, y)` is why this was affordable.** Every slot centre, hit test and panel bound already went through one function, so widening the screen was a translation and the signed-off click/drag/shift-click model needed no changes at all.
+
+**Twenty-six blocks and eight ores.** The stone family, glass, flowers, terracotta, ice, bookshelf, obsidian, clay, sandstone, deepslate and bedrock. Ores generate as **thresholded 3D noise** — the cave mechanism at a much higher frequency, because a per-cell roll scatters single blocks and reads as speckle. Bands and rarities are the wiki's, mapped onto our y 0–96 world, with the table **ordered rarest first** so a common ore cannot overwrite a scarce one where their bands overlap. A bedrock floor and a deepslate layer arrived with them.
+
+**Eleven resource items and a metal chain.** Raw iron, gold and copper smelt to ingots; coal fuels a furnace and makes torches. Drop counts and tool tiers were **looked up rather than derived** — on the user's instruction, after I had invented plausible numbers once. Everything demanding an iron pickaxe in the reference demands a stone one here, which is a named divergence rather than an oversight.
+
+**Reach was wrong and had been since M7.** 12 m is Bedrock's *touch creative* figure; the mouse values are 5 m for blocks in every mode and 3 m for entities, 5 in creative.
+
+**Three render bugs, all found by playing.** A dropped tool rendered as **two crossed swords**, because every non-block item went down the *plant* path; non-blocks now get one sprite with real thickness. The stairs icon was a plain cobblestone cube, because `appendBlockIcon` drew one box; it draws two. And every **stair step, slab top and fence rail was pure black**, because the partial-shape mesher lit an interior face from the block's own solid cell, which light can never reach — that had affected slabs and fences since M17b and nobody had reported it.
+
+**Startup warnings were removed.** Three lines announcing that placeholder reference art was in use. The distinction now written down: **warn about faults, never about a state the user chose.**
+
+### 🟡 M20f — Aggression · **Core**
+
+**Asked for directly on 2026-08-05**: *"our mob behaviours are still pretty broken — aggression especially."* Six Opus-5 subagents read the shipped Bedrock behaviour pack for all thirty-six species plus the goal-component reference, and the answers went into the species table rather than into new code. **Slice 1 is built; slices 2 and 3 are named below and not started.**
+
+**The one thing that was actually broken.** `must_see` is set on every hostile in the reference, and we had it nowhere except the Bramble's fuse — so a zombie behind a wall tracked you through it, and every "it saw me through solid rock" complaint traces to that one missing predicate. Every species that can target now casts a sight ray, and the whole of the aggression rework hangs off having one.
+
+**What came with it**, all as fields in `kSpecies`:
+
+- **A scan interval.** Bedrock looks for a target every ten ticks, not every tick. That is what the old `senseRange × 1.4` hysteresis was really standing in for — a target on the exact edge of the range used to be found and lost on alternate frames — and it pays for the new sight ray twice a second instead of at the frame rate.
+- **Forgetting as a timer, not a switch.** Three seconds for almost everything and **seventeen for a zombie**, which is the reference's own divergence and is why a corner shakes off a skeleton and does nothing about a zombie.
+- **Two ranges, and not in the order instinct says.** A zombie notices you at **35 m** and gives up at **25**. A witch notices at 10 and follows to 64.
+- **Anger with a species' own length**, replacing a flat six seconds for the entire roster: wolf 25 s, polar bear 500, spider 10, silverfish effectively forever. It also fixes the spider properly — it acquires you in the dark, and lighting a torch no longer calls off a chase already under way.
+- **Alerting that is off for the undead.** `alert_same_type` is false on everything in the reference except the silverfish, so a horde has to be walked into rather than summoned by hitting one zombie. Wolves hear at 20 m, bears at 41. The herd ranges on the passives are ours and were kept.
+- **Reach and facing.** A blow is the creature's own box grown 0.8 m horizontally, not a flat 1.5 m that gave a silverfish a polar bear's bite; and it has to be *facing* you within 90°, so walking around one buys the moment it takes to come about.
+- **Per-behaviour speed.** The skeleton family and the Bramble sprint the last stretch; a fleeing villager is slower than it walks.
+
+**The species table was converted to named fields** in the same pass, because it had to be. It was positional, which meant every new field went on the end with a default and setting one on an older row meant restating a dozen tuned numbers. Nothing about the tuning changed; the wall of bare values became rows that say only what makes them different, and a mis-ordered value is now a compile error instead of a silently wrong animal.
+
+**Still owed, and deliberately not started:**
+
+- **Slice 2 — creatures fighting each other.** `CreatureTarget` is `{None, Player}`; it needs to name another creature. That is the whole of a wolf hunting sheep and rabbits, a cat hunting rabbits, an ocelot hunting chickens, a polar bear hunting foxes, and a llama spitting at wolves.
+- **Slice 3 — avoidance and flight that ends properly.** Fleeing is a straight line away on a fixed timer; the reference stops when it is 10 m clear. And `AvoidFeline` should be a general `Avoid` — a rabbit runs from players at 8 m, a skeleton from wolves at 6, a villager from zombies at 8, a fox from wolves and bears at 10.
+
+Also still open from M20b: the **flying** archetype and a death animation. Water closed at M20i, M20j closed the melee behaviour — arriving, striking and the arm swing that goes with it — and **M20k closed pathfinding**.
+
+### ✅ M20g — The bucket, the catalogue's scrolling, and four bugs found by playing · **Core**
+
+**Unplanned, 2026-08-05.** Everything here came from the user playing the build, and two of the four bugs were reported as something other than what they were — which is the pattern worth remembering.
+
+**A water bucket**, made from three iron ingots. It fills from a *source* only, because scooping a flowing cell leaves a hole its own source refills a second later; it places a source, because a flowing level drains itself on the next update; and it needed the aiming ray to gain a `stopAtWater` flag, since water has no selection geometry and the crosshair goes straight through it. Empty stacks to 16, full to 1. **106 items, 20 recipes.**
+
+**`INTERFACE.md` slice 4**, forced by the bucket. It arrived as entries 50 and 51 of a 51-entry tab, and the grid showed 49 whole cells plus a clipped row that deliberately drew *no icons* — so the two newest items in the game were in the list, in the right tab, and invisible. The catalogue now scrolls, empty rows are not drawn, and **the clipped row is cut by a real scissor rectangle**: the pipeline had dynamic scissor state all along, so `Renderer::setClippedScreenMesh` was one extra draw call. That also closed the long-standing live bug where the wheel drove the hotbar invisibly behind an open panel.
+
+**An underwater view**, which did not exist at all. Water rendered from outside and showed nothing once your eye went under, so the only evidence was the physics changing — and the user reported it as **"gravity is broken"**. It shipped here as one full-screen tinted quad and was replaced by real distance fog at M20h. *A physics state with no visual is indistinguishable from a physics bug.*
+
+**The zombie, husk and zombie villager had their arms hinged inside their skulls.** The arms-out rest height was a number tuned back when a limb was a *translated* box; once `legBox` began deriving the joint from that same value, it put the shoulder at 1.68 against a head spanning 1.5 to 2.0. Every other limb converted safely because `legBox` at angle zero reproduces the old box exactly — these three are the only limbs posed at 90°, where the pivot is the whole of what the pose depends on.
+
+**Dropped items climbed blocks, and rendered as two.** They resolved *vertically only*, documented as not worth the cost for something decorative — so a drop could enter a block sideways, and the ground probe then found *that* block and lifted it onto the top. They now collide on all three axes through the shared helpers. Separately their sprite was extruded by 0.045 m against a sprite 0.20 m wide, which read as two parallel swords; the reference extrudes by one texel of the item's own grid.
+
+**The furnace showed its mouth on all four sides.** The cause was written in the code as a comment — `BlockFace` was Top/Bottom/Side, so no block could say which way a side pointed — and the tell was that `FurnaceSide` was loaded into the texture array every launch and never returned. Faces gained a direction, the furnace gained a facing stored in its id the way stairs do, and it turns to face whoever places it. **The crafting table has the identical unfixed simplification.**
+
+### ✅ M20h — Water rebuilt, and three things it dragged in with it · **Core**
+
+**Unplanned, 2026-08-05.** Asked for directly: *"our water physics are very broken."* What existed was a fudge — gravity × 0.22, a 3 m/s sink cap, horizontal speed × 0.55 — with no source behind any of the four numbers, which is the bug report. Research first, then five separate pieces of work.
+
+**Entities in water.** The reference never *caps* speed; it multiplies velocity by a drag factor every tick and adds a fixed impulse. That one structural difference is the whole feel, and it turns sinking, swimming, sprint-swimming, the plunge after a dive and being carried by a current into one expression settling toward a different number. `world/Fluid.hpp` is the single owner and quotes everything as a **terminal speed**, so `v = v·k + terminal·(1−k)` is exact at any frame rate by construction rather than by correction. Breath, drowning, floating drops, and the reference's `float` / `sink` / `amphibious` / `breathes_water` / `avoid_water` navigation flags per species. Three separate places applied gravity *and then* the drag, which costs about 5 m/s of unwanted sink at 120 fps — water has to **replace** the acceleration, not follow it.
+
+**The water block itself**, reported as: *"if i'm on a 9 block tower and i put water at the tippy top, instead of expanding immediately it should fall on all sides."* Falling water is now its own block and is **full**; a cell that *can* drop never runs sideways, which is what makes a waterfall a column and lets it pool only where it lands; and a four-deep breadth-first search sends a stream toward the nearest hole. Spreading is paced at the reference's five ticks a block, so water visibly runs. Plants are **washed away and dropped** rather than damming the flow.
+
+**Mobs spawning inside blocks.** `canStandAt` was re-deriving the body shape as a column of whole cells — a second copy of what `collisionBoxes` owns, blind to slabs and fences — and `separate` shoved crowded creatures into terrain with no collision test at all, which is permanent. Both now go through the shared helpers, anything that ends up buried climbs out, creature physics gained the player's frame-time clamp, and the spawn shell went from 12–30 m to the reference's 24–44.
+
+**The loading screen finishing early.** It streamed around `spawn_x`/`spawn_z` and then dropped the player at the *saved* position, so the bar measured a piece of world nobody was about to stand in — every checkpoint honest about the wrong thing. The saved position is now read *before* the screen; progress is generated / drawn / settled over the **visible box**; and the first log line went from `pending 372` to `pending 0`.
+
+**Real underwater fog**, replacing M20g's flat tint. One `gl_Position.w` varying and one push constant — a perspective projection already puts view depth there. **The colour is measured off reference screenshots, not copied from Bedrock's fog JSON**, because the shipped value is an input the game blends with the water's own colour and reads grey on its own; `SYSTEM_MEMORY.md` has a do-not-revert box with the numbers. Two more ambitious versions were built and both were rejected on sight — see `CLAUDE.md`.
+
+### ✅ M20i — The sea inhabited · **Core**
+
+**Unplanned, 2026-08-05.** Asked for directly: *"let's get some water mobs in."* Twelve aquatic mobs exist in the reference; these are the first nine, taken in batches of three after a ranking by cost. It closes M20b's water archetype and takes the roster from thirty-six species to **forty-six**.
+
+**A second movement model.** Every creature until now was a walker. A `swims` species has **no gravity in water and steers in three dimensions**, which is Bedrock saying the same thing three ways — `has_gravity: false`, `can_sink: false`, `can_walk: false`. Out of water it flops, unless `walksOnLand` says it can walk, which is how a turtle and an axolotl are amphibious while a cod is not. `breathesAir: false` runs the *same* air counter the other way round so a fish suffocates in air, and `dryOutSeconds` is a third clock again — a dolphin drowns if held under **and** dries if kept out.
+
+**Nine species.** The **drowned** was cheapest by far and needed no swimming at all: the zombie's rig, already-existing amphibious flags, and its clothing drawn as a second alpha-cutout shell exactly like the sheep's fleece. **Cod**, **salmon** and **tropical fish** are shoaling fish; the **pufferfish** inflates through *three genuinely different models*, not one scaled, because its spines only exist once it is puffed; the **squid** and **glow squid** jet; the **turtle** hatches on beach sand and swims only once it gets there; the **dolphin** is fast and neutral; the **axolotl** has five liveries and holds its legs still in water while its tail does the work.
+
+**A squid does not walk, and that took two goes.** The first version swung its tentacles on a symmetric sine, which is a walk cycle. The reference's curve is `sin(f²π)` over the first half of the cycle, and the squared term is the whole point: it flares slowly and snaps shut fast, with **thrust applied only during the snap**. The push and the pose are one number, so they cannot drift apart — and because a jetting squid stops steering while it pushes, it genuinely has to turn about before it can go the other way. Its body angle comes from its *movement vector* rather than its heading, which is what makes it hang upright when drifting and lie right over when swimming.
+
+**Variants.** `variantCount` plus a per-creature `variant` selects a whole net at a row offset — five axolotl colours, and twelve tropical fish from two body shapes crossed with six pattern overlays. The pattern is a second cutout shell rather than a runtime tint, because runtime tinting is exactly what produced the washed-out grass at M19a.
+
+**Spawning is the reference's, and the reference has no size test.** What keeps fish out of puddles there is the **biome tag**, not a measurement — so the numbers taken were `height_filter`, `density_limit` and `herd`, and the one thing added on top is a three-block depth requirement of our own, because our biome map is coarser than theirs.
+
+**Two model faults found only by playing**, both worth remembering. Boxes that merely **touch** face-to-face z-fight exactly as overlapping ones do, because Minecraft never draws a surface's inward side and we always do — that was the turtle's neck and the dolphin's head. And **our reference textures are Java's while the geometry is Bedrock's**; for most mobs the two agree, but the dolphin's do not, and its entire back half was sampling empty pixels.
+
+**Still remaining:** turtle home beaches and egg laying, the tadpole (which needs frog breeding), and the guardian (which needs projectiles).
+
+### ✅ M20j — Hostiles that fight, and water that behaves · **Core**
+
+**Unplanned, 2026-08-05/06.** Six things, all reported by playing and all fixed against Mojang's shipped data rather than by tuning.
+
+**A chase had no arrival condition.** `MeleeAttack` steered at the player every tick for as long as it had a target, and nothing here collides with the player — so a zombie walked *through*, overshot, and had to come all the way about at a limited turn rate. That is a circle, and reach being a distance meant the player was inside it on every pass. The reference does not solve this with a turn rate or a reach; it solves it with a **destination** — `melee_box_attack` paths to a node *beside* its target and the path ends there. Two exemptions fell out of the reference and both would otherwise have been new bugs: a hopper never stops, because a slime has no melee goal at all and arriving on you *is* its attack; and "arrived" means *on the same footing*, or a zombie at the foot of a one-block ledge stands there forever, since the step-up and the jump both read `walking`.
+
+**A blow swings the arms**, on the reference's own curves, and the two rigs run in opposite senses: a zombie starts with its arms out and **chops down**, an armed biped starts with them hanging and **swings up**. Neither needs an "am I swinging" test, because both curves are zero at both ends by construction.
+
+**Which mobs swing is a species fact, not a rig fact**, and shipping it as the latter cost a correction: every skeleton on the biped rig mimed a sword blow. **They are archers.** `swingsArms` names the six that genuinely strike with their hands; the Blackbone is the one skeleton on the list, because it carries a stone sword rather than a bow.
+
+**A slime rebounds off the player**, which is *better* than the reference here rather than a compromise: Bedrock separates the two bodies with `pushable`, which we have no equivalent of, so a slime simply passed through and re-entered forever. The player's body is a wall — the inward part of its velocity comes back out at a restitution and it is lifted clear of the floor, so it hits, recoils, gathers and comes again.
+
+**The furnace showed its mouth on every side of its icon.** An icon draws *two* side faces at once and they point different ways, so handing both "a side" with no direction showed the identifying face on both. The crafting table had the same fault and its own comment named the blocker — which had been supplied a day earlier and never wired up.
+
+**The spider was rebuilt from `geometry.spider.v1.8` and `animation.spider.walk`.** Its body sat at 0.40 with eight level bars either side of it, which read as an animal lying on its belly; the reference droops each leg 45° about its own forward axis from a joint level with the body, and **that droop is the entire reason a spider stands off the ground**. The walk is worth copying exactly: a quarter turn of phase per pair, a sweep at twice the rate of the lift, and absolute values on both. What keeps adjacent tips from colliding is the *lift*, not the sweep.
+
+**Water, in four passes, and the last two were corrections.** The four vertical terminals were about a quarter too fast because the water-gravity term had been dropped from the derivation — caught by a check that was free and sitting in the same file, since the same expression with no impulse has to reproduce the sink speed. Sprint-swimming gained gaze steering, without which it could only skim. And **treading was wrong twice before it was right**: holding jump is a *climb* while your eyes are under and a *stroke* once they are out, and running both at the climb speed threw the player a body length clear; then a smooth taper fixed the overshoot and settled dead instead. It needs a latch **and** a gentler speed. `tools/simulate-swim.ps1` exists because of this — it replays the vertical motion and reads every constant out of the headers, so the float height could be *derived* rather than judged.
+
+### ✅ M20k — Real pathfinding · **Core**
+
+**2026-08-06.** Closes the first of M20b's three remaining items.
+
+**What was there was steering, not pathfinding, and the tell was a constant.** `steerAround` probes `kProbeDistance = 0.9` metres ahead — less than one block — fans out to either side, and takes the first heading that is not blocked. That can never choose to go *away* from where it wants in order to get round something, so a wall longer than it can see is hugged rather than rounded and a dead end is oscillated in. It has no memory and no plan.
+
+**`world/Pathfinder.hpp` is A\* over walkable cells**, and it is a plan: the route is searched before a step is taken, so it commits to a detour. Node costs are the reference's own (`RESEARCH.md` §8.5) — distance travelled plus a penalty, water 8, and **the water-border penalty applied to the *neighbours* of the water rather than to the water itself**, which is what makes a mob give a pond a berth instead of skimming its edge.
+
+**The fallback is what made it safe to roll out.** `walkTo` steers with the old fan whenever it has no route, so every case the search declines to answer behaves exactly as it did before — the same additive property that let `legBox` and `beginHead` convert a signed-off roster one animal at a time. The route only ever replaces *which way to face this instant*; the step-up, the jump and the last 0.9 m of obstacle-hugging are all still the fan's.
+
+**Wandering picks a place now, not a bearing**, because a bearing is not something that can be pathed to. Ten blocks, which is the reference's `random_stroll` reach.
+
+Bounded three ways so one boxed-in animal cannot cost a frame: 24 m of range, 384 expansions, and two searches per frame across the whole population. The repath cadence is the reference's — every half second, or sooner if the target has walked a block — and **both reasons are gated behind the same timer**, or a chaser dancing in and out of contact searches every frame forever.
+
+**Not done, deliberately:** panic still steers rather than pathing, because bolting is a direction and a fleeing animal that stops to think looks wrong. Swimmers keep their own three-dimensional planner.
+
+### ✅ M20l — Ten more creatures, six of them nearly free · **Core**
+
+**2026-08-06.** Takes the roster from forty-six to **fifty-six** and the catalogue to **126 items**.
+
+**Six of the ten are a table row and a skin**, because they share a rig with something already here — and *which* rig came from `Mojang/bedrock-samples`' own `<mob>.entity.json` rather than from comparing pixels. That distinction earned its place immediately: a whole-sheet alpha comparison says the skeleton horse differs from the horse on 51 of 64 rows, and it uses `geometry.horse` unchanged. Those rows are skeletal holes in the artwork, not net boundaries. The **Mushroom Cow** is the cow, the **Skeleton** and **Zombie Horse** are the horse, the **Trader Llama** is a llama with its pack drawn over it as a second cutout shell, and the **Princepin Brute** and **Zombie Princepin** are both `geometry.piglin`.
+
+**A mob's identifying feature is not always in its skin.** The mooshroom's alpha matches a cow's on every row, and `geometry.mooshroom.v2` contains no mushroom cubes at all — the reference puts real mushroom *blocks* on its back. So the mushrooms are grown as crossed quads, exactly the way every plant here is drawn, from the block texture stamped into an empty corner of that species' own sheet rows. **Deliberately not a new texture layer:** adding one would have moved `TextureLayer::SpawnEggFirst` and silently slid all fifty-six spawn egg sprites.
+
+**The magma cube is not a scaled slime**, which is the obvious guess. `geometry.lavaslime` builds the shell from **eight separate 8×1×8 slabs** around a 4×4×4 core and pulls them apart as it jumps, so the glow shows between them — one box could never do that, and the gaps are the whole animal. Every slab reads the same band rather than the reference's eight different rows, and that is measured rather than assumed: our reference texture is Java's, and only the first row carries a full-width side band there. The other seven measure half-covered and would have rendered four faces of each slab as nothing.
+
+**The Zombie Princepin needed no flag to be neutral.** Not hostile with damage above zero already means "ignores you until struck", which is the wolf's temperament and was sitting there.
+
+Names follow the standing rule — ordinary words are free, coined ones need ours. *Mushroom*, *cow*, *magma*, *cube*, *horse*, *trader* and *llama* all stay; the endermite becomes the **Voidmite**, and the two piglins join the Princepin family.
 
 ### ⬜ M21 — Survival systems · **Core**
 

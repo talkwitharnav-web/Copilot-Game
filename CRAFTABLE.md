@@ -20,17 +20,19 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 ## What exists right now
 
-**Blocks:** Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab (bottom + top), Cobblestone Stairs (8 orientations), Plank Fence, **Crafting Table**, **Furnace** (lit and unlit), **Torch**.
+**Blocks (66):** the originals — Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab, Cobblestone Stairs, Plank Fence, Crafting Table, Furnace, Torch — plus **Andesite, Diorite, Granite, Smooth Stone, Stone Bricks, Mossy Cobblestone, Obsidian, Clay, Sandstone, Bookshelf, Glass, Dandelion, Poppy, Dead Bush, eight ores, Deepslate, Bedrock, Terracotta and Packed Ice.**
 
-**Items:** **Stick**, **Charcoal**, and ten tools — wooden and stone pickaxe, axe, shovel, sword and hoe. Everything else is a block item.
+**Items (61):** Stick, Charcoal, ten tools, fifty-six spawn eggs, and **eleven resources** — coal, raw iron/gold/copper, iron/gold/copper ingots, diamond, emerald, lapis lazuli and redstone.
 
-**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works**: `Cobblestone → Stone` and `Log → Charcoal`, fuelled by charcoal, logs, planks, fences or sticks.
+**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works** with seven recipes, fuelled by coal, charcoal, logs, planks, fences or sticks.
 
-**Mining is timed and tiered.** Stone-family blocks need a pickaxe or they drop nothing.
+**Mining is timed and tiered.** Stone-family blocks and every ore need a pickaxe or they drop nothing.
 
-**Recipes shipped (15):** `Log → 4 Planks`, `2 Planks → 4 Sticks`, `4 Planks → Crafting Table`, `8 Cobblestone → Furnace`, `Charcoal + Stick → 4 Torches`, and all ten tools.
+**Recipes shipped (20):** `Log → 4 Planks`, `2 Planks → 4 Sticks`, `4 Planks → Crafting Table`, `8 Cobblestone → Furnace`, `Charcoal + Stick → 4 Torches`, `Coal + Stick → 4 Torches`, `4 Stone → 4 Stone Bricks`, `4 Sand → Sandstone`, `Cobblestone + Tall Grass → Mossy Cobblestone`, `3 Iron Ingots in a V → Bucket`, and all ten tools. **Eight fit a 2×2**, so they are craftable without a table.
 
-**Still missing:** wall torches (need a tilted shape), glass (needs a transparent block), chest (needs a non-cube model), and the whole of Tier 2's slab and stair variants.
+**Smelting shipped (7):** Cobblestone → Stone, Stone → Smooth Stone, Log → Charcoal, Sand → Glass, and the three raw metals → their ingots.
+
+**Still missing:** wall torches (need a tilted shape), the chest (needs a non-cube model), and the whole of Tier 2's slab and stair variants.
 
 ---
 
@@ -42,7 +44,7 @@ These need nothing that does not already exist.
 ```
 Log        →  4 Planks
 ```
-Shapeless, 1 ingredient, fits 2×2. **The only recipe craftable today**, and the one M19 will be built against.
+Shapeless, 1 ingredient, fits 2×2. The first recipe the game ever shipped, and what M19 was built against.
 
 ### Stone Slab
 ```
@@ -70,9 +72,9 @@ Furnace. Makes Stone renewable and needs no new texture at all — we own both b
 
 ## Tier 1 — the critical path
 
-Four assets unlock roughly twenty-five recipes. Ordered by how much each one unblocks.
+Four assets unlock roughly twenty-five recipes. **All four shipped at M19c**; the ordering is kept because it is the reasoning, and because it is the shape any future "what unblocks the most?" question should take.
 
-### 1. Stick · *needs an item icon — no reference available*
+### 1. Stick
 ```
 Planks .   →  4 Sticks
 Planks .
@@ -126,13 +128,15 @@ Planks Stick Planks
 
 ## Tier 3 — smelting
 
-Needs the furnace. One new texture between them.
+Needs the furnace. **All shipped.**
 
-| Input | Output | Texture status |
-|---|---|---|
-| Log | Charcoal | item icon — no reference |
-| Sand | **Glass** | reference: `glass.png` |
-| Cobblestone | Stone | already own both |
+| Input | Output |
+|---|---|
+| Log | Charcoal |
+| Sand | Glass |
+| Cobblestone | Stone |
+| Stone | Smooth Stone |
+| Raw iron / gold / copper | the matching ingot |
 
 Fuel burn times worth copying: coal/charcoal smelts 8 items, a log smelts 1.5, planks 1.5, a stick 0.5.
 
@@ -148,9 +152,7 @@ M M M          M M .          . M .       . M .       M M .
 . S .          M S .          . S .       . M .       . S .
 . S .          . S .          . S .       . S .       . S .
 ```
-All 3×3, all mirrorable.
-
-No reference available — the dump is block textures only.
+All 3×3, all mirrorable. Reference icons exist for all ten — `textures/item/{wooden,stone}_*.png`.
 
 ---
 
@@ -184,23 +186,18 @@ Planks Planks Planks
 
 | Thing | Why |
 |---|---|
-| **Lever**, **Grindstone** | Craftable with what we would have, but there is no redstone and no enchanting, so they would do nothing |
-| **Coal Ore + Coal item** | Charcoal from a log covers every use. Revisit only if ore generation lands for other reasons |
+| **Lever**, **Grindstone** | Craftable with what we would have, but there is no redstone circuitry and no enchanting, so they would do nothing |
 | **Snowball, Flint** | Item icons for no payoff |
-| **Bricks** | The block exists but has **no source**. The real chain is Clay Ball → smelt → Brick item → 4 Bricks, which needs clay generation plus two icons. Creative-only until then |
+| **Bricks** | The block exists but has **no source**. The real chain is Clay Ball → smelt → Brick item → 4 Bricks, which needs two icons. Clay now generates, so this is cheaper than it was |
 | **Sign** | `6 Planks + 1 Stick → 3 Signs` is simple, but rendering player text on a block is a whole feature |
 
 ---
 
 ## Asset status summary
 
-**Every texture on the critical path now has reference material.** The full 26.2 asset dump includes item icons and entity textures, so the earlier conclusion — that the artist was needed for Stick and the tool icons — is obsolete. That gap existed only because the previous dump held block textures exclusively.
+**Every texture on the critical path has reference material, and all of it is currently staged in the running game.** `tools/make-reference-blocks.ps1` writes the reference block and item art to `blocks-reference/` beside each executable; our own 16×16s under `assets/textures/blocks/` are the fallback. Delete the folder to return to ours everywhere. See `START-HERE.md` §5 for why the reference goes in first and ours follows.
 
-**I can generate all of these** from measured reference statistics (palette spread, run lengths, tiling behaviour), the same method used for bark and leaves:
-
-Stick · Charcoal · Crafting Table · Furnace · Torch · Glass · Ladder · 10 tool icons
-
-**Chest is the one real exception.** Its texture is a single 64×64 UV-unwrapped sheet for a non-cube model, not four square faces — so it needs model support before the texture matters at all. Defer it past M19.
+**Chest is the one real exception.** Its texture is a single 64×64 UV-unwrapped sheet for a non-cube model, not four square faces — so it needs model support before the texture matters at all.
 
 Before inventing any shape's dimensions, read `models/block/*.json` in the reference dump. Our fence post at `0.375–0.625` already matches the reference's `[6,0,6]→[10,16,10]` exactly, and that was arrived at by guessing — next time it can be read.
 

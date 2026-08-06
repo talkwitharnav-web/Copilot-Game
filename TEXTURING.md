@@ -147,7 +147,9 @@ When a grid is not enough, extract the net as its own magnified image and *look*
 
 **Pixels are expressive work.** Palette, tone choices, patterning must be original. Reference art may be used to *measure*, must never live under `assets/`, and must never ship in a release. Keep it in `reference/` — the build copies `assets/` wholesale, and 925 of Mojang's PNGs once landed in the output that way.
 
-**Two sanctioned exceptions currently exist, and neither is a mistake.** The HUD sheet (`assets/textures/hud.png`) is Minecraft's widget art, and **thirty-two of the thirty-six creature skins render from `creatures-reference.png`, which sits beside each `game.exe` and never under `assets/`** — both at the user's explicit request, both temporary, both to be gone before a release. `START-HERE.md` §5 has the arrangement and why it exists. **Do not re-author those skins, and do not treat the placeholders as a violation to clean up.**
+**Almost every texture in the running game is currently Mojang's, and none of it is a mistake.** Four staged sets sit **beside each `game.exe`, never under `assets/`** — `creatures-reference.png` (42 of 46 skins), `spawn-eggs/` (all 46), `hud-reference.png` (the five catalogue tabs) and `blocks-reference/` (76 block and item textures). `assets/textures/hud.png` is the one exception that does live under `assets/`. All of it is at the user's explicit request, all of it is temporary, and all of it must be gone before a release. `START-HERE.md` §5 has the arrangement and why it exists.
+
+**The sequence is the point, and it is a standing rule rather than a concession:** stage the reference first, prove the model or the layout against pixels known to be right, *then* author ours. Authoring art and judging the geometry by it at the same time leaves two unknowns behind one symptom. **Do not re-author the creature skins** — an artist has them — and do not treat any of the placeholders as a violation to clean up.
 
 ### Palette discipline is a property of the subject, not a house style
 
@@ -328,7 +330,7 @@ Bounded, but still surfaces errors — do not filter on words like `error`, beca
 
 Final numbers, as a template for the next creature. One texel is 1/16 of a block.
 
-**Sheet** — the shared `assets/textures/creatures.png` is **128×1888**. The sheep still occupies its original first two 64×32 regions: row 0 bare hide and row 32 fleece shell. Selected by texture layer `-3.0`, following the same negative-layer convention the HUD (`-1`) and font (`-2`) use.
+**Sheet** — the shared `assets/textures/creatures.png` is **128×3552**, and `kCreatureSheetWidth`/`Height` in `Creature.hpp` is the single owner of that number. The sheep still occupies its original first two 64×32 regions: row 0 bare hide and row 32 fleece shell. Selected by texture layer `-3.0`, following the same negative-layer convention the HUD (`-1`) and font (`-2`) use.
 
 **The last 32 rows (1856–1887) are not a species.** They hold the charged Bramble's energy shell — the reference's `creeper_armor` overlay, on the *same net as the Bramble itself* so the same box UVs read it, mostly transparent so only the blue survives the cutout test. `kCreatureSheetWidth/Height` in `Creature.hpp` is the single owner of the size, and `Main.cpp` checks the PNG header against it, because a sheet of the wrong height does not fail — it slides every UV and mistextures the whole roster in silence.
 
@@ -405,7 +407,7 @@ writes `creatures-reference.png` **beside each built `game.exe`**, packing the r
 
 It never writes under `assets/` — the script refuses — so reference pixels cannot reach a build through the asset copy step. **It began as a debugging aid and is currently also the shipping placeholder for most of the roster**, at the user's explicit request. So *expect* to find one in a normal build right now; that is correct. What must never happen is one surviving into a release. `run.ps1` rebuilds it whenever `creatures.png` is newer, because a stale atlas serves old art silently.
 
-To actually look at the result, `creature_showcase` in `settings.cfg` freezes the spawner and lines the roster up in front of spawn: `1` is every species in a staggered grid, **`2` and up is one species alone in three copies (profile, facing the camera, facing away), where the value is the `CreatureKind` index + 2** — so Wolf is 15 and Frog is 16. Waiting for the right biome to produce the right animal is not a test loop.
+To look at the result, set `creature_showcase` in `settings.cfg` — it freezes the spawner and lines the roster up in front of spawn. `SYSTEM_MEMORY.md` → "Reviewing a model" has the value for each species. Waiting for the right biome to produce the right animal is not a test loop.
 
 ### Read the alpha as runs, not as a picture
 
@@ -420,7 +422,9 @@ for($y=0;$y -lt $b.Height;$y++){ $runs=@(); $s=-1
   if($runs.Count){ Write-Host ("{0,3}: {1}" -f $y, ($runs -join '  ')) } }
 ```
 
-A net then reads directly off two consecutive run widths: the **band** rows are `2w` wide starting at `u+d`, the **full** rows are `2(w+d)` wide starting at `u`, the band's row count is `d` and the full rows' count is `h`. A band that is *half* the expected width means one of the top/bottom faces is transparent because it is buried — which is itself a placement constraint, not a measurement error.
+**Never truncate that listing.** The villager and zombie villager are identical row for row up to row 33 and differ only in where their arm rows *stop* — a dump cut short said "same model" with total confidence and shipped arms a third too short.
+
+This is step 1 of the full procedure in §13, "Reading a net you have never seen before". Follow that in order; the steps rule out classes of error that are invisible to each other.
 
 ## 13. The 26.2 roster, measured
 
@@ -619,7 +623,9 @@ All three sizes are this one model at different `modelScale` (1.04 / 2.08 / 4.16
 | abdomen | (0, 12) | 10 × 8 × 12 |
 | leg (shared, all eight) | (18, 0) | 16 × 2 × 2 |
 
-**The leg net is a sideways bar, not an upright limb.** At 16 across and 2 the other two ways it takes the upright mapping with its *width* along the side axis — read as a standing leg it would be a 1-block-tall post. The reference bends each leg down at a knee, which an axis-aligned box cannot express; level legs read correctly from every angle a player actually meets a spider from.
+**The leg net is a sideways bar, not an upright limb.** At 16 across and 2 the other two ways it takes the upright mapping with its *width* along the side axis — read as a standing leg it would be a 1-block-tall post.
+
+**Rebuilt at M20j from `geometry.spider.v1.8`, and the earlier note here was wrong.** It used to say the reference bends each leg at a knee, which an axis-aligned box cannot express, and that level legs read correctly anyway. **They do not — they read as an animal lying on its belly, which is what the user reported.** There is no knee: the reference droops each *whole* leg 45° (33.3° for the inner pairs) about its own forward axis, from a joint level with the body, and **that droop is the entire reason a spider stands off the ground**. Thorax, head, abdomen and all eight joints share one height, **texel 9 of 16**, and the leg tips end about a tenth of a block *under* the floor — which the reference does too, and is what makes it read as planted rather than hovering. `barBox` gained its `splay` parameter for this; see §14.
 
 **`cave_spider.png` has byte-identical alpha to `spider.png`**, so it is the same rig at `modelScale` 0.70. Diff the alpha of any new skin against the ones already modelled before deriving anything — that check has now saved two species outright.
 
@@ -714,6 +720,121 @@ Its one extra part is a **head wrap**: the standard overlay slot at **(32,0), 8�
 
 The head is **10 wide against the biped's 8**, which is the whole silhouette — a piglin is broad-faced. Body, arms and legs are identical to the zombie's, so only the head needed deriving.
 
+### The aquatic roster, measured (M20i)
+
+Ten species added on 2026-08-05. Nine of them are the first models here that are **not** a spine with legs, and the drowned is the cheapest addition in the roster — it is the zombie rig twice over.
+
+**⛔ Read this before transcribing any of it.** Every net below was **measured off the texture**, not copied out of `bedrock-samples`. Our reference art is **Java's** and the geometry is **Bedrock's**; for most mobs the two sheets agree, and for the dolphin they do not — Bedrock puts its tail at `(0,33)` and its tail fin at `(0,49)`, where the Java sheet has nothing at all, so its whole back half rendered as empty with no error anywhere. The turtle's head starts at `u = 3` where the geometry says `2`, and at `2` the top face sampled a transparent column and showed a slot across the crown. **After transcribing any UV, dump the alpha of that rect** — full coverage means the origin is right, partial means it has slid, empty means the part is about to vanish silently.
+
+**Drowned** (`drowned/drowned.png` + `drowned/drowned_outer_layer.png`, 64×64 each). The zombie's biped rig, unchanged, drawn twice: the body, then the outer layer as a second shell inflated a quarter of a texel. The layer is an ordinary alpha-tested cutout, exactly like the sheep's fleece, so it needed no rendering work at all. It is the only aquatic that walks the seabed rather than swimming.
+
+**Cod** (`fish/cod.png`, 32×32).
+
+| part | net | `w × h × d` |
+|---|---|---|
+| body | (0, 0) | 2 × 4 × 7 |
+| head | (11, 0) | 2 × 4 × 3 |
+| nose | (0, 0) | 2 × 3 × 1 |
+| tail fin | (20, 1) | 0 × 4 × 6 |
+| dorsal | (20, −6) | 0 × 1 × 6 |
+| ventral | (22, −1) | 0 × 1 × 2 |
+| pectoral, right / left | (24, 4) / (24, 1) | 2 × 1 × 2 |
+
+**Salmon** (`fish/salmon.png`, 32×32). Two body halves rather than one long box — the reference bends a salmon in the middle. Ours draws them straight, because that bend is an animation we do not have.
+
+| part | net | `w × h × d` |
+|---|---|---|
+| body, front / back | (0, 0) / (0, 13) | 3 × 5 × 8 |
+| head | (22, 0) | 2 × 4 × 3 |
+| dorsal, front / back | (4, 2) / (2, 3) | 0 × 2 × 2 / 0 × 2 × 3 |
+| tail fin | (20, 10) | 0 × 5 × 6 |
+| pectoral, right / left | (2, 0) | 2 × 0 × 2 |
+
+**Pufferfish** (`fish/pufferfish.png`, 32×32). **Three separate geometries, not one model scaled** — the spines are real parts that only exist once it is inflated, so `puff` picks a model rather than a size. The three bodies are 3, 5 and 8 texels wide, so the handover happens at the **geometric mean** of each adjacent pair, with the scale ramped continuously across it; what the eye sees is one animal swelling, with only the spines arriving.
+
+| stage | part | net | `w × h × d` |
+|---|---|---|---|
+| small | body | (0, 27) | 3 × 2 × 3 |
+| small | eye, right / left | (24, 6) / (28, 6) | 1 × 1 × 1 |
+| small | tail fin | (−3, 0) | 3 × 0 × 3 |
+| small | fin, right / left | (25, 0) | 1 × 1 × 2 |
+| medium | body | (12, 22) | 5 × 5 × 5 |
+| medium | eye, right / left | (24, 3) / (24, 0) | 2 × 1 × 2 |
+| medium | spine, top / bottom ×2 | (19,17) (11,17) (18,20) | 5 × 1 × 0 |
+| medium | spine, side ×4 | (1,17) (5,17) (9,17) | 1 × 5 × 0 |
+| large | body | (0, 0) | 8 × 8 × 8 |
+| large | eye, right / left | (24, 3) / (24, 0) | 2 × 1 × 2 |
+| large | spike, top ×3 / bottom ×3 | (14, 16) / (14, 19) | 8 × 1 × 1 |
+| large | spike, flank ×6 | (0/4/8, 16) | 1 × 8 × 1 |
+
+Every spine and spike is pushed a sixteenth of a texel off the body. Flush is what the reference does, and flush means a shared face plane, and both of ours are drawn from both sides.
+
+**Squid** and **Glow Squid** (`squid/squid.png`, `squid/glow_squid.png`, 64×32). One rig, one net, two skin rows; the glow squid additionally sets its own light to full. A bell with eight tentacles at 45° spacing — the first model here that is a **ring of limbs** rather than a spine with legs.
+
+| part | net | `w × h × d` |
+|---|---|---|
+| bell | (0, 0) | 12 × 16 × 12 |
+| tentacle ×8 | (48, 0) | 2 × 18 × 2 |
+
+`legBox` hangs each tentacle from its top face and the derived joint lands exactly on the underside of the bell, so the ring hinges where it meets the body. The splay is **negated**, because a positive pitch swings a hanging limb toward the ring's centre and a flare is outward.
+
+**Turtle** (`turtle/big_sea_turtle.png`, 128×64). The shell and the belly plate are authored upright and laid down a quarter turn — the reference's own `bind_pose_rotation` of 90°, which is what `lyingBox` is for. The head and the four flippers are already flat and take no rotation.
+
+| part | net | `w × h × d` |
+|---|---|---|
+| shell | (6, 37) | 19 × 20 × 6 |
+| belly plate | (30, 1) | 11 × 18 × 3 |
+| head | **(3, 0)** | 6 × 5 × 6 |
+| front flipper, right / left | (26, 30) / (26, 24) | 13 × 1 × 5 |
+| rear flipper, right / left | (0, 23) / (0, 12) | 4 × 1 × 10 |
+
+The shell is centred against the **flippers** rather than by eye: the front pair sit at z −6..−1 and the rear at 11..21, so a body spanning −8..12 meets both. The head is **sunk into** the shell and set a shade below its roof, because its crown originally landed on exactly the shell's top plane.
+
+**Dolphin** (`dolphin/dolphin.png`, 64×64). **Body, tail and tail fin are the Java sheet's origins, not Bedrock's** — see the warning above.
+
+| part | net | `w × h × d` |
+|---|---|---|
+| body | (22, 0) | 8 × 7 × 13 |
+| head | (0, 0) | 8 × 7 × 6 |
+| nose | (0, 13) | 2 × 2 × 4 |
+| tail | (0, 19) | 4 × 5 × 11 |
+| tail fin | (19, 20) | 10 × 1 × 6 |
+| dorsal | (52, 0) | 1 × 5 × 4 |
+| pectoral, right / left | (44, 27) | 8 × 1 × 4 |
+
+The head's cross-section is the body's **exactly** — 8 by 7 — so the two met at a plane and their touching faces were the same rectangle in the same place, drawn from both sides. It is grown and pushed back into the body instead. The beak had the same fault against the head. The dorsal is swept 30° and the pectorals 20°.
+
+**Axolotl** (`axolotl/axolotl_*.png`, 64×64 each). **Five liveries, each a whole net on its own 64 rows**, selected by `Creature::variant`.
+
+| part | net | `w × h × d` |
+|---|---|---|
+| body | (0, 11) | 8 × 4 × 10 |
+| back ridge | (2, 17) | 0 × 5 × 9 |
+| tail | (2, 19) | 0 × 5 × 12 |
+| head | (0, 1) | 8 × 5 × 5 |
+| gill, right / left | (11, 40) / (0, 40) | 3 × 7 × 0 |
+| gill, crown | (3, 37) | 8 × 3 × 0 |
+| limb ×4 | (2, 13) | 3 × 5 × 0 |
+
+**The gills are three real boxes cut by alpha, not decoration** — they are what makes the animal read as an axolotl. The tail sways about **where it meets the body**, not about the animal's middle, or its root swings clear of the hips on every beat. The limbs are splayed out and down rather than hanging straight, which is what lets a sprawling amphibian's legs reach the floor at all. **In water the tail does all the work and the legs hang still; on land it is the other way about**, and that is the whole difference between its two gaits.
+
+Two traps here. The model sits below its own feet in the reference — the limbs hang to −4 — so the whole thing is **lifted** to stand in its box rather than through it. And it deliberately does **not** use `beginHead`: that helper rebuilds the frame from the creature's own position, which would throw the lift away and drop the head below the body.
+
+**Tropical Fish** (`fish/tropical_a.png`, `tropical_b.png` and six pattern sheets each, 32×32). **Twelve fish from two body shapes crossed with six patterns.** The pattern rides over the body as a second cutout shell a fraction larger — the sheep's fleece arrangement — which is what avoids authoring all twelve as separate skins. It is a shell rather than a runtime tint deliberately: runtime tinting is exactly what produced the washed-out grass at M19a.
+
+| shape | part | net | `w × h × d` |
+|---|---|---|---|
+| flat (A) | body | (0, 0) | 2 × 3 × 6 |
+| flat (A) | dorsal | (10, −6) | 0 × 4 × 6 |
+| flat (A) | tail fin | (24, −4) | 0 × 3 × 4 |
+| tall (B) | body | (0, 20) | 2 × 6 × 6 |
+| tall (B) | ventral | (20, 21) | 0 × 5 × 6 |
+| tall (B) | dorsal | (20, 10) | 0 × 5 × 6 |
+| tall (B) | tail fin | (21, 16) | 0 × 6 × 5 |
+| both | pectoral, right / left | (2, 12) / (2, 16) | 2 × 2 × 0 |
+
+The pectorals take **body art only** — the pattern sheet does not paint them.
+
 ### A villager-family overlay slot we do not build
 
 The villager, zombie villager, wandering trader and witch all carry an extra region at roughly **x 0–27, rows 38–63** — a robe or skirt layer over the body and legs. The villager has a small version of it and has shipped without it since M20b, looking correct, so all four skip it. Recorded here so nobody re-measures it; it would cost one more pass of inflated boxes and an alpha-tested shell, the same shape as the sheep's fleece.
@@ -734,7 +855,9 @@ So the wolf's head is unambiguous the moment you see rows 0-3 spanning x 4-15 an
 
 **3. Where arithmetic runs out, use colour.** The frog's two 7×9 nets are arithmetically interchangeable — same footprint, both plausible as "head" and "body". Averaging their side bands settles it in one command: patterned orange versus flat pale tan is a back and a belly, so they *stack*. Guessing would have produced an animal twice its proper length, and every metric would still have passed. This is the same lesson the cow's udder taught (`CLAUDE.md`): identify an unknown region by measuring its colour, not by reasoning about what it ought to be.
 
-**4. Check for shared extents before rendering, not after.** Every creature quad is double-sided, so two boxes that overlap while sharing an extent on any axis will z-fight, and the symptom is a flickering *triangle diagonal* rather than anything that looks like a modelling mistake. Listing the half-extents and scanning for duplicates takes a minute. The camel cost a user bug report for exactly this; the frog's two 7-wide nets were caught in advance from the same checklist.
+**4. Check for shared extents before rendering, not after.** Every creature quad is double-sided, so two boxes that overlap while sharing an extent on any axis will z-fight, and the symptom is a flickering *triangle diagonal* rather than anything that looks like a modelling mistake. Listing the half-extents and scanning for duplicates takes a minute. The camel cost a user bug report for exactly this; the frog's two 7-wide nets were caught in advance from the same checklist. **And check for boxes that merely *touch*, which this scan does not catch** — see §14.5c.
+
+**4b. If you took the net from `bedrock-samples`, verify it against the alpha.** Our reference art is **Java's** and the geometry is **Bedrock's**. They agree for nearly every mob, and when they do not the failure is silent: a rect pointed at empty pixels renders **nothing at all**, with no error, no warning and no log line. Dump the alpha of each transcribed rect — full coverage means the origin is right, partial means it has slid a few texels, empty means the part is about to vanish. The dolphin lost its entire back half to this.
 
 **5. Then render, and look at it.** Two renders is the budget. The first exposes gross placement — on the wolf, a head sunk into the ruff. The second confirms. If it takes a third, the problem is usually **pose, not dimensions** (see below), and no amount of nudging numbers will find it.
 
@@ -871,7 +994,12 @@ top, and a `1x4x6` wing pivoting effectively at its top face.
 **`barBox` is for a limb that runs sideways and pivots at its inner end** - the
 spider's eight legs. Its swing is a **yaw**, not a tilt, so it rotates the local
 `forward`/`side` axes exactly as the head turn does and then places the box so
-its inner end lands on the pivot.
+its inner end lands on the pivot. It also takes a **`splay`**, which droops the
+leg about its *own* forward axis after the fan - so the outer end drops however
+the leg happens to be pointing. Both axes rotate together rather than only the
+long one, so the box stays a rigid body and its cut ends stay square to it.
+**That droop is what stands a spider off the ground**; without it the body sits
+on the floor with eight level bars sticking out of it.
 
 **Rotating sweeps a box through space it did not occupy at rest, so run §14.5's
 shared-extent check at the swing extremes, not just at rest** - and check the
@@ -959,8 +1087,27 @@ invisible, and some 25× the depth precision at normal viewing range.
 for the other on this join before that was noticed — each "fix" resized the part
 to cure a fight that resizing cannot cure.
 
-### 14.6 Hop physics (species with `hops`)
+### 14.5c Two boxes that merely *touch* have the same problem
 
+§14.5's scan looks for shared extents among boxes that **overlap**. Two boxes that
+sit face to face overlap in nothing at all and still put two double-sided quads on
+exactly one plane, so the scan reports clean and the model flickers anyway.
+
+It cost two bug reports on the same day. A turtle's head resting on the top plane
+of its shell; a dolphin's head meeting its body at identical 8 × 7 cross-sections.
+Both looked correct in a still frame and both flickered the moment anything moved.
+
+**The cure is §14.5b's, applied for a different reason:** overlap them slightly,
+with different `grow` values, rather than letting the faces meet. The general rule
+is now settled — **a coincident plane is a coincident plane however the boxes
+arrived at it**, and the check to run is "does any face of A lie on any face of
+B", not "do A and B overlap".
+
+Where a whole chain of parts is involved — the pufferfish's twelve spikes, the
+witch's four stacked hat boxes — give each one its own **descending** `grow` so
+consecutive boxes overlap rather than butt.
+
+### 14.6 Hop physics (species with `hops`)
 ```
 arc height   = launch^2 / (2 * gravity)
 airtime      = 2 * launch / gravity

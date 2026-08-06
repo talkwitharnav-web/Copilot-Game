@@ -21,7 +21,13 @@ struct RaycastHit {
 /// Steps block to block rather than sampling at fixed intervals, so it cannot
 /// skip a block no matter how the ray is angled and costs the same regardless
 /// of precision.
-RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction, float maxDistance);
+///
+/// `stopAtWater` makes a water source count as something to hit. It is off by
+/// default because water has no selection geometry - you aim *through* it at
+/// the riverbed - and on only for a bucket, which is the reference's own
+/// arrangement: fluids are invisible to a normal reach and solid to a bucket.
+RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction,
+                   float maxDistance, bool stopAtWater = false);
 
 /// Whether anything opaque stands between two points.
 ///

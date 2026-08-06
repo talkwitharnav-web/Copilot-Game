@@ -86,6 +86,20 @@ public:
     /// be near zero to sit in front of the world.
     void setScreenMesh(const MeshData& mesh);
 
+    /// The same, but cut off at a rectangle.
+    ///
+    /// A second draw rather than a flag on the first, because the cut is a
+    /// scissor and a scissor is per draw call. It exists for lists that scroll:
+    /// the reference clips its last row **through** a cell, and there is no
+    /// other way to end geometry at an arbitrary line - scaling the contents to
+    /// fit changes their size, and clipping by hand is impossible for anything
+    /// that is not an axis-aligned rectangle, which an isometric block icon is
+    /// not.
+    ///
+    /// `min` and `max` are in the same units as the mesh, so the caller never
+    /// has to know about pixels or the aspect ratio.
+    void setClippedScreenMesh(const MeshData& mesh, const glm::vec2& min, const glm::vec2& max);
+
     /// Geometry drawn in world space with its own transform and no directional
     /// lighting, for the sun and anything else pinned to the sky.
     void setSkyMesh(const MeshData& mesh);
@@ -98,6 +112,17 @@ public:
     /// `ambient` is the floor every surface receives, `sun` is what a surface
     /// facing the sun adds on top.
     void setSunLighting(float ambient, float sun, float ambientFloor);
+
+    /// Redirects one texture layer to another for this frame.
+    ///
+    /// Geometry meshed with `meshedLayer` samples `currentLayer` instead, which
+    /// is how an animated surface plays without a single chunk being rebuilt.
+    /// Pass the same value twice to leave it alone.
+    void setAnimatedLayer(float meshedLayer, float currentLayer);
+
+    /// Fades world geometry toward `colour`, reaching it at `distance` metres.
+    /// A distance of 0 turns it off. Screen-space geometry is never fogged.
+    void setFog(const glm::vec3& colour, float distance);
 
     /// Renders and presents a single frame. Does nothing while the window is minimized.
     ///
@@ -199,12 +224,20 @@ private:
     std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
     GpuMesh m_screenMesh;
+    GpuMesh m_clippedScreenMesh;
+    glm::vec2 m_screenClipMin{0.0f};
+    glm::vec2 m_screenClipMax{0.0f};
     GpuMesh m_skyMesh;
     glm::mat4 m_skyTransform{1.0f};
     glm::vec3 m_sunDirection{0.0f, 1.0f, 0.0f};
     float m_ambientLight = 0.55f;
     float m_sunLight = 0.45f;
     float m_ambientFloor = 0.0f;
+    /// Negative means nothing is redirected, which no real layer can match.
+    float m_animatedLayer = -1.0f;
+    float m_animatedFrame = -1.0f;
+    glm::vec3 m_fogColour{0.0f};
+    float m_fogDistance = 0.0f;
 
     struct RetiredMesh {
         GpuMesh mesh;

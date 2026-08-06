@@ -45,12 +45,67 @@ enum class ItemId : std::uint16_t {
     /// chances to get the order wrong, and nothing needs to say `SpawnEggGoat`
     /// when `spawnEggFor(kind)` says it better.
     SpawnEggFirst,
+
+    /// Resource items, appended **after** the whole spawn egg run.
+    ///
+    /// Inserting them among the eggs would shift every egg's id, and item ids
+    /// are written to disk in the player's inventory - a saved world would come
+    /// back holding the wrong things.
+    Coal = SpawnEggFirst + kSpawnEggLayers,
+    RawIron,
+    IronIngot,
+    RawGold,
+    GoldIngot,
+    RawCopper,
+    CopperIngot,
+    Diamond,
+    Emerald,
+    LapisLazuli,
+    Redstone,
+
+    /// Appended after the resource run, and for the same reason it was appended
+    /// after the eggs: an item id is written into the player's inventory on
+    /// disk, so inserting anywhere earlier makes a saved world come back
+    /// holding the wrong things.
+    Bucket,
+    WaterBucket,
+
+    /// Spawn eggs for species added after the first thirty-six, continuing in
+    /// `CreatureKind` order. A second run for exactly the reason above: growing
+    /// the first would shift every resource and bucket id behind it.
+    SpawnEggExtraFirst,
+
+    /// **The single owner of where the item run ends.** `allItems()` reads it,
+    /// and a stale one silently drops the newest item from the catalogue.
+    kLastItem = SpawnEggExtraFirst + kExtraSpawnEggLayers - 1,
 };
 
-/// The species offset an egg carries, or -1 if the item is not an egg.
+/// Every species has an egg, across both runs.
+constexpr int kSpawnEggItems = kSpawnEggLayers + kExtraSpawnEggLayers;
+
+/// How many items the resource run holds. One contiguous run, so a sprite layer
+/// is arithmetic rather than a case per item. Taken from the sprite count so
+/// the eleven is written down once.
+constexpr int kResourceItems = kResourceSpriteCount;
+
+static_assert(static_cast<int>(ItemId::Redstone) - static_cast<int>(ItemId::Coal) + 1 == kResourceItems,
+              "kResourceItems must cover the whole run from Coal to Redstone");
+
+/// The resource offset an item carries, or -1 if it is not one.
+constexpr int resourceIndex(ItemId item) {
+    const int offset = static_cast<int>(item) - static_cast<int>(ItemId::Coal);
+    return offset >= 0 && offset < kResourceItems ? offset : -1;
+}
+
+/// The species offset an egg carries, or -1 if the item is not an egg. Two
+/// runs, so the second continues the numbering the first left off at.
 constexpr int spawnEggIndex(ItemId item) {
     const int offset = static_cast<int>(item) - static_cast<int>(ItemId::SpawnEggFirst);
-    return offset >= 0 && offset < kSpawnEggLayers ? offset : -1;
+    if (offset >= 0 && offset < kSpawnEggLayers) {
+        return offset;
+    }
+    const int extra = static_cast<int>(item) - static_cast<int>(ItemId::SpawnEggExtraFirst);
+    return extra >= 0 && extra < kExtraSpawnEggLayers ? kSpawnEggLayers + extra : -1;
 }
 
 constexpr bool isSpawnEgg(ItemId item) {
@@ -59,7 +114,10 @@ constexpr bool isSpawnEgg(ItemId item) {
 
 /// The egg for a species, by its `CreatureKind` index.
 constexpr ItemId spawnEggForIndex(int kindIndex) {
-    return static_cast<ItemId>(static_cast<int>(ItemId::SpawnEggFirst) + kindIndex);
+    return kindIndex < kSpawnEggLayers
+               ? static_cast<ItemId>(static_cast<int>(ItemId::SpawnEggFirst) + kindIndex)
+               : static_cast<ItemId>(static_cast<int>(ItemId::SpawnEggExtraFirst) + kindIndex -
+                                     kSpawnEggLayers);
 }
 
 /// Layer in the block texture array, for anything that is not a block.
@@ -93,11 +151,20 @@ constexpr int itemTextureLayer(ItemId item) {
         return static_cast<int>(TextureLayer::StoneSword);
     case ItemId::StoneHoe:
         return static_cast<int>(TextureLayer::StoneHoe);
+    case ItemId::Bucket:
+        return kBucketSpritesFirst;
+    case ItemId::WaterBucket:
+        return kBucketSpritesFirst + 1;
     default:
         // Eggs are a contiguous run against a contiguous run of layers, so the
         // offset maps straight across rather than through thirty-six cases.
         if (const int egg = spawnEggIndex(item); egg >= 0) {
-            return static_cast<int>(TextureLayer::SpawnEggFirst) + egg;
+            return egg < kSpawnEggLayers
+                       ? static_cast<int>(TextureLayer::SpawnEggFirst) + egg
+                       : kExtraSpawnEggFirst + egg - kSpawnEggLayers;
+        }
+        if (const int resource = resourceIndex(item); resource >= 0) {
+            return kResourceSpritesFirst + resource;
         }
         return -1;
     }
@@ -129,6 +196,32 @@ constexpr const char* itemName(ItemId item) {
         return "Stone Sword";
     case ItemId::StoneHoe:
         return "Stone Hoe";
+    case ItemId::Coal:
+        return "Coal";
+    case ItemId::RawIron:
+        return "Raw Iron";
+    case ItemId::IronIngot:
+        return "Iron Ingot";
+    case ItemId::RawGold:
+        return "Raw Gold";
+    case ItemId::GoldIngot:
+        return "Gold Ingot";
+    case ItemId::RawCopper:
+        return "Raw Copper";
+    case ItemId::CopperIngot:
+        return "Copper Ingot";
+    case ItemId::Diamond:
+        return "Diamond";
+    case ItemId::Emerald:
+        return "Emerald";
+    case ItemId::LapisLazuli:
+        return "Lapis Lazuli";
+    case ItemId::Redstone:
+        return "Redstone";
+    case ItemId::Bucket:
+        return "Bucket";
+    case ItemId::WaterBucket:
+        return "Water Bucket";
     default:
         // The species half of the name is added by the caller, which is the one
         // place that knows what a `CreatureKind` is called.
@@ -199,8 +292,18 @@ constexpr bool isTool(ItemId item) {
 
 /// **Tools never stack.** Two with different wear are not interchangeable, and
 /// merging them would silently pick one damage value for both.
+///
+/// A full bucket does not stack either, and an empty one stacks only to
+/// sixteen - both the reference's, and the full one matters: a stack of water
+/// buckets that emptied one at a time would need a count on each.
 constexpr int maxStackFor(ItemId item) {
-    return isTool(item) ? 1 : kMaxStack;
+    if (isTool(item) || item == ItemId::WaterBucket) {
+        return 1;
+    }
+    if (item == ItemId::Bucket) {
+        return 16;
+    }
+    return kMaxStack;
 }
 
 /// An item and how many of it. A count of zero means the slot is empty, and the
@@ -231,6 +334,10 @@ constexpr ItemId dropForBlock(BlockId block) {
     if (isWater(block)) {
         return ItemId::None;
     }
+    // The world's floor is not a souvenir.
+    if (block == BlockId::Bedrock) {
+        return ItemId::None;
+    }
     // A furnace that happens to be alight is still just a furnace once broken.
     if (isFurnace(block)) {
         return itemForBlock(BlockId::Furnace);
@@ -242,8 +349,45 @@ constexpr ItemId dropForBlock(BlockId block) {
         return itemForBlock(BlockId::Cobblestone);
     case BlockId::Grass:
         return itemForBlock(BlockId::Dirt);
+    // Ores give up their resource, not themselves. Counts and products are the
+    // reference's: one each for coal, diamond and emerald, one *raw* metal for
+    // iron and gold, and several for copper, redstone and lapis.
+    case BlockId::CoalOre:
+        return ItemId::Coal;
+    case BlockId::IronOre:
+        return ItemId::RawIron;
+    case BlockId::GoldOre:
+        return ItemId::RawGold;
+    case BlockId::CopperOre:
+        return ItemId::RawCopper;
+    case BlockId::RedstoneOre:
+        return ItemId::Redstone;
+    case BlockId::LapisOre:
+        return ItemId::LapisLazuli;
+    case BlockId::DiamondOre:
+        return ItemId::Diamond;
+    case BlockId::EmeraldOre:
+        return ItemId::Emerald;
     default:
         return itemForBlock(block);
+    }
+}
+
+/// How many a block yields. One unless the reference says otherwise.
+///
+/// The reference rolls a range - copper 2-5, redstone 4-5, lapis 4-9 - and we
+/// take the middle of each rather than adding randomness a generator has no
+/// need of. Mining the same vein twice should give the same haul.
+constexpr int dropCountForBlock(BlockId block) {
+    switch (block) {
+    case BlockId::CopperOre:
+        return 3;
+    case BlockId::RedstoneOre:
+        return 4;
+    case BlockId::LapisOre:
+        return 6;
+    default:
+        return 1;
     }
 }
 
@@ -289,6 +433,17 @@ constexpr ItemCategory categoryFor(ItemId item) {
     case BlockId::PlanksFence:
     case BlockId::CraftingTable:
     case BlockId::Torch:
+    case BlockId::Andesite:
+    case BlockId::Diorite:
+    case BlockId::Granite:
+    case BlockId::SmoothStone:
+    case BlockId::StoneBricks:
+    case BlockId::MossyCobblestone:
+    case BlockId::Obsidian:
+    case BlockId::Sandstone:
+    case BlockId::Bookshelf:
+    case BlockId::Glass:
+    case BlockId::Terracotta:
         return ItemCategory::Construction;
     case BlockId::Dirt:
     case BlockId::Grass:
@@ -298,6 +453,21 @@ constexpr ItemCategory categoryFor(ItemId item) {
     case BlockId::Log:
     case BlockId::Leaves:
     case BlockId::TallGrass:
+    case BlockId::Clay:
+    case BlockId::Dandelion:
+    case BlockId::Poppy:
+    case BlockId::DeadBush:
+    case BlockId::CoalOre:
+    case BlockId::IronOre:
+    case BlockId::CopperOre:
+    case BlockId::GoldOre:
+    case BlockId::RedstoneOre:
+    case BlockId::LapisOre:
+    case BlockId::DiamondOre:
+    case BlockId::EmeraldOre:
+    case BlockId::Deepslate:
+    case BlockId::Bedrock:
+    case BlockId::PackedIce:
         return ItemCategory::Nature;
     default:
         return ItemCategory::Items;
@@ -313,15 +483,30 @@ constexpr ItemCategory categoryFor(ItemId item) {
 inline const std::vector<ItemId>& allItems() {
     static const std::vector<ItemId> items = [] {
         std::vector<ItemId> all;
-        for (int id = 0; id <= static_cast<int>(BlockId::Torch); ++id) {
+        for (int id = 0; id <= static_cast<int>(kLastBlock); ++id) {
             const auto block = static_cast<BlockId>(id);
             if (isCanonicalBlockItem(block)) {
                 all.push_back(itemForBlock(block));
             }
         }
         for (int id = static_cast<int>(ItemId::kFirstToolItem);
-             id < static_cast<int>(ItemId::SpawnEggFirst) + kSpawnEggLayers; ++id) {
+             id < static_cast<int>(ItemId::SpawnEggFirst); ++id) {
             all.push_back(static_cast<ItemId>(id));
+        }
+        // Then **every** egg, in species order, across both runs. The ids are
+        // deliberately split - the resources and buckets sit between them,
+        // because an item id is written into a save and could not be moved - so
+        // walking ids alone shows thirty-six eggs, thirteen unrelated items,
+        // and then the other six. What order they *display* in is ours.
+        for (int kind = 0; kind < kSpawnEggItems; ++kind) {
+            all.push_back(spawnEggForIndex(kind));
+        }
+        for (int id = static_cast<int>(ItemId::SpawnEggFirst) + kSpawnEggLayers;
+             id <= static_cast<int>(ItemId::kLastItem); ++id) {
+            const auto item = static_cast<ItemId>(id);
+            if (!isSpawnEgg(item)) {
+                all.push_back(item);
+            }
         }
         return all;
     }();

@@ -53,7 +53,7 @@ $skinWidth = 128
 $skinHeight = 32
 # Must match kCreatureSheetHeight in game/src/world/Creature.hpp. The last 32
 # rows are the charged Bramble's energy shell rather than a species.
-$sheetHeight = 1888
+$sheetHeight = 3552
 
 function ConvertTo-Color {
     param([string]$Hex)

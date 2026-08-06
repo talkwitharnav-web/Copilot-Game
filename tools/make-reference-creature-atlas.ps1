@@ -77,6 +77,58 @@ $targets = @(
     # creeper itself so the same box UVs read it. Mostly transparent, which is
     # the point - only the blue survives the cutout test.
     @{ Row = 1856; Path = "creeper\creeper_armor.png" }
+    @{ Row = 1888; Path = "zombie\drowned.png" }
+    # Not a species either: the drowned's clothing, on the same net as the body
+    # under it, drawn as a second shell a quarter of a texel larger.
+    @{ Row = 1952; Path = "zombie\drowned_outer_layer.png" }
+    @{ Row = 2016; Path = "fish\cod.png" }
+    @{ Row = 2048; Path = "fish\salmon.png" }
+    @{ Row = 2080; Path = "fish\pufferfish.png" }
+    @{ Row = 2112; Path = "squid\squid.png" }
+    @{ Row = 2144; Path = "squid\glow_squid.png" }
+    @{ Row = 2176; Path = "turtle\turtle.png" }
+    @{ Row = 2240; Path = "dolphin\dolphin.png" }
+    # Five axolotl liveries, 64 rows each, in the order `CreatureKind` variants
+    # are rolled.
+    @{ Row = 2304; Path = "axolotl\axolotl_lucy.png" }
+    @{ Row = 2368; Path = "axolotl\axolotl_cyan.png" }
+    @{ Row = 2432; Path = "axolotl\axolotl_gold.png" }
+    @{ Row = 2496; Path = "axolotl\axolotl_wild.png" }
+    @{ Row = 2560; Path = "axolotl\axolotl_blue.png" }
+    # Each tropical body shape, then its six pattern overlays. The overlay is
+    # drawn as a second cutout shell rather than tinted onto the base.
+    @{ Row = 2624; Path = "fish\tropical_a.png" }
+    @{ Row = 2656; Path = "fish\tropical_a_pattern_1.png" }
+    @{ Row = 2688; Path = "fish\tropical_a_pattern_2.png" }
+    @{ Row = 2720; Path = "fish\tropical_a_pattern_3.png" }
+    @{ Row = 2752; Path = "fish\tropical_a_pattern_4.png" }
+    @{ Row = 2784; Path = "fish\tropical_a_pattern_5.png" }
+    @{ Row = 2816; Path = "fish\tropical_a_pattern_6.png" }
+    @{ Row = 2848; Path = "fish\tropical_b.png" }
+    @{ Row = 2880; Path = "fish\tropical_b_pattern_1.png" }
+    @{ Row = 2912; Path = "fish\tropical_b_pattern_2.png" }
+    @{ Row = 2944; Path = "fish\tropical_b_pattern_3.png" }
+    @{ Row = 2976; Path = "fish\tropical_b_pattern_4.png" }
+    @{ Row = 3008; Path = "fish\tropical_b_pattern_5.png" }
+    @{ Row = 3040; Path = "fish\tropical_b_pattern_6.png" }
+    # Tier 1. The first four are a skin apiece over a rig that already exists;
+    # the trader llama contributes only its pack, because the reference draws
+    # that over an ordinary llama rather than replacing it.
+    @{ Row = 3072; Path = "cow\mooshroom_red.png" }
+    @{ Row = 3136; Path = "slime\magmacube.png" }
+    @{ Row = 3200; Path = "horse\horse_skeleton.png" }
+    @{ Row = 3264; Path = "horse\horse_zombie.png" }
+    @{ Row = 3328; Path = "equipment\llama_body\trader_llama.png" }
+    @{ Row = 3392; Path = "endermite\endermite.png" }
+    @{ Row = 3424; Path = "piglin\piglin_brute.png" }
+    @{ Row = 3488; Path = "piglin\zombified_piglin.png" }
+    # Not a skin: the mushroom the Mushroom Cow grows on its back. The reference
+    # puts real mushroom BLOCKS there rather than painting them on the hide, so
+    # this is the block texture stamped into an empty corner of that species'
+    # own rows - measured at 0% coverage before it was chosen. Putting it here
+    # rather than in the block texture array is what avoids moving
+    # `TextureLayer::SpawnEggFirst` and sliding every spawn egg sprite.
+    @{ Row = 3072; X = 32; Y = 48; Path = "..\block\red_mushroom.png" }
 )
 
 $ours = Join-Path $PSScriptRoot "..\assets\textures\creatures.png"
@@ -107,7 +159,9 @@ try {
             } else {
                 [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
             }
-            $graphics.DrawImageUnscaled($source, 0, $target.Row)
+            $offsetX = if ($null -ne $target.X) { $target.X } else { 0 }
+            $offsetY = if ($null -ne $target.Y) { $target.Y } else { 0 }
+            $graphics.DrawImageUnscaled($source, $offsetX, $target.Row + $offsetY)
         } finally {
             $source.Dispose()
         }

@@ -11,6 +11,8 @@ layout(push_constant) uniform Push {
     mat4 modelViewProjection;
     vec4 sunDirection;
     vec4 lighting;
+    vec4 animation;
+    vec4 fog;
 } push;
 
 layout(location = 0) out vec4 fragColor;
@@ -22,6 +24,9 @@ layout(location = 2) flat out float fragLayer;
 // is already world space. That is what lets the fragment shader recover a face
 // normal without the vertex format carrying one.
 layout(location = 3) out vec3 fragWorldPosition;
+// Distance from the eye along the view axis. A perspective projection leaves it
+// in `gl_Position.w`, so fog costs one varying and no extra maths.
+layout(location = 4) out float fragViewDepth;
 
 void main() {
     gl_Position = push.modelViewProjection * vec4(inPosition, 1.0);
@@ -29,4 +34,5 @@ void main() {
     fragUv = inUv;
     fragLayer = inLayer;
     fragWorldPosition = inPosition;
+    fragViewDepth = gl_Position.w;
 }

@@ -1,9 +1,12 @@
 #include "world/ItemEntity.hpp"
 
+#include "world/Collision.hpp"
+#include "world/Fluid.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace game {
 namespace {
@@ -11,6 +14,10 @@ namespace {
 constexpr float kGravity = 22.0f;
 constexpr float kHalfSize = 0.10f;
 constexpr float kTerminalVelocity = 24.0f;
+
+/// How fast a drop rises to the surface. Gentle on purpose - the reference's
+/// buoyancy bobs an item up rather than firing it out of the water.
+constexpr float kFloatSpeed = 0.6f;
 
 /// Stops a drop being collected the instant it leaves the block, which would
 /// make breaking look like the item never existed. Thrown items pass a longer
@@ -94,30 +101,63 @@ void ItemEntities::update(const World& world, const glm::vec3& playerFeet, float
             continue;
         }
 
-        drop.velocity.y = std::max(drop.velocity.y - kGravity * deltaSeconds, -kTerminalVelocity);
+        // Resolved on every axis, through the same helpers the player and the
+        // creatures use. It used to be vertical only, on the reasoning that a
+        // drop is small and decorative - but nothing stopped one entering a
+        // block sideways, and once inside, the ground probe found *that* block
+        // and lifted the drop onto its top. So an item nudged against a step
+        // climbed it.
+        const auto boxAt = [](const glm::vec3& centre) {
+            return Aabb{{centre.x - kHalfSize, centre.y - kHalfSize, centre.z - kHalfSize},
+                        {centre.x + kHalfSize, centre.y + kHalfSize, centre.z + kHalfSize}};
+        };
 
-        glm::vec3 next = drop.position + drop.velocity * deltaSeconds;
+        // A dropped item genuinely floats in the reference - it carries
+        // `minecraft:buoyant`, which the player does not - so anything lost in a
+        // lake washes up rather than being gone. It is carried by the current
+        // too, under the same drag as everything else in the water.
+        //
+        // Water **replaces** gravity here rather than following it. Applying
+        // both offsets the settling speed by `g dt k / (1 - k)`, which is metres
+        // per second at any real frame rate - enough to sink an item that every
+        // constant says should float.
+        const fluid::FluidContact water = fluid::sampleFluid(world, boxAt(drop.position));
+        if (water.inWater) {
+            drop.velocity.y =
+                fluid::approach(drop.velocity.y, kFloatSpeed, fluid::kWaterDrag, deltaSeconds);
+            const glm::vec3 carried = water.flow * fluid::kCurrentSpeed;
+            drop.velocity.x =
+                fluid::approach(drop.velocity.x, carried.x, fluid::kWaterDrag, deltaSeconds);
+            drop.velocity.z =
+                fluid::approach(drop.velocity.z, carried.z, fluid::kWaterDrag, deltaSeconds);
+        } else {
+            drop.velocity.y = std::max(drop.velocity.y - kGravity * deltaSeconds, -kTerminalVelocity);
+        }
 
-        // Only the vertical axis is resolved. A drop is small and slow, and
-        // full collision on something purely decorative is not worth the cost.
-        const int cellX = static_cast<int>(std::floor(next.x));
-        const int cellZ = static_cast<int>(std::floor(next.z));
+        const glm::vec3 step = drop.velocity * deltaSeconds;
+        glm::vec3 next = drop.position;
 
-        // Probed just under the drop's underside. Resting it *above* the surface
-        // leaves a gap it then falls through, and the landing pushes it back up:
-        // a permanent bounce rather than a clean failure. The hover is the bob
-        // animation's job, not the physics'.
-        const float bottom = next.y - kHalfSize;
-        const int below = static_cast<int>(std::floor(bottom - 0.01f));
+        // One axis at a time, so a corner pushes out along one of them rather
+        // than being refused entirely.
+        next.x += step.x;
+        if (overlapsSolid(world, boxAt(next))) {
+            next.x = drop.position.x;
+            drop.velocity.x = 0.0f;
+        }
+        next.z += step.z;
+        if (overlapsSolid(world, boxAt(next))) {
+            next.z = drop.position.z;
+            drop.velocity.z = 0.0f;
+        }
 
         drop.onGround = false;
-        if (world.isSolid(cellX, below, cellZ)) {
-            const BlockBoxes shape = collisionBoxes(world.blockAt(cellX, below, cellZ));
-            float surface = static_cast<float>(below);
-            for (int i = 0; i < shape.count; ++i) {
-                surface = std::max(surface, static_cast<float>(below) + shape.boxes[i].maxY);
-            }
-            if (bottom <= surface) {
+        next.y += step.y;
+        if (step.y <= 0.0f && overlapsSolid(world, boxAt(next))) {
+            // Landing reads the shape table, so a slab's top is halfway up its
+            // cell rather than the cell boundary - the same rule that stopped
+            // creatures hovering over slabs.
+            const float surface = highestSurfaceBelow(world, boxAt(next), drop.position.y - kHalfSize);
+            if (std::isfinite(surface)) {
                 next.y = surface + kHalfSize;
 
                 if (-drop.velocity.y > kSettleSpeed) {
@@ -128,6 +168,9 @@ void ItemEntities::update(const World& world, const glm::vec3& playerFeet, float
                     drop.velocity = glm::vec3{0.0f};
                     drop.onGround = true;
                 }
+            } else {
+                next.y = drop.position.y;
+                drop.velocity.y = 0.0f;
             }
         }
 
@@ -224,14 +267,33 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds) 
                                                      base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
         };
 
+        // A tool or a spawn egg is one flat sprite with a little thickness.
+        // Crossing two of them - which is what a plant does - made a dropped
+        // sword read as two swords passing through each other.
+        if (!blockLike) {
+            // **One texel of the sprite's own grid**, which is what the
+            // reference extrudes a dropped item by. It was 0.045, very nearly
+            // half the sprite's width, and two quads that far apart stopped
+            // looking like one object with depth and started looking like two
+            // swords side by side.
+            //
+            // `quad` emits both windings, so each face is already visible from
+            // behind; the pair is here for the thickness and the shading
+            // difference between front and back, not for visibility.
+            constexpr float kSpriteTexels = 16.0f;
+            const float halfDepth = kHalfSize / kSpriteTexels;
+            const glm::vec3 depth = forward * (halfDepth / kHalfSize);
+            quad(centre - right - up + depth, centre + right - up + depth, centre + right + up + depth,
+                 centre - right + up + depth, BlockFace::Side, 1.0f);
+            quad(centre - right - up - depth, centre + right - up - depth, centre + right + up - depth,
+                 centre - right + up - depth, BlockFace::Side, 0.82f);
+            continue;
+        }
+
         // A plant is two crossed quads, the same shape it has once placed and
         // the same reason the hotbar icon is flat: wrapping the artwork around a
         // cube shows a box of grass rather than the thing you are holding.
-        // Crossed rather than one sprite because the drop spins, and a single
-        // quad turns edge-on and disappears twice a revolution.
-        //
-        // A tool or a spawn egg takes the same path, for the same reason.
-        if (!blockLike || blockShape(block) == BlockShape::Cross) {
+        if (blockShape(block) == BlockShape::Cross) {
             constexpr float kSquare = 0.70710678f; // 1/sqrt(2), so the diagonal matches a cube face
             const glm::vec3 a = (right + forward) * kSquare;
             const glm::vec3 b = (right - forward) * kSquare;

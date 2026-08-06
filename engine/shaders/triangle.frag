@@ -5,11 +5,14 @@ layout(location = 0) in vec4 fragColor;
 layout(location = 1) in vec2 fragUv;
 layout(location = 2) flat in float fragLayer;
 layout(location = 3) in vec3 fragWorldPosition;
+layout(location = 4) in float fragViewDepth;
 
 layout(push_constant) uniform Push {
     mat4 modelViewProjection;
     vec4 sunDirection;
     vec4 lighting;
+    vec4 animation;
+    vec4 fog;
 } push;
 
 layout(set = 0, binding = 0) uniform sampler2DArray blockTextures;
@@ -24,16 +27,23 @@ layout(set = 0, binding = 3) uniform sampler2DArray skinTexture;
 layout(location = 0) out vec4 outColor;
 
 void main() {
+    // Water is meshed with one fixed layer and redirected to whichever frame the
+    // clock is on, so a moving surface costs no re-meshing at all.
+    float layer = fragLayer;
+    if (abs(layer - push.animation.x) < 0.25) {
+        layer = push.animation.y;
+    }
+
     // Negative layers are the agreed signals for the HUD sheets.
     vec4 texel;
-    if (fragLayer < -2.5) {
+    if (layer < -2.5) {
         texel = texture(skinTexture, vec3(fragUv, 0.0));
-    } else if (fragLayer < -1.5) {
+    } else if (layer < -1.5) {
         texel = texture(fontTexture, vec3(fragUv, 0.0));
-    } else if (fragLayer < 0.0) {
+    } else if (layer < 0.0) {
         texel = texture(hudTexture, vec3(fragUv, 0.0));
     } else {
-        texel = texture(blockTextures, vec3(fragUv, fragLayer));
+        texel = texture(blockTextures, vec3(fragUv, layer));
     }
 
     vec3 rgb = texel.rgb * fragColor.rgb;
@@ -105,6 +115,16 @@ void main() {
         // them gives blood, keeping them gives a vivid scarlet with the skin
         // still legible underneath.
         rgb = clamp(rgb * vec3(2.9, 0.92, 0.86), 0.0, 1.0);
+    }
+
+    // Underwater, everything fades toward one colour over a fixed distance -
+    // the reference's `fog_start` of 0 is why even something close up carries a
+    // little of it. Alpha goes with it, or a distant water surface would stay
+    // see-through in the middle of solid fog.
+    if (push.fog.w > 0.0) {
+        float fogged = clamp(fragViewDepth / push.fog.w, 0.0, 1.0);
+        rgb = mix(rgb, push.fog.rgb, fogged);
+        alpha = mix(alpha, 1.0, fogged);
     }
 
     outColor = vec4(rgb, alpha);

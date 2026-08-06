@@ -75,6 +75,45 @@ float blockHardness(BlockId block) {
         return 2.0f;
     case BlockId::Glowstone:
         return 0.3f;
+    case BlockId::Glass:
+        return 0.3f;
+    case BlockId::Clay:
+        return 0.6f;
+    case BlockId::Sandstone:
+        return 0.8f;
+    case BlockId::Bookshelf:
+        return 1.5f;
+    case BlockId::Andesite:
+    case BlockId::Diorite:
+    case BlockId::Granite:
+    case BlockId::StoneBricks:
+        return 1.5f;
+    case BlockId::SmoothStone:
+    case BlockId::MossyCobblestone:
+        return 2.0f;
+    case BlockId::Obsidian:
+        // Deliberately punishing. At a stone pickaxe's speed this is about
+        // nineteen seconds, which is the point of the block.
+        return 50.0f;
+    case BlockId::PackedIce:
+        return 0.5f;
+    case BlockId::Terracotta:
+        return 1.25f;
+    case BlockId::CoalOre:
+    case BlockId::IronOre:
+    case BlockId::CopperOre:
+    case BlockId::GoldOre:
+    case BlockId::RedstoneOre:
+    case BlockId::LapisOre:
+    case BlockId::DiamondOre:
+    case BlockId::EmeraldOre:
+    case BlockId::Deepslate:
+        return 3.0f;
+    case BlockId::Bedrock:
+        // The reference's own value for "never". Nothing here treats a block as
+        // unbreakable, so an absurd hardness is what enforces it, and creative
+        // still ignores it - which is correct, it is a builder's tool.
+        return 3600.0f;
     default:
         return 1.0f;
     }
@@ -88,17 +127,39 @@ ToolKind harvestTool(BlockId block) {
     case BlockId::Stone:
     case BlockId::Cobblestone:
     case BlockId::Bricks:
+    case BlockId::Andesite:
+    case BlockId::Diorite:
+    case BlockId::Granite:
+    case BlockId::SmoothStone:
+    case BlockId::StoneBricks:
+    case BlockId::MossyCobblestone:
+    case BlockId::Obsidian:
+    case BlockId::Sandstone:
+        return ToolKind::Pickaxe;
+    case BlockId::CoalOre:
+    case BlockId::IronOre:
+    case BlockId::CopperOre:
+    case BlockId::GoldOre:
+    case BlockId::RedstoneOre:
+    case BlockId::LapisOre:
+    case BlockId::DiamondOre:
+    case BlockId::EmeraldOre:
+    case BlockId::Deepslate:
+    case BlockId::Terracotta:
+    case BlockId::PackedIce:
         return ToolKind::Pickaxe;
     case BlockId::Log:
     case BlockId::Planks:
     case BlockId::PlanksFence:
     case BlockId::CraftingTable:
+    case BlockId::Bookshelf:
         return ToolKind::Axe;
     case BlockId::Dirt:
     case BlockId::Grass:
     case BlockId::Sand:
     case BlockId::Gravel:
     case BlockId::Snow:
+    case BlockId::Clay:
         return ToolKind::Shovel;
     default:
         return ToolKind::None;
@@ -116,7 +177,30 @@ int harvestTier(BlockId block) {
     case BlockId::Stone:
     case BlockId::Cobblestone:
     case BlockId::Bricks:
+    case BlockId::Andesite:
+    case BlockId::Diorite:
+    case BlockId::Granite:
+    case BlockId::SmoothStone:
+    case BlockId::StoneBricks:
+    case BlockId::MossyCobblestone:
+    case BlockId::Sandstone:
         return kWoodTier;
+    case BlockId::CoalOre:
+    case BlockId::Deepslate:
+    case BlockId::Terracotta:
+        return kWoodTier;
+    case BlockId::IronOre:
+    case BlockId::CopperOre:
+    case BlockId::GoldOre:
+    case BlockId::RedstoneOre:
+    case BlockId::LapisOre:
+    case BlockId::DiamondOre:
+    case BlockId::EmeraldOre:
+    case BlockId::Obsidian:
+        // The hardest thing a stone pickaxe can still take home. There is no
+        // higher tier yet, so gating any of these above it would make them
+        // unobtainable rather than aspirational.
+        return kStoneTier;
     default:
         return kHandTier;
     }

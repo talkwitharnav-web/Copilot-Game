@@ -4,9 +4,12 @@
 
 #include <engine/render/MeshData.hpp>
 
+#include <glm/glm.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace game {
@@ -96,9 +99,13 @@ static_assert(static_cast<int>(CatalogueTab::Search) == static_cast<int>(ItemCat
 /// `build` is otherwise a pure function of its arguments, and keeping it that
 /// way is the most reusable fact about this module - so the screen's state
 /// lives in one struct the caller owns rather than in file-scope statics.
-/// Scrolling and the search text join it in later slices.
+/// The search text joins it in a later slice.
 struct CatalogueState {
     CatalogueTab tab = CatalogueTab::Construction;
+    /// How many whole rows have been scrolled past. Rows rather than pixels,
+    /// because the grid has no sub-row states and a fractional offset would
+    /// only make the clipped last row ambiguous.
+    int scrollRow = 0;
 };
 
 /// Whether this screen shows the catalogue card beside the inventory.
@@ -114,7 +121,15 @@ std::optional<CatalogueTab> tabAt(Kind kind, float x, float y);
 
 /// Which catalogue entry sits under a point, as an index into the tab's
 /// filtered list. Cells past the bottom of the card never answer.
-std::optional<std::size_t> catalogueCellAt(Kind kind, float x, float y);
+///
+/// Takes the scroll offset rather than returning a screen-relative cell,
+/// because turning one into the other is the sort of arithmetic that ends up
+/// copied to three call sites and wrong at one of them.
+std::optional<std::size_t> catalogueCellAt(Kind kind, float x, float y, int scrollRow);
+
+/// The furthest `scrollRow` that still shows something, for a list this long.
+/// Zero when everything already fits.
+int catalogueMaxScroll(std::size_t itemCount);
 
 /// True anywhere over the catalogue's list - the cells, the gaps between them
 /// and the empty space below the last one.
@@ -123,6 +138,11 @@ std::optional<std::size_t> catalogueCellAt(Kind kind, float x, float y);
 /// stack destroys it. The tabs and the card's frame are deliberately outside,
 /// so a misjudged click on a tab cannot cost you what you are holding.
 bool insideCatalogueList(Kind kind, float x, float y);
+
+/// The catalogue list's rectangle in screen units, top-left then bottom-right.
+/// The renderer scissors to it, so the row the card cuts through is cut for
+/// real rather than shrunk to fit.
+std::pair<glm::vec2, glm::vec2> catalogueListBounds();
 
 /// The items a tab lists, in declaration order.
 std::vector<ItemId> catalogueItems(CatalogueTab tab);
@@ -135,9 +155,13 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y);
 bool insidePanel(Kind kind, float x, float y);
 
 /// `heldStack` is what the cursor is carrying, drawn at (cursorX, cursorY).
+///
+/// Catalogue entry icons go into `clipped` rather than the returned mesh,
+/// because they are the one part of the screen that has to stop at an edge.
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
                        const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
-                       float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress = {});
+                       float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
+                       engine::MeshData& clipped);
 
 } // namespace inventoryScreen
 } // namespace game

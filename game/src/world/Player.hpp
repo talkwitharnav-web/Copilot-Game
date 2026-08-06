@@ -1,5 +1,7 @@
 #pragma once
 
+#include "world/Fluid.hpp"
+
 #include <glm/glm.hpp>
 
 namespace game {
@@ -57,14 +59,6 @@ constexpr float kAirDeceleration = 2.0f;
 constexpr float kGravity = 32.0f;
 constexpr float kTerminalVelocity = 78.4f;
 
-/// In water: gravity mostly cancels, everything slows, and holding jump swims
-/// upward. Enough to make water survivable rather than a pit you drown in.
-constexpr float kSwimGravityScale = 0.22f;
-constexpr float kSwimSinkSpeed = 3.0f;
-constexpr float kSwimRiseSpeed = 5.0f;
-constexpr float kSwimSpeedScale = 0.55f;
-constexpr float kSwimDrag = 6.0f;
-
 /// Chosen so the jump apex is ~1.25 blocks: high enough to clear one block,
 /// not high enough to clear two.
 constexpr float kJumpVelocity = 8.944f;
@@ -83,12 +77,55 @@ struct Player {
     /// is refused when there is no headroom.
     bool sneaking = false;
 
-    /// True while any part of the body is in water.
+    /// True while any part of the body is in water. The reference switches its
+    /// entire movement model on this, not on being fully under, so wading in
+    /// the shallows is already swimming.
     bool inWater = false;
+
+    /// True while the eye is under the surface. Separate from `inWater`,
+    /// because breath and the swim state both ask about the head alone.
+    bool underwater = false;
+
+    /// Sprint-swimming: faster, slipperier, and it holds depth with no input
+    /// because water gravity is skipped outright while it is on.
+    ///
+    /// Starting it needs the head under; keeping it only needs to be in water,
+    /// which is what lets you sprint-swim along the surface.
+    bool swimming = false;
+
+    /// Seconds since any part of the body was last in water. Only the airborne
+    /// horizontal reads it - see `fluid::kSwimGrace` for what it is for.
+    float sinceWater = 0.0f;
+
+    /// Mid-stroke while treading water. Latched across `fluid::kStroke` rather
+    /// than recomputed, because a drive that fades out as the head clears is
+    /// first-order and settles dead - the latch is what keeps the bob going.
+    bool treading = false;
+
+    /// Seconds of breath left, counting down only while the eye is submerged.
+    float air = fluid::kAirSeconds;
+
+    /// Counts on past empty, and every whole second of it is two health points
+    /// once there is player health to take them from.
+    float drowningSeconds = 0.0f;
 
     float eyeOffset = player_constants::kEyeHeight;
 
+    /// Metres the camera still trails the feet after stepping up.
+    ///
+    /// The collision box snaps to the new height and only the *view* eases up
+    /// after it. Ramping the box instead would leave a part-way body inside the
+    /// block it is climbing, which is a whole family of stuck states.
+    /// **Only the camera may read this** - reach, targeting and knockback all
+    /// want the true eye.
+    float stepSmooth = 0.0f;
+
     glm::vec3 eyePosition() const { return position + glm::vec3{0.0f, eyeOffset, 0.0f}; }
+
+    /// Where the camera actually sits: the eye, trailing briefly after a step.
+    glm::vec3 renderEyePosition() const {
+        return eyePosition() - glm::vec3{0.0f, stepSmooth, 0.0f};
+    }
 
     float height() const {
         return sneaking ? player_constants::kSneakHeight : player_constants::kHeight;
@@ -105,6 +142,11 @@ struct PlayerInput {
     bool sneak = false;
     /// Only used while flying.
     float verticalWish = 0.0f;
+    /// Vertical component of where the camera is pointing, positive up.
+    /// **Only sprint-swimming reads it**: `moveDirection` is flattened so that
+    /// looking down cannot drive you into the ground, and this is what puts the
+    /// pitch back for the one case that wants it.
+    float lookY = 0.0f;
 };
 
 /// Advances the player by one frame against the world.

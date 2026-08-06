@@ -68,7 +68,8 @@ bool hitsBlockGeometry(const World& world, const glm::vec3& origin, const glm::v
 
 } // namespace
 
-RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction, float maxDistance) {
+RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction,
+                   float maxDistance, bool stopAtWater) {
     RaycastHit result;
 
     const float length = glm::length(direction);
@@ -79,7 +80,9 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
 
     glm::ivec3 cell{static_cast<int>(std::floor(origin.x)), static_cast<int>(std::floor(origin.y)),
                     static_cast<int>(std::floor(origin.z))};
-
+    // Where a bucket's water would go: the cell the ray was in before it
+    // reached the surface, since water has no face to take a normal from.
+    glm::ivec3 previous = cell;
     constexpr float infinity = std::numeric_limits<float>::infinity();
 
     glm::ivec3 step{0};
@@ -99,6 +102,16 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
     }
 
     while (true) {
+        // A source only, never a flowing cell: scooping a stream would leave a
+        // gap its own source refills a moment later, which reads as the bucket
+        // having done nothing.
+        if (stopAtWater && isWaterSource(world.blockAt(cell.x, cell.y, cell.z))) {
+            result.hit = true;
+            result.block = cell;
+            result.adjacent = previous;
+            return result;
+        }
+
         float tHit = 0.0f;
         glm::ivec3 normal{0};
         if (hitsBlockGeometry(world, origin, dir, cell, maxDistance, tHit, normal)) {
@@ -121,6 +134,7 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
             return result;
         }
 
+        previous = cell;
         cell[axis] += step[axis];
         tMax[axis] += tDelta[axis];
     }

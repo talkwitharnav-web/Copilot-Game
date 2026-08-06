@@ -95,6 +95,11 @@ float blastResistance(BlockId block) {
         // a single 0.3 step costs 30, which no creeper ray can pay.
         return 100.0f;
     }
+    // Every facing and both lit states share one resistance, so the family is
+    // answered once rather than as eight cases.
+    if (isFurnace(block)) {
+        return 3.5f;
+    }
     switch (block) {
     case BlockId::Air:
         return 0.0f;
@@ -120,11 +125,38 @@ float blastResistance(BlockId block) {
         return 3.0f;
     case BlockId::Glowstone:
         return 0.3f;
-    case BlockId::Furnace:
-    case BlockId::FurnaceLit:
-        return 3.5f;
     case BlockId::Bricks:
         return 6.0f;
+    case BlockId::Glass:
+        return 0.3f;
+    case BlockId::Clay:
+        return 0.6f;
+    case BlockId::Sandstone:
+        return 0.8f;
+    case BlockId::Bookshelf:
+        return 1.5f;
+    case BlockId::Dandelion:
+    case BlockId::Poppy:
+    case BlockId::DeadBush:
+        return 0.0f;
+    case BlockId::Obsidian:
+        // 1200, and it is why obsidian is what you build a blast shelter from.
+        return 1200.0f;
+    case BlockId::Bedrock:
+        return 3600.0f;
+    case BlockId::PackedIce:
+        return 0.5f;
+    case BlockId::Terracotta:
+        return 4.2f;
+    case BlockId::CoalOre:
+    case BlockId::IronOre:
+    case BlockId::CopperOre:
+    case BlockId::GoldOre:
+    case BlockId::RedstoneOre:
+    case BlockId::LapisOre:
+    case BlockId::DiamondOre:
+    case BlockId::EmeraldOre:
+        return 3.0f;
     default:
         break;
     }

@@ -5,6 +5,7 @@
 #include "world/Structures.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace game {
@@ -40,6 +41,70 @@ constexpr int kBedrockHeight = 2;
 /// Fraction of grassy surface cells carrying a tuft. Gated on the surface block
 /// rather than on a biome column, so it follows wherever grass actually ends up.
 constexpr float kTallGrassDensity = 0.12f;
+
+/// Share of the ground cover that comes up a flower instead of grass. A second
+/// roll on a cell that already won the first, so flowers thin the grass out
+/// rather than adding to it and the meadow keeps its density.
+constexpr float kFlowerShare = 0.18f;
+
+constexpr float kDeadBushDensity = 0.02f;
+
+/// How far the sand of a desert turns to sandstone before it reaches stone.
+constexpr int kSandstoneDepth = 3;
+
+/// Stone gives way to deepslate below this, the way the deep rock does in the
+/// reference. Sea level is 24, so this is well under any seabed.
+constexpr int kDeepslateTop = 12;
+
+/// Where each ore appears and how much of the rock it takes.
+///
+/// A smooth 3D field thresholded high gives small connected blobs, which is
+/// what a vein looks like; a per-cell roll would scatter single blocks and read
+/// as speckle. Same mechanism as the caves, at a much higher frequency so the
+/// features are metres rather than tens of metres across.
+struct OreVein {
+    BlockId block;
+    std::uint32_t salt;
+    float frequency;
+    float threshold;
+    int minY;
+    int maxY;
+};
+
+/// **Rarest first**: the first match wins, so a common ore can never overwrite a
+/// scarce one where their depth bands overlap.
+///
+/// Bands and rarities are the wiki's, mapped onto our world: it runs y 0-96
+/// with sea level 24, against the reference's -64 to 320 with sea level 63, so
+/// depths below sea level compress by about 0.17 and heights above it by 0.28.
+/// The thresholds come from that share of rock via `t = 1 - sqrt(share)`, which
+/// holds because a single octave of value noise is near enough triangular.
+constexpr std::array<OreVein, 8> kOreVeins{{
+    {BlockId::EmeraldOre, 0x51c3b7u, 0.17f, 0.968f, 10, 60},
+    {BlockId::DiamondOre, 0x2f9a41u, 0.17f, 0.948f, 3, 16},
+    {BlockId::LapisOre, 0x7b31d9u, 0.16f, 0.941f, 3, 24},
+    {BlockId::GoldOre, 0x1de4a3u, 0.16f, 0.941f, 3, 19},
+    {BlockId::RedstoneOre, 0x64b8f2u, 0.16f, 0.929f, 3, 16},
+    {BlockId::IronOre, 0x3ac05eu, 0.15f, 0.900f, 3, 26},
+    {BlockId::CopperOre, 0x9e271bu, 0.15f, 0.890f, 10, 38},
+    {BlockId::CoalOre, 0x0c7d86u, 0.14f, 0.866f, 13, 90},
+}};
+
+/// The ore a cell of rock turns into, or the rock itself.
+BlockId oreAt(std::uint32_t seed, int worldX, int worldY, int worldZ, BlockId rock) {
+    for (const OreVein& vein : kOreVeins) {
+        if (worldY < vein.minY || worldY > vein.maxY) {
+            continue;
+        }
+        const float field = noise::value3D(seed ^ vein.salt, static_cast<float>(worldX) * vein.frequency,
+                                           static_cast<float>(worldY) * vein.frequency,
+                                           static_cast<float>(worldZ) * vein.frequency);
+        if (field > vein.threshold) {
+            return vein.block;
+        }
+    }
+    return rock;
+}
 
 /// True where a cave should hollow out the rock.
 bool isCave(std::uint32_t seed, int worldX, int worldY, int worldZ, int surfaceHeight) {
@@ -115,10 +180,25 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                 }
 
                 BlockId block = BlockId::Stone;
-                if (worldY == surface) {
+                if (worldY <= kBedrockHeight) {
+                    // Checked first, so the floor wins even where terrain is
+                    // low enough that the surface would otherwise claim it.
+                    block = BlockId::Bedrock;
+                } else if (worldY == surface) {
                     block = top;
                 } else if (worldY > surface - biome.fillerDepth) {
                     block = biome.filler;
+                } else if (biome.filler == BlockId::Sand &&
+                           worldY > surface - biome.fillerDepth - kSandstoneDepth) {
+                    // Sand sits on sandstone rather than straight on stone.
+                    // Keyed off the filler so it needs no biome name.
+                    block = BlockId::Sandstone;
+                } else if (worldY <= kDeepslateTop) {
+                    block = BlockId::Deepslate;
+                }
+
+                if (block == BlockId::Stone || block == BlockId::Deepslate) {
+                    block = oreAt(seed, worldX, worldY, worldZ, block);
                 }
 
                 chunk.set(x, y, z, block);
@@ -139,10 +219,21 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
             // on the biome's nominal top block: a snow line or a shoreline may
             // already have overridden it.
             const int plantY = surface + 1 - baseY;
-            if (top == BlockId::Grass && surface > kSeaLevel + 1 && plantY >= 0 && plantY < Chunk::kSize &&
-                chunk.at(x, plantY, z) == BlockId::Air &&
-                noise::hashUnit2D(seed ^ 0x91a5eedu, worldX, worldZ) < kTallGrassDensity) {
-                chunk.set(x, plantY, z, BlockId::TallGrass);
+            if (plantY >= 0 && plantY < Chunk::kSize && surface > kSeaLevel + 1 &&
+                chunk.at(x, plantY, z) == BlockId::Air) {
+                if (top == BlockId::Grass &&
+                    noise::hashUnit2D(seed ^ 0x91a5eedu, worldX, worldZ) < kTallGrassDensity) {
+                    const float pick = noise::hashUnit2D(seed ^ 0x5f3aa17u, worldX, worldZ);
+                    BlockId cover = BlockId::TallGrass;
+                    if (pick < kFlowerShare) {
+                        cover = pick < kFlowerShare * 0.5f ? BlockId::Dandelion : BlockId::Poppy;
+                    }
+                    chunk.set(x, plantY, z, cover);
+                } else if (top == BlockId::Sand && surface > kSeaLevel + 2 &&
+                           noise::hashUnit2D(seed ^ 0x2c9b4d1u, worldX, worldZ) < kDeadBushDensity) {
+                    // Clear of the shoreline, so a beach does not sprout scrub.
+                    chunk.set(x, plantY, z, BlockId::DeadBush);
+                }
             }
         }
     }

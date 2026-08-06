@@ -57,8 +57,15 @@ constexpr std::uint32_t kWindowWidth = 1280;
 constexpr std::uint32_t kWindowHeight = 720;
 constexpr float kLookRadiansPerPixel = 0.0025f;
 
-// How far the player can reach to break or place, in metres.
-constexpr float kReach = 12.0f;
+// How far the player can reach, in metres, measured from the eye.
+//
+// The reference's own keyboard-and-mouse numbers: five blocks to a *block* in
+// every mode, and three to a *creature* - except creative, which gets five for
+// both. Its touch controls use six and twelve, and twelve is what this was,
+// which made the crosshair reach absurdly far for a mouse.
+constexpr float kBlockReach = 5.0f;
+constexpr float kEntityReach = 3.0f;
+constexpr float kCreativeEntityReach = 5.0f;
 
 // Holding the button keeps editing at this rate, so dragging across terrain
 // does not need one click per block.
@@ -106,6 +113,11 @@ constexpr float kLoadingBudgetSeconds = 0.016f;
 /// How fast the bar catches up to the reported progress, per second. Chunk
 /// counts arrive in coarse steps, and easing is what turns them into movement.
 constexpr float kLoadingBarEase = 6.0f;
+
+/// How long the loading screen tolerates every queue being empty while its
+/// checkpoints still disagree. Only a fault can produce that, so this is a
+/// bail-out rather than a timeout.
+constexpr float kLoadingStallSeconds = 3.0f;
 
 /// How hard a dropped item is thrown, and how long before it can be collected.
 /// The delay has to outlast the flight, or the item is pulled straight back
@@ -163,9 +175,21 @@ int main() {
         // reference has no counterpart for - the white utility layer, the sun -
         // silently keeps ours.
         const std::filesystem::path referenceBlocks = engine::executableDirectory() / "blocks-reference";
+        std::vector<std::string> missingTextures;
         const auto blockTexture = [&](const char* name) {
             std::filesystem::path staged = referenceBlocks / name;
-            return std::filesystem::exists(staged) ? staged : textureDir / name;
+            if (std::filesystem::exists(staged)) {
+                return staged;
+            }
+            std::filesystem::path own = textureDir / name;
+            if (std::filesystem::exists(own)) {
+                return own;
+            }
+            // The list index *is* the layer index, so a missing file has to
+            // become a blank layer rather than be skipped - dropping it would
+            // slide every layer after it.
+            missingTextures.emplace_back(name);
+            return textureDir / "white.png";
         };
 
         const std::vector<std::filesystem::path> blockTextures{
@@ -187,7 +211,31 @@ int main() {
             blockTexture("wooden_shovel.png"),  blockTexture("wooden_sword.png"),
             blockTexture("wooden_hoe.png"),     blockTexture("stone_pickaxe.png"),
             blockTexture("stone_axe.png"),      blockTexture("stone_shovel.png"),
-            blockTexture("stone_sword.png"),    blockTexture("stone_hoe.png")};
+            blockTexture("stone_sword.png"),    blockTexture("stone_hoe.png"),
+            blockTexture("andesite.png"),       blockTexture("diorite.png"),
+            blockTexture("granite.png"),        blockTexture("smooth_stone.png"),
+            blockTexture("stone_bricks.png"),   blockTexture("mossy_cobblestone.png"),
+            blockTexture("obsidian.png"),       blockTexture("clay.png"),
+            blockTexture("sandstone_top.png"),  blockTexture("sandstone_side.png"),
+            blockTexture("sandstone_bottom.png"), blockTexture("bookshelf.png"),
+            blockTexture("glass.png"),          blockTexture("dandelion.png"),
+            blockTexture("poppy.png"),          blockTexture("dead_bush.png"),
+            blockTexture("coal_ore.png"),       blockTexture("iron_ore.png"),
+            blockTexture("copper_ore.png"),     blockTexture("gold_ore.png"),
+            blockTexture("redstone_ore.png"),   blockTexture("lapis_ore.png"),
+            blockTexture("diamond_ore.png"),    blockTexture("emerald_ore.png"),
+            blockTexture("deepslate_side.png"), blockTexture("deepslate_top.png"),
+            blockTexture("bedrock.png"),        blockTexture("terracotta.png"),
+            blockTexture("packed_ice.png")};
+
+        if (!missingTextures.empty()) {
+            std::string names;
+            for (const std::string& name : missingTextures) {
+                names += (names.empty() ? "" : ", ") + name;
+            }
+            engine::logError(std::to_string(missingTextures.size()) +
+                             " block textures are missing and will draw blank: " + names);
+        }
 
 
         // Spawn egg sprites, staged beside the exe rather than under assets/ for
@@ -213,18 +261,77 @@ int main() {
             }
             const std::filesystem::path eggDir = engine::executableDirectory() / "spawn-eggs";
             int missing = 0;
-            for (int i = 0; i < game::kSpawnEggLayers; ++i) {
+            const auto pushEgg = [&](int index) {
                 char name[16]{};
-                std::snprintf(name, sizeof(name), "egg%02d.png", i);
+                std::snprintf(name, sizeof(name), "egg%02d.png", index);
                 std::filesystem::path egg = eggDir / name;
                 if (!std::filesystem::exists(egg)) {
                     egg = textureDir / "white.png";
                     ++missing;
                 }
                 spriteLayers.push_back(egg);
+            };
+            for (int i = 0; i < game::kSpawnEggLayers; ++i) {
+                pushEgg(i);
             }
             if (missing > 0) {
                 engine::logError(std::to_string(missing) +
+                                 " spawn egg sprites are missing and will draw blank -"
+                                 " run tools\\make-spawn-egg-sprites.ps1");
+            }
+
+            // Resource sprites go after the whole egg run, which is what lets a
+            // new one be added without shifting any egg's layer.
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kResourceSpritesFirst)) {
+                engine::logError("kResourceSpritesFirst is " + std::to_string(game::kResourceSpritesFirst) +
+                                 " but " + std::to_string(spriteLayers.size()) +
+                                 " layers are loaded - every resource icon will be wrong");
+            }
+            for (const char* name : {"coal.png", "raw_iron.png", "iron_ingot.png", "raw_gold.png",
+                                     "gold_ingot.png", "raw_copper.png", "copper_ingot.png",
+                                     "diamond.png", "emerald.png", "lapis_lazuli.png", "redstone.png"}) {
+                spriteLayers.push_back(blockTexture(name));
+            }
+
+            // And the buckets after those, same arrangement and same reason.
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kBucketSpritesFirst)) {
+                engine::logError("kBucketSpritesFirst is " + std::to_string(game::kBucketSpritesFirst) +
+                                 " but " + std::to_string(spriteLayers.size()) +
+                                 " layers are loaded - both bucket icons will be wrong");
+            }
+            for (const char* name : {"bucket.png", "water_bucket.png"}) {
+                spriteLayers.push_back(blockTexture(name));
+            }
+
+            // The water surface's frames, last of all. A missing one falls back
+            // to the still texture rather than being skipped, because the list
+            // index is the layer index.
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kWaterFrameFirst)) {
+                engine::logError("kWaterFrameFirst is " + std::to_string(game::kWaterFrameFirst) +
+                                 " but " + std::to_string(spriteLayers.size()) +
+                                 " layers are loaded - the water animation will sample rubbish");
+            }
+            for (int i = 0; i < game::kWaterFrames; ++i) {
+                char name[20]{};
+                std::snprintf(name, sizeof(name), "water%02d.png", i);
+                spriteLayers.push_back(blockTexture(name));
+            }
+
+            // Spawn eggs for the species added after the first thirty-six. A
+            // second run right at the end rather than a longer first one: the
+            // resource, bucket and water layers sit behind that one, and their
+            // item ids are in the player's saved inventory.
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kExtraSpawnEggFirst)) {
+                engine::logError("kExtraSpawnEggFirst is " + std::to_string(game::kExtraSpawnEggFirst) +
+                                 " but " + std::to_string(spriteLayers.size()) +
+                                 " layers are loaded - the newest spawn eggs will be wrong");
+            }
+            const int extraMissingBefore = missing;
+            for (int i = 0; i < game::kExtraSpawnEggLayers; ++i) {
+                pushEgg(game::kSpawnEggLayers + i);
+            }
+            if (missing > extraMissingBefore) {
+                engine::logError(std::to_string(missing - extraMissingBefore) +
                                  " spawn egg sprites are missing and will draw blank -"
                                  " run tools\\make-spawn-egg-sprites.ps1");
             }
@@ -396,6 +503,22 @@ int main() {
             }
         };
 
+        // **Where the world has to be streamed around**, which a resumed save can
+        // put thousands of blocks from `spawn_x`. Read before the loading screen
+        // rather than after it: loading around the generator's spawn and then
+        // dropping the player somewhere else means the bar was measuring a piece
+        // of world nobody was about to stand in, and the real one streamed in
+        // underneath you while you played.
+        game::Player player;
+        const std::optional<game::SavedPlayer> savedPlayer = world.store().loadPlayer();
+        if (savedPlayer.has_value()) {
+            player.position = savedPlayer->position;
+            camera.yaw = savedPlayer->yaw;
+            camera.pitch = savedPlayer->pitch;
+        } else {
+            player.position = spawn;
+        }
+
         // The world streams in with the window already alive and drawing, rather
         // than blocking before the first frame. Queuing every chunk at once
         // pinned all cores, took the peak memory before anything was on screen,
@@ -403,6 +526,8 @@ int main() {
         {
             float shown = 0.0f;
             float lastDrawn = -1.0f;
+            float stalled = 0.0f;
+            const char* lastPhase = nullptr;
             auto lastTick = std::chrono::steady_clock::now();
 
             while (!window.shouldClose()) {
@@ -412,22 +537,53 @@ int main() {
                 const float delta = std::chrono::duration<float>(now - lastTick).count();
                 lastTick = now;
 
-                const std::vector<game::ChunkMeshUpdate> batch = world.update(spawn, kLoadingBudgetSeconds);
+                const std::vector<game::ChunkMeshUpdate> batch =
+                    world.update(player.position, kLoadingBudgetSeconds);
                 applyUpdates(batch);
 
-                // Eased rather than snapped: chunk loading arrives in coarse
-                // steps and an unsmoothed bar jerks between them.
+                // Eased toward each checkpoint rather than snapped to it: the
+                // measurements arrive in coarse steps and an unsmoothed bar
+                // jerks between them.
+                const game::World::LoadStatus status = world.loadStatus();
                 const float target = world.initialLoadProgress();
                 shown += (target - shown) * std::min(1.0f, delta * kLoadingBarEase);
-                if (target >= 1.0f && shown > 0.998f) {
+                // A checkpoint can dip when the streamer re-centres, and a bar
+                // that walks backwards reads as a fault rather than as honesty.
+                shown = std::max(shown, lastDrawn);
+
+                if (status.complete && shown > 0.998f) {
                     break;
+                }
+
+                // `settled` means there is genuinely no work left anywhere, so
+                // if the checkpoints still disagree, nothing is ever going to
+                // move them. Waiting on that is a hang; proceeding with a named
+                // fault is recoverable. It cannot fire during an ordinary slow
+                // load, because a slow load always has work outstanding.
+                if (status.settled && !status.complete) {
+                    stalled += delta;
+                    if (stalled > kLoadingStallSeconds) {
+                        engine::logError("Load stalled with terrain at " +
+                                         std::to_string(static_cast<int>(status.generated * 100.0f)) +
+                                         "% and geometry at " +
+                                         std::to_string(static_cast<int>(status.drawn * 100.0f)) +
+                                         "% and nothing queued - entering the world anyway");
+                        break;
+                    }
+                } else {
+                    stalled = 0.0f;
                 }
 
                 // Rebuilt only when it would look different: this runs every
                 // frame and each rebuild retires a GPU buffer.
-                if (std::abs(shown - lastDrawn) > 0.001f) {
+                const char* phase = status.generated < 1.0f ? "Generating terrain"
+                                    : status.drawn < 1.0f   ? "Building the world"
+                                                            : "Finishing up";
+                if (std::abs(shown - lastDrawn) > 0.001f || phase != lastPhase) {
                     lastDrawn = shown;
-                    renderer.setScreenMesh(game::hud::makeLoadingScreen(shown, renderer.aspectRatio()));
+                    lastPhase = phase;
+                    renderer.setScreenMesh(
+                        game::hud::makeLoadingScreen(shown, phase, renderer.aspectRatio()));
                 }
                 renderer.drawFrame(engine::ClearColor{0.055f, 0.06f, 0.075f, 1.0f}, camera.viewMatrix());
             }
@@ -446,15 +602,16 @@ int main() {
         // Starts mid-morning rather than at sunrise, so the first thing seen is
         // a lit world with the sun clearly off to one side.
         float timeOfDay = 0.18f;
+        float waterAnimationSeconds = 0.0f;
         renderer.setVerticalFov(kDefaultFov);
 
-        game::Player player;
-        if (const std::optional<game::SavedPlayer> saved = world.store().loadPlayer()) {
-            player.position = saved->position;
-            camera.yaw = saved->yaw;
-            camera.pitch = saved->pitch;
+        if (savedPlayer.has_value()) {
             engine::logInfo("Resumed from the last saved position.");
-        } else {            player.position = spawn;
+        } else {
+            // Only the fresh-world placement is left here: it reads blocks, so
+            // it cannot run until the chunks exist. A resumed position was read
+            // before the loading screen, because it is what the world had to be
+            // streamed around.
             player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
 
             if (settings.spawnUnderground) {
@@ -537,7 +694,7 @@ int main() {
         engine::logInfo("F5 toggles the diagnostics overlay.");
         engine::logInfo("F6/F7 change render distance.");
         engine::logInfo("F8 spawns a Bramble ahead of you, F9 a charged one.");
-        engine::logInfo("Right click a spawn egg to place that creature. F10 swaps eggs for the block kit.");
+        engine::logInfo("Right click a spawn egg to place that creature; the inventory's left card has them all.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
         using Clock = std::chrono::steady_clock;
@@ -594,25 +751,8 @@ int main() {
             }
         };
 
-        // Every spawn egg, one per slot. There are thirty-six species and
-        // thirty-six slots, so this is the whole inventory and the block kit
-        // cannot coexist with it - hence the toggle rather than a compromise
-        // that quietly drops half of either.
-        const auto fillSpawnEggs = [&] {
-            static_assert(static_cast<std::size_t>(game::CreatureKind::Count) <= game::kInventorySlots,
-                          "a spawn egg per species has to fit the inventory");
-            for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
-                inventory.slot(i) = game::ItemStack{};
-            }
-            for (int i = 0; i < static_cast<int>(game::CreatureKind::Count); ++i) {
-                inventory.slot(static_cast<std::size_t>(i)) =
-                    game::ItemStack{game::spawnEggForIndex(i), game::kMaxStack};
-            }
-        };
-        bool eggKit = false;
         if (creative) {
-            fillSpawnEggs();
-            eggKit = true;
+            fillCreativeKit();
         }
 
         game::ItemEntities drops;
@@ -634,6 +774,17 @@ int main() {
             constexpr float kShowcaseYaw = 1.5707963f;
             const int count = static_cast<int>(game::CreatureKind::Count);
 
+            // Standing on the ground, but **never below the player's own
+            // feet**. A seabed is twenty blocks under a swimming camera and a
+            // cliff edge nearly as far, and a subject placed down there is a
+            // model nobody can review. It is also the only thing that puts a
+            // fish in water rather than on the bottom of the sea.
+            const auto showcaseY = [&](float x, float z) {
+                const int ground = world.highestSolid(static_cast<int>(std::floor(x)),
+                                                      static_cast<int>(std::floor(z)));
+                return std::max(static_cast<float>(ground + 1), player.position.y);
+            };
+
             if (settings.creatureShowcase == 1) {
                 // A grid rather than a row: the field of view cannot hold
                 // thirteen animals side by side at a distance where any of them
@@ -646,10 +797,8 @@ int main() {
                     const float z = player.position.z - (8.0f + static_cast<float>(row) * 7.0f);
                     const float x = player.position.x + static_cast<float>(column - 2) * 3.0f +
                                     static_cast<float>(row) * 1.5f;
-                    const int ground =
-                        world.highestSolid(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)));
                     creatures.place(static_cast<game::CreatureKind>(i),
-                                    glm::vec3{x, static_cast<float>(ground + 1), z}, kShowcaseYaw);
+                                    glm::vec3{x, showcaseY(x, z), z}, kShowcaseYaw);
                 }
             } else {
                 // One species, three copies: profile, facing the camera, and
@@ -661,9 +810,13 @@ int main() {
                 for (int i = 0; i < 3; ++i) {
                     const float x = player.position.x + static_cast<float>(i - 1) * 2.5f;
                     const float z = player.position.z - 5.0f;
-                    const int ground =
-                        world.highestSolid(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z)));
-                    creatures.place(kind, glm::vec3{x, static_cast<float>(ground + 1), z}, yaws[i]);
+                    // Something that inflates gets its three *stages* rather
+                    // than three angles. The roster is frozen here, so a
+                    // pufferfish left to itself would sit deflated forever and
+                    // two thirds of its model would be unreviewable.
+                    const float puff =
+                        game::speciesInfo(kind).puffs ? static_cast<float>(i) : 0.0f;
+                    creatures.place(kind, glm::vec3{x, showcaseY(x, z), z}, yaws[i], false, puff);
                 }
                 engine::logWarn(std::string{"creature_showcase: "} + game::speciesInfo(kind).name + " only");
             }
@@ -700,7 +853,12 @@ int main() {
         // The population survives a restart rather than being rebuilt from
         // scratch. Anything the player has walked away from since is retired by
         // the first `manage`, so a stale saved position corrects itself.
-        {
+        //
+        // **The showcase reads none of it.** It is a review mode, and loading
+        // the world's animals into a frozen roster is exactly what stopped "one
+        // species alone" being one species - they arrive after the subjects are
+        // placed and, with the spawner off, nothing ever retires them.
+        if (settings.creatureShowcase == 0) {
             std::size_t restored = 0;
             for (const game::SavedCreature& saved : world.store().loadCreatures()) {
                 if (saved.kind >= static_cast<std::uint8_t>(game::CreatureKind::Count)) {
@@ -741,6 +899,10 @@ int main() {
 
         std::size_t selectedSlot = 0;
         bool hudDirty = true;
+        /// Whether the camera itself is inside a water cell, which is a
+        /// different question from `Player::inWater` - that one asks about the
+        /// whole body, and being waist deep does not change what you see.
+        bool eyeUnderwater = false;
 
         // Hands back everything the screen was holding: the cursor stack, then
         // the crafting grid. **Every** way of closing has to do this, which is
@@ -808,6 +970,9 @@ int main() {
             // A panel carries its own hotbar row, and a crosshair over a
             // pointer-driven screen is just clutter.
             engine::MeshData hud = openScreen.has_value() ? engine::MeshData{} : game::makeCrosshair();
+            // Catalogue entries, which are the one part of the HUD that has to
+            // stop at an edge rather than simply being drawn or not.
+            engine::MeshData clipped;
 
             const auto append = [&](const engine::MeshData& part) {
                 const auto base = static_cast<std::uint32_t>(hud.vertices.size());
@@ -841,7 +1006,7 @@ int main() {
                     *openScreen, inventory, craftSlots.data(), shownResult, heldStack,
                     (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight,
                     (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight, renderer.aspectRatio(),
-                    catalogue, progress));
+                    catalogue, progress, clipped));
             } else {
                 append(game::makeHotbar(inventory, selectedSlot));
 
@@ -870,6 +1035,8 @@ int main() {
             }
 
             renderer.setScreenMesh(hud);
+            const auto [clipMin, clipMax] = game::inventoryScreen::catalogueListBounds();
+            renderer.setClippedScreenMesh(clipped, clipMin, clipMax);
         };
 
         while (!window.shouldClose()) {
@@ -991,24 +1158,6 @@ int main() {
                                     std::atan2(-look.x, -look.z), charged);
                     engine::logInfo(charged ? "Spawned a charged Bramble ahead."
                                             : "Spawned a Bramble ahead.");
-                    continue;
-                }
-                if (key == engine::Key::F10) {
-                    // Thirty-six eggs fill all thirty-six slots, so the block
-                    // kit and the egg set cannot both be held at once.
-                    if (!creative) {
-                        engine::logInfo("F10 only fills the creative kit, and this world is survival.");
-                    } else {
-                        eggKit = !eggKit;
-                        if (eggKit) {
-                            fillSpawnEggs();
-                        } else {
-                            fillCreativeKit();
-                        }
-                        hudDirty = true;
-                        engine::logInfo(eggKit ? "Inventory: all 36 spawn eggs."
-                                               : "Inventory: the block kit.");
-                    }
                     continue;
                 }
                 if (key >= engine::Key::Num1 && key <= engine::Key::Num9) {
@@ -1176,6 +1325,9 @@ int main() {
                         if (const auto tab = game::inventoryScreen::tabAt(*openScreen, cursorX, cursorY);
                             tab.has_value()) {
                             catalogue.tab = *tab;
+                            // A new tab starts at the top. Keeping the offset
+                            // would open a short list scrolled past its end.
+                            catalogue.scrollRow = 0;
                             hudDirty = true;
                             continue;
                         }
@@ -1194,8 +1346,8 @@ int main() {
                             // through to the bin below rather than swallowing
                             // the click.
                             bool tookEntry = false;
-                            if (const auto cell =
-                                    game::inventoryScreen::catalogueCellAt(*openScreen, cursorX, cursorY);
+                            if (const auto cell = game::inventoryScreen::catalogueCellAt(
+                                    *openScreen, cursorX, cursorY, catalogue.scrollRow);
                                 cell.has_value()) {
                                 const std::vector<game::ItemId> listed =
                                     game::inventoryScreen::catalogueItems(catalogue.tab);
@@ -1383,15 +1535,30 @@ int main() {
 
             // Scrolling away from the user moves right along the bar, and the
             // selection wraps at both ends.
+            //
+            // **While a screen is open the wheel belongs to the catalogue**, the
+            // same way the movement keys do. Without that guard it kept driving
+            // the hotbar underneath - silently, because the bar is hidden behind
+            // the panel while you are looking at it.
             const float scroll = window.consumeScrollDelta();
             if (const int notches = static_cast<int>(scroll); notches != 0) {
-                const auto slots = static_cast<int>(game::kHotbarSlots);
-                int next = (static_cast<int>(selectedSlot) - notches) % slots;
-                if (next < 0) {
-                    next += slots;
+                if (openScreen.has_value() && game::inventoryScreen::showsCatalogue(*openScreen)) {
+                    const int limit = game::inventoryScreen::catalogueMaxScroll(
+                        game::inventoryScreen::catalogueItems(catalogue.tab).size());
+                    const int next = std::clamp(catalogue.scrollRow - notches, 0, limit);
+                    if (next != catalogue.scrollRow) {
+                        catalogue.scrollRow = next;
+                        hudDirty = true;
+                    }
+                } else if (!openScreen.has_value()) {
+                    const auto slots = static_cast<int>(game::kHotbarSlots);
+                    int next = (static_cast<int>(selectedSlot) - notches) % slots;
+                    if (next < 0) {
+                        next += slots;
+                    }
+                    selectedSlot = static_cast<std::size_t>(next);
+                    hudDirty = true;
                 }
-                selectedSlot = static_cast<std::size_t>(next);
-                hudDirty = true;
             }
 
             // The overlay wants refreshing continuously, and so does the
@@ -1420,6 +1587,7 @@ int main() {
                                                                 static_cast<int>(std::floor(player.position.z)))
                                                   .dominant)
                                   .name;
+                stats.air = player.air;
 
                 rebuildHud(stats);
                 lastHudRebuild = now;
@@ -1466,14 +1634,26 @@ int main() {
                 move.jump = window.isKeyDown(engine::Key::Space);
                 move.sprint = window.isKeyDown(engine::Key::LeftControl);
                 move.sneak = window.isKeyDown(engine::Key::LeftShift);
+                move.lookY = glm::normalize(camera.forward()).y;
                 move.verticalWish = (window.isKeyDown(engine::Key::Space) ? 1.0f : 0.0f) -
                                     (window.isKeyDown(engine::Key::LeftShift) ? 1.0f : 0.0f);
             }
 
             game::updatePlayer(player, move, world, deltaSeconds);
-            camera.position = player.eyePosition();
+            camera.position = player.renderEyePosition();
 
-            const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kReach);
+            // Being underwater has to be visible, not merely felt. Without this
+            // the only evidence is the physics changing, which reads as gravity
+            // being broken rather than as swimming.
+            {
+                const bool submergedNow =
+                    game::isWater(world.blockAt(static_cast<int>(std::floor(camera.position.x)),
+                                                static_cast<int>(std::floor(camera.position.y)),
+                                                static_cast<int>(std::floor(camera.position.z))));
+                eyeUnderwater = submergedNow;
+            }
+
+            const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kBlockReach);
 
             if (wantInteract && target.hit &&
                 game::isInteractive(world.blockAt(target.block.x, target.block.y, target.block.z))) {
@@ -1525,13 +1705,14 @@ int main() {
             // it. Asked every frame rather than only when a swing is ready,
             // because the swing's cooldown would otherwise let the block behind
             // a creature be mined straight through it.
+            const float entityReach = creative ? kCreativeEntityReach : kEntityReach;
             const bool creatureInWay =
-                wantBreak && creatures.aimedAt(camera.position, camera.forward(), kReach);
+                wantBreak && creatures.aimedAt(camera.position, camera.forward(), entityReach);
             if (creatureInWay && swingTimer <= 0.0f) {
                 const game::ToolProperties swung = game::toolFor(inventory.slot(selectedSlot).item);
                 const int damage = swung.kind == game::ToolKind::Sword ? (swung.tier >= game::kStoneTier ? 5 : 4)
                                                                        : 1 + swung.tier;
-                if (creatures.strike(camera.position, camera.forward(), kReach, damage)) {
+                if (creatures.strike(camera.position, camera.forward(), entityReach, damage)) {
                     swingTimer = kSwingSeconds;
                 }
             }
@@ -1594,7 +1775,8 @@ int main() {
                     // gives nothing, which is what makes a pickaxe worth making.
                     const game::ItemId dropped = game::dropForBlock(broken);
                     if (dropped != game::ItemId::None && (creative || game::yieldsDrop(broken, tool.item))) {
-                        drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped, 1);
+                        drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped,
+                                    game::dropCountForBlock(broken));
                     }
 
                     // Tools wear only on blocks that actually resist them.
@@ -1649,6 +1831,52 @@ int main() {
                     placeTimer = kPlaceRepeatSeconds;
                 }
 
+                // A bucket is used rather than placed, and needs its own ray:
+                // water has no selection geometry, so the ordinary aim passes
+                // straight through it to the riverbed.
+                if (placeTimer <= 0.0f && !held.empty() &&
+                    (held.item == game::ItemId::Bucket || held.item == game::ItemId::WaterBucket)) {
+                    const bool filling = held.item == game::ItemId::Bucket;
+                    const game::RaycastHit reached =
+                        game::raycast(world, camera.position, camera.forward(), kBlockReach, filling);
+
+                    bool used = false;
+                    if (filling && reached.hit &&
+                        game::isWaterSource(world.blockAt(reached.block.x, reached.block.y, reached.block.z))) {
+                        world.setBlock(reached.block.x, reached.block.y, reached.block.z,
+                                       game::BlockId::Air);
+                        used = true;
+                    } else if (!filling && reached.hit &&
+                               !game::playerOverlapsBlock(player, reached.adjacent)) {
+                        // Level 0 is a *source*, not merely a full cell. Placing
+                        // a flowing level instead would drain itself the moment
+                        // the fluid update ran.
+                        world.setBlock(reached.adjacent.x, reached.adjacent.y, reached.adjacent.z,
+                                       game::BlockId::Water0);
+                        used = true;
+                    }
+
+                    if (used) {
+                        // Emptying and filling is the *cost* of using a bucket,
+                        // which is the one thing creative is allowed to skip.
+                        if (!creative) {
+                            game::ItemStack& slot = inventory.slot(selectedSlot);
+                            const game::ItemId became =
+                                filling ? game::ItemId::WaterBucket : game::ItemId::Bucket;
+                            if (slot.count > 1) {
+                                // A stack of empties gives back one full bucket,
+                                // so the swap has to go somewhere else.
+                                --slot.count;
+                                inventory.add(became, 1);
+                            } else {
+                                slot = game::ItemStack{became, 1};
+                            }
+                            hudDirty = true;
+                        }
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
                 const bool canPlace = !held.empty() && game::isBlockItem(held.item);
                 if (placeTimer <= 0.0f && canPlace && target.hit &&
                     !game::playerOverlapsBlock(player, target.adjacent)) {
@@ -1681,6 +1909,16 @@ int main() {
                                 ? (aim.x > 0.0f ? game::Facing::West : game::Facing::East)
                                 : (aim.z > 0.0f ? game::Facing::North : game::Facing::South);
                         placing = game::stairsAt(facing, clickedBelow);
+                    } else if (game::isFurnace(placing)) {
+                        // The mouth turns to face whoever placed it, which is
+                        // the reference's rule and the only way three plain
+                        // sides and one front can be told apart.
+                        const glm::vec3 aim = camera.forward();
+                        const game::FaceDirection front =
+                            std::abs(aim.x) > std::abs(aim.z)
+                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
+                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
+                        placing = game::furnaceFacing(front, false);
                     }
 
                     // Nothing that needs a floor may be placed without one.
@@ -1710,15 +1948,28 @@ int main() {
                 if (!game::isFurnace(present)) {
                     continue;
                 }
-                const game::BlockId wanted = lit ? game::BlockId::FurnaceLit : game::BlockId::Furnace;
+                // Lighting one must not turn it round: the facing and the lit
+                // state are both in the id, so they are recombined rather than
+                // one being overwritten with a default.
+                const game::BlockId wanted = game::furnaceFacing(game::furnaceFacing(present), lit);
                 if (present != wanted) {
                     world.setBlock(position.x, position.y, position.z, wanted);
                 }
             }
 
+            // Anything a spreading flow swept aside drops, the same way a plant
+            // left hanging by mining below it does.
+            for (const game::World::WashedBlock& washed : world.takeWashedBlocks()) {
+                const game::ItemId shed = game::dropForBlock(washed.block);
+                if (shed != game::ItemId::None) {
+                    drops.spawn(glm::vec3{washed.position} + glm::vec3{0.5f}, shed, 1);
+                }
+            }
+
             // Dropped items live entirely on the main thread: there are a
             // handful of them and they touch the world only to read it.
-            drops.update(world, player.position, deltaSeconds);            for (const game::ItemEntities::Collectable& ready : drops.collectable(player.position)) {
+            drops.update(world, player.position, deltaSeconds);
+            for (const game::ItemEntities::Collectable& ready : drops.collectable(player.position)) {
                 // Collection is mode-independent, like dropping. Skipping it in
                 // creative left anything dropped orbiting the player forever.
                 if (!inventory.hasRoomFor(ready.item, ready.count)) {
@@ -1923,10 +2174,39 @@ int main() {
             renderer.setSunLighting(ambient, sunStrength, game::sky::kAmbientFloor);
             renderer.setSkyTransform(game::sky::sunTransform(camera.position, sunDirection));
 
-            const glm::vec3 sky = game::sky::skyColor(sunDirection);
-            const engine::ClearColor background{sky.r, sky.g, sky.b, 1.0f};
+            // The water surface plays its own strip of frames. Redirecting the
+            // layer at draw time is what makes it free: not one chunk is rebuilt
+            // for it, and a still lake and a waterfall stay one mesh.
+            waterAnimationSeconds += deltaSeconds;
+            // Wrapped rather than left to grow, or a long session eventually
+            // loses the fraction that picks the frame.
+            constexpr float kWaterLoop = game::kWaterFrames * game::kWaterFrameSeconds;
+            waterAnimationSeconds -= std::floor(waterAnimationSeconds / kWaterLoop) * kWaterLoop;
+            const int waterFrame =
+                static_cast<int>(waterAnimationSeconds / game::kWaterFrameSeconds) % game::kWaterFrames;
+            renderer.setAnimatedLayer(static_cast<float>(game::TextureLayer::Water),
+                                      static_cast<float>(game::kWaterFrameFirst + waterFrame));
 
-            renderer.drawFrame(background, camera.viewMatrix(), highlight);
+            // Underwater everything fades to one colour over a fixed distance,
+            // and your eyes open out over the first half-minute. Dimmed by the
+            // daylight the surface is getting, or a night dive glows.
+            const glm::vec3 sky = game::sky::skyColor(sunDirection);
+            glm::vec3 background = sky;
+            if (eyeUnderwater) {
+                // A flat colour and a fixed distance, both constant. Anything
+                // that varies with the time of day or with how long you have
+                // been under makes the water look like a different colour every
+                // time you dip into it.
+                renderer.setFog(game::fluid::kFogColour, game::fluid::kFogDistance);
+                // Anything with no geometry behind it is water too, so the sky
+                // must not show through from sixty metres down.
+                background = game::fluid::kFogColour;
+            } else {
+                renderer.setFog(glm::vec3{0.0f}, 0.0f);
+            }
+
+            renderer.drawFrame(engine::ClearColor{background.r, background.g, background.b, 1.0f},
+                               camera.viewMatrix(), highlight);
 
             ++framesSinceReport;
             if (now - lastReportTime >= std::chrono::seconds(1)) {
@@ -1983,16 +2263,21 @@ int main() {
         }
         world.store().saveFurnaces(savedFurnaces);
 
+        // And it must not write one back either. The showcase population is
+        // three copies of whatever was being looked at; saving that would
+        // replace the world's animals with it.
         std::vector<game::SavedCreature> savedCreatures;
-        savedCreatures.reserve(creatures.all().size());
-        for (const game::Creature& creature : creatures.all()) {
-            savedCreatures.push_back(game::SavedCreature{static_cast<std::uint8_t>(creature.kind),
-                                                         creature.position.x, creature.position.y,
-                                                         creature.position.z, creature.yaw,
-                                                         creature.health, creature.scale,
-                                                         static_cast<std::uint8_t>(creature.charged ? 1 : 0)});
+        if (settings.creatureShowcase == 0) {
+            savedCreatures.reserve(creatures.all().size());
+            for (const game::Creature& creature : creatures.all()) {
+                savedCreatures.push_back(game::SavedCreature{static_cast<std::uint8_t>(creature.kind),
+                                                             creature.position.x, creature.position.y,
+                                                             creature.position.z, creature.yaw,
+                                                             creature.health, creature.scale,
+                                                             static_cast<std::uint8_t>(creature.charged ? 1 : 0)});
+            }
+            world.store().saveCreatures(savedCreatures);
         }
-        world.store().saveCreatures(savedCreatures);
 
         engine::logInfo("Saved " + std::to_string(world.savedChunkCount()) + " modified chunks, " +
                         std::to_string(savedFurnaces.size()) + " furnaces and " +

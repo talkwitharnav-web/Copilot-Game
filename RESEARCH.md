@@ -400,6 +400,8 @@ The effective range is $\max(\text{range} \times \text{modifier},\ 2.0)$ — so 
 
 **Most mobs perform one melee attack per second.** Players have unlimited attack frequency and greater reach than most mobs, "allowing them to continuously attack targets without being reached."
 
+> **▶ Where we stand.** **Taken verbatim on 2026-08-05**: 5 m blocks in every mode, 3 m entities in survival and 5 in creative. The game had shipped **12 m** since M7, which is this table's *touch creative* row — a different input mode entirely, and picking the wrong row is exactly the kind of error that survives because the number looks plausible. Entity reach is still a **distance check**, not the bounding-box expansion described above; that only starts to matter once a mob is wide enough for the difference to show.
+
 ## 2.7 Difficulty scaling
 
 If a mob deals **D** on Normal:
@@ -436,12 +438,18 @@ CRD = 0                if RD < 2
 
 Chunk inhabited time is **cumulative across players** and capped at 50 hours. CRD is **always 0 on Easy** and always ≥ 0.125 on Hard.
 
-> **▶ Where we stand.** We have a melee swing with knockback and creatures that compute a blow and hand it back as a `CreatureAttack` rather than applying it — exactly the shape needed when player health arrives.
+> **▶ Where we stand (2026-08-06).** We have a melee swing with knockback and creatures that compute a blow and hand it back as a `CreatureAttack` rather than applying it — exactly the shape needed when player health arrives.
+>
+> **M20j added the half that was missing, and it was not a number — it was a destination.** A chase had no arrival condition at all: `MeleeAttack` steered at the player for as long as it had a target, nothing here collides with the player, so a zombie walked *through*, overshot and came about at a limited turn rate. That is an orbit, and reach being a distance put the player inside it on every pass. **The reference does not fix this with a turn rate or a reach; `melee_box_attack` paths to a node *beside* its target and the path ends there.** Anything that closes on something has to say where it stops, and **"it stops when it can hit" is not the same distance as "it stops when it arrives"**.
+>
+> Two exemptions fall out of the reference rather than being invented. A **hopper** never stops, because a slime has no melee goal at all — `attack.melee` fires on contact, so arriving *is* the attack. And **"arrived" means on the same footing**, tested against the species' own `stepHeight`, or a zombie at the foot of a one-block ledge stands there forever: the step-up and the jump both read `walking`, which the arrival had just cleared.
+>
+> **A slime rebounding off the player is ours, and it is better than the reference here.** Bedrock separates the two bodies with `minecraft:pushable`, which we have no equivalent of, so a slime passed through and re-entered forever. The player's body is a wall: the inward part of the slime's velocity comes back out at a restitution, and it is lifted clear of the floor. It needs **no cooldown**, because after it fires the slime is heading away and the test cannot pass again — and it must fire on **contact rather than on the blow**, since a small slime does no damage in the reference and a wall does not care.
 >
 > Take, in order:
 > 1. **The 0.5 s invulnerability window with the overwrite rule** (§2.4). Without it, a creature standing inside you kills instantly.
 > 2. **The "halve existing velocity, then apply, cap vertical at 0.4 b/t" knockback recipe** (§2.3). We already learned the hard way that knockback must be *assigned, never accumulated* — the reference agrees, and adds the halving step that makes repeated hits feel controlled rather than launching.
-> 3. **`follow_range` as a per-species number with a ×0.8 sneak modifier and a 2-block floor** (§2.5). We have `senseRange`; adding the sneak multiplier and the floor is four lines and makes sneaking a real mechanic.
+> 3. ~~**`follow_range` as a per-species number with a ×0.8 sneak modifier and a 2-block floor** (§2.5).~~ **Done at M20f**, along with `must_see`, a scan interval, a forget timer and a separate leash range. See §6 and `SYSTEM_MEMORY.md` "What it takes to be noticed".
 > 4. **Bounding-box-intersection reach rather than a distance check** (§2.6), the moment we have a mob wider than one block. The camel is already 1.7 wide.
 >
 > Skip: the attack cooldown (Bedrock has none), and regional difficulty (it is quality scaling for gear we do not have).
@@ -568,7 +576,9 @@ Group sizes for species we have: sheep 4 (weight 12), cow 4 (8), pig 4 (10), chi
 
 **Persistence** is granted by: being named, ridden, tamed, bred, leashed, summoned, picking up an item, or spawning as part of a structure or raid.
 
-> **▶ Where we stand (2026-08-04).** We now run **both** of the reference's spawn systems. The continuous cycle fires every 2.5 s in a 12–30 m ring around the player, held to a cap of 14, and retires past 90 m. The **chunk-generation pass** places a chunk's own group the first time the player comes within two chunks of it, ignoring the cap — a pure function of `(seed, chunkCoord)`, so a chunk always produces the same herd, and it fits our generation purity rule with no threading consequences. Which species and how many come from `groupSize` and `weight` in the species table; ten percent of chunks get anything at all, matching the reference's default probability.
+> **▶ Where we stand (2026-08-04).** We now run **both** of the reference's spawn systems. The continuous cycle fires every 2.5 s in a **24–44 m** ring around the player — the reference's own shell at its lowest simulation distance — held to a cap of 14, and retires past 90 m. The **chunk-generation pass** places a chunk's own group the first time the player comes within two chunks of it, ignoring the cap — a pure function of `(seed, chunkCoord)`, so a chunk always produces the same herd, and it fits our generation purity rule with no threading consequences. Which species and how many come from `groupSize` and `weight` in the species table; ten percent of chunks get anything at all, matching the reference's default probability.
+>
+> **A candidate must clear its own body box** (`overlapsSolid` on the real `bodyBox`), not a column of whole cells — the old test was blind to slabs, fences and anything wider than one cell, and dropped bulky species straight into the terrain beside them. Both spawners also refuse a column that has not finished loading, since absent ground reads as air.
 >
 > **Persistence has landed too** — `creatures.dat`, written on save.
 >
@@ -719,7 +729,9 @@ Point-blank damage, **Bedrock**: 14.75 / 27.5 / 41.25 by difficulty. `[JE]` is m
 
 > **▶ Where we stand.** **Built 2026-08-04.** The Bramble detonates: `world/Explosion.hpp` carries the 1352-ray block algorithm, the exposure test and the damage formula above, and `blastResistance` is kept strictly apart from mining hardness. Damage is scaled by `27.5 / 43` to land on Bedrock's point-blank figure rather than Java's.
 >
-> **Its stats were wrong in four places until they were checked against this section**, all of them defaults or guesses that looked plausible: health 10 against 20, follow range 14 against 16, swell 2.5 m against 3, cancel 6 m against 7. The comment in the table even claimed 2.5/6 *were* Bedrock's and that 3/7 was Java's - exactly backwards. **Run speed** went 2.4 → 4.25, converting the 0.25 attribute at the low end of §1.4's documented ×17-19 band, which finally makes the "can be strolled away from" note below untrue.
+> **Its stats were wrong in four places until they were checked against this section**, all of them defaults or guesses that looked plausible: health 10 against 20, follow range 14 against 16, and the two swell distances. **Run speed** went 2.4 → 4.25, converting the 0.25 attribute at the low end of §1.4's documented ×17-19 band, which finally makes the "can be strolled away from" note below untrue.
+>
+> **The two swell distances then went wrong a second time, in the opposite direction.** They were "corrected" from 2.5 / 6 to the 3 / 7 this section quotes, on the reasoning that this section is the Bedrock record. It is not, on this point: the numbers above came from the wiki, and `Mojang/bedrock-samples` ships the actual behaviour pack. `behavior_pack/entities/creeper.json` reads `behavior.swell { start_distance: 2.5, stop_distance: 6 }`, and its `target_nearby_sensor` says `inside_range: 2.5, outside_range: 6` — two independent statements of the same pair. **2.5 and 6 are Bedrock's; 3 and 7 are the wiki's, and almost certainly Java's.** Restored 2026-08-05. Do not flip them again without opening that file.
 >
 > Also built: the **line-of-sight requirement for the whole countdown**, **fall-triggered ignition** (§6.3 point 6 - 1.5 ticks of fuse per block, stopping five ticks short), and **fleeing cats and ocelots** within 6 m at ×1.2 speed, sitting *below* Swell in priority so a lit fuse is not called off by a passing cat. §2.5's detection modifier is in too: ×0.8 for a sneaking target with a 2 m floor, applied **only on acquisition**, which falls out of the behaviour table's `canStart`/`canContinue` split for free.
 >
@@ -776,9 +788,33 @@ Bat, parrot, allay, phantom, ghast, bee, breeze. Speeds 0.6–0.7 attribute, but
 
 **Note: bees don't actually fly by Minecraft's own definition — they hover, like bats and parrots. Only the ghast and ender dragon truly fly.**
 
-## 7.3 Archetype C — swimming
+## 7.3 Archetype C — swimming ✅ **built, M20i (2026-08-05)**
 
 Squid, glow squid, dolphin (speed 1.2), cod/salmon/tropical fish/pufferfish, axolotl, tadpole, guardian.
+
+> **▶ Where we stand.** Nine of these shipped at M20i, plus the drowned. What was
+> actually needed against the list below: **(1)** yes, and `world/Fluid.hpp` from
+> M20h already had it. **(2)** no buoyancy at all — a swimmer simply has
+> `has_gravity: false`, which is what the reference does; see §9.1's navigation flag table. **(3)** the
+> cheat, exactly as recommended — a heading in three dimensions with no pathing.
+> **(4)** yes, and it is *three* clocks rather than two: `breathesAir` runs the
+> ordinary air counter backwards so a fish suffocates in air, and `dryOutSeconds`
+> is separate again, so a dolphin drowns if held under **and** dries if kept out.
+> **(5)** `groupSize`, already in the species table, was enough — no boids.
+> **(6)** taken as advised: five axolotl liveries and twelve tropical fish as real
+> nets, no runtime tinting.
+>
+> **Not built:** the tadpole (needs frog breeding) and the guardian (needs
+> projectiles). Turtle home beaches and egg laying are also outstanding.
+>
+> **The one thing this section got wrong:** it does not mention that Minecraft has
+> **no water-body size test**. I wrote a flood fill to keep fish out of puddles
+> before checking. The reference does it with a **biome tag** — `spawns_underwater`
+> plus an ocean/river filter — which costs nothing and is why a village well never
+> fills with cod. The spawn rule files carry `height_filter`, `density_limit`,
+> `herd`, `distance_filter` and `brightness_filter`, and every one is a number
+> rather than a search. Ours adds a three-block depth requirement on top, because
+> our biome map is coarser than theirs.
 
 **What the engine would need:**
 
@@ -907,6 +943,12 @@ Frog:   navigation.generic { can_swim, can_walk, is_amphibious, can_sink: false 
 
 Wandering, verbatim: *"random targets are generated every tick… For every target, a path is generated; with the entity preferring the path with the lowest score… If an entity's target is located inside a block (including water), the target is moved to the nearest air block above it."*
 
+> **▶ Where we stand (2026-08-06).** Built as **M20k**. `world/Pathfinder.hpp` is A\* over foot cells with the penalty model above; only the two water entries can arise, since we have no lava, fire, cactus, honey or doors. The **"danger applies to the neighbours"** rule from point 2 is implemented and is what makes `avoidsWater` real routing rather than a fan rejection. The **−1 sentinel** is expressed as a node simply not being generated, which is the same thing with less arithmetic.
+>
+> Two of the quoted wandering rules are in: a goal inside a block is **lifted to the first cell a body fits in**, and a search that cannot reach its goal returns the route to the **closest cell it reached** rather than nothing. The "generate several targets and take the lowest-scoring path" part is deliberately not — it is one search per goal here, because scoring several candidate routes multiplies the only genuinely expensive thing in the system.
+>
+> The cost bounds are ours, not the reference's: 24 m of range, 384 expansions, 32 waypoints, two searches a frame across the population, and a repath every half second or whenever the target has moved a block.
+
 ## 8.6 Spawn rules — the cleanest thing in the whole design
 
 A separate JSON per entity. `population_control` selects one of four capped pools: `animal`, `water_animal`, `monster`, `cat`. `conditions` is an **array**, each element an independent condition set — that is how one mob gets several spawning modes.
@@ -981,35 +1023,44 @@ Write exactly three — `Wander`, `Flee`, `Chase` — by lifting the existing sw
 
 # 9. Blocks, fluids and plants
 
-## 9.1 Fluid mechanics
+## 9.1 Fluid mechanics - BUILT; this is now a pointer
 
-**Levels are numbered in two reversed schemes, which trips everyone up.** Bedrock's `liquid_depth`: 0 = fullest, 1–7 flowing, bit `0x8` = falling. `[JE]` block state `level`: 0 = source, 7…1 flowing (7 = fullest), 8 = falling.
+> **This section ran to nearly four thousand words and the work is done.** Water shipped at
+> M20h and was corrected twice at M20j. A description of how the reference behaves, sitting
+> beside an implementation that already behaves that way, is a second copy of the same facts -
+> and a second copy is this project's single most reliable source of bugs.
 
-| Fluid | Horizontal reach | Speed |
+| Question | Where the answer lives now |
+|---|---|
+| Every constant of how an entity moves through water | `game/src/world/Fluid.hpp`, the single owner, read by the player, creatures and dropped items |
+| How the block spreads, and why a waterfall is a column | `SYSTEM_MEMORY.md` -> "Water" |
+| What we deliberately diverge on | `SYSTEM_MEMORY.md` -> "Water", "Named divergences" |
+| Why treading took three attempts | `LESSONS.md`; `tools/simulate-swim.ps1` replays it |
+
+**Four findings kept because they are not recoverable from the code:**
+
+1. **The wiki's 0.39 sink rate is a copy error** - it is the upstream *horizontal* speed. The
+   real figure is 0.50. Every vertical terminal is `(impulse * drag - water gravity)/(1 - drag)`,
+   and dropping the water-gravity term made all four about a quarter too fast, which shipped.
+2. **The wiki's "2.23 m/s ascending by holding jump" is measured in a waterfall**, so it is not
+   the still-water figure. The number to check a sprint-swim-up against is **6.98 m/s**.
+3. **`Mojang/bedrock-samples` carries no fluid data at all** - it is a behaviour pack, and the
+   player's water physics is closed C++. It *is* authoritative for `breathes_water`, the seven
+   `navigation.*` flags and `behavior.float`.
+4. **`can_sink` and `behavior.float` are separate mechanisms, and that is the crux.** Squid,
+   frog, turtle, axolotl and dolphin set `can_sink: false` with *no* float goal, so they hang
+   mid-water and never surface. Every land mob that bobs leaves `can_sink` at its default and
+   gets the bob from `behavior.float` instead. The undead pair `is_amphibious` with
+   `breathes_water`, so a lake is a road to a zombie. **Piglins have no float goal and drown.**
+
+| Navigation flag | Default | What it changes |
 |---|---|---|
-| Water | **7 blocks** | 1 block / **5 ticks** (4 b/s) |
-| Lava (Nether) | 7 blocks | 1 block / 10 ticks |
-| Lava (Overworld) | **3 blocks** | 1 block / 30 ticks |
+| `can_swim` | false | Path nodes may sit **inside** the water volume, in 3D |
+| `is_amphibious` | false | Nodes on the **seabed** are walkable |
+| `can_sink` | **true** | Gravity applies in water. False is neutral buoyancy, **not** lift |
+| `can_path_over_water` | false | The surface is a walkable floor |
+| `avoid_water` | false | **Pathing only.** Routes around water; does not refuse entry |
 
-**The spread algorithm.** For each block on the spreading list, **the block directly below is checked first**:
-
-1. **Air** → flowing fluid with depth 0 (it *inherits*, not increments). *This is why a fluid travels much further if it drops periodically.*
-2. Washable non-solid → may drop as an item, replaced with depth +1, and **the block above is removed from the spreading list**.
-3. **Solid** → flow spreads to all open sides. If all four neighbours are solid or sources, spreading stops.
-4. A source of the same fluid → flowing stops.
-
-**Horizontal direction choice — the weight search:**
-
-- Every candidate direction gets a weight **initialised to 1000**.
-- For each adjacent block it could flow into, the game looks for **a way down reachable in four or fewer blocks**.
-- When found, the weight becomes the **shortest path distance** to that drop.
-- The fluid spreads **only in the lowest-weight directions**.
-
-Consequence: from a source within 5 blocks of a cliff edge, the flow is **one block wide all the way to the edge**. Overworld lava can visibly turn toward drop-offs it cannot reach, because its search radius exceeds its flow distance.
-
-**Source formation.** A block becomes a water source when it has **≥2 adjacent water sources horizontally** and **the block below cannot be flowed into**. Bedrock also forms a source from two sources **diagonally above one another**, and creates a flowing block first, converting it **5 ticks later**. Gamerules: `waterSourceConversion` default **true**, `lavaSourceConversion` default **false**.
-
-**Mixing:** flowing lava touching water in any direction except downward → **cobblestone**. Lava flowing *into* water → **stone**. Water touching a lava **source** on top or sides → **obsidian**.
 
 ## 9.2 Gravity blocks
 
@@ -1188,6 +1239,8 @@ Hardness **−1** is a sentinel, not a small number.
 | Diamond / emerald | 1 gem | 3–7 |
 | Lapis | 4–9 | 2–5 |
 | Redstone | 4–5 | 1–5 |
+
+> **▶ Where we stand.** **All eight ores exist and drop by this table**, with the ranges flattened to their midpoints — copper 3, redstone 4, lapis 6, everything else 1 — because there is no randomness in `dropCountForBlock` and a fixed number is honest rather than pretending. **Tiers are one step lower than the reference's**: gold, redstone, diamond and emerald demand an iron pickaxe there and a stone one here, since we have only wood and stone. XP does not exist yet.
 
 ## 10.4 Experience
 
@@ -1468,6 +1521,8 @@ Modern placement uses **triangular** distributions — densest at a target Y, ta
 | Emerald | mountains only, −16..320 | 236 |
 
 **Large ore veins** for copper (y 0..50, granite filler) and iron (y −60..−8, tuff filler) generate as long branching spaghetti: **70% untouched filler, 30% is 10–30% ore plus 2% raw ore blocks.**
+
+> **▶ Where we stand.** **Eight ores generate**, from a table ordered **rarest first** so a common ore cannot overwrite a scarce one where their bands overlap. Two deliberate simplifications. Ours are **thresholded 3D noise** rather than triangular-distributed vein placement — same mechanism as the caves at a much higher frequency, which gives connected blobs for free where a per-cell roll would read as speckle. And the bands are **compressed onto our world**: y 0–96 with sea level 24 against the reference's −64–320 with sea level 63, so depths below sea level scale by about 0.17 and heights above it by 0.28. Each threshold comes from the reference's share of rock via `t = 1 − sqrt(share)`, which holds because one octave of value noise is near enough triangular. `worldgen/configured_feature/ore_*.json` in the reference dump carries the exact vein sizes and counts if this is ever worth doing properly.
 
 ## 15.3 Trees
 

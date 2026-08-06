@@ -22,6 +22,9 @@ struct OverlayStats {
     unsigned workerThreads = 0;
     int renderDistance = 0;
     const char* biome = "";
+    /// Seconds of breath left. The bubble bar arrives with player health at
+    /// M21; until then this is the only place the timer is visible.
+    float air = 0.0f;
 };
 
 /// Builds the diagnostics panel: a frame-time history graph plus labelled rows.

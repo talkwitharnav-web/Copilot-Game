@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <iterator>
+#include <utility>
 
 namespace game {
 namespace {
@@ -35,6 +36,9 @@ constexpr std::array<glm::ivec3, 6> kLightSteps{glm::ivec3{1, 0, 0},  glm::ivec3
 /// The four directions water spreads sideways.
 constexpr std::array<glm::ivec3, 4> kFlowSteps{glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0}, glm::ivec3{0, 0, 1},
                                                glm::ivec3{0, 0, -1}};
+
+/// One block every five ticks, which is the reference's water flow speed.
+constexpr std::chrono::milliseconds kFluidSpreadDelay{250};
 
 /// Everything a mesh job reads, allocated once and shared with the job.
 ///
@@ -371,20 +375,126 @@ void World::scheduleFluidUpdate(int x, int y, int z) {
     if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
         return;
     }
-    m_fluidUpdates.push_back({x, y, z});
+    m_fluidUpdates.push_back({{x, y, z}, std::chrono::steady_clock::now() + kFluidSpreadDelay});
+}
+
+namespace {
+
+/// How far the reference looks for a way down before giving up: four blocks.
+constexpr int kSlopeSearch = 4;
+
+/// What an unreachable drop scores. The reference's own sentinel.
+constexpr int kNoSlope = 1000;
+
+} // namespace
+
+bool World::fluidCanEnter(int x, int y, int z) const {
+    const BlockId here = blockAt(x, y, z);
+    // A plant does not dam a stream, it is swept away by it - so the search has
+    // to path straight through one, or a meadow full of grass turns every flow
+    // into a maze.
+    return here == BlockId::Air || isWater(here) || isWashedAway(here);
+}
+
+bool World::fluidCanDrainFrom(int x, int y, int z) const {
+    // Somewhere below that could *receive* water. Water already there does not
+    // count, and that is the whole point: once a hole has filled it stops being
+    // a hole, the weight search stops steering everything into it, and the flow
+    // spreads on past. Counting any water below as a drop dead-ended every
+    // stream at the first dip it found.
+    const BlockId below = blockAt(x, y - 1, z);
+    return below == BlockId::Air || isWashedAway(below);
+}
+
+bool World::fluidFeedsSideways(int x, int y, int z) const {
+    // Solid ground underfoot is what makes water pool. Anything that can still
+    // go down goes down instead - which is what keeps a waterfall one block
+    // wide - and a cell resting on more water is partway down a column, not the
+    // bottom of one. A source is the exception: it spreads across water, which
+    // is how a lake has a surface at all.
+    const BlockId below = blockAt(x, y - 1, z);
+    return game::isSolid(below) || (isWaterSource(blockAt(x, y, z)) && isWater(below));
+}
+
+int World::slopeDistance(int x, int z, int y, int fromDirection) const {
+    // Breadth-first, so the first hole found is genuinely the nearest. Depth is
+    // capped at four, which is the reference's `slopeFindDistance` and is what
+    // makes water seek a hole it can nearly reach and ignore one it cannot.
+    struct Node {
+        int x;
+        int z;
+        int depth;
+        int from;
+    };
+
+    std::array<Node, 4 * kSlopeSearch * kSlopeSearch + 4> queue{};
+    std::size_t head = 0;
+    std::size_t tail = 0;
+    queue[tail++] = {x, z, 1, fromDirection};
+
+    while (head < tail) {
+        const Node node = queue[head++];
+        if (!fluidCanEnter(node.x, y, node.z)) {
+            continue;
+        }
+        if (fluidCanDrainFrom(node.x, y, node.z)) {
+            return node.depth;
+        }
+        if (node.depth >= kSlopeSearch) {
+            continue;
+        }
+        for (std::size_t i = 0; i < kFlowSteps.size(); ++i) {
+            // Never turn straight back the way we came; the reference does the
+            // same, and without it the search wastes most of its budget
+            // re-examining the cell it just left.
+            if (static_cast<int>(i ^ 1u) == node.from) {
+                continue;
+            }
+            if (tail >= queue.size()) {
+                break;
+            }
+            queue[tail++] = {node.x + kFlowSteps[i].x, node.z + kFlowSteps[i].z, node.depth + 1,
+                             static_cast<int>(i)};
+        }
+    }
+    return kNoSlope;
+}
+
+bool World::fluidSpreadsToward(const glm::ivec3& from, std::size_t direction) const {
+    // Every direction starts at 1000 and is replaced by the distance to the
+    // nearest reachable drop. Water then runs **only** the lowest-scoring ways,
+    // which is what sends a stream one block wide at a cliff edge instead of
+    // fanning into a diamond. With no hole in range every direction ties at
+    // 1000, and a flat floor gets the even spread it should.
+    int best = kNoSlope;
+    std::array<int, 4> weights{};
+    for (std::size_t i = 0; i < kFlowSteps.size(); ++i) {
+        const glm::ivec3 step = from + kFlowSteps[i];
+        weights[i] = fluidCanEnter(step.x, step.y, step.z)
+                         ? slopeDistance(step.x, step.z, step.y, static_cast<int>(i))
+                         : kNoSlope;
+        best = std::min(best, weights[i]);
+    }
+    return weights[direction] == best;
 }
 
 void World::updateFluids(const BudgetCheck& budgetSpent) {
+    const auto now = std::chrono::steady_clock::now();
     while (!m_fluidUpdates.empty() && !budgetSpent()) {
-        const glm::ivec3 p = m_fluidUpdates.front();
+        // Every entry waits the same delay, so the queue is already in due
+        // order and the front one not being ready means none of them is.
+        if (m_fluidUpdates.front().due > now) {
+            break;
+        }
+        const glm::ivec3 p = m_fluidUpdates.front().position;
         m_fluidUpdates.pop_front();
 
         const BlockId current = blockAt(p.x, p.y, p.z);
-        // Only air and water are the fluid system's business. Testing for
-        // "not solid" was the same thing while every block was a full cube or
-        // water, but a plant is neither - and falling through here rewrites it
-        // to air, which silently deleted anything you placed.
-        if (current != BlockId::Air && !isWater(current)) {
+        // Only air, water and things a flow sweeps aside are the fluid system's
+        // business. Testing for "not solid" was the same thing while every block
+        // was a full cube or water, but a slab is neither - and falling through
+        // here rewrites it to air.
+        if (current != BlockId::Air && !isWater(current) && !isWashedAway(current)) {
             continue;
         }
         // Sources are the fixed points of the whole system. Without something
@@ -395,48 +505,80 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
 
         int supply = kMaxWaterLevel + 1;
         int adjacentSources = 0;
-
-        // Anything falling from above arrives nearly full, and falling beats
-        // spreading: water only runs sideways once it has nowhere to drop.
-        if (isWater(blockAt(p.x, p.y + 1, p.z))) {
-            supply = 1;
-        }
-
         for (const glm::ivec3& step : kFlowSteps) {
-            const glm::ivec3 n = p + step;
-            const BlockId neighbour = blockAt(n.x, n.y, n.z);
-            if (!isWater(neighbour)) {
-                continue;
-            }
-            if (isWaterSource(neighbour)) {
+            if (isWaterSource(blockAt(p.x + step.x, p.y, p.z + step.z))) {
                 ++adjacentSources;
             }
+        }
 
-            // That neighbour has somewhere to fall, so it drains downward
-            // instead of feeding us.
-            if (blockAt(n.x, n.y - 1, n.z) == BlockId::Air) {
-                continue;
-            }
+        // **The block above is answered before any neighbour**, because a cell
+        // fed from overhead is *falling*: full, and on its way down. Ours used
+        // to record it as merely "nearly full", which let a column poured off a
+        // tower fan out sideways at every level it passed.
+        const bool fedFromAbove = isWater(blockAt(p.x, p.y + 1, p.z));
 
-            const int level = waterLevel(neighbour);
-            if (level < kMaxWaterLevel) {
+        if (!fedFromAbove) {
+            for (std::size_t i = 0; i < kFlowSteps.size(); ++i) {
+                const glm::ivec3 n = p + kFlowSteps[i];
+                const BlockId neighbour = blockAt(n.x, n.y, n.z);
+                if (!isWater(neighbour)) {
+                    continue;
+                }
+
+                // **A neighbour that can still go down does not run sideways at
+                // all.** This one rule is what makes a waterfall a column: every
+                // cell in mid-air has somewhere to drop, so none of them feeds
+                // anything to the side, and only the cell that finally lands on
+                // solid ground has nowhere left to go and pools.
+                if (!fluidFeedsSideways(n.x, n.y, n.z)) {
+                    continue;
+                }
+
+                const int level = waterLevel(neighbour);
+                if (level >= kMaxWaterLevel) {
+                    continue;
+                }
+                // A cell that can itself drain is always worth flowing into -
+                // nothing can score better than a drop one step away - so the
+                // search is skipped rather than run to reach the same answer.
+                if (!fluidCanDrainFrom(p.x, p.y, p.z) && !fluidSpreadsToward(n, i ^ 1u)) {
+                    continue;
+                }
                 // Competing flows resolve to whichever supply is strongest.
                 supply = std::min(supply, level + 1);
             }
         }
 
         BlockId wanted = BlockId::Air;
-        if (adjacentSources >= 2 && game::isSolid(blockAt(p.x, p.y - 1, p.z))) {
-            // Two sources meeting over solid ground fill the gap permanently.
+        if (adjacentSources >= 2 &&
+            (game::isSolid(blockAt(p.x, p.y - 1, p.z)) || isWaterSource(blockAt(p.x, p.y - 1, p.z)))) {
+            // Two sources meeting over solid ground - or over another source -
+            // fill the gap permanently.
             wanted = BlockId::Water0;
+        } else if (fedFromAbove) {
+            wanted = BlockId::WaterFalling;
         } else if (supply <= kMaxWaterLevel) {
             wanted = waterAtLevel(supply);
         }
 
-        if (wanted != current) {
-            setBlock(p.x, p.y, p.z, wanted);
+        if (wanted == current) {
+            continue;
         }
+        // Water only *arrives* in a plant's cell; it never leaves air behind in
+        // one. Without this an update that decided on nothing would quietly mow
+        // the lawn.
+        if (isWashedAway(current)) {
+            if (wanted == BlockId::Air) {
+                continue;
+            }
+            m_washedBlocks.push_back({p, current});
+        }
+        setBlock(p.x, p.y, p.z, wanted);
     }
+}
+
+std::vector<World::WashedBlock> World::takeWashedBlocks() {
+    return std::exchange(m_washedBlocks, {});
 }
 
 void World::setVisibleRadius(int chunks) {
@@ -926,32 +1068,58 @@ bool World::isSettled() const {
            m_skyRemovals.empty() && m_blockRemovals.empty() && m_lightDirty.empty() && m_fluidUpdates.empty();
 }
 
-float World::initialLoadProgress() const {
-    const int span = 2 * m_loadRadius + 1;
-    const auto expected = static_cast<float>(span * span * kWorldHeightChunks);
-    if (expected <= 0.0f) {
-        return 1.0f;
+World::LoadStatus World::loadStatus() const {
+    LoadStatus status;
+
+    const int loadSpan = 2 * m_loadRadius + 1;
+    const auto wantedChunks = static_cast<float>(loadSpan * loadSpan * kWorldHeightChunks);
+    status.generated =
+        wantedChunks <= 0.0f ? 1.0f : std::min(1.0f, static_cast<float>(m_chunks.size()) / wantedChunks);
+
+    if (!m_hasCentre) {
+        return status;
     }
 
-    const float loaded = std::min(1.0f, static_cast<float>(m_chunks.size()) / expected);
-
-    std::size_t meshed = 0;
-    for (const auto& entry : m_chunks) {
-        if (entry.second.meshed) {
-            ++meshed;
+    // **Counted over the visible box, not over whatever happens to be loaded.**
+    // The old measure was meshed-over-loaded, which reads high from the very
+    // first frame - two chunks in with one meshed is "half drawn" - and could
+    // never reach 1 anyway, because the outer ring is loaded on purpose and
+    // never meshed.
+    std::size_t drawn = 0;
+    std::size_t wanted = 0;
+    for (int dz = -m_visibleRadius; dz <= m_visibleRadius; ++dz) {
+        for (int dx = -m_visibleRadius; dx <= m_visibleRadius; ++dx) {
+            for (int cy = 0; cy < kWorldHeightChunks; ++cy) {
+                ++wanted;
+                const auto it = m_chunks.find(ChunkCoord{m_centre.x + dx, cy, m_centre.z + dz});
+                if (it != m_chunks.end() && it->second.meshed) {
+                    ++drawn;
+                }
+            }
         }
     }
-    const float meshedFraction =
-        m_chunks.empty() ? 0.0f : static_cast<float>(meshed) / static_cast<float>(m_chunks.size());
 
-    // Generation is most of the work but meshing is what you can actually see,
-    // so the bar splits between them rather than hitting 100% while the world is
-    // still invisible.
-    const float reported = 0.6f * loaded + 0.4f * loaded * meshedFraction;
+    status.drawn = wanted == 0 ? 1.0f : static_cast<float>(drawn) / static_cast<float>(wanted);
+    status.settled = isSettled();
+    // Every chunk you could see is built and uploaded, every chunk the streamer
+    // asked for exists, and every queue behind them is empty. Anything weaker
+    // and the world carries on assembling after the bar has gone.
+    status.complete = status.generated >= 1.0f && drawn == wanted && status.settled;
+    return status;
+}
 
-    // Held short of full until everything has drained, light included, so the
-    // bar cannot finish ahead of the world.
-    return (loaded >= 1.0f && isSettled()) ? 1.0f : std::min(reported, 0.99f);
+float World::initialLoadProgress() const {
+    const LoadStatus status = loadStatus();
+
+    // Two weighted checkpoints rather than one number that guesses. Meshing gets
+    // the larger share because it is the half you can actually see; the last
+    // sliver is the drain, which is quick and would otherwise let the bar sit at
+    // 100% while light and water finish behind it.
+    constexpr float kGeneratedShare = 0.40f;
+    constexpr float kDrawnShare = 0.59f;
+    const float reported = kGeneratedShare * status.generated + kDrawnShare * status.drawn;
+
+    return status.complete ? 1.0f : std::min(reported, 0.99f);
 }
 
 std::vector<ChunkMeshUpdate> World::loadImmediately(const glm::vec3& position) {

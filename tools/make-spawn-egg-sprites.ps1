@@ -32,7 +32,13 @@ $eggs = @(
     "ocelot", "polar_bear", "panda", "slime", "slime", "slime", "spider",
     "cave_spider", "zombie", "skeleton", "villager", "husk", "silverfish",
     "wither_skeleton", "stray", "bogged", "zombie_villager", "witch",
-    "wandering_trader", "piglin"
+    "wandering_trader", "piglin", "drowned", "cod", "salmon", "pufferfish",
+    "squid", "glow_squid", "turtle", "dolphin", "axolotl", "tropical_fish",
+    # Tier 1. The three magma cubes share one reference egg for the same reason
+    # the slimes do.
+    "mooshroom", "skeleton_horse", "zombie_horse", "trader_llama",
+    "piglin_brute", "zombified_piglin", "endermite",
+    "magma_cube", "magma_cube", "magma_cube"
 )
 
 $resolvedOutputs = foreach ($candidate in $OutputPath) {

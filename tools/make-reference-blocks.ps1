@@ -86,7 +86,56 @@ $sources = @(
     @{ Name = 'stone_shovel.png';          Path = 'item\stone_shovel' }
     @{ Name = 'stone_sword.png';           Path = 'item\stone_sword' }
     @{ Name = 'stone_hoe.png';             Path = 'item\stone_hoe' }
+    @{ Name = 'andesite.png';              Path = 'block\andesite' }
+    @{ Name = 'diorite.png';               Path = 'block\diorite' }
+    @{ Name = 'granite.png';               Path = 'block\granite' }
+    @{ Name = 'smooth_stone.png';          Path = 'block\smooth_stone' }
+    @{ Name = 'stone_bricks.png';          Path = 'block\stone_bricks' }
+    @{ Name = 'mossy_cobblestone.png';     Path = 'block\mossy_cobblestone' }
+    @{ Name = 'obsidian.png';              Path = 'block\obsidian' }
+    @{ Name = 'clay.png';                  Path = 'block\clay' }
+    @{ Name = 'sandstone_top.png';         Path = 'block\sandstone_top' }
+    @{ Name = 'sandstone_side.png';        Path = 'block\sandstone' }
+    @{ Name = 'sandstone_bottom.png';      Path = 'block\sandstone_bottom' }
+    @{ Name = 'bookshelf.png';             Path = 'block\bookshelf' }
+    @{ Name = 'glass.png';                 Path = 'block\glass' }
+    @{ Name = 'dandelion.png';             Path = 'block\dandelion' }
+    @{ Name = 'poppy.png';                 Path = 'block\poppy' }
+    @{ Name = 'dead_bush.png';             Path = 'block\dead_bush' }
+    @{ Name = 'coal_ore.png';              Path = 'block\coal_ore' }
+    @{ Name = 'iron_ore.png';              Path = 'block\iron_ore' }
+    @{ Name = 'copper_ore.png';            Path = 'block\copper_ore' }
+    @{ Name = 'gold_ore.png';              Path = 'block\gold_ore' }
+    @{ Name = 'redstone_ore.png';          Path = 'block\redstone_ore' }
+    @{ Name = 'lapis_ore.png';             Path = 'block\lapis_ore' }
+    @{ Name = 'diamond_ore.png';           Path = 'block\diamond_ore' }
+    @{ Name = 'emerald_ore.png';           Path = 'block\emerald_ore' }
+    @{ Name = 'deepslate_side.png';        Path = 'block\deepslate' }
+    @{ Name = 'deepslate_top.png';         Path = 'block\deepslate_top' }
+    @{ Name = 'bedrock.png';               Path = 'block\bedrock' }
+    @{ Name = 'terracotta.png';            Path = 'block\terracotta' }
+    @{ Name = 'packed_ice.png';            Path = 'block\packed_ice' }
+    @{ Name = 'coal.png';                  Path = 'item\coal' }
+    @{ Name = 'raw_iron.png';              Path = 'item\raw_iron' }
+    @{ Name = 'iron_ingot.png';            Path = 'item\iron_ingot' }
+    @{ Name = 'raw_gold.png';              Path = 'item\raw_gold' }
+    @{ Name = 'gold_ingot.png';            Path = 'item\gold_ingot' }
+    @{ Name = 'raw_copper.png';            Path = 'item\raw_copper' }
+    @{ Name = 'copper_ingot.png';          Path = 'item\copper_ingot' }
+    @{ Name = 'diamond.png';               Path = 'item\diamond' }
+    @{ Name = 'emerald.png';               Path = 'item\emerald' }
+    @{ Name = 'lapis_lazuli.png';          Path = 'item\lapis_lazuli' }
+    @{ Name = 'redstone.png';              Path = 'item\redstone' }
+    @{ Name = 'bucket.png';                Path = 'item\bucket' }
+    @{ Name = 'water_bucket.png';          Path = 'item\water_bucket' }
 )
+
+# The water surface is a thirty-two frame strip and the game plays all of it, so
+# every frame is staged as its own layer. `water.png` above stays as frame 0 for
+# anything that wants a single still image.
+$sources += 0..31 | ForEach-Object {
+    @{ Name = ('water{0:d2}.png' -f $_); Path = 'block\water_still'; Tint = $waterTint; Frame = $_ }
+}
 
 $size = 16
 

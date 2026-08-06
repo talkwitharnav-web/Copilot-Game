@@ -2,6 +2,8 @@
 
 #include "world/Biome.hpp"
 #include "world/Block.hpp"
+#include "world/Fluid.hpp"
+#include "world/Pathfinder.hpp"
 #include "item/Item.hpp"
 
 #include <engine/render/MeshData.hpp>
@@ -23,7 +25,7 @@ class World;
 /// `tools/make-creature-skins.ps1` owns the file; this is the one place the
 /// number is written down in code, and `Main.cpp` checks the PNG against it.
 constexpr int kCreatureSheetWidth = 128;
-constexpr int kCreatureSheetHeight = 1888;
+constexpr int kCreatureSheetHeight = 3552;
 
 /// Which animal this is.
 enum class CreatureKind : std::uint8_t {
@@ -69,6 +71,46 @@ enum class CreatureKind : std::uint8_t {
     /// Our name for the reference's gilded swine-folk. *Piglin* is coined and
     /// needs ours; the user named this one and its larger cousin.
     Princepin,
+    /// The first three that belong in water. The drowned walks the seabed on
+    /// the zombie's rig; the two fish are the first things here that swim, and
+    /// they are the reason a second movement model exists at all.
+    Drowned,
+    Cod,
+    Salmon,
+    /// The pufferfish inflates in three stages and the squid is the first thing
+    /// here built from a ring of limbs rather than a spine and legs.
+    Pufferfish,
+    Squid,
+    GlowSquid,
+    /// The amphibious three and the one that comes in a dozen liveries. All
+    /// four swim, and unlike the fish the first three can walk out of it.
+    Turtle,
+    Dolphin,
+    Axolotl,
+    TropicalFish,
+    /// Six that share a rig with something already here, which is what makes
+    /// them a table row and a skin rather than a model. Confirmed against
+    /// `Mojang/bedrock-samples`' own `<mob>.entity.json`, which names the
+    /// geometry outright - a whole-sheet alpha diff calls the skeleton horse a
+    /// different model, and it is not: those are holes in the artwork.
+    MushroomCow,
+    SkeletonHorse,
+    ZombieHorse,
+    TraderLlama,
+    /// Our names. *Piglin* is coined and already answers to Princepin here, so
+    /// its two cousins join the same family; *brute* and *zombie* are ordinary
+    /// English and stay.
+    PrincepinBrute,
+    ZombiePrincepin,
+    /// Our name for the reference's tiny end-vermin. *Endermite* is coined;
+    /// *void* and *mite* are both ordinary words.
+    Voidmite,
+    /// Not a scaled slime, which is the obvious guess and wrong: the reference
+    /// builds it from **eight stacked slabs** around a glowing core, and pulls
+    /// them apart as it hops. Three sizes, splitting like the slime.
+    MagmaCubeSmall,
+    MagmaCubeMedium,
+    MagmaCubeLarge,
     Count,
 };
 
@@ -229,9 +271,181 @@ struct CreatureSpecies {
     /// Applies to chicks exactly as it does to adults - `scale` never enters
     /// into it, which is the reference's behaviour too.
     float fallDrag = 1.0f;
+
+    // --- Water. Bedrock keeps these on two different components and they mean
+    // --- genuinely different things, so they are four flags rather than one
+    // --- "aquatic" bit. `RESEARCH.md` §9.1 has the shipped values.
+
+    /// Bedrock's `minecraft:behavior.float`, which almost every land animal
+    /// carries: while its head is under, it swims up. **This is what makes a
+    /// cow bob at the surface, and it is a behaviour rather than buoyancy** -
+    /// nothing pushes it, it swims. Turning it off is how the reference lets
+    /// the undead walk the seabed, and how the Princepin drowns.
+    bool floats = true;
+
+    /// Bedrock's `can_sink`. False is neutral buoyancy: it holds whatever depth
+    /// it is at instead of settling. Only the frog on this roster.
+    bool sinks = true;
+
+    /// Bedrock's `is_amphibious`: it walks on the bottom rather than swimming.
+    /// Paired with `floats = false` on every mob that has it, which is what
+    /// makes a drowned horde cross a lake along the floor.
+    bool amphibious = false;
+
+    /// Never runs out of air. Bedrock's `breathable.breathes_water`, and the
+    /// list is exactly the undead plus the frog.
+    bool breathesWater = false;
+
+    /// Bedrock's `avoid_water`, which is a **pathing** preference and nothing
+    /// more: it routes around water when it can, and is perfectly capable of
+    /// being knocked into it. Most farm animals have it; a chicken, a wolf, a
+    /// llama and a polar bear do not.
+    bool avoidsWater = false;
+
+    /// Lives in water and moves in three dimensions there. Bedrock spreads this
+    /// across `physics.has_gravity: false`, `navigation.can_swim` and
+    /// `can_walk: false`; one flag covers all three here because nothing on
+    /// this roster wants them apart. **It is not `amphibious`** - that is a
+    /// walker that copes underwater, and this is something that cannot walk.
+    bool swims = false;
+
+    /// Bedrock's `breathable.breathes_air`. False is a fish: out of water it
+    /// runs the same fifteen-second supply down and then suffocates, which is
+    /// the exact mirror of what drowning does to everything else.
+    bool breathesAir = true;
+
+    /// Wants a water cell to spawn in. Separate from `swims` because the
+    /// drowned needs both water *and* solid ground under it - it walks the
+    /// bottom rather than swimming over it.
+    bool spawnsInWater = false;
+
+    /// Highest cell it will spawn in, or 0 for no ceiling. Bedrock's
+    /// `height_filter`, which is how the reference expresses depth: its ocean
+    /// fish take 0-64 against a sea level of 63 - anywhere at or below the
+    /// surface - while a glow squid takes -64 to 30, thirty-three blocks down.
+    /// Ours is a quarter the height of theirs, so a depth below sea level
+    /// converts at the same 0.19 the ore bands use.
+    int maxSpawnY = 0;
+
+    /// How many of this species may be loaded at once, or 0 for no limit.
+    /// Bedrock's `density_limit`, and it is per species rather than global -
+    /// which is what keeps a shoal of cod from crowding out every squid in the
+    /// sea when both want the same water.
+    int maxLoaded = 0;
+
+    /// Inflates when something gets close. Three stages, and they are three
+    /// separate models rather than one model scaled, so this drives geometry
+    /// rather than a size. **The collision box does not grow with it** - one
+    /// species has one shape here, and a per-stage row is a change to the shape
+    /// table rather than to this row.
+    bool puffs = false;
+
+    /// Lit by itself rather than by the world. We have no emissive materials
+    /// until the renderer is rebuilt, so this simply feeds the skin full light
+    /// instead of the cell's - which is most of what one looks like in a dark
+    /// ocean, and costs nothing.
+    bool glows = false;
+
+    /// Moves by pulsing rather than by swimming steadily. **A squid has no
+    /// legs and does not walk**: its tentacles flare wide, snap shut, and the
+    /// snap is what pushes it. So its speed is not a constant to be steered -
+    /// it surges on the close and coasts in between, and the animation and the
+    /// movement are the same number rather than two that have to be kept in
+    /// step.
+    bool jets = false;
+
+    /// Whether it can get about on land at all. **A swimmer is not necessarily
+    /// a fish**: Bedrock's turtle, axolotl and dolphin all set `can_swim` *and*
+    /// `can_walk`, so they move in three dimensions in the water and walk out
+    /// of it. A cod sets `can_walk: false` and can only flop.
+    bool walksOnLand = true;
+
+    /// Seconds out of water before it starts taking damage, or 0 for never.
+    /// Bedrock's `drying_out_timer`, and it is **not** the breath counter: a
+    /// dolphin drowns if it is held under *and* dries out if it is kept out,
+    /// which are two timers running in opposite directions.
+    float dryOutSeconds = 0.0f;
+
+    /// How many skins this species has, each one a full net on its own rows of
+    /// the sheet. One means the single skin at `skinRow`. Bedrock's
+    /// `minecraft:variant`, which is how it gets five axolotls and a whole reef
+    /// of tropical fish out of one model.
+    int variantCount = 1;
+
+    // --- Aggression. Bedrock's `nearest_attackable_target` and
+    // --- `minecraft:angry`, cut down to the fields that mean anything while
+    // --- the player is still the only thing worth attacking.
+
+    /// Whether noticing the player needs a clear line of sight. Bedrock's
+    /// `must_see`, and **every hostile in the shipped data sets it** - which is
+    /// the whole reason a wall is a defence. It defaults to `false` there and
+    /// to `true` here, because the one species that genuinely leaves it off is
+    /// easier to name than the thirty-five that do not: the silverfish comes at
+    /// you through stone.
+    bool mustSee = true;
+
+    /// How long it keeps coming after losing sight of you. Bedrock's
+    /// `must_see_forget_duration`, whose default is three seconds. The zombie
+    /// is the one that overrides it, at **seventeen** - which is why ducking
+    /// round a corner shakes off a skeleton and does nothing at all about a
+    /// zombie.
+    float forgetSeconds = 3.0f;
+
+    /// How far it will follow something it already has, or zero to use
+    /// `senseRange`. Bedrock's `within_radius` / `follow_range`, and it is
+    /// **not always wider than the range it notices you at**: a zombie spots
+    /// you at 35 m and gives up at 25.
+    float leashRange = 0.0f;
+
+    /// How long being struck - or noticing you in the dark - keeps mattering.
+    /// Bedrock's `minecraft:angry.duration`, and the spread is enormous and
+    /// entirely deliberate: a llama sulks for four seconds, a wolf for
+    /// twenty-five, a polar bear for five hundred, a silverfish forever. Ours
+    /// was a flat six for every animal on the roster.
+    float angerSeconds = 6.0f;
+
+    /// How far striking one rouses its own kind, or zero for none.
+    ///
+    /// The reference does this through `minecraft:angry.broadcast_anger` rather
+    /// than `hurt_by_target.alert_same_type`, which is off on everything except
+    /// the silverfish - and **the undead do not do it at all**, so a horde has
+    /// to be walked into rather than summoned by hitting one of them.
+    ///
+    /// The passive rows are ours rather than the reference's, which gives farm
+    /// animals no alerting whatsoever. A herd that scatters together is worth
+    /// keeping.
+    float alertRange = 0.0f;
+
+    /// Bedrock's `melee_box_attack.speed_multiplier`: how much quicker it moves
+    /// while closing on something than while going anywhere else. The skeleton
+    /// family and the Bramble sprint the last stretch; a zombie does not.
+    float chaseSpeedScale = 1.0f;
+    /// And `panic.speed_multiplier`. Expressed against the roster rather than
+    /// against the reference's own stroll speed, so only the rows that
+    /// genuinely stand out move - a fleeing villager is slower than it walks,
+    /// a rabbit is far faster.
+    float panicSpeedScale = 1.0f;
+
+    /// Whether a blow from this species swings its arms.
+    ///
+    /// **It is not simply "has arms", and that is the whole point of the
+    /// field.** The skeleton family are archers - the reference gives them
+    /// `ranged_attack` at priority 0 and only drops them to melee when they
+    /// have no bow - so miming a sword swing tells the player exactly the wrong
+    /// thing about what they are. They still deal contact damage here, because
+    /// we have no arrows yet and a harmless skeleton is worse than an
+    /// unconvincing one, but they do not wind up to it.
+    ///
+    /// Defaults false, which is safe: most of the roster has no arms at all, so
+    /// the rows that want this are the handful that opt in rather than the
+    /// majority that would have to remember to opt out.
+    bool swingsArms = false;
 };
 
 const CreatureSpecies& speciesInfo(CreatureKind kind);
+
+static_assert(kSpawnEggItems == static_cast<int>(CreatureKind::Count),
+              "the two spawn egg runs together must cover every species");
 
 /// The egg that produces this species, and the species an egg produces. The two
 /// runs are deliberately the same order, so this is arithmetic rather than a
@@ -294,6 +508,35 @@ struct Creature {
     float yaw = 0.0f;
     float targetYaw = 0.0f;
 
+    /// How far the **body** is tipped nose-down, and where it wants to be.
+    /// Only a swimmer uses these: a walker's body is level by definition, and
+    /// its head tips on its own pair below. Positive is nose-down, matching
+    /// every other pitch here.
+    float pitch = 0.0f;
+    float targetPitch = 0.0f;
+
+    /// How inflated a pufferfish is, from 0 to 2. A float rather than the
+    /// reference's three component groups, because the stages are separated by
+    /// timers either way and one number carries both the stage and how far
+    /// through it this individual is.
+    float puff = 0.0f;
+
+    /// Where a jetting creature is in its pulse, from 0 to two pi, and how much
+    /// push it still has from the last one. Only `jets` species use them. The
+    /// phase is seeded at random on the first tick so a group does not pulse in
+    /// unison, which is the one thing that would make eight squid read as one
+    /// machine.
+    float jetPhase = 0.0f;
+    float jetPower = 0.0f;
+
+    /// How far a jetting creature's body is tipped away from hanging upright,
+    /// in radians, eased. **Derived from where it is actually moving, not from
+    /// where it wants to go**: a squid hangs vertically when still and lies
+    /// right over when swimming flat out, so the bell leads and the tentacles
+    /// trail. Zero is upright, a right angle is horizontal, and a half turn is
+    /// diving straight down.
+    float bodyTilt = 0.0f;
+
     /// Where the **head** points, which is deliberately not where the body
     /// walks. Two separate controllers means a behaviour can claim one without
     /// the other, and this pair is what that buys: a creature that ambles one
@@ -325,10 +568,50 @@ struct Creature {
     /// because the same animal flees faster than it chases.
     float speedScale = 1.0f;
 
+    /// The route it is walking, and the place that route was built to reach.
+    ///
+    /// **This is a plan, where `targetYaw` is an instinct.** The steering fan
+    /// looks 0.9 m ahead and takes the first heading that is not blocked, which
+    /// can never choose to go *away* from where it wants in order to get round
+    /// something - so a wall longer than it can see is hugged rather than
+    /// rounded, and a dead end is oscillated in. A route is searched before a
+    /// step is taken, so it can commit to the detour.
+    path::Route route;
+    glm::vec3 routeGoal{0.0f};
+    /// Counts down to the next search. The reference recomputes a chase path
+    /// every four to ten ticks rather than every tick, and paying for that
+    /// across a whole population is the only expensive part of pathfinding.
+    float repathTimer = 0.0f;
+    /// Where it stood when progress was last checked, and how long it has made
+    /// none. The reference stops a path whose mob is not advancing; without
+    /// that, a route asking for something the legs cannot actually manage is
+    /// walked into forever.
+    glm::vec3 progressFrom{0.0f};
+    float progressTimer = 0.0f;
+    /// Where an ambling creature has decided to go. A **place** rather than a
+    /// bearing, because a bearing is not something that can be pathed to.
+    glm::vec3 wanderGoal{0.0f};
+
     /// How long it still believes it can see the player. Refreshed whenever the
     /// ray gets through and counted down otherwise, so a fence post clipped for
     /// one frame does not reverse a countdown.
     float sightTimer = 0.0f;
+
+    /// Counts down to the next attempt at noticing something.
+    ///
+    /// Bedrock scans on a `scan_interval` of ten ticks rather than every tick,
+    /// and copying that does two separate jobs. It stops a target flickering on
+    /// and off frame by frame at the exact edge of the sense range, which is
+    /// what the old distance hysteresis was standing in for. And it pays for
+    /// the line-of-sight ray twice a second instead of a hundred and twenty
+    /// times, which is what makes sight affordable for the whole roster rather
+    /// than only for the exploders.
+    float scanTimer = 0.0f;
+    /// How long it still remembers something it can no longer see. Bedrock's
+    /// `must_see_forget_duration`, refreshed for as long as the ray gets
+    /// through - so a creature that has you does not lose you the instant a
+    /// tree passes between the two of you.
+    float forgetTimer = 0.0f;
 
     /// How far it has dropped since it last stood on something. Only the
     /// exploders read it - a hard landing shortens their fuse - but fall damage
@@ -395,17 +678,45 @@ struct Creature {
     /// and physics, targeting and reach all want the truth.
     float stepSmooth = 0.0f;
 
-    bool onGround = false;
+    /// Any part of the body is in water, which is what switches its whole
+    /// movement model over - the same test the reference uses.
+    bool inWater = false;
+
+    /// Seconds of breath left. Counts down only while the head is under, and
+    /// refills over `fluid::kInhaleSeconds` once it is out.
+    float air = fluid::kAirSeconds;
+
+    /// Time since the air ran out, so drowning lands two health points on the
+    /// second rather than once a frame.
+    float drownTimer = 0.0f;
+
+    /// Standing until something says otherwise. `step` recomputes it every tick
+    /// before anything reads it, so the default only matters for a creature
+    /// that has never ticked - which is exactly the frozen showcase, where
+    /// *standing* is the pose worth reviewing.
+    bool onGround = true;
     int health = 6;
     /// Brief flash after being struck.
     float hurtTimer = 0.0f;
     /// Stops a hostile landing a blow every frame it is touching you.
     float attackTimer = 0.0f;
+    /// Time left in the arm swing of a blow that has just landed. Far shorter
+    /// than `attackTimer`, because the arm is moving for well under a third of
+    /// the cycle and rests visibly in between.
+    float swingTimer = 0.0f;
 
     /// This individual's size against its species. One for an adult; a baby is
     /// smaller, and it multiplies the collision box as well as the model, so a
     /// calf fits through gaps its mother cannot.
     float scale = 1.0f;
+
+    /// Which of its species' skins this one wears, below `variantCount`. Rolled
+    /// at spawn. **Not saved yet** - a reloaded fish comes back in a different
+    /// livery, which is cosmetic and waits on a save-format version bump.
+    std::uint8_t variant = 0;
+
+    /// How long it has been out of water, for anything with `dryOutSeconds`.
+    float dryTimer = 0.0f;
 
     /// Struck by lightning, in the reference. **Doubles the blast power and
     /// nothing else** - a charged creeper has the same twenty health as any
@@ -478,12 +789,20 @@ public:
     /// "why is nothing spawning here" without attaching a debugger.
     std::array<std::size_t, static_cast<std::size_t>(CreatureKind::Count)> census() const;
 
-    /// Placed only where one could stand, so a spawn never lands inside rock.
-    static bool canStandAt(const World& world, const CreatureSpecies& species, int x, int y, int z);
+    /// Placed only where this species could actually live: on ground for a
+    /// walker, in water for a swimmer, and on the seabed *under* water for the
+    /// drowned. One test rather than three call sites deciding for themselves.
+    static bool canSpawnAt(const World& world, const CreatureSpecies& species, int x, int y, int z);
+
+    /// Rolls which skin an individual wears, or 0 for a species with only one.
+    std::uint8_t rollVariant(CreatureKind kind);
 
     /// Places one creature outright, ignoring biome, light and the population
-    /// cap. Only the showcase setting and the debug spawn key use this.
-    void place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged = false);
+    /// cap. Only the showcase setting and the debug spawn key use this. `puff`
+    /// is for the showcase alone: the roster is frozen there, so a pufferfish
+    /// can never inflate itself and has to be handed a stage.
+    void place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged = false,
+               float puff = 0.0f);
 
     /// Every creature currently loaded, for the caller to write to disk. The
     /// store owns what a save record contains; this only hands over the live
@@ -502,7 +821,7 @@ private:
     void step(const World& world, Creature& creature, float deltaSeconds);
     /// Pushes overlapping creatures apart horizontally. Soft, so it never
     /// fights the world collision that runs before it.
-    void separate(float deltaSeconds);
+    void separate(const World& world, float deltaSeconds);
     /// Rouses the struck creature's own kind nearby: fighters join in, prey
     /// bolts with it. The reference's `alert_same_type`, and the same mechanism
     /// serves pack anger and herd flight.
@@ -522,6 +841,14 @@ private:
     std::unordered_set<std::uint64_t> m_populated;
     std::uint32_t m_random;
     float m_spawnTimer = 0.0f;
+
+    /// The one route planner, shared by the whole population so that repeated
+    /// searches reuse its buffers instead of allocating.
+    path::Pathfinder m_pathfinder;
+    /// How many searches are left this frame. One animal boxed into a maze must
+    /// not be able to cost a frame on its own, so the population shares a
+    /// budget exactly as light propagation and water flow already do.
+    int m_pathBudget = 0;
 };
 
 } // namespace game

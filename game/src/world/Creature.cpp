@@ -15,6 +15,7 @@ namespace game {
 namespace {
 
 constexpr float kTwoPi = 6.2831853f;
+constexpr float kPi = 3.14159265f;
 
 constexpr float kGravity = 26.0f;
 constexpr float kTerminalVelocity = 60.0f;
@@ -26,15 +27,23 @@ constexpr float kMaxDropHeight = 3.0f;
 /// How far a creature may be from the player before it is retired, and the ring
 /// it is allowed to appear in. The near edge keeps them from popping into view.
 constexpr float kDespawnDistance = 90.0f;
-constexpr float kSpawnNear = 12.0f;
-constexpr float kSpawnFar = 30.0f;
+/// The reference's spawn shell, 24 to 44 blocks at its lowest simulation
+/// distance. Ours was 12 to 30, which is close enough to watch one appear.
+constexpr float kSpawnNear = 24.0f;
+constexpr float kSpawnFar = 44.0f;
 constexpr std::size_t kMaxCreatures = 14;
 constexpr float kSpawnInterval = 2.5f;
 
-/// A struck creature is shoved back and flashes for this long, and runs for
-/// rather longer.
+/// How far up a body buried in terrain will climb to free itself, and in what
+/// steps. Upward only: it is the direction that works for something covered
+/// over, and a sideways nudge would just as often find another block.
+constexpr float kUnstickReach = 2.0f;
+constexpr float kUnstickStep = 0.25f;
+
+/// A struck creature is shoved back and flashes for this long. How long it
+/// stays roused afterwards is `CreatureSpecies::angerSeconds`, which used to be
+/// a flat six seconds here for every animal in the world.
 constexpr float kHurtSeconds = 0.35f;
-constexpr float kFleeSeconds = 6.0f;
 /// The shove a player's blow carries.
 constexpr float kStrikeKnockback = 5.0f;
 constexpr float kStrikeLift = 4.0f;
@@ -92,6 +101,42 @@ constexpr float kPrincepinSkin = 1792.0f;
 /// cutout test. Drawn as a second, larger shell exactly the way the sheep's
 /// fleece is.
 constexpr float kChargeSkin = 1856.0f;
+constexpr float kDrownedSkin = 1888.0f;
+/// The drowned's clothing, on the same net as the body underneath it - the
+/// reference's `drowned_outer_layer`. An alpha-tested cutout like every other
+/// skin here, so it needs no new rendering path: the same rig is drawn twice,
+/// the second pass a fraction of a texel larger.
+constexpr float kDrownedOuterSkin = 1952.0f;
+constexpr float kCodSkin = 2016.0f;
+constexpr float kSalmonSkin = 2048.0f;
+constexpr float kPufferfishSkin = 2080.0f;
+constexpr float kSquidSkin = 2112.0f;
+constexpr float kGlowSquidSkin = 2144.0f;
+constexpr float kTurtleSkin = 2176.0f;
+constexpr float kDolphinSkin = 2240.0f;
+/// Five liveries at 64 rows each, chosen per individual.
+constexpr float kAxolotlSkin = 2304.0f;
+constexpr float kAxolotlVariantRows = 64.0f;
+/// Two body shapes, each followed by its six pattern overlays. **The pattern is
+/// a second alpha-cutout shell over the body**, exactly as the drowned's
+/// clothing and the sheep's fleece are - which is what buys a reef's worth of
+/// fish from fourteen skins instead of authoring every combination.
+constexpr float kTropicalASkin = 2624.0f;
+constexpr float kTropicalBSkin = 2848.0f;
+/// The Tier 1 batch. Each of the first four shares its whole rig with a species
+/// already here and differs only in which rows of the sheet it reads.
+constexpr float kMushroomCowSkin = 3072.0f;
+constexpr float kMagmaCubeSkin = 3136.0f;
+constexpr float kSkeletonHorseSkin = 3200.0f;
+constexpr float kZombieHorseSkin = 3264.0f;
+/// Not a species: the trader llama's pack, on the same net as the llama under
+/// it, drawn as a second cutout shell. The sheep's fleece arrangement.
+constexpr float kTraderLlamaDecorSkin = 3328.0f;
+constexpr float kVoidmiteSkin = 3392.0f;
+constexpr float kPrincepinBruteSkin = 3424.0f;
+constexpr float kZombiePrincepinSkin = 3488.0f;
+constexpr float kTropicalRows = 32.0f;
+constexpr int kTropicalPatterns = 6;
 constexpr float kSkinTextureLayer = -3.0f;
 /// Same sheet, but the fragment shader tints it red. A struck creature has to
 /// signal somehow and every vertex colour channel already carries something.
@@ -103,9 +148,56 @@ constexpr float kSkinFlashLayer = -5.0f;
 /// One texel is 1/16 of a block, matching the block textures.
 constexpr float kTexel = 1.0f / 16.0f;
 
-/// How close a hostile must be to land a blow, and how long before the next.
-constexpr float kAttackReach = 1.5f;
+/// Half the thickness given to a fin the reference authors with none at all.
+/// A box of zero extent puts its two large faces on exactly one plane, and
+/// every creature quad here is double-sided, so they would fight for every
+/// pixel. About a fifth of a texel: invisible, and twenty times the depth
+/// precision at normal viewing range.
+constexpr float kFinHalfThickness = 0.012f;
+
+/// How far past its own body a blow lands, and how long before the next.
+///
+/// Bedrock's `melee_box_attack.horizontal_reach`: the mob's own box grown by
+/// this much on the horizontal axes, which the target has to overlap. It is
+/// **not** a flat distance, and using one gave a silverfish a polar bear's
+/// reach and a polar bear a silverfish's. The two older components pick reach
+/// differently again - `melee_attack` multiplies body size by 2 and
+/// `delayed_attack` by 1.5 - but every modern mob in the reference uses the box
+/// form, so that is the one to copy.
+constexpr float kMeleeHorizontalReach = 0.8f;
 constexpr float kAttackInterval = 1.0f;
+/// How long one swing of the arm takes, against that one-second gap between
+/// blows. Six ticks, the reference's own swing duration - so a mob strikes,
+/// recovers, and stands there for most of a second before doing it again.
+constexpr float kAttackSwingSeconds = 0.3f;
+
+/// What a hopper does when it arrives on you. **Ours, not the reference's** -
+/// Bedrock makes a slime `pushable` and lets entity collision separate the two,
+/// and we have no push between a creature and the player at all.
+///
+/// So the player's body is treated as a wall instead: the part of the slime's
+/// velocity heading into you is sent back out at `kReboundRestitution` of its
+/// speed, and it is lifted clear of the ground so the recoil is a real hop
+/// rather than something the next tick flattens. It lands, gathers, and comes
+/// again, which is the cycle a slime is supposed to have.
+constexpr float kReboundRestitution = 0.6f;
+constexpr float kReboundLift = 0.6f;
+
+/// How much the gap between hops closes once a slime has something to chase.
+/// Bedrock swaps `movement.jump.jump_delay` from 0.5-1.5 s to 0.16-0.5 when it
+/// turns aggressive, so roughly a third of the wait.
+constexpr float kChaseHopGather = 0.33f;
+/// `melee_fov`, halved because the test is against a bearing rather than a
+/// cone. Ninety degrees means a creature has to be turned toward you to land a
+/// blow, so walking round one buys the moment it takes to come about.
+constexpr float kMeleeHalfFov = 0.7853982f;
+
+/// Bedrock's `scan_interval`: ten ticks between attempts at noticing something,
+/// rather than one. The docs say plainly that anything under ten hurts
+/// performance, and it buys two things beyond the cost - a target that cannot
+/// flicker on and off frame by frame at the exact edge of the sense range, and
+/// a line-of-sight ray paid for twice a second instead of at the frame rate.
+constexpr float kTargetScanSeconds = 0.5f;
 
 /// Bedrock's `look_at_player`: notices you within 8 m, rolls **0.02 per tick**
 /// and holds the glance for two to four seconds.
@@ -202,18 +294,104 @@ constexpr float kSteerFanStep = 0.42f;
 /// is already up against, and launching a metre early clears nothing.
 constexpr float kJumpProbe = 0.45f;
 
+/// Pathfinding. `kRepathSeconds` is the reference's own cadence for a chase -
+/// it recomputes every four to ten ticks rather than every tick - and
+/// `kRepathMoved` is the other half of the same rule: a target that has walked
+/// a block away invalidates the route early.
+constexpr float kRepathSeconds = 0.5f;
+constexpr float kRepathMoved = 1.0f;
+/// How close counts as having reached a waypoint. The reference advances "when
+/// it is close enough" and skips a node when heading straight at a later one is
+/// safe; this is that distance.
+constexpr float kWaypointReached = 0.55f;
+/// How long a creature may make no headway before its route is thrown away.
+/// The reference stops a path whose mob has stopped advancing, and without it a
+/// route into somewhere the legs cannot manage is walked at forever.
+constexpr float kProgressWindow = 1.0f;
+constexpr float kProgressDistance = 0.25f;
+/// Searches allowed across the whole population in one frame. A ceiling on the
+/// spike rather than a rate: the repath cadence already holds the population to
+/// about two searches a second each, so this only ever binds when several
+/// animals are boxed in at once - which is exactly the case worth bounding.
+constexpr int kPathsPerFrame = 2;
+/// How far an ambling creature picks a spot. The reference's `random_stroll`
+/// reaches ten blocks.
+constexpr float kWanderRange = 10.0f;
+
+/// Swimming. A fish carries a heading and a dive angle rather than a goal/// point: the reference's `random_swim` aims 16 blocks out and up to 4 up or
+/// down, which is an angle of about 14 degrees, so rolling the angle directly
+/// reproduces it without storing a destination. The turn rate is slower than a
+/// walker's because a fish banks rather than pivots.
+constexpr float kSwimPitchMax = 0.28f;
+constexpr float kSwimTurnRate = 1.8f;
+/// How far ahead a swimmer looks for the edge of its own water. Longer than the
+/// walker's probe because there is no floor to stop it - a fish that misses the
+/// surface simply leaves.
+constexpr float kSwimProbe = 1.4f;
+
+/// A stranded fish flops rather than lying still: a small hop and a new heading
+/// on a fixed cadence. It cannot right itself, which is the point of it.
+constexpr float kFlopInterval = 0.55f;
+constexpr float kFlopLaunch = 3.2f;
+
+/// What counts as a body of water big enough to live in.
+///
+/// **The reference has no size test at all** - its `spawns_underwater` asks
+/// only that the cell is water, and what actually keeps fish out of puddles is
+/// the `biome_filter` on the `ocean` and `river` tags. Every aquatic row here is
+/// ocean-only for that reason.
+///
+/// This depth is ours, and it is deliberately small: our biome map is coarser
+/// than the reference's, so an ocean region can hug a shoreline more tightly
+/// than theirs does. Two cells is what the reference implies anyway - water at
+/// the position and water above it - and this is one more for margin.
+constexpr int kOpenWaterDepth = 3;
+
+/// The pufferfish. It inflates while something is inside `kPuffRange` and lets
+/// go once nothing has been within `kPuffHoldRange` for `kPuffDeflateSeconds` -
+/// the reference's 2.5 m, 2.9 m and 3 s, with its two-second stage timers
+/// expressed as the rate a single number climbs through the three stages.
+constexpr float kPuffRange = 2.5f;
+constexpr float kPuffHoldRange = 2.9f;
+constexpr float kPuffStageSeconds = 2.0f;
+constexpr float kPuffDeflateSeconds = 3.0f;
+constexpr float kPuffMax = 2.0f;
+
+/// The squid's jet. **It does not walk and has no gait**: the tentacles open
+/// wide and then snap shut, and the snap is the push.
+///
+/// The curve is the reference's own - `sin(f^2 * pi)` over the first half of
+/// the cycle - and the squared term is the whole point of it: the opening takes
+/// seven tenths of that half and the closing the remaining three, so it flares
+/// slowly and shuts suddenly. Thrust is applied only past three quarters of the
+/// way through, which lands it squarely inside the snap. The second half of the
+/// cycle holds the tentacles still and coasts.
+constexpr float kJetRate = 4.0f;
+constexpr float kJetSplay = 0.7853982f;
+constexpr float kJetThrustFrom = 0.75f;
+constexpr float kJetOpenDecay = 0.8f;
+constexpr float kJetCoastDecay = 0.9f;
+/// How fast the body swings round to line up with where it is going. The
+/// reference's own 0.1 a tick, which is slow enough to see it happen.
+constexpr float kBodyTiltLagPerTick = 0.9f;
+/// Above this much push, a jetting creature stops steering. The squeeze is what
+/// moves it, so it has to be pointing somewhere before it starts - which is the
+/// whole reason one has to turn around before it can go the other way.
+constexpr float kJetCommitted = 0.5f;
+
 /// How big a baby is against its parent, and how much quicker it moves. The
 /// reference gives young a smaller body, an oversized head and a faster walk;
 /// we take the first and the last, since one scale cannot do the middle.
 constexpr float kBabyScale = 0.55f;
 constexpr float kBabySpeedBonus = 1.15f;
 
-/// How hard two creatures standing in each other push apart, and how long an
-/// alerted neighbour stays angry. Separation is a soft impulse rather than a
-/// hard constraint, which is the reference's own choice - a hard one would need
-/// entities to resolve against each other as well as the world.
+/// How hard two creatures standing in each other push apart. A soft impulse
+/// rather than a hard constraint, which is the reference's own choice - a hard
+/// one would need entities to resolve against each other as well as the world.
 constexpr float kSeparationPush = 2.2f;
-constexpr float kAlertRadius = 16.0f;
+/// How far up and down a call carries. The horizontal reach is per species now,
+/// because the reference's broadcast ranges run from nothing at all for the
+/// undead to forty-one metres for a bear.
 constexpr float kAlertHeight = 10.0f;
 
 /// Chunks are 32 blocks, so a coordinate shifts by five.
@@ -244,6 +422,11 @@ float hashUnit(std::uint32_t hash) {
     return static_cast<float>(hash & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
 
+/// How far a struck animal's own kind hears it. **Ours, not the reference's** -
+/// Bedrock gives farm animals no alerting whatsoever, and a herd that scatters
+/// together is worth more than fidelity here.
+constexpr float kHerdAlertRange = 16.0f;
+
 /// One row per species. Adding an animal is adding a row.
 ///
 /// Heights for the nine most recent species are Bedrock's hitboxes rather than
@@ -255,6 +438,14 @@ float hashUnit(std::uint32_t hash) {
 ///
 /// Order must match `CreatureKind`.
 ///
+/// **Fields are named rather than positional.** It used to be a wall of bare
+/// values, which meant every new field had to go at the end with a default, and
+/// setting one on an old row meant restating a dozen numbers nobody wanted to
+/// change. Naming them costs nothing at runtime, lets a row say only what makes
+/// it different, and turns a mis-ordered value from a silent wrong animal into
+/// a compile error. Designated initialisers must appear in declaration order,
+/// so the struct itself is the checklist.
+///
 /// **`gaitSwing` is radians of limb rotation about the joint**, not a distance.
 /// Each value is the species' old hand-tuned foot travel converted back to the
 /// angle that produces it, then opened up by half again and held to 0.70 rad -
@@ -263,68 +454,132 @@ float hashUnit(std::uint32_t hash) {
 /// several species that sit on the cap are the short-legged and the fast, which
 /// is exactly the set the reference would give one flat amplitude anyway.
 constexpr CreatureSpecies kSpecies[] = {
-    // name       half   hgt    gaitR  gaitS  hop   launch gather scale  hp  walk  run   hostile sense dmg  noct maxL weight   burnsInDay huntsBelow splitInto splitMin splitMax climbs babyChance groupSize
-    {"Sheep",     0.32f, 1.40f, 6.0f,  0.36f, false, 0.0f, 0.0f,  1.00f, 6,  1.6f, 3.4f, false, 8.0f,  0, false, 15, 1.0f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 4},
-    {"Cow",       0.45f, 1.50f, 5.5f,  0.36f, false, 0.0f, 0.0f,  1.00f, 10, 1.3f, 2.8f, false, 8.0f,  0, false, 15, 0.9f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 4},
-    {"Pig",       0.32f, 1.05f, 7.0f,  0.66f, false, 0.0f, 0.0f,  1.00f, 10, 1.4f, 3.0f, false, 8.0f,  0, false, 15, 0.9f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 4},
+    {.name = "Sheep", .halfWidth = 0.32f, .height = 1.40f, .gaitRate = 6.0f, .gaitSwing = 0.36f,
+     .modelScale = 1.00f, .health = 6, .walkSpeed = 1.6f, .runSpeed = 3.4f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 1.0f, .babyChance = 0.05f, .groupSize = 4,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
+    {.name = "Cow", .halfWidth = 0.45f, .height = 1.50f, .gaitRate = 5.5f, .gaitSwing = 0.36f,
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 1.3f, .runSpeed = 2.8f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.9f, .babyChance = 0.05f, .groupSize = 4,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
+    {.name = "Pig", .halfWidth = 0.32f, .height = 1.05f, .gaitRate = 7.0f, .gaitSwing = 0.66f,
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 1.4f, .runSpeed = 3.0f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.9f, .babyChance = 0.05f, .groupSize = 4,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // The one thing in the world that detonates. `attackDamage` stays at 3 so a
     // fuse that is cancelled still leaves something dangerous, but the blast is
     // the point: power 3 clears about four blocks of soil and barely marks
-    // stone. **3 m to light and 7 m to cancel are Bedrock's**, as is the 16 m
-    // follow range and the 20 health - all four were wrong until 2026-08-04.
+    // stone. The 16 m follow range and the 20 health are Bedrock's.
     //
-    // The run speed is the biggest change of the four. At 2.4 it could be
-    // strolled away from, which made the fuse decorative; 4.25 is the speed
-    // attribute converted at the low end of the documented x17-19 band and sits
-    // just under a walking player, so a head start still saves you and standing
-    // still does not.
+    // **2.5 m to light and 6 m to cancel come from `creeper.json` itself**, and
+    // they were briefly "corrected" to the wiki's 3 and 7 on the reasoning that
+    // the wiki was the Bedrock source. It is not: `Mojang/bedrock-samples` is
+    // the shipped behaviour pack, its `behavior.swell` reads
+    // `start_distance 2.5, stop_distance 6`, and its `target_nearby_sensor`
+    // agrees exactly. Do not flip these again without opening that file.
+    //
+    // The run speed is the speed attribute converted at the low end of the
+    // documented x17-19 band and sits just under a walking player, so a head
+    // start still saves you and standing still does not.
     //
     // It spawns in the dark and does **not** burn off at dawn. `RESEARCH.md`
-    // §13.4 names the burn list exactly - zombie, skeleton, stray, drowned,
-    // phantom, zombie villager, bogged - and this is not on it, which is why
-    // one caught out at sunrise is still following you at noon.
-    {"Bramble",   0.30f, 1.70f, 6.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 20, 2.0f, 4.25f, true, 16.0f, 3, true,   6, 0.9f,
-     false, 0, CreatureKind::Count, 0, 0, false, 0.0f, 0, 3.0f, 1.5f, 3.0f, 7.0f, 6.0f},
+    // §13.4 names the burn list exactly and this is not on it, which is why one
+    // caught out at sunrise is still following you at noon.
+    {.name = "Bramble", .halfWidth = 0.30f, .height = 1.70f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 2.0f, .runSpeed = 4.25f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
+     .burnsInDay = false, .explodePower = 3.0f, .fuseSeconds = 1.5f, .swellStartRange = 2.5f,
+     .swellStopRange = 6.0f, .avoidFelineRange = 6.0f, .chaseSpeedScale = 1.25f},
     // Falls slowly and flaps the whole way down, which is the reference's own
     // reason chickens need no fall-damage exemption - they never land hard.
-    // The trailing values before `fallDrag` are defaults, restated only because
-    // it sits at the end of the row.
-    {"Chicken",   0.20f, 0.80f, 14.0f, 0.49f, false, 0.0f, 0.0f,  1.00f, 4,  1.5f, 3.0f, false, 6.0f,  0, false, 15, 1.1f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 4, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 0.6f, 1.2522f, 0.6f},
-    {"Cat",       0.24f, 0.70f, 10.0f, 0.32f, false, 0.0f, 0.0f,  1.00f, 6,  1.8f, 3.8f, false, 9.0f,  0, false, 15, 0.8f,   true, 0, CreatureKind::Count, 0, 0, false, 0.25f, 2},
+    {.name = "Chicken", .halfWidth = 0.20f, .height = 0.80f, .gaitRate = 14.0f, .gaitSwing = 0.49f,
+     .modelScale = 1.00f, .health = 4, .walkSpeed = 1.5f, .runSpeed = 3.0f, .senseRange = 6.0f,
+     .maxBlockLight = 15, .weight = 1.1f, .babyChance = 0.05f, .groupSize = 4, .fallDrag = 0.6f,
+     .alertRange = kHerdAlertRange},
+    {.name = "Cat", .halfWidth = 0.24f, .height = 0.70f, .gaitRate = 10.0f, .gaitSwing = 0.32f,
+     .modelScale = 1.00f, .health = 6, .walkSpeed = 1.8f, .runSpeed = 3.8f, .senseRange = 9.0f,
+     .maxBlockLight = 15, .weight = 0.8f, .babyChance = 0.25f, .groupSize = 2,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // Long-legged enough to walk up a full block without jumping, which is the
     // reference's own list: the horse family, the llama and the camel all have
-    // a step height of 1 or more and so never hop a ledge. The trailing zeros
-    // before it are the explode fields, restated only because these two sit at
-    // the end of the row.
-    {"Camel",     0.48f, 2.375f, 3.5f, 0.35f, false, 0.0f, 0.0f,  1.00f, 16, 1.3f, 2.8f, false, 10.0f, 0, false, 15, 0.7f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 1, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.5f, 0.0f},
-    {"Horse",     0.45f, 1.60f, 5.0f,  0.49f, false, 0.0f, 0.0f,  1.00f, 16, 2.0f, 4.5f, false, 10.0f, 0, false, 15, 0.8f,   true, 0, CreatureKind::Count, 0, 0, false, 0.20f, 4, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.0f, 0.0f},
-    {"Mule",      0.44f, 1.60f, 5.2f,  0.47f, false, 0.0f, 0.0f,  0.92f, 16, 1.8f, 4.0f, false, 10.0f, 0, false, 15, 0.55f,  true, 0, CreatureKind::Count, 0, 0, false, 0.20f, 3, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.0f, 0.0f},
-    {"Llama",     0.43f, 1.87f, 5.5f,  0.31f, false, 0.0f, 0.0f,  1.00f, 12, 1.6f, 3.5f, false, 10.0f, 0, false, 15, 0.65f,  true, 0, CreatureKind::Count, 0, 0, false, 0.10f, 4, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.0f, 0.0f},
-    {"Donkey",    0.42f, 1.60f, 5.5f,  0.44f, false, 0.0f, 0.0f,  0.87f, 15, 1.7f, 3.8f, false, 9.0f,  0, false, 15, 0.65f,  true, 0, CreatureKind::Count, 0, 0, false, 0.20f, 3, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.0f, 0.0f},
-    {"Goat",      0.38f, 1.30f, 8.0f,  0.36f, false, 0.0f, 0.0f,  1.00f, 10, 1.7f, 3.8f, false, 9.0f,  0, false, 15, 0.7f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 3},
+    // a step height of 1 or more and so never hop a ledge.
+    {.name = "Camel", .halfWidth = 0.48f, .height = 2.375f, .gaitRate = 3.5f, .gaitSwing = 0.35f,
+     .modelScale = 1.00f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 2.8f, .senseRange = 10.0f,
+     .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.05f, .groupSize = 1, .stepHeight = 1.5f,
+     .jumpHeight = 0.0f, .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
+    {.name = "Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f, .gaitSwing = 0.49f,
+     .modelScale = 1.00f, .health = 16, .walkSpeed = 2.0f, .runSpeed = 4.5f, .senseRange = 10.0f,
+     .maxBlockLight = 15, .weight = 0.8f, .babyChance = 0.20f, .groupSize = 4, .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .avoidsWater = true, .alertRange = kHerdAlertRange},
+    {.name = "Mule", .halfWidth = 0.44f, .height = 1.60f, .gaitRate = 5.2f, .gaitSwing = 0.47f,
+     .modelScale = 0.92f, .health = 16, .walkSpeed = 1.8f, .runSpeed = 4.0f, .senseRange = 10.0f,
+     .maxBlockLight = 15, .weight = 0.55f, .babyChance = 0.20f, .groupSize = 3, .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .avoidsWater = true, .alertRange = kHerdAlertRange},
+    {.name = "Llama", .halfWidth = 0.43f, .height = 1.87f, .gaitRate = 5.5f, .gaitSwing = 0.31f,
+     .modelScale = 1.00f, .health = 12, .walkSpeed = 1.6f, .runSpeed = 3.5f, .senseRange = 10.0f,
+     .maxBlockLight = 15, .weight = 0.65f, .babyChance = 0.10f, .groupSize = 4, .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .alertRange = kHerdAlertRange},
+    {.name = "Donkey", .halfWidth = 0.42f, .height = 1.60f, .gaitRate = 5.5f, .gaitSwing = 0.44f,
+     .modelScale = 0.87f, .health = 15, .walkSpeed = 1.7f, .runSpeed = 3.8f, .senseRange = 9.0f,
+     .maxBlockLight = 15, .weight = 0.65f, .babyChance = 0.20f, .groupSize = 3, .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .avoidsWater = true, .alertRange = kHerdAlertRange},
+    {.name = "Goat", .halfWidth = 0.38f, .height = 1.30f, .gaitRate = 8.0f, .gaitSwing = 0.36f,
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 1.7f, .runSpeed = 3.8f, .senseRange = 9.0f,
+     .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.05f, .groupSize = 3,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // The gait numbers are zero on purpose for a hopper: its legs are driven by
     // the jump, so there is no cycle to tune. Sat upright the rabbit is tall
     // and narrow, which is what the much smaller scale is paying for.
-    {"Rabbit",    0.18f, 0.60f, 0.0f,  0.0f,  true,  4.2f, 0.18f, 0.48f, 4,  2.0f, 4.2f, false, 8.0f,  0, false, 15, 0.9f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 3},
+    {.name = "Rabbit", .halfWidth = 0.18f, .height = 0.60f, .hops = true, .hopLaunch = 4.2f,
+     .hopGather = 0.18f, .modelScale = 0.48f, .health = 4, .walkSpeed = 2.0f, .runSpeed = 4.2f,
+     .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.9f, .babyChance = 0.05f, .groupSize = 3,
+     .avoidsWater = true, .alertRange = kHerdAlertRange, .panicSpeedScale = 1.5f},
     // Neutral rather than hostile: it has a bite but no interest in using it
-    // until struck. See `CreatureSpecies::attackDamage`.
-    {"Wolf",      0.30f, 0.80f, 9.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 8,  1.8f, 4.2f, false, 12.0f, 4, false, 15, 0.7f,   true, 0, CreatureKind::Count, 0, 0, false, 0.10f, 4},
+    // until struck. See `CreatureSpecies::attackDamage`. Twenty-five seconds of
+    // grudge is the reference's `wolf_angry`, and it is four times what every
+    // animal on the roster used to carry.
+    {.name = "Wolf", .halfWidth = 0.30f, .height = 0.80f, .gaitRate = 9.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 8, .walkSpeed = 1.8f, .runSpeed = 4.2f, .senseRange = 12.0f,
+     .attackDamage = 4, .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.10f, .groupSize = 4,
+     .angerSeconds = 25.0f, .alertRange = 20.0f},
     // A far higher, lazier arc than the rabbit's: about 0.8 m up with a long
     // pause between hops, which is most of what makes a frog read as a frog.
-    // Step height 1 is the reference's, and the zero jump is not a restriction -
-    // hopping already is its jump.
-    {"Frog",      0.25f, 0.50f, 0.0f,  0.0f,  true,  6.5f, 0.55f, 1.00f, 10, 1.0f, 2.2f, false, 7.0f,  0, false, 15, 0.8f,   true, 0, CreatureKind::Count, 0, 0, false, 0.0f, 4, 0.0f, 1.5f, 2.5f, 6.0f, 0.0f, 1.0f, 1.2522f},
-    {"Fox",       0.25f, 0.70f, 11.0f, 0.66f, false, 0.0f, 0.0f,  0.93f, 10, 1.9f, 4.0f, false, 8.0f,  0, false, 15, 0.7f,   true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 3},
+    // Step height 1 is the reference's, and hopping already is its jump.
+    //
+    // The one genuinely amphibious animal here: it breathes underwater, walks
+    // the bottom rather than bobbing, and `sinks = false` holds it at whatever
+    // depth it is at instead of settling.
+    {.name = "Frog", .halfWidth = 0.25f, .height = 0.50f, .hops = true, .hopLaunch = 6.5f,
+     .hopGather = 0.55f, .modelScale = 1.00f, .health = 10, .walkSpeed = 1.0f, .runSpeed = 2.2f,
+     .senseRange = 7.0f, .maxBlockLight = 15, .weight = 0.8f, .groupSize = 4, .stepHeight = 1.0f,
+     .floats = false, .sinks = false, .amphibious = true, .breathesWater = true,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
+    {.name = "Fox", .halfWidth = 0.25f, .height = 0.70f, .gaitRate = 11.0f, .gaitSwing = 0.66f,
+     .modelScale = 0.93f, .health = 10, .walkSpeed = 1.9f, .runSpeed = 4.0f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.05f, .groupSize = 3,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // Shares the cat's net and model outright, the way the mule shares the
     // horse's - the reference draws them from one rig too.
-    {"Ocelot",    0.24f, 0.70f, 10.0f, 0.32f, false, 0.0f, 0.0f,  1.00f, 10, 1.8f, 3.9f, false, 9.0f,  0, false, 15, 0.6f,   true, 0, CreatureKind::Count, 0, 0, false, 0.25f, 2},
+    {.name = "Ocelot", .halfWidth = 0.24f, .height = 0.70f, .gaitRate = 10.0f, .gaitSwing = 0.32f,
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 1.8f, .runSpeed = 3.9f, .senseRange = 9.0f,
+     .maxBlockLight = 15, .weight = 0.6f, .babyChance = 0.25f, .groupSize = 2,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // The heaviest thing in the world and the second neutral: it ignores you
-    // until struck, and then hits for six. Slow, so backing off actually works.
+    // until struck, and then hits for six. Slow, so backing off actually works -
+    // except that it now holds a grudge for the reference's five hundred
+    // seconds and follows to 48 m, so backing off has to mean leaving.
     // Scaled well past its hitbox on purpose - a bear that does not tower over
     // the roster is not doing its job, and the horse already sets the precedent
     // for a model much taller than the box it collides with.
-    {"Polar Bear",0.50f, 1.40f, 4.5f,  0.64f, false, 0.0f, 0.0f,  1.25f, 30, 1.2f, 3.0f, false, 12.0f, 6, false, 15, 0.4f,   true, 0, CreatureKind::Count, 0, 0, false, 0.10f, 2},
-    {"Panda",     0.45f, 1.25f, 4.5f,  0.54f, false, 0.0f, 0.0f,  1.10f, 20, 0.8f, 1.8f, false, 8.0f,  0, false, 15, 0.35f,  true, 0, CreatureKind::Count, 0, 0, false, 0.05f, 2},
+    {.name = "Polar Bear", .halfWidth = 0.50f, .height = 1.40f, .gaitRate = 4.5f,
+     .gaitSwing = 0.64f, .modelScale = 1.25f, .health = 30, .walkSpeed = 1.2f, .runSpeed = 3.0f,
+     .senseRange = 12.0f, .attackDamage = 6, .maxBlockLight = 15, .weight = 0.4f,
+     .babyChance = 0.10f, .groupSize = 2, .leashRange = 48.0f, .angerSeconds = 500.0f,
+     .alertRange = 41.0f},
+    {.name = "Panda", .halfWidth = 0.45f, .height = 1.25f, .gaitRate = 4.5f, .gaitSwing = 0.54f,
+     .modelScale = 1.10f, .health = 20, .walkSpeed = 0.8f, .runSpeed = 1.8f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.35f, .babyChance = 0.05f, .groupSize = 2,
+     .avoidsWater = true, .angerSeconds = 500.0f, .alertRange = 41.0f},
     // The three slimes are one animal at three sizes, and the size is the whole
     // design: health is the size squared, damage is the size, and killing one
     // leaves two to four of the next size down. A small one does no damage at
@@ -333,71 +588,378 @@ constexpr CreatureSpecies kSpecies[] = {
     // They hop rather than walk, and the launch is identical for all three
     // because the reference jumps one block high whatever the size - only the
     // distance covered scales, which falls out of the speed.
-    // name      half   hgt    gaitR  gaitS  hop   launch gather scale  hp  walk  run   hostile sense dmg  noct maxL weight   burnsInDay huntsBelow splitInto splitMin splitMax climbs
-    {"Slime",     0.26f, 0.52f, 0.0f,  0.0f,  true,  7.21f, 0.90f, 1.04f, 1,  0.5f, 1.1f, true, 16.0f, 0, true,  15, 0.6f,   false, 0, CreatureKind::Count, 0, 0, false},
-    {"Slime",     0.52f, 1.04f, 0.0f,  0.0f,  true,  7.21f, 0.85f, 2.08f, 4,  0.8f, 1.8f, true, 16.0f, 2, true,  15, 0.5f,   false, 0, CreatureKind::SlimeSmall, 2, 4, false},
-    {"Slime",     0.75f, 2.08f, 0.0f,  0.0f,  true,  7.21f, 0.80f, 4.16f, 16, 1.3f, 2.8f, true, 16.0f, 4, true,  15, 0.3f,   false, 0, CreatureKind::SlimeMedium, 2, 4, false},
+    {.name = "Slime", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.90f, .modelScale = 1.04f, .health = 1, .walkSpeed = 0.5f, .runSpeed = 1.1f,
+     .hostile = true, .senseRange = 16.0f, .nocturnal = true, .maxBlockLight = 15, .weight = 0.6f,
+     .burnsInDay = false, .avoidsWater = true},
+    {.name = "Slime", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.85f, .modelScale = 2.08f, .health = 4, .walkSpeed = 0.8f, .runSpeed = 1.8f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true,
+     .maxBlockLight = 15, .weight = 0.5f, .burnsInDay = false,
+     .splitInto = CreatureKind::SlimeSmall, .splitMin = 2, .splitMax = 4, .avoidsWater = true},
+    {.name = "Slime", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.80f, .modelScale = 4.16f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 2.8f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 4, .nocturnal = true,
+     .maxBlockLight = 15, .weight = 0.3f, .burnsInDay = false,
+     .splitInto = CreatureKind::SlimeMedium, .splitMin = 2, .splitMax = 4, .avoidsWater = true},
     // Neutral by temperament and hostile by circumstance: it ignores you in the
     // light and hunts on sight in the dark, which is the reference's rule and a
     // far better use of our light system than another always-hostile mob.
-    {"Spider",    0.45f, 0.90f, 16.0f, 0.30f, false, 0.0f, 0.0f,  1.10f, 16, 1.6f, 4.0f, false, 16.0f, 2, true,  15, 0.8f,   false, 11, CreatureKind::Count, 0, 0, true},
+    //
+    // Ten seconds of anger is `spider_angry`, and it is what makes the light
+    // rule survive contact with a torch: once it has you, brightening the room
+    // no longer calls it off.
+    //
+    // **Both spiders run the reference's own gait numbers rather than ours**,
+    // because `animation.spider.walk` is ported whole: 2.665 radians per metre
+    // is `ANIMATION.md` §2.2's rate for the whole of Minecraft, and 0.4 is the
+    // 22.92 degrees the animation swings. Driving it by distance is what makes
+    // a chase scuttle and a stroll amble with no second animation.
+    {.name = "Spider", .halfWidth = 0.45f, .height = 0.90f, .gaitRate = 2.665f, .gaitSwing = 0.40f,
+     .modelScale = 1.10f, .health = 16, .walkSpeed = 1.6f, .runSpeed = 4.0f, .senseRange = 16.0f,
+     .attackDamage = 2, .nocturnal = true, .maxBlockLight = 15, .weight = 0.8f,
+     .burnsInDay = false, .huntsBelowLight = 11, .climbs = true, .angerSeconds = 10.0f},
     // Same rig as the spider - their reference skins have byte-identical alpha -
     // at two thirds the size, which is the whole difference.
-    {"Cave Spider",0.30f, 0.50f, 18.0f, 0.30f, false, 0.0f, 0.0f,  0.70f, 12, 1.8f, 4.2f, false, 16.0f, 2, true,  15, 0.6f,   false, 11, CreatureKind::Count, 0, 0, true},
+    {.name = "Cave Spider", .halfWidth = 0.30f, .height = 0.50f, .gaitRate = 2.665f,
+     .gaitSwing = 0.40f, .modelScale = 0.70f, .health = 12, .walkSpeed = 1.8f, .runSpeed = 4.2f,
+     .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 15,
+     .weight = 0.6f, .burnsInDay = false, .huntsBelowLight = 11, .climbs = true,
+     .angerSeconds = 10.0f},
     // The first bipeds. Movement is the cheap half of a humanoid - two legs and
     // two counter-swinging arms - and these carry none of the villager's
     // economy, so they cost a rig and a row each.
-    {"Zombie",    0.28f, 1.95f, 5.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 20, 1.0f, 2.2f, true, 16.0f, 3, true,   6, 1.0f},
+    //
+    // **35 m to notice and 25 m to give up are the reference's, and they are
+    // the right way round**: a zombie sees you across a field and then loses
+    // interest closer in than it started. Seventeen seconds of memory is its
+    // own override of the three everything else gets, which is why a corner
+    // shakes off a skeleton and does nothing about a zombie.
+    //
+    // The undead do not swim. `is_amphibious` with no float goal means they
+    // walk the seabed, and `breathes_water` is why that costs them nothing -
+    // so a lake is a road to a zombie rather than a wall.
+    {.name = "Zombie", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f, .hostile = true,
+     .senseRange = 35.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 1.0f,
+     .floats = false, .amphibious = true, .breathesWater = true,
+     .forgetSeconds = 17.0f, .leashRange = 25.0f, .swingsArms = true},
     // No bow yet, so it closes and hits rather than shooting. Faster and
-    // lighter than the zombie to keep the two feeling different.
-    {"Skeleton",  0.28f, 1.99f, 6.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 20, 1.2f, 2.8f, true, 16.0f, 2, true,   6, 0.9f},
+    // lighter than the zombie to keep the two feeling different, and it sprints
+    // the last stretch - `melee_box_attack.speed_multiplier` is 1.25 on every
+    // skeleton in the reference and 1 on every zombie.
+    //
+    // **It does not swing its arms**, and that is deliberate rather than
+    // missing: a skeleton is an archer. The reference only drops one to melee
+    // when it has no bow, and until we have arrows a punching animation would
+    // tell the player it is something it is not.
+    {.name = "Skeleton", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 1.2f, .runSpeed = 2.8f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
+     .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
+     .chaseSpeedScale = 1.25f},
     // Model and texture only for now: it wanders and nothing more. Trading, the
-    // schedule and villages are their own milestone entirely.
-    {"Villager",  0.28f, 1.95f, 4.5f,  0.62f, false, 0.0f, 0.0f,  0.92f, 20, 0.9f, 1.6f, false, 8.0f,  0, false, 15, 0.5f},
+    // schedule and villages are their own milestone entirely. It flees slower
+    // than it walks, which is the reference's 0.6 and reads as panic rather
+    // than athleticism.
+    {.name = "Villager", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f, .gaitSwing = 0.62f,
+     .modelScale = 0.92f, .health = 20, .walkSpeed = 0.9f, .runSpeed = 1.6f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.5f, .avoidsWater = true, .alertRange = kHerdAlertRange,
+     .panicSpeedScale = 0.65f},
     // The zombie's rig verbatim - the two reference skins have byte-identical
     // alpha - and the one thing that makes it a different animal is that it
     // does **not** burn off at dawn. So the desert is the one region where
-    // something is still hunting you at noon.
-    {"Husk",      0.28f, 1.95f, 5.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 20, 1.0f, 2.2f, true, 16.0f, 4, true,   6, 0.9f,   false},
+    // something is still hunting you at noon. It forgets in three seconds where
+    // a zombie takes seventeen, which is the reference's own divergence and
+    // easy to miss.
+    {.name = "Husk", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f, .hostile = true,
+     .senseRange = 35.0f, .attackDamage = 4, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
+     .burnsInDay = false, .floats = false, .amphibious = true, .breathesWater = true,
+     .leashRange = 25.0f, .swingsArms = true},
     // The smallest thing in the world: seven tapering segments, no legs, and a
     // serpentine wriggle. It has no limb to turn, so `gaitSwing` is zero and
     // the wriggle's own amplitude - a sideways distance, not an angle - lives
     // beside the segments in `buildMesh` where the rest of its shape does.
     // Lives underground and does not burn, so a cave is its home rather than a
     // night shift.
-    {"Silverfish",0.20f, 0.30f, 11.0f, 0.0f,  false, 0.0f, 0.0f,  1.00f, 8,  1.3f, 2.6f, true, 10.0f, 1, true,   4, 0.8f,   false},
+    //
+    // **The one species that needs no line of sight**, which is the reference's
+    // own omission and why it comes at you through stone. It is also the only
+    // one whose `hurt_by_target` sets `alert_same_type`, and its anger never
+    // expires - so ten minutes stands in for never.
+    {.name = "Silverfish", .halfWidth = 0.20f, .height = 0.30f, .gaitRate = 11.0f,
+     .modelScale = 1.00f, .health = 8, .walkSpeed = 1.3f, .runSpeed = 2.6f, .hostile = true,
+     .senseRange = 8.0f, .attackDamage = 1, .nocturnal = true, .maxBlockLight = 4, .weight = 0.8f,
+     .burnsInDay = false, .mustSee = false, .angerSeconds = 600.0f, .alertRange = 20.0f},
     // The skeleton's rig at 1.20 scale, which is what takes a 2.00 model to the
     // reference's 2.4 hitbox. Hits far harder than the skeleton and is rarer
-    // for it.
-    // Also not on §13.4's burn list, and for the same reason as the Bramble:
-    // only the ordinary undead catch fire. It is the skeleton's rig at 1.20
-    // scale, and it staying out past dawn is what makes it the rare one worth
-    // being afraid of rather than a skeleton with more health.
-    {"Blackbone", 0.30f, 2.40f, 5.5f,  0.70f, false, 0.0f, 0.0f,  1.20f, 20, 1.1f, 2.6f, true, 16.0f, 6, true,   6, 0.35f,
-     false},
+    // for it. Also not on §13.4's burn list, and for the same reason as the
+    // Bramble: only the ordinary undead catch fire, and staying out past dawn
+    // is what makes it the rare one worth being afraid of.
+    //
+    // **The one skeleton that does swing**: it carries a stone sword in the
+    // reference rather than a bow, so melee is its real attack.
+    {.name = "Blackbone", .halfWidth = 0.30f, .height = 2.40f, .gaitRate = 5.5f, .gaitSwing = 0.70f,
+     .modelScale = 1.20f, .health = 20, .walkSpeed = 1.1f, .runSpeed = 2.6f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 6, .nocturnal = true, .maxBlockLight = 6,
+     .weight = 0.35f, .burnsInDay = false, .floats = false, .amphibious = true,
+     .breathesWater = true, .avoidsWater = true, .chaseSpeedScale = 1.25f, .swingsArms = true},
     // Stray and bogged are the skeleton's rig again, unchanged. What separates
     // them is where they live and how hard they are: the stray holds the cold
     // uplands and is the tougher, the bogged swarms the lowlands and is the
     // weaker. The reference tells them apart by the arrows they fire, which we
     // have no bow for yet.
-    {"Stray",     0.28f, 1.99f, 6.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 20, 1.2f, 2.8f, true, 16.0f, 3, true,   6, 0.5f},
-    {"Bogged",    0.28f, 1.99f, 6.5f,  0.70f, false, 0.0f, 0.0f,  1.00f, 16, 1.3f, 3.0f, true, 16.0f, 2, true,   6, 0.6f},
+    {.name = "Stray", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 1.2f, .runSpeed = 2.8f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.5f,
+     .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
+     .chaseSpeedScale = 1.25f},
+    {.name = "Bogged", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.5f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 3.0f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.6f,
+     .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
+     .chaseSpeedScale = 1.25f},
     // The villager's rig - its nets are identical row for row - but posed with
     // the arms held out rather than folded, which is the reference's own
     // distinction between a villager and one that has turned.
-    {"Zombie Villager", 0.28f, 1.95f, 5.0f, 0.70f, false, 0.0f, 0.0f, 0.92f, 20, 1.0f, 2.2f, true, 16.0f, 3, true, 6, 0.4f},
+    {.name = "Zombie Villager", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+     .gaitSwing = 0.70f, .modelScale = 0.92f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f,
+     .hostile = true, .senseRange = 35.0f, .attackDamage = 3, .nocturnal = true,
+     .maxBlockLight = 6, .weight = 0.4f, .floats = false, .amphibious = true,
+     .breathesWater = true, .leashRange = 25.0f, .swingsArms = true},
     // The villager rig again, under a four-box pointed hat and with a wart on
     // the nose. Tough and slow, and like the husk it does not burn - so one
-    // caught out at dawn keeps coming.
-    {"Witch",     0.28f, 1.95f, 4.5f,  0.62f, false, 0.0f, 0.0f,  0.92f, 26, 0.9f, 1.8f, true, 16.0f, 2, true,   6, 0.3f,   false},
+    // caught out at dawn keeps coming. It notices you at only 10 m, which is
+    // the reference's, and then follows to 64: a witch is hard to provoke and
+    // very hard to shake.
+    {.name = "Witch", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f, .gaitSwing = 0.62f,
+     .modelScale = 0.92f, .health = 26, .walkSpeed = 0.9f, .runSpeed = 1.8f, .hostile = true,
+     .senseRange = 10.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.3f,
+     .burnsInDay = false, .leashRange = 64.0f},
     // Passive, rare and found anywhere: the one thing on the roster that is
     // meant to read as a traveller rather than a resident. Trading is a
     // milestone of its own, so for now it only wanders.
-    {"Wandering Trader", 0.28f, 1.95f, 4.5f, 0.62f, false, 0.0f, 0.0f, 0.92f, 20, 1.0f, 1.8f, false, 8.0f, 0, false, 15, 0.2f},
+    {.name = "Wandering Trader", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f,
+     .gaitSwing = 0.62f, .modelScale = 0.92f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 1.8f,
+     .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.2f, .avoidsWater = true,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 0.65f},
     // The first hostile that spawns in **daylight**, which is most of the point
     // of it: the uplands stop being safe at noon. Its body is the biped rig at
-    // the standard limb offsets; only the head is its own.
-    {"Princepin", 0.28f, 1.95f, 5.0f,  0.70f, false, 0.0f, 0.0f,  1.00f, 16, 1.1f, 2.4f, true, 16.0f, 5, false, 15, 0.3f,   false},
+    // the standard limb offsets; only the head is its own. Thirty seconds of
+    // anger and a 64 m leash are the reference's piglin, and its kind hear a
+    // blow at 16 m - the one hostile on the roster that answers a call.
+    //
+    // It has no float goal in the shipped data, which is not an oversight: a
+    // piglin genuinely will not swim up, so deep water drowns it.
+    {.name = "Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 16, .walkSpeed = 1.1f, .runSpeed = 2.4f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 5, .maxBlockLight = 15, .weight = 0.3f,
+     .burnsInDay = false, .floats = false, .avoidsWater = true, .leashRange = 64.0f,
+     .angerSeconds = 30.0f, .alertRange = 16.0f, .swingsArms = true},
+    // The zombie's rig and the zombie's stats, living in the sea. It is
+    // amphibious with no float goal, so it walks the seabed exactly as its dry
+    // cousins do - and `breathes_water` is why that costs it nothing.
+    //
+    // It notices you at 20 m, which is the reference's `max_dist` rather than
+    // the zombie's 35, and keeps the zombie's seventeen seconds of memory. Its
+    // land speed is 0.23 against a zombie's 0.23, but `underwater_movement` is
+    // only 0.06 - a quarter - which is why one is slow to reach you and then
+    // alarming once you are both on the beach.
+    {.name = "Drowned", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+     .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f, .hostile = true,
+     .senseRange = 20.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 7, .weight = 1.0f,
+     .floats = false, .amphibious = true, .breathesWater = true, .spawnsInWater = true,
+     .maxSpawnY = kSeaLevel, .maxLoaded = 5, .forgetSeconds = 17.0f, .leashRange = 25.0f,
+     .swingsArms = true},
+    // The first two things that swim. `swims` is the whole archetype: no
+    // gravity while submerged, a heading in three dimensions rather than two,
+    // and no ability to walk at all - so out of water they flop and suffocate.
+    //
+    // Three health and a 0.1 speed attribute are the reference's, converted at
+    // the same x17 the rest of the roster uses. The group size, the ceiling and
+    // the population cap are its `herd`, `height_filter` and `density_limit`
+    // from `spawn_rules/cod.json` - 4 to 7 a shoal, anywhere at or below the
+    // surface, and twenty at a time.
+    {.name = "Cod", .halfWidth = 0.25f, .height = 0.30f, .gaitRate = 0.0f, .modelScale = 1.00f,
+     .health = 3, .walkSpeed = 1.7f, .runSpeed = 3.4f, .senseRange = 6.0f, .maxBlockLight = 15,
+     .weight = 1.0f, .groupSize = 7, .stepHeight = 0.0f, .jumpHeight = 0.0f, .floats = false,
+     .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
+     .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 20, .walksOnLand = false,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 1.5f},
+    // Bigger, faster and a longer two-part body. The reference rolls three
+    // sizes at spawn - 0.5, 1.0 and 1.5 - and ours reuses the baby scale for
+    // the small one rather than adding a second size mechanism.
+    //
+    // **Ocean only.** The reference's second home for a salmon is a *river*,
+    // which we do not have, and a beach was standing in for one - but a beach
+    // here is the shallow edge of the sea rather than a channel, so it put
+    // salmon in the surf.
+    {.name = "Salmon", .halfWidth = 0.22f, .height = 0.50f, .gaitRate = 0.0f, .modelScale = 1.00f,
+     .health = 3, .walkSpeed = 2.0f, .runSpeed = 4.0f, .senseRange = 6.0f, .maxBlockLight = 15,
+     .weight = 0.8f, .babyChance = 0.30f, .groupSize = 5, .stepHeight = 0.0f, .jumpHeight = 0.0f,
+     .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
+     .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 10, .walksOnLand = false,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 1.5f},
+    // Inflates in three stages when something comes within 2.5 m and lets go
+    // three seconds after it leaves. The stages are three separate *models* -
+    // the spines are real geometry, not a scale - which is why this is a flag
+    // rather than a size. The reference's own `scale` of 1.2 is folded into
+    // `modelScale`.
+    //
+    // **Its collision box does not grow with it.** The reference swaps the box
+    // per stage, and one species owns one shape here; a per-stage box is a
+    // change to the shape table rather than to this row. Nothing collides with
+    // a fish but terrain, so the cost is that a puffed one is easier to swim
+    // past than it should be.
+    {.name = "Pufferfish", .halfWidth = 0.28f, .height = 0.60f, .gaitRate = 0.0f,
+     .modelScale = 1.20f, .health = 3, .walkSpeed = 2.2f, .runSpeed = 4.4f, .senseRange = 6.0f,
+     .maxBlockLight = 15, .weight = 0.5f, .groupSize = 5, .stepHeight = 0.0f, .jumpHeight = 0.0f,
+     .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
+     .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 3, .puffs = true,
+     .walksOnLand = false, .panicSpeedScale = 1.5f},
+    // The first thing built from a ring of limbs rather than a spine and legs:
+    // a bell with eight tentacles hanging off it at forty-five degree spacing.
+    // Ten health and a 0.2 speed attribute are the reference's, and 5% of them
+    // arrive as young, which is its own `entity_spawned` roll rather than the
+    // baby share the land roster uses.
+    {.name = "Squid", .halfWidth = 0.35f, .height = 0.80f, .gaitRate = 0.0f, .modelScale = 0.80f,
+     .health = 10, .walkSpeed = 1.6f, .runSpeed = 3.4f, .senseRange = 8.0f, .maxBlockLight = 15,
+     .weight = 0.6f, .babyChance = 0.05f, .groupSize = 4, .stepHeight = 0.0f, .jumpHeight = 0.0f,
+     .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
+     .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 4, .jets = true,
+     .walksOnLand = false, .panicSpeedScale = 1.5f},
+    // The squid's rig outright - the two reference skins are the same net at
+    // the same size - lit by itself rather than by the water around it.
+    //
+    // **It is the one aquatic that wants depth.** Its `height_filter` is -64 to
+    // 30 against a sea level of 63, so thirty-three blocks down and lower; our
+    // world is a quarter as tall, which puts it six below ours.
+    {.name = "Glow Squid", .halfWidth = 0.35f, .height = 0.80f, .gaitRate = 0.0f,
+     .modelScale = 0.80f, .health = 10, .walkSpeed = 1.6f, .runSpeed = 3.4f, .senseRange = 8.0f,
+     .maxBlockLight = 0, .weight = 0.35f, .babyChance = 0.05f, .groupSize = 4, .stepHeight = 0.0f,
+     .jumpHeight = 0.0f, .floats = false, .sinks = false, .breathesWater = true, .swims = true,
+     .breathesAir = false, .spawnsInWater = true, .maxSpawnY = kSeaLevel - 6, .maxLoaded = 4,
+     .glows = true, .jets = true, .walksOnLand = false, .panicSpeedScale = 1.5f},
+    // Spawns on the sand like the reference does rather than in the water, and
+    // swims only once it gets there - `can_swim` *and* `can_walk`, which is the
+    // first time those two have been true together here.
+    //
+    // Thirty health is the reference's and makes it far the toughest passive in
+    // the sea. **What it does not have yet is a home beach**: the reference
+    // remembers where it hatched and returns there to lay, which needs
+    // per-creature state that survives a save and is a milestone of its own.
+    {.name = "Turtle", .halfWidth = 0.50f, .height = 0.40f, .gaitRate = 6.0f, .gaitSwing = 0.30f,
+     .modelScale = 1.00f, .health = 30, .walkSpeed = 1.0f, .runSpeed = 2.0f, .senseRange = 8.0f,
+     .maxBlockLight = 15, .weight = 0.5f, .babyChance = 0.10f, .groupSize = 2, .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .floats = false, .sinks = false, .breathesWater = true, .swims = true,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
+    // Fast, and the only thing in the sea that hits back without being hostile:
+    // its `angry` duration is 25 seconds and its kind hear it at 16 m.
+    //
+    // **Named divergence: it does not drown.** The reference gives it a
+    // 240-second air supply and a goal that sends it up to breathe, and without
+    // that goal a drowning dolphin would simply die at the bottom - so it
+    // breathes water and the land timer is what can kill it.
+    {.name = "Dolphin", .halfWidth = 0.40f, .height = 0.60f, .gaitRate = 0.0f,
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 2.6f, .runSpeed = 5.2f, .senseRange = 12.0f,
+     .attackDamage = 3, .maxBlockLight = 15, .weight = 0.4f, .babyChance = 0.10f, .groupSize = 4,
+     .stepHeight = 0.0f, .jumpHeight = 0.0f, .floats = false, .sinks = false,
+     .breathesWater = true, .swims = true, .spawnsInWater = true, .maxSpawnY = kSeaLevel,
+     .maxLoaded = 4, .walksOnLand = false, .dryOutSeconds = 120.0f, .angerSeconds = 25.0f,
+     .alertRange = 16.0f},
+    // Amphibious like the turtle, and the first species with a livery: the
+    // reference rolls four of its five colours at 25% each and keeps the fifth
+    // for breeding, which we have none of, so all five are equally likely.
+    // Underwater it is twice the speed it manages on land - 0.2 against 0.1 -
+    // and it dries out in five minutes ashore.
+    {.name = "Axolotl", .halfWidth = 0.32f, .height = 0.42f, .gaitRate = 9.0f, .gaitSwing = 0.30f,
+     .modelScale = 1.00f, .health = 14, .walkSpeed = 1.7f, .runSpeed = 3.4f, .senseRange = 8.0f,
+     .attackDamage = 2, .maxBlockLight = 15, .weight = 0.4f, .babyChance = 0.10f, .groupSize = 3,
+     .stepHeight = 0.6f, .jumpHeight = 0.0f, .floats = false, .sinks = false,
+     .breathesWater = true, .swims = true, .spawnsInWater = true, .maxSpawnY = kSeaLevel,
+     .maxLoaded = 5, .dryOutSeconds = 300.0f, .variantCount = 5,
+     .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
+    // Two body shapes crossed with six patterns. The reference gets its
+    // twenty-two named fish by tinting a base and an overlay at runtime; ours
+    // draws the overlay as a second cutout shell instead, because runtime
+    // tinting is exactly what produced the washed-out grass at M19a.
+    {.name = "Tropical Fish", .halfWidth = 0.20f, .height = 0.40f, .gaitRate = 0.0f,
+     .modelScale = 1.00f, .health = 3, .walkSpeed = 1.8f, .runSpeed = 3.6f, .senseRange = 6.0f,
+     .maxBlockLight = 15, .weight = 0.7f, .groupSize = 5, .stepHeight = 0.0f, .jumpHeight = 0.0f,
+     .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
+     .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 8, .walksOnLand = false,
+     .variantCount = 2 * kTropicalPatterns, .alertRange = kHerdAlertRange,
+     .panicSpeedScale = 1.5f},
+    // --- Tier 1. Six of the ten are an existing rig plus a skin, which is what
+    // --- makes them a row here rather than a model: the geometry each one uses
+    // --- was read out of `Mojang/bedrock-samples`' own entity files.
+
+    // The cow's rig and the cow's stats. The reference confines it to one
+    // biome we do not have, so it spawns wherever a cow does and is simply
+    // scarce - a named divergence rather than an oversight.
+    {.name = "Mushroom Cow", .halfWidth = 0.45f, .height = 1.50f, .gaitRate = 5.5f,
+     .gaitSwing = 0.36f, .modelScale = 1.00f, .health = 10, .walkSpeed = 1.3f, .runSpeed = 2.8f,
+     .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.18f, .babyChance = 0.05f,
+     .groupSize = 2, .avoidsWater = true, .alertRange = kHerdAlertRange},
+    // Both undead horses are `geometry.horse` unchanged. They are **passive**,
+    // as the reference has them, and neither burns off - so a pale horse
+    // standing in a field at noon is correct rather than a bug.
+    {.name = "Skeleton Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f,
+     .gaitSwing = 0.49f, .modelScale = 1.00f, .health = 15, .walkSpeed = 2.0f, .runSpeed = 4.5f,
+     .senseRange = 10.0f, .nocturnal = true, .maxBlockLight = 7, .weight = 0.15f,
+     .burnsInDay = false, .stepHeight = 1.0f, .jumpHeight = 0.0f, .floats = false,
+     .amphibious = true, .breathesWater = true},
+    {.name = "Zombie Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f,
+     .gaitSwing = 0.49f, .modelScale = 1.00f, .health = 15, .walkSpeed = 1.8f, .runSpeed = 4.0f,
+     .senseRange = 10.0f, .nocturnal = true, .maxBlockLight = 7, .weight = 0.15f,
+     .burnsInDay = false, .stepHeight = 1.0f, .jumpHeight = 0.0f, .floats = false,
+     .amphibious = true, .breathesWater = true},
+    // The llama's rig with its pack drawn over it. Travels in smaller groups
+    // than a wild llama, which is the whole idea of a trader's string.
+    {.name = "Trader Llama", .halfWidth = 0.43f, .height = 1.87f, .gaitRate = 5.5f,
+     .gaitSwing = 0.31f, .modelScale = 1.00f, .health = 12, .walkSpeed = 1.6f, .runSpeed = 3.5f,
+     .senseRange = 10.0f, .maxBlockLight = 15, .weight = 0.2f, .babyChance = 0.10f,
+     .groupSize = 2, .stepHeight = 1.0f, .jumpHeight = 0.0f, .alertRange = kHerdAlertRange},
+    // The Princepin's rig at both ends of its family. The brute is the
+    // reference's own outlier - fifty health and seven damage, and it never
+    // calms down - while the zombified one is **neutral**, which needs no flag
+    // at all: not hostile with damage above zero is already "ignores you until
+    // struck", and its thirty-second grudge is the reference's `angry` duration.
+    {.name = "Princepin Brute", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+     .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 50, .walkSpeed = 1.2f, .runSpeed = 2.6f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 7, .maxBlockLight = 15,
+     .weight = 0.12f, .burnsInDay = false, .floats = false, .avoidsWater = true,
+     .leashRange = 64.0f, .angerSeconds = 600.0f, .alertRange = 16.0f, .swingsArms = true},
+    {.name = "Zombie Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+     .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f,
+     .senseRange = 16.0f, .attackDamage = 5, .nocturnal = true, .maxBlockLight = 7,
+     .weight = 0.35f, .burnsInDay = false, .floats = false, .amphibious = true,
+     .breathesWater = true, .angerSeconds = 30.0f, .alertRange = 20.0f, .swingsArms = true},
+    // The silverfish's cousin, and it keeps the one thing that makes a
+    // silverfish frightening: no line of sight needed.
+    {.name = "Voidmite", .halfWidth = 0.20f, .height = 0.30f, .gaitRate = 11.0f,
+     .modelScale = 1.00f, .health = 8, .walkSpeed = 1.4f, .runSpeed = 2.8f, .hostile = true,
+     .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 4,
+     .weight = 0.5f, .burnsInDay = false, .mustSee = false, .angerSeconds = 600.0f},
+    // Three sizes that split, exactly as the slimes do - the machinery is
+    // already there and none of it needed touching. The launch is shared for
+    // the same reason theirs is: the reference jumps one block whatever the
+    // size, and only the ground covered scales.
+    {.name = "Magma Cube", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.75f, .modelScale = 1.04f, .health = 1, .walkSpeed = 0.8f, .runSpeed = 1.6f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 3, .maxBlockLight = 15,
+     .weight = 0.35f, .burnsInDay = false, .avoidsWater = true},
+    {.name = "Magma Cube", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.70f, .modelScale = 2.08f, .health = 4, .walkSpeed = 1.1f, .runSpeed = 2.2f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 4, .maxBlockLight = 15,
+     .weight = 0.3f, .burnsInDay = false, .splitInto = CreatureKind::MagmaCubeSmall,
+     .splitMin = 2, .splitMax = 4, .avoidsWater = true},
+    {.name = "Magma Cube", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 7.21f,
+     .hopGather = 0.65f, .modelScale = 4.16f, .health = 16, .walkSpeed = 1.5f, .runSpeed = 3.0f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 6, .maxBlockLight = 15,
+     .weight = 0.2f, .burnsInDay = false, .splitInto = CreatureKind::MagmaCubeMedium,
+     .splitMin = 2, .splitMax = 4, .avoidsWater = true},
 };
 
 static_assert(std::size(kSpecies) == static_cast<std::size_t>(CreatureKind::Count),
@@ -432,6 +994,25 @@ bool hasFooting(const World& world, const glm::vec3& feet) {
     return false;
 }
 
+/// What the route planner is allowed to walk through, built from the species
+/// row rather than written down twice.
+///
+/// **`climbHeight` is deliberately the same `max(stepHeight, jumpHeight)` the
+/// steering fan probes with.** A planner and the legs that follow it have to
+/// agree on what counts as passable - the fan learned that once already, when
+/// rejecting anything blocked at foot height sent creatures around every rise
+/// and the jump could never fire.
+path::Agent pathAgentFor(const CreatureSpecies& species, float scale) {
+    return path::Agent{.halfWidth = species.halfWidth * scale,
+                       .height = species.height * scale,
+                       .climbHeight = std::max(species.stepHeight, species.jumpHeight),
+                       .maxDrop = kMaxDropHeight,
+                       .avoidsWater = species.avoidsWater,
+                       // The undead walk the bottom, so water is a road rather
+                       // than a hazard to route around.
+                       .amphibious = species.amphibious || species.breathesWater};
+}
+
 /// xorshift32: small, fast, and good enough for wandering. Creatures are not
 /// part of generation, so this needs no determinism guarantee.
 float nextRandom(std::uint32_t& state) {
@@ -441,6 +1022,47 @@ float nextRandom(std::uint32_t& state) {
     return static_cast<float>(state & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
 
+/// A cell somewhere inside the water column over the seabed, or -1 where there
+/// is no room for one.
+///
+/// A swimmer wants the *middle* of the water, not the floor of it - which is
+/// all `highestSolid` can offer, and is why the surface-based spawn path cannot
+/// serve one. Two cells of water are required so the body is genuinely under
+/// rather than bobbing in the one wet block of a shoreline.
+int waterColumnY(const World& world, int x, int z, float roll) {    const int bed = world.highestSolid(x, z);
+    if (bed < 0) {
+        return -1;
+    }
+    int top = bed + 1;
+    while (top <= kSeaLevel + 1 && isWater(world.blockAt(x, top, z))) {
+        ++top;
+    }
+    const int lowest = bed + 1;
+    const int highest = top - 2;
+    if (highest < lowest) {
+        return -1;
+    }
+    return std::min(lowest + static_cast<int>(roll * static_cast<float>(highest - lowest + 1)),
+                    highest);
+}
+
+/// Whether the water here is deep enough to live in.
+///
+/// Measured over the whole column between the bed and the surface rather than
+/// around the candidate, because a fish one block off the floor of a deep sea
+/// is in open water and the same fish in a two-deep dip is not.
+bool inOpenWater(const World& world, int x, int z) {
+    const int bed = world.highestSolid(x, z);
+    if (bed < 0) {
+        return false;
+    }
+    int top = bed + 1;
+    while (top <= kSeaLevel + 1 && isWater(world.blockAt(x, top, z))) {
+        ++top;
+    }
+    return top - (bed + 1) >= kOpenWaterDepth;
+}
+
 /// Picks somewhere to amble to, and how long to spend on it.
 void pickWanderGoal(Creature& creature, std::uint32_t& random) {
     creature.walking = nextRandom(random) > 0.35f;
@@ -448,6 +1070,13 @@ void pickWanderGoal(Creature& creature, std::uint32_t& random) {
         creature.walking ? 2.0f + nextRandom(random) * 4.0f : 1.5f + nextRandom(random) * 4.5f;
     if (creature.walking) {
         creature.targetYaw = nextRandom(random) * kTwoPi;
+        // A place as well as a bearing, because only a place can be pathed to.
+        // The reference picks a spot within ten blocks and paths to that.
+        const float reach = kWanderRange * (0.4f + nextRandom(random) * 0.6f);
+        creature.wanderGoal =
+            creature.position +
+            glm::vec3{std::sin(creature.targetYaw), 0.0f, std::cos(creature.targetYaw)} * reach;
+        creature.route.clear();
     }
 }
 
@@ -478,7 +1107,49 @@ bool steerAround(const World& world, const Creature& creature, float desiredYaw,
                     continue;
                 }
             }
-            if (!hasFooting(world, landing)) {
+            // Open air below is a fall and gets rejected - unless it is already
+            // swimming, in which case there is no floor to want and demanding
+            // one would pin it in the middle of the lake.
+            if (!creature.inWater && !hasFooting(world, landing)) {
+                continue;
+            }
+            // `avoid_water` is a pathing preference and nothing more: it routes
+            // around a pond it can see, and is perfectly capable of being
+            // knocked into one. Most farm animals have it; a chicken, a wolf, a
+            // llama and a polar bear do not.
+            if (species.avoidsWater &&
+                isWater(world.blockAt(static_cast<int>(std::floor(landing.x)),
+                                      static_cast<int>(std::floor(landing.y)),
+                                      static_cast<int>(std::floor(landing.z))))) {
+                continue;
+            }
+            chosenYaw = yaw;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The swimmer's planner. The same fan as `steerAround`, looking for a
+/// different thing: a heading is good when the body still fits *and* the cell
+/// it lands in is water. There is no floor to want and no rise to step onto,
+/// and asking for either would pin a fish in the middle of the sea.
+bool steerInWater(const World& world, const Creature& creature, float desiredYaw, float& chosenYaw) {
+    const CreatureSpecies& species = speciesInfo(creature.kind);
+
+    for (int step = 0; step <= kSteerFanSteps; ++step) {
+        for (int sign = 0; sign < (step == 0 ? 1 : 2); ++sign) {
+            const float offset = static_cast<float>(step) * kSteerFanStep * (sign == 0 ? 1.0f : -1.0f);
+            const float yaw = desiredYaw + offset;
+            const glm::vec3 ahead =
+                creature.position + glm::vec3{std::sin(yaw), 0.0f, std::cos(yaw)} * kSwimProbe;
+            if (bodyOverlapsSolid(world, species, ahead, creature.scale)) {
+                continue;
+            }
+            const float mid = species.height * creature.scale * 0.5f;
+            if (!isWater(world.blockAt(static_cast<int>(std::floor(ahead.x)),
+                                       static_cast<int>(std::floor(ahead.y + mid)),
+                                       static_cast<int>(std::floor(ahead.z))))) {
                 continue;
             }
             chosenYaw = yaw;
@@ -489,8 +1160,7 @@ bool steerAround(const World& world, const Creature& creature, float desiredYaw,
 }
 
 // ---------------------------------------------------------------------------
-// Behaviours
-//
+// Behaviours//
 // Bedrock's shape rather than Bedrock's format: a behaviour is a priority, a
 // set of controllers it claims, and three function pointers. There is no JSON,
 // no component groups and no filter language - the table is `constexpr`, so the
@@ -559,6 +1229,13 @@ struct BehaviourContext {
     /// player themselves.
     CreatureAttack& attack;
     std::uint32_t& random;
+
+    /// The one route planner, and what is left of this frame's search budget.
+    /// Shared across the population rather than held per creature, so that one
+    /// animal boxed into a maze cannot cost a frame on its own - the same
+    /// reasoning as the per-frame budgets on light and water.
+    path::Pathfinder& pathfinder;
+    int& pathBudget;
 };
 
 /// One row of the behaviour table.
@@ -590,6 +1267,83 @@ bool walkToward(const BehaviourContext& ctx, float desiredYaw) {
     return true;
 }
 
+/// The bearing from a creature to a place, in this codebase's yaw convention.
+float yawTo(const Creature& self, const glm::vec3& goal) {
+    return std::atan2(goal.x - self.position.x, goal.z - self.position.z);
+}
+
+float flatDistance(const glm::vec3& a, const glm::vec3& b) {
+    return std::hypot(a.x - b.x, a.z - b.z);
+}
+
+/// Walk to a **place**, following a searched route rather than a bearing.
+///
+/// **Falling back to `walkToward` is what made this safe to roll out**: a
+/// creature with no route steers at its goal exactly as it always did, so every
+/// case the search declines to answer behaves as it did before. The route only
+/// ever replaces *which way to face this instant*; the step-up, the jump, the
+/// water avoidance and the final 0.9 m of obstacle-hugging are all still the
+/// steering fan's, and none of them changed.
+bool walkTo(const BehaviourContext& ctx, const glm::vec3& goal) {
+    Creature& self = ctx.self;
+
+    // A swimmer has its own planner and moves in three dimensions; this one
+    // walks on floors.
+    if (ctx.species.swims) {
+        return walkToward(ctx, yawTo(self, goal));
+    }
+
+    // Close enough that a route would be two waypoints of noise.
+    if (flatDistance(self.position, goal) <= kWaypointReached * 2.0f) {
+        self.route.clear();
+        return walkToward(ctx, yawTo(self, goal));
+    }
+
+    // No headway for a while means the route is asking for something the legs
+    // cannot do. Throw it away rather than grinding into the same block.
+    self.progressTimer += ctx.deltaSeconds;
+    if (self.progressTimer >= kProgressWindow) {
+        if (flatDistance(self.position, self.progressFrom) < kProgressDistance) {
+            self.route.clear();
+            self.repathTimer = 0.0f;
+        }
+        self.progressFrom = self.position;
+        self.progressTimer = 0.0f;
+    }
+
+    self.repathTimer = std::max(0.0f, self.repathTimer - ctx.deltaSeconds);
+    // Two reasons to want a new route, and **both are gated behind the same
+    // cadence**. Without that gate a chaser dancing in and out of contact
+    // clears its route on the frame it arrives and searches again on the next
+    // one, forever. Waiting simply falls back to steering in the meantime,
+    // which is what this did before there were routes at all.
+    const bool wantNew =
+        self.route.finished() || flatDistance(goal, self.routeGoal) > kRepathMoved;
+    if (wantNew && self.repathTimer <= 0.0f && ctx.pathBudget > 0) {
+        --ctx.pathBudget;
+        self.repathTimer = kRepathSeconds;
+        self.routeGoal = goal;
+        if (!ctx.pathfinder.find(ctx.world, pathAgentFor(ctx.species, self.scale), self.position,
+                                 goal, self.route)) {
+            self.route.clear();
+        }
+    }
+
+    // Advance past everything already reached. Walking through two waypoints in
+    // one frame is normal at speed, and doubling back to touch one would read
+    // as a stutter.
+    while (!self.route.finished() &&
+           flatDistance(self.position, path::waypoint(self.route, self.route.next)) <=
+               kWaypointReached) {
+        ++self.route.next;
+    }
+
+    if (self.route.finished()) {
+        return walkToward(ctx, yawTo(self, goal));
+    }
+    return walkToward(ctx, yawTo(self, path::waypoint(self.route, self.route.next)));
+}
+
 // --- Producers: these write the target slot and claim no controller at all, so
 // --- they can never be crowded out by something that is merely moving.
 
@@ -611,28 +1365,64 @@ void hurtByTargetTick(const BehaviourContext& ctx) {
 /// rather than a special case in the mood logic - a spider is a hunter wherever
 /// the light is low enough and an ordinary neutral everywhere else.
 ///
-/// A crouched target is noticed later. The floor matters as much as the
+/// Three of the reference's rules land here at once.
+///
+/// **It only asks twice a second.** Bedrock scans on a `scan_interval` of ten
+/// ticks, and that is what the old distance hysteresis was really standing in
+/// for: without it, something sitting exactly on the sense boundary is noticed
+/// and forgotten on alternate frames.
+///
+/// **It needs to see you.** `must_see` is set on every hostile in the shipped
+/// data, and we did not have it at all outside the Bramble's fuse - so a zombie
+/// on the far side of a wall knew exactly where you were.
+///
+/// **A crouched target is noticed later.** The floor matters as much as the
 /// multiplier: nothing hides at point-blank range however carefully it moves.
 bool nearestTargetStart(const BehaviourContext& ctx) {
+    if (!(ctx.species.hostile || ctx.huntsHere) || ctx.self.scanTimer > 0.0f) {
+        return false;
+    }
     const float range = ctx.playerSneaking
                             ? std::max(ctx.species.senseRange * kSneakDetection, kMinDetection)
                             : ctx.species.senseRange;
-    return (ctx.species.hostile || ctx.huntsHere) && ctx.distance < range;
+    return ctx.distance < range && (!ctx.species.mustSee || ctx.seesPlayer);
 }
 
-/// Hysteresis: it gives up further out than it engages. Without the gap, a
-/// creature sitting exactly on the sense boundary flips every frame.
+/// Why it keeps coming is a different question from why it set off, and the
+/// reference answers it with two different numbers rather than one widened one.
+///
+/// **Distance is the leash, not the sense range**, and the two are not ordered
+/// the way instinct says: a zombie notices you at 35 m and loses interest at
+/// 25. **Sight becomes a memory** - `must_see_forget_duration`, three seconds
+/// for almost everything and seventeen for a zombie - so ducking behind a tree
+/// does not shake anything off instantly.
+///
+/// **Being roused outranks the reason it started.** That is what makes the
+/// spider's light rule survive contact with a torch: it acquires you in the
+/// dark, `nearestTargetTick` sets the grudge, and brightening the room no
+/// longer calls it off until the grudge runs out.
 ///
 /// **Sneaking is deliberately not applied here.** The reference only uses the
 /// modifier while a mob is acquiring, so crouching keeps you from being noticed
 /// and does nothing at all once you have been - which is the difference between
 /// stealth and an escape button.
 bool nearestTargetContinue(const BehaviourContext& ctx) {
-    return (ctx.species.hostile || ctx.huntsHere) && ctx.distance < ctx.species.senseRange * 1.4f;
+    if (!(ctx.species.hostile || ctx.huntsHere || ctx.self.provokedTimer > 0.0f)) {
+        return false;
+    }
+    const float leash =
+        ctx.species.leashRange > 0.0f ? ctx.species.leashRange : ctx.species.senseRange;
+    return ctx.distance < leash && (!ctx.species.mustSee || ctx.self.forgetTimer > 0.0f);
 }
 
 void nearestTargetTick(const BehaviourContext& ctx) {
     ctx.self.target = CreatureTarget::Player;
+    // A neutral that turns hunter by circumstance stays roused for a while
+    // afterwards, which is the reference's `spider_angry`. A species that is
+    // hostile outright needs nothing: it never stops being a reason on its own.
+    if (ctx.huntsHere && !ctx.species.hostile) {
+        ctx.self.provokedTimer = std::max(ctx.self.provokedTimer, ctx.species.angerSeconds);
+    }
 }
 
 // --- Consumers and locomotion.
@@ -677,6 +1467,7 @@ bool panicStart(const BehaviourContext& ctx) {
 
 void panicTick(const BehaviourContext& ctx) {
     ctx.self.running = true;
+    ctx.self.speedScale = ctx.species.panicSpeedScale;
     walkToward(ctx, ctx.yawToPlayer + 3.14159265f);
 }
 
@@ -690,23 +1481,118 @@ bool meleeAttackStart(const BehaviourContext& ctx) {
 void meleeAttackTick(const BehaviourContext& ctx) {
     Creature& self = ctx.self;
     self.running = true;
+    self.speedScale = ctx.species.chaseSpeedScale;
     // It holds the look controller as well as the movement one, so nothing
     // lower down can pull its gaze off what it is chasing.
     self.targetHeadYaw = ctx.yawToPlayer;
     self.targetHeadPitch = ctx.pitchToPlayer;
-    walkToward(ctx, ctx.yawToPlayer);
 
-    if (ctx.species.attackDamage <= 0 || ctx.distance >= kAttackReach || self.attackTimer > 0.0f ||
-        std::abs(ctx.toPlayer.y) >= ctx.species.height) {
+    const float halfWidth = ctx.species.halfWidth * self.scale;
+    // **It closes until the two bodies meet, and then stands there and
+    // swings.** The reference paths to a node beside its target and the path
+    // simply ends, which is what a walker arriving at you looks like.
+    //
+    // Without that it kept walking for as long as it had a target. Nothing
+    // here collides with the player, so it walked *through*, overshot, and then
+    // had to come all the way about - which at a limited turn rate is a circle,
+    // with the player on the inside of it taking a hit on every pass.
+    //
+    // A hopper is exempt, and that is the reference's own split rather than a
+    // convenience: a slime has no melee goal at all, it has `slime_attack` and
+    // an `area_attack` that hurts whatever it lands on, so arriving on top of
+    // you *is* its attack and stopping short would leave it sitting in front of
+    // you doing nothing.
+    //
+    // So is anything whose target is not on its own level. Two bodies at
+    // different heights have not met, and standing still there would mean a
+    // zombie at the foot of a one-block ledge never climbing it - the step-up
+    // and the jump both read `walking`.
+    const float contact = halfWidth + player_constants::kWidth * 0.5f;
+    // Arriving means arriving on the same **footing**. Anything more than a
+    // step up or down is something to climb rather than something reached, and
+    // both the step-up and the jump read `walking` - so a zombie at the foot of
+    // a one-block ledge has to keep walking into it or it stands there forever.
+    const bool arrived =
+        ctx.distance <= contact && std::abs(ctx.toPlayer.y) <= ctx.species.stepHeight;
+    if (arrived && !ctx.species.hops) {
+        // `walking` is sticky - it survives from whichever behaviour set it
+        // last - so standing still has to be said outright. Claiming the
+        // movement controller only stops anything else *steering*. This is the
+        // trap the Bramble's fuse already fell into once.
+        self.walking = false;
+        self.targetYaw = ctx.yawToPlayer;
+        self.route.clear();
+    } else {
+        // A searched route rather than a bearing, which is the whole of why a
+        // wall is now something to walk around rather than something to press
+        // against until the player happens to come back into the open.
+        walkTo(ctx, self.position + ctx.toPlayer);
+    }
+
+    const float length = std::max(ctx.distance, 0.001f);
+    const glm::vec3 out{-ctx.toPlayer.x / length, 0.0f, -ctx.toPlayer.z / length};
+
+    // Whether the two bodies genuinely overlap, which is a different question
+    // from having arrived and is **not symmetric**: the player is 1.8 m tall,
+    // so a slime sailing over their boots is still hitting them.
+    const bool touching = ctx.distance <= contact &&
+                          ctx.toPlayer.y < ctx.species.height * self.scale &&
+                          ctx.toPlayer.y > -player_constants::kHeight;
+
+    // A hopper rebounds instead of stopping, because it has nowhere to stop:
+    // arriving on you *is* its attack. So the player is a wall, and the part of
+    // its velocity heading into that wall comes back out - which is what turns
+    // "it keeps jumping into me" into a real cycle of hit, recoil, gather,
+    // come again.
+    //
+    // **Contact, not the blow.** A small slime does no damage at all in the
+    // reference, and a wall does not care: it would look wrong for the big ones
+    // to bounce and the small one to pass straight through.
+    //
+    // It fires at most once per approach without needing a timer, because after
+    // it the slime is heading away and `inward` is negative.
+    if (ctx.species.hops && touching) {
+        const float inward = -(self.velocity.x * out.x + self.velocity.z * out.z);
+        if (inward > 0.0f) {
+            // Whatever it had sideways is kept; only the inward part reverses.
+            const float tangentX = self.velocity.x + out.x * inward;
+            const float tangentZ = self.velocity.z + out.z * inward;
+            self.velocity.x = tangentX + out.x * inward * kReboundRestitution;
+            self.velocity.z = tangentZ + out.z * inward * kReboundRestitution;
+            // Assigned as the stronger of the two, never accumulated - several
+            // sources each adding their own push is the oldest bug in here.
+            self.velocity.y =
+                std::max(self.velocity.y, ctx.species.hopLaunch * kReboundLift);
+            // It has just been knocked off the floor, and saying so is what
+            // makes the rebound survive: the hop branch zeroes horizontal
+            // velocity on any creature it still believes is standing, so a
+            // bounce landed at ground level would come out as a hop straight
+            // up with the recoil thrown away.
+            self.onGround = false;
+        }
+    }
+
+    // Reach is wider than contact, deliberately: it is this creature's own box
+    // grown horizontally, plus the target's half-width, because what the
+    // reference tests is whether the two boxes overlap once one of them has
+    // been inflated. So a blow still lands on someone who has just been knocked
+    // back out of contact. A flat number gave every animal on the roster the
+    // same bite.
+    const float reach = halfWidth + kMeleeHorizontalReach + player_constants::kWidth * 0.5f;
+    // And it has to be facing you. `melee_fov` is 90 degrees in the reference,
+    // which turns walking round a creature into a real half-second of grace
+    // while it comes about rather than a cosmetic detail.
+    const float offAxis = std::abs(std::remainder(ctx.yawToPlayer - self.yaw, kTwoPi));
+
+    if (ctx.species.attackDamage <= 0 || ctx.distance >= reach || self.attackTimer > 0.0f ||
+        offAxis > kMeleeHalfFov || std::abs(ctx.toPlayer.y) >= ctx.species.height) {
         return;
     }
     self.attackTimer = kAttackInterval;
+    self.swingTimer = kAttackSwingSeconds;
     ctx.attack.damage += ctx.species.attackDamage;
 
-    const float length = std::max(ctx.distance, 0.001f);
-    const glm::vec3 push =
-        glm::vec3{ctx.toPlayer.x / length, 0.0f, ctx.toPlayer.z / length} * kKnockbackSpeed +
-        glm::vec3{0.0f, kKnockbackLift, 0.0f};
+    const glm::vec3 push = -out * kKnockbackSpeed + glm::vec3{0.0f, kKnockbackLift, 0.0f};
     // Only the hardest blow moves you. Summing them lets a pack launch the
     // player clear across the world in one frame, which is what emptied the map
     // on the first night the hostiles worked.
@@ -727,11 +1613,12 @@ void wanderTick(const BehaviourContext& ctx) {
     if (!self.walking) {
         return;
     }
-    if (!walkToward(ctx, self.targetYaw)) {
+    if (!walkTo(ctx, self.wanderGoal)) {
         // Boxed in with nowhere sensible to go: stand still and try again
         // shortly rather than grind into the wall for the rest of the timer.
         self.walking = false;
         self.decisionTimer = 0.5f;
+        self.route.clear();
     }
 }
 
@@ -761,6 +1648,81 @@ void lookAtPlayerTick(const BehaviourContext& ctx) {
     self.lookTimer -= ctx.deltaSeconds;
     self.targetHeadYaw = ctx.yawToPlayer;
     self.targetHeadPitch = ctx.pitchToPlayer;
+}
+
+/// Cruising, for anything that swims. The reference splits this across three
+/// goals - `random_swim` picks a point 16 out and up to 4 above or below,
+/// `swim_wander` nudges the heading, `swim_idle` does nothing - and one row
+/// covers all three here, because the only thing separating them is how far
+/// ahead the point is and nothing here stores a point at all. Rolling the dive
+/// *angle* instead reproduces the same 14-degree spread for one float.
+///
+/// It outranks `Wander` and claims the same controller, so a swimmer never runs
+/// the walking version and a walker never runs this one.
+bool swimWanderStart(const BehaviourContext& ctx) {
+    return ctx.species.swims;
+}
+
+void swimWanderTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    if (!self.inWater) {
+        // Out of its element there is nothing to steer: `step` flops it, and a
+        // heading would only make it slide.
+        self.walking = false;
+        self.targetPitch = 0.0f;
+        return;
+    }
+
+    if (self.decisionTimer <= 0.0f) {
+        self.decisionTimer = 2.0f + nextRandom(ctx.random) * 4.0f;
+        self.targetYaw = nextRandom(ctx.random) * kTwoPi;
+        self.targetPitch = (nextRandom(ctx.random) * 2.0f - 1.0f) * kSwimPitchMax;
+    }
+
+    self.walking = true;
+    float routed = self.targetYaw;
+    if (!steerInWater(ctx.world, self, self.targetYaw, routed)) {
+        // Boxed in. Turn about and decide again immediately rather than grind
+        // into the seabed for the rest of the timer.
+        self.targetYaw += 3.14159265f;
+        self.decisionTimer = 0.0f;
+        return;
+    }
+    self.targetYaw = routed;
+
+    // The surface and the seabed are both walls to a fish, and neither is
+    // something the horizontal fan can see. Positive pitch is nose-down, so
+    // refusing to rise is a floor under the angle and refusing to dive is a
+    // ceiling over it.
+    const int hx = static_cast<int>(std::floor(self.position.x));
+    const int hz = static_cast<int>(std::floor(self.position.z));
+    const float top = self.position.y + ctx.species.height * self.scale;
+    if (!isWater(ctx.world.blockAt(hx, static_cast<int>(std::floor(top + kSwimProbe)), hz))) {
+        self.targetPitch = std::max(self.targetPitch, 0.0f);
+    }
+    if (ctx.world.isSolid(hx, static_cast<int>(std::floor(self.position.y - kSwimProbe)), hz)) {
+        self.targetPitch = std::min(self.targetPitch, 0.0f);
+    }
+}
+
+/// A pufferfish inflating. It claims **no controller at all**, because swelling
+/// is a state rather than a way of moving - so it runs alongside whatever is
+/// steering, exactly as the targeting rows do.
+bool puffStart(const BehaviourContext& ctx) {
+    return ctx.species.puffs;
+}
+
+void puffTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    // Two ranges rather than one, which is the reference's own arrangement: it
+    // starts inflating at 2.5 m and only lets go once nothing has been within
+    // 2.9 m for three seconds. A single threshold would flicker for anyone
+    // circling at exactly that distance.
+    if (ctx.distance <= kPuffRange) {
+        self.puff = std::min(self.puff + ctx.deltaSeconds / kPuffStageSeconds, kPuffMax);
+    } else if (ctx.distance > kPuffHoldRange) {
+        self.puff = std::max(self.puff - ctx.deltaSeconds / kPuffDeflateSeconds, 0.0f);
+    }
 }
 
 /// Running from a cat. The reference's `avoid_mob_type`, and the one behaviour
@@ -793,8 +1755,14 @@ constexpr Behaviour kBehaviours[] = {
     // Ties with the row above on purpose, and must stay below it: it reads the
     // target slot that one writes, and within a tie the array order decides.
     {"Swell", 2, ControlMove | ControlLook, swellStart, swellTick, swellContinue},
+    // Claims nothing, like the targeting rows: a pufferfish inflates while it
+    // goes on swimming, and neither behaviour needs to know about the other.
+    {"Puff", 2, 0, puffStart, puffTick},
     {"AvoidFeline", 3, ControlMove | ControlLook, avoidFelineStart, avoidFelineTick},
     {"MeleeAttack", 4, ControlMove | ControlLook, meleeAttackStart, meleeAttackTick},
+    // Above `Wander` and claiming the same controller, which is what keeps the
+    // two mutually exclusive: a swimmer never ambles and a walker never cruises.
+    {"SwimWander", 5, ControlMove, swimWanderStart, swimWanderTick},
     {"Wander", 6, ControlMove, wanderStart, wanderTick},
     {"LookAtPlayer", 7, ControlLook, lookAtPlayerStart, lookAtPlayerTick, lookAtPlayerContinue},
 };
@@ -851,8 +1819,8 @@ const CreatureSpecies& speciesInfo(CreatureKind kind) {
     return kSpecies[static_cast<std::size_t>(kind)];
 }
 
-static_assert(kSpawnEggLayers == static_cast<int>(CreatureKind::Count),
-              "one spawn egg sprite layer per species, in the same order");
+static_assert(kSpawnEggItems == static_cast<int>(CreatureKind::Count),
+              "one spawn egg sprite layer per species, in the same order - across both runs");
 
 const char* spawnEggName(ItemId item) {
     // Built once and handed out as stable pointers, because a tooltip keeps the
@@ -975,6 +1943,52 @@ bool spawnsIn(CreatureKind kind, BiomeId biome) {
         // ground is the nearest thing, and keeping it off the plains is what
         // stops a daylight hostile making the whole surface unsafe.
         return biome == BiomeId::Rocky || biome == BiomeId::Mountains;
+    // The only three that want the ocean, which until now nothing did.
+    case CreatureKind::Drowned:
+    case CreatureKind::Cod:
+        return biome == BiomeId::Ocean;
+    case CreatureKind::Salmon:
+    case CreatureKind::Pufferfish:
+    case CreatureKind::Squid:
+    case CreatureKind::GlowSquid:
+    case CreatureKind::Dolphin:
+    case CreatureKind::TropicalFish:
+        return biome == BiomeId::Ocean;
+    case CreatureKind::Turtle:
+        // The reference hatches them on beach sand, and so do we - it is the
+        // one aquatic here that starts its life out of the water.
+        return biome == BiomeId::Beach;
+    case CreatureKind::Axolotl:
+        // Lush caves in the reference, which we have none of. Ocean water is
+        // the honest stand-in until underwater caves exist.
+        return biome == BiomeId::Ocean;
+    case CreatureKind::MushroomCow:
+        // The reference confines it to a mushroom biome we do not have, so it
+        // grazes where a cow does and is simply scarce.
+        return biome == BiomeId::Plains || biome == BiomeId::Rocky;
+    case CreatureKind::SkeletonHorse:
+    case CreatureKind::ZombieHorse:
+        // The reference only produces these from a lightning trap, which needs
+        // weather. Until then they are rare night grazers on open ground.
+        return biome == BiomeId::Plains || biome == BiomeId::Rocky;
+    case CreatureKind::TraderLlama:
+        return biome == BiomeId::Rocky || biome == BiomeId::Mountains ||
+               biome == BiomeId::SnowyPeaks;
+    case CreatureKind::PrincepinBrute:
+    case CreatureKind::ZombiePrincepin:
+        // Same barren stand-in for the Nether the Princepin already uses.
+        return biome == BiomeId::Rocky || biome == BiomeId::Mountains;
+    case CreatureKind::Voidmite:
+        // The reference spawns it from an enderman's teleport, which does not
+        // exist here. It keeps the silverfish's stony home instead.
+        return biome == BiomeId::Rocky || biome == BiomeId::Mountains ||
+               biome == BiomeId::SnowyPeaks;
+    case CreatureKind::MagmaCubeSmall:
+    case CreatureKind::MagmaCubeMedium:
+    case CreatureKind::MagmaCubeLarge:
+        // Nether again, so the same barren stand-in - and being underground and
+        // dark is what actually gates them.
+        return biome == BiomeId::Rocky || biome == BiomeId::Mountains;
     case CreatureKind::Count:
         break;
     }
@@ -985,6 +1999,17 @@ Creatures::Creatures(std::uint32_t seed) : m_random(seed | 1u) {}
 
 float Creatures::random01() {
     return nextRandom(m_random);
+}
+
+/// Which of a species' skins an individual wears. Zero for the thirty-eight
+/// that have only one, so the roll costs nothing where it means nothing.
+std::uint8_t Creatures::rollVariant(CreatureKind kind) {
+    const int count = speciesInfo(kind).variantCount;
+    if (count <= 1) {
+        return 0;
+    }
+    return static_cast<std::uint8_t>(
+        std::min(static_cast<int>(random01() * static_cast<float>(count)), count - 1));
 }
 
 std::size_t Creatures::hunting() const {
@@ -1005,23 +2030,47 @@ std::array<std::size_t, static_cast<std::size_t>(CreatureKind::Count)> Creatures
     return counts;
 }
 
-bool Creatures::canStandAt(const World& world, const CreatureSpecies& species, int x, int y, int z) {
+bool Creatures::canSpawnAt(const World& world, const CreatureSpecies& species, int x, int y, int z) {
+    // **The body's own box, through the shared helper.** This used to scan a
+    // column of whole cells `ceil(height)` tall, which is a second copy of what
+    // `collisionBoxes` already owns - and it could not see a slab, a fence, or a
+    // body wider than the cell it stands in, so anything bulky was dropped
+    // straight into the terrain beside it and had no way back out.
+    //
+    // Measured at full size even for a baby: an animal that grows into its box
+    // should not find itself inside a wall when it does.
+    const glm::vec3 feet{static_cast<float>(x) + 0.5f, static_cast<float>(y),
+                         static_cast<float>(z) + 0.5f};
+    if (overlapsSolid(world, bodyBox(species, feet, 1.0f))) {
+        return false;
+    }
+
+    const bool wet = isWater(world.blockAt(x, y, z));
+    // Bedrock's `height_filter`, which is the reference's only expression of
+    // depth: its ocean fish sit anywhere at or below the surface and its glow
+    // squid well under it.
+    if (species.maxSpawnY > 0 && y > species.maxSpawnY) {
+        return false;
+    }
+    if (species.swims) {
+        // Nothing under it and nothing above it matters - only that there is
+        // enough water to be inside of. Asking for the cell above as well is
+        // what stops a fish appearing in the single wet block of a shoreline.
+        return wet && isWater(world.blockAt(x, y + 1, z)) && inOpenWater(world, x, z);
+    }
+    if (species.spawnsInWater) {
+        return wet && world.isSolid(x, y - 1, z) && inOpenWater(world, x, z);
+    }
+    if (wet) {
+        return false;
+    }
+
     if (!world.isSolid(x, y - 1, z)) {
         return false;
     }
     const BlockId ground = world.blockAt(x, y - 1, z);
-    if (ground != BlockId::Grass && ground != BlockId::Sand && ground != BlockId::Snow &&
-        ground != BlockId::Stone && ground != BlockId::Gravel) {
-        return false;
-    }
-    // Head room for its actual height, and nothing to stand in.
-    const int clearance = static_cast<int>(std::ceil(species.height));
-    for (int step = 0; step <= clearance; ++step) {
-        if (world.isSolid(x, y + step, z)) {
-            return false;
-        }
-    }
-    return !isWater(world.blockAt(x, y, z));
+    return ground == BlockId::Grass || ground == BlockId::Sand || ground == BlockId::Snow ||
+           ground == BlockId::Stone || ground == BlockId::Gravel;
 }
 
 void Creatures::think(const World& world, Creature& creature, const glm::vec3& playerFeet,
@@ -1031,7 +2080,9 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
 
     creature.hurtTimer = std::max(0.0f, creature.hurtTimer - deltaSeconds);
     creature.attackTimer = std::max(0.0f, creature.attackTimer - deltaSeconds);
+    creature.swingTimer = std::max(0.0f, creature.swingTimer - deltaSeconds);
     creature.provokedTimer = std::max(0.0f, creature.provokedTimer - deltaSeconds);
+    creature.scanTimer = std::max(0.0f, creature.scanTimer - deltaSeconds);
     creature.decisionTimer -= deltaSeconds;
 
     const glm::vec3 toPlayer = playerFeet - creature.position;
@@ -1058,19 +2109,40 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     }
 
     // Sight, eye to eye, so lying behind a one-block wall genuinely hides you.
+    //
     // Measured once here rather than inside the predicates that want it: it
-    // costs a ray through the world, two predicates ask for it, and it needs a
-    // little memory to survive being sampled every frame instead of every tick.
-    if (species.explodePower > 0.0f) {
+    // costs a ray through the world and several predicates ask for it. **It is
+    // no longer only the exploders that pay** - `must_see` is set on every
+    // hostile in the reference, and until now nothing but the fuse read it, so
+    // a zombie behind a wall tracked you through it.
+    //
+    // How often the ray is cast is the interesting part. An exploder needs an
+    // answer every tick, because its fuse reverses the instant the line breaks.
+    // Everything else only needs one on the tick it scans, and the answer holds
+    // until the next scan - which is exactly Bedrock's own sampling, and takes
+    // the cost from one ray per creature per frame to two per second.
+    creature.sightTimer = std::max(0.0f, creature.sightTimer - deltaSeconds);
+    const float sightRange = std::max(species.senseRange, species.leashRange);
+    const bool caresAboutSight =
+        species.hostile || species.huntsBelowLight > 0 || species.attackDamage > 0;
+    if (caresAboutSight && distance <= sightRange) {
+        const bool recheck = species.explodePower > 0.0f || creature.scanTimer <= 0.0f ||
+                             creature.forgetTimer > 0.0f;
         const glm::vec3 eye = creature.position + glm::vec3{0.0f, species.height * 0.85f, 0.0f};
         const glm::vec3 playerEye = playerFeet + glm::vec3{0.0f, player_constants::kEyeHeight, 0.0f};
-        if (hasLineOfSight(world, eye, playerEye)) {
-            creature.sightTimer = kSightGrace;
-        } else {
-            creature.sightTimer = std::max(0.0f, creature.sightTimer - deltaSeconds);
+        if (recheck && hasLineOfSight(world, eye, playerEye)) {
+            creature.sightTimer = species.explodePower > 0.0f ? kSightGrace : kTargetScanSeconds;
         }
+    } else {
+        creature.sightTimer = 0.0f;
     }
     const bool seesPlayer = creature.sightTimer > 0.0f;
+
+    // And the longer memory on top of it. Sight answers "can it see you now";
+    // this answers "how long ago did it last", which is the question a chase
+    // actually turns on.
+    creature.forgetTimer = seesPlayer ? species.forgetSeconds
+                                      : std::max(0.0f, creature.forgetTimer - deltaSeconds);
 
     // The nearest thing this species runs from. Quadratic across the whole
     // population, which is why it is guarded by the range being non-zero at
@@ -1110,8 +2182,17 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                                    toPlayer,  distance,  yawToPlayer,    pitchToPlayer,
                                    huntsHere,
                                    seesPlayer,           playerSneaking, feared,
-                                   yawFromFeared,        attack,         m_random};
+                                   yawFromFeared,        attack,         m_random,
+                                   m_pathfinder,         m_pathBudget};
     runBehaviours(context);
+
+    // Rearmed after the table has run, not before, so the acquisition predicate
+    // gets to see the tick on which it expired. A scan that finds nothing costs
+    // the same wait as one that finds you, which is the reference's behaviour
+    // and is what keeps the cadence steady.
+    if (creature.scanTimer <= 0.0f) {
+        creature.scanTimer = kTargetScanSeconds;
+    }
 
     // The fuse runs back down whenever nothing is holding it, which is what
     // makes breaking line of sight or stepping back an actual defence rather
@@ -1150,6 +2231,11 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
 void Creatures::step(const World& world, Creature& creature, float deltaSeconds) {
     const CreatureSpecies& species = speciesInfo(creature.kind);
 
+    // Clamped exactly as the player's is. The resolver snaps out of at most one
+    // block, so a frame long enough to fall further than that lands the body on
+    // the wrong side of the floor - and a chunk-loading hitch is long enough.
+    deltaSeconds = std::min(deltaSeconds, 0.05f);
+
     // Ground it cannot see is ground it would fall through: an absent chunk
     // reads as air, so simulating over one drops the creature out of the world
     // and it reappears buried when the chunk returns. Standing still until the
@@ -1160,7 +2246,98 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
         return;
     }
 
-    creature.velocity.y = std::max(creature.velocity.y - kGravity * deltaSeconds, -kTerminalVelocity);
+    // A body inside terrain climbs out rather than staying there forever.
+    // Nothing *should* put one there, but a shove from a herd, a spawn over
+    // ground that had not finished loading, or a player filling in the block it
+    // was standing in all can - and once inside, every move it tries overlaps
+    // something, so it is stuck for good. The reference has its own push-out
+    // procedure for exactly this (`RESEARCH.md` §1.6).
+    if (bodyOverlapsSolid(world, species, creature.position, creature.scale)) {
+        for (float lift = kUnstickStep; lift <= kUnstickReach; lift += kUnstickStep) {
+            glm::vec3 freed = creature.position;
+            freed.y += lift;
+            if (!bodyOverlapsSolid(world, species, freed, creature.scale)) {
+                creature.position = freed;
+                break;
+            }
+        }
+        // Whatever it was doing, it was not doing it from in there.
+        creature.velocity = glm::vec3{0.0f};
+        creature.onGround = false;
+    }
+
+    // **Floating is a behaviour, not buoyancy.** Bedrock gives almost every
+    // land animal `minecraft:behavior.float`, which swims up while its head is
+    // under - so a cow bobs, and the undead, which have no such goal, walk the
+    // bottom. Ours applies it continuously rather than rolling the reference's
+    // 0.8 per tick; the bob still comes out, because clearing the surface is
+    // what stops it.
+    const glm::vec3 eye = creature.position + glm::vec3{0.0f, species.height * creature.scale, 0.0f};
+    const bool headUnder = isWater(world.blockAt(static_cast<int>(std::floor(eye.x)),
+                                                 static_cast<int>(std::floor(eye.y - 0.1f)),
+                                                 static_cast<int>(std::floor(eye.z))));
+    const fluid::FluidContact water =
+        fluid::sampleFluid(world, bodyBox(species, creature.position, creature.scale));
+    creature.inWater = water.inWater;
+
+    if (creature.inWater) {
+        // Water **replaces** gravity rather than being applied after it. Doing
+        // both leaves the settling speed offset by `g dt k / (1 - k)`, which at
+        // 120 fps is over 5 m/s - so a cow would have sunk like a stone while
+        // every constant still read correct.
+        const float terminal = !species.sinks                ? 0.0f
+                               : (species.floats && headUnder) ? fluid::kSwimUpSpeed
+                                                               : -fluid::kSinkSpeed;
+        creature.velocity.y =
+            fluid::approach(creature.velocity.y, terminal, fluid::kWaterDrag, deltaSeconds);
+        creature.fallDistance = 0.0f;
+    } else {
+        creature.velocity.y =
+            std::max(creature.velocity.y - kGravity * deltaSeconds, -kTerminalVelocity);
+    }
+
+    // Breath. Every land animal on the roster carries the reference's 15-second
+    // supply and takes two health points a second once it runs out; the undead
+    // and the frog breathe water and never start the clock.
+    //
+    // A fish runs the **same** counter for being out of water. Bedrock spells
+    // that as `breathes_air: false` on the very component that carries
+    // `breathes_water`, so it is one mechanism read from either end rather than
+    // a second system for drying out.
+    const bool suffocating = (headUnder && !species.breathesWater) ||
+                             (!creature.inWater && !species.breathesAir);
+    if (suffocating) {
+        creature.air = std::max(0.0f, creature.air - deltaSeconds);
+        if (creature.air <= 0.0f) {
+            creature.drownTimer += deltaSeconds;
+            while (creature.drownTimer >= fluid::kDrownInterval) {
+                creature.drownTimer -= fluid::kDrownInterval;
+                creature.health -= fluid::kDrownDamage;
+                creature.hurtTimer = kHurtSeconds;
+            }
+        }
+    } else {
+        creature.air =
+            std::min(fluid::kAirSeconds,
+                     creature.air + deltaSeconds * fluid::kAirSeconds / fluid::kInhaleSeconds);
+        creature.drownTimer = 0.0f;
+    }
+
+    // Drying out, which is a separate clock running the other way. A dolphin
+    // does both: held under it would drown, kept out it dries, and the two have
+    // nothing to do with each other beyond sharing an animal.
+    if (species.dryOutSeconds > 0.0f) {
+        if (creature.inWater) {
+            creature.dryTimer = 0.0f;
+        } else {
+            creature.dryTimer += deltaSeconds;
+            if (creature.dryTimer >= species.dryOutSeconds) {
+                creature.dryTimer -= 1.0f;
+                creature.health -= 1;
+                creature.hurtTimer = kHurtSeconds;
+            }
+        }
+    }
 
     // A chicken flaps and drifts down instead of dropping. The reference scales
     // a descent by 0.6 every tick, which settles at 1.95 m/s against the 60
@@ -1173,14 +2350,24 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     // backwards from the speed the reference's own constant produces keeps the
     // descent identical at any frame rate, and comes out at exactly 0.6 when a
     // frame happens to be a tick.
-    if (species.fallDrag < 1.0f && !creature.onGround && creature.velocity.y < 0.0f) {
+    if (species.fallDrag < 1.0f && !creature.inWater && !creature.onGround && creature.velocity.y < 0.0f) {
         const float terminal = kGravity * 0.05f * species.fallDrag / (1.0f - species.fallDrag);
         creature.velocity.y *= terminal / (terminal + kGravity * deltaSeconds);
     }
 
     // Turning is eased, so a new heading reads as the animal turning to face it.
-    const float turn = std::remainder(creature.targetYaw - creature.yaw, kTwoPi);
-    creature.yaw += std::clamp(turn, -kTurnRate * deltaSeconds, kTurnRate * deltaSeconds);
+    // A jetting creature holds its heading while it is actually pushing: it
+    // moves along the way it points, so steering mid-squeeze would slew it
+    // sideways instead of making it turn about and go again.
+    if (!species.jets || creature.jetPower <= kJetCommitted) {
+        const float turn = std::remainder(creature.targetYaw - creature.yaw, kTwoPi);
+        creature.yaw += std::clamp(turn, -kTurnRate * deltaSeconds, kTurnRate * deltaSeconds);
+    }
+
+    // And the body's own tilt, which only a swimmer ever asks for. Its own rate
+    // because a fish banks into a climb rather than pivoting into one.
+    const float tilt = creature.targetPitch - creature.pitch;
+    creature.pitch += std::clamp(tilt, -kSwimTurnRate * deltaSeconds, kSwimTurnRate * deltaSeconds);
 
     const bool running = creature.running;
     const float speed = (running ? species.runSpeed : species.walkSpeed) * creature.speedScale *
@@ -1213,7 +2400,60 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     const bool mustJump = wallAhead && stepBlocked && jumpClear && species.jumpHeight > 0.0f;
 
     glm::vec3 wish{0.0f};
-    if (species.hops) {
+    if (species.swims && creature.inWater) {
+            // Where it points is where it goes, in all three axes. Bedrock says
+            // this three times over - `physics.has_gravity: false`,
+            // `can_sink: false` and `can_walk: false` - and one flag covers all
+            // three: no buoyancy to fight and no floor to want.
+            float drive = creature.walking ? speed : 0.0f;
+
+            if (species.jets) {
+                // Seeded on the first tick rather than at construction, so a
+                // group of them is out of phase with itself.
+                if (creature.age <= 0.0f) {
+                    creature.jetPhase = random01() * kTwoPi;
+                }
+                creature.jetPhase += kJetRate * deltaSeconds;
+                if (creature.jetPhase > kTwoPi) {
+                    creature.jetPhase -= kTwoPi;
+                }
+                const float half = kTwoPi * 0.5f;
+                const float ticks = deltaSeconds / 0.05f;
+                const bool closing =
+                    creature.jetPhase < half && creature.jetPhase / half > kJetThrustFrom;
+                if (closing) {
+                    creature.jetPower = 1.0f;
+                } else {
+                    creature.jetPower *= std::pow(
+                        creature.jetPhase < half ? kJetOpenDecay : kJetCoastDecay, ticks);
+                }
+                // The push and the pose are the same number, so they can never
+                // drift apart into a squid that glides while its arms flap.
+                drive *= creature.jetPower;
+            }
+
+            wish = glm::vec3{std::sin(creature.yaw), 0.0f, std::cos(creature.yaw)} *
+                   (drive * std::cos(creature.pitch));
+            creature.velocity.y = -std::sin(creature.pitch) * drive;
+    } else if (species.swims && !species.walksOnLand) {
+            // Stranded, and it cannot walk. So it flops: a shove and a new
+            // heading on a fixed cadence, going nowhere in particular, which is
+            // the point of it. Anything amphibious falls past this and walks.
+            if (creature.onGround) {
+                creature.velocity.x = 0.0f;
+                creature.velocity.z = 0.0f;
+                creature.hopTimer -= deltaSeconds;
+                if (creature.hopTimer <= 0.0f) {
+                    creature.hopTimer = kFlopInterval;
+                    creature.velocity.y = kFlopLaunch;
+                    creature.yaw = random01() * kTwoPi;
+                    creature.targetYaw = creature.yaw;
+                    creature.velocity.x = std::sin(creature.yaw) * species.walkSpeed;
+                    creature.velocity.z = std::cos(creature.yaw) * species.walkSpeed;
+                }
+            }
+            wish = glm::vec3{creature.velocity.x, 0.0f, creature.velocity.z};
+    } else if (species.hops && !creature.inWater) {
         // A hop is a real jump rather than a bob: the launch sets a velocity and
         // the world's gravity brings it back down, so the arc, the airtime and
         // the distance covered all fall out of the physics. All the ground it
@@ -1224,8 +2464,16 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
             creature.velocity.z = 0.0f;
             creature.hopTimer -= deltaSeconds;
             if (creature.walking && creature.hopTimer <= 0.0f) {
+                // Bedrock shortens the wait between hops the moment a slime has
+                // something to chase - `jump_delay` goes from 0.5-1.5 s to
+                // 0.16-0.5. Worked out once and used for both the cadence and
+                // the burst, or the two disagree about how much ground a hop
+                // has to cover.
+                const float gather =
+                    species.hopGather *
+                    (creature.target != CreatureTarget::None ? kChaseHopGather : 1.0f);
                 const float airSeconds = 2.0f * species.hopLaunch / kGravity;
-                const float burst = speed * (airSeconds + species.hopGather) / airSeconds;
+                const float burst = speed * (airSeconds + gather) / airSeconds;
                 // A rabbit's ordinary hop reaches about a third of a metre, so
                 // left alone it nudges into every ledge it meets forever. When
                 // one is in the way it launches hard enough to clear it
@@ -1237,7 +2485,7 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
                              : species.hopLaunch;
                 creature.velocity.x = std::sin(creature.yaw) * burst;
                 creature.velocity.z = std::cos(creature.yaw) * burst;
-                creature.hopTimer = species.hopGather;
+                creature.hopTimer = gather;
             }
         }
         // Nothing steers mid-air, which is the point.
@@ -1248,6 +2496,32 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     // A shove from being hit overrides its own intent while it lasts.
     if (creature.hurtTimer > 0.0f) {
         wish = glm::vec3{creature.velocity.x, 0.0f, creature.velocity.z};
+    }
+
+    if (creature.inWater) {
+        // A land animal is hobbled by water; a fish is not. `kSwimSpeedRatio` is
+        // the penalty for swimming badly, and something whose entire movement
+        // model *is* swimming should not be paying it.
+        if (!species.swims) {
+            wish *= fluid::kSwimSpeedRatio;
+        }
+        // A flowing cell carries whatever is standing in it, walking or not -
+        // which is the whole of why a river is a river and not a long puddle.
+        wish += water.flow * fluid::kCurrentSpeed;
+    }
+
+    // A jetting body lines itself up with where it is going. Taken from the
+    // movement vector rather than from the heading, which is what makes a squid
+    // hang upright when it is drifting and lie right over when it is swimming -
+    // bell first, tentacles trailing. `atan2` of the two speeds is the
+    // reference's own expression, and it gives every case for free: nothing
+    // moving reads as upright, flat out reads as a right angle, and straight
+    // down reads as a half turn.
+    if (species.jets) {
+        const float flat = std::sqrt(wish.x * wish.x + wish.z * wish.z);
+        const float wanted = std::atan2(flat, creature.velocity.y);
+        creature.bodyTilt += (wanted - creature.bodyTilt) *
+                             (1.0f - std::pow(kBodyTiltLagPerTick, deltaSeconds / 0.05f));
     }
 
     const glm::vec3 before = creature.position;
@@ -1262,10 +2536,17 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     if (bodyOverlapsSolid(world, species, creature.position, creature.scale)) {
         if (creature.velocity.y < 0.0f) {
             // A slab's top is halfway up its cell, so the resting height comes
-            // from the shape table rather than from the cell boundary.
+            // from the shape table rather than from the cell boundary. Checked
+            // before it is taken: the surface found is at or below where the
+            // body already was, and a lower position can meet something the
+            // higher one cleared.
             const float surface = highestSurfaceBelow(
                 world, bodyBox(species, creature.position, creature.scale), before.y);
-            creature.position.y = std::isfinite(surface) ? surface + kCollisionSkin : before.y;
+            const float landed = std::isfinite(surface) ? surface + kCollisionSkin : before.y;
+            glm::vec3 settled = creature.position;
+            settled.y = landed;
+            creature.position.y =
+                bodyOverlapsSolid(world, species, settled, creature.scale) ? before.y : landed;
             creature.onGround = true;
 
             // A hard landing lights most of an exploder's fuse. The reference
@@ -1397,15 +2678,19 @@ CreatureAttack Creatures::update(const World& world, const glm::vec3& playerFeet
                                  bool night, bool playerSneaking,
                                  std::vector<CreatureExplosion>& blasts) {
     CreatureAttack attack;
+    // Refilled once a frame, then spent by whichever creatures ask to search.
+    // A cap here rather than a cap per creature is what bounds the cost against
+    // the whole population instead of against each animal.
+    m_pathBudget = kPathsPerFrame;
     for (Creature& creature : m_creatures) {
         think(world, creature, playerFeet, deltaSeconds, night, playerSneaking, attack, blasts);
         step(world, creature, deltaSeconds);
     }
-    separate(deltaSeconds);
+    separate(world, deltaSeconds);
     return attack;
 }
 
-void Creatures::separate(float deltaSeconds) {
+void Creatures::separate(const World& world, float deltaSeconds) {
     // A soft horizontal shove rather than a hard constraint, which is what the
     // reference does too: entities never resolve against each other properly,
     // they just push apart. There is deliberately no vertical component, so one
@@ -1438,21 +2723,42 @@ void Creatures::separate(float deltaSeconds) {
             }
 
             const float strength = (reach - distance) * kSeparationPush * deltaSeconds;
-            a.position -= push * strength;
-            b.position += push * strength;
+            // A shove may not put a body inside terrain. It could, and once
+            // inside a block every move a creature tries overlaps something, so
+            // it is stuck for good - which is how a herd crowding a wall buried
+            // its own members.
+            const glm::vec3 nextA = a.position - push * strength;
+            const glm::vec3 nextB = b.position + push * strength;
+            if (!bodyOverlapsSolid(world, speciesInfo(a.kind), nextA, a.scale)) {
+                a.position = nextA;
+            }
+            if (!bodyOverlapsSolid(world, speciesInfo(b.kind), nextB, b.scale)) {
+                b.position = nextB;
+            }
         }
     }
 }
 
 void Creatures::alertNeighbours(const Creature& struck, std::size_t struckIndex) {
     // One mechanism, two behaviours: a neighbour that can bite turns on the
-    // player, and one that cannot bolts with its herd. Both are what the
-    // reference's `alert_same_type` does, and it is the difference between a
-    // group of animals and a set of animals standing near each other.
+    // player, and one that cannot bolts with its herd. Which of the two it is
+    // stopped being decided here at M20c - this only records that the
+    // neighbour heard something, and `Panic` and `HurtByTarget` read the
+    // species row and disagree about what that means.
     //
-    // Which of the two it is stopped being decided here at M20c: this now only
-    // records that the neighbour saw something, and `Panic` and `HurtByTarget`
-    // read the species row and disagree about what that means.
+    // **How far the call carries is per species, and for most hostiles it does
+    // not carry at all.** The reference does this through
+    // `minecraft:angry.broadcast_anger` rather than `alert_same_type`, which is
+    // off on everything except the silverfish - so a zombie or a skeleton hears
+    // nothing, and a horde has to be walked into rather than summoned by
+    // hitting one of them. A wolf pack hears at twenty metres, a bear at
+    // forty-one, and a herd of sheep at sixteen, which is ours rather than the
+    // reference's.
+    const CreatureSpecies& species = speciesInfo(struck.kind);
+    if (species.alertRange <= 0.0f) {
+        return;
+    }
+
     for (std::size_t i = 0; i < m_creatures.size(); ++i) {
         if (i == struckIndex) {
             continue;
@@ -1464,16 +2770,21 @@ void Creatures::alertNeighbours(const Creature& struck, std::size_t struckIndex)
 
         const glm::vec3 offset = other.position - struck.position;
         if (std::abs(offset.y) > kAlertHeight ||
-            offset.x * offset.x + offset.z * offset.z > kAlertRadius * kAlertRadius) {
+            offset.x * offset.x + offset.z * offset.z > species.alertRange * species.alertRange) {
             continue;
         }
-        other.provokedTimer = kFleeSeconds;
+        other.provokedTimer = species.angerSeconds;
     }
-}void Creatures::place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged) {
+}
+
+void Creatures::place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged,
+                      float puff) {
     Creature creature;
     creature.kind = kind;
     creature.health = speciesInfo(kind).health;
     creature.charged = charged;
+    creature.puff = puff;
+    creature.variant = rollVariant(kind);
     creature.position = feet;
     creature.yaw = yaw;
     creature.targetYaw = yaw;
@@ -1487,6 +2798,7 @@ void Creatures::restore(CreatureKind kind, const glm::vec3& feet, float yaw, int
     Creature creature;
     creature.kind = kind;
     creature.health = health;
+    creature.variant = rollVariant(kind);
     creature.position = feet;
     creature.yaw = yaw;
     creature.targetYaw = yaw;
@@ -1534,11 +2846,16 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
 
             // Everything that could be generated here, weighted as usual. Only
             // species with a group size take part.
+            const auto loaded = census();
             float weights[static_cast<std::size_t>(CreatureKind::Count)]{};
             float total = 0.0f;
             for (std::size_t i = 0; i < static_cast<std::size_t>(CreatureKind::Count); ++i) {
                 const CreatureSpecies& species = kSpecies[i];
                 if (species.groupSize <= 0 || !spawnsIn(static_cast<CreatureKind>(i), biome)) {
+                    continue;
+                }
+                if (species.maxLoaded > 0 &&
+                    loaded[i] >= static_cast<std::size_t>(species.maxLoaded)) {
                     continue;
                 }
                 weights[i] = species.weight;
@@ -1579,14 +2896,22 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
                 if (surface < 0) {
                     continue;
                 }
-                const int y = surface + 1;
-                if (!canStandAt(world, species, x, y, z)) {
+                // Ground that is not fully loaded reads as air, so a herd placed
+                // over it starts life falling through the world.
+                if (!world.columnResident(x, z)) {
+                    continue;
+                }
+                seed = chunkHash(seed, z, x);
+                const int y =
+                    species.swims ? waterColumnY(world, x, z, hashUnit(seed)) : surface + 1;
+                if (y < 0 || !canSpawnAt(world, species, x, y, z)) {
                     continue;
                 }
 
                 Creature creature;
                 creature.kind = chosen;
                 creature.health = species.health;
+                creature.variant = rollVariant(chosen);
                 creature.position = glm::vec3{static_cast<float>(x) + 0.5f, static_cast<float>(y),
                                               static_cast<float>(z) + 0.5f};
                 seed = chunkHash(seed, x, z);
@@ -1620,11 +2945,14 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
         const bool tooFar = glm::dot(offset, offset) > kDespawnDistance * kDespawnDistance;
         // Nocturnal creatures caught in daylight retire, which is what makes a
         // night different from a day rather than merely darker. Slimes and
-        // spiders are exempt: they spawn in the dark and simply stay.
+        // spiders are exempt: they spawn in the dark and simply stay. So is
+        // anything still in the water, which is the reference's rule and the
+        // only reason a drowned is not extinct by breakfast.
         const int sky = world.skyLightAt(static_cast<int>(std::floor(creature.position.x)),
                                         static_cast<int>(std::floor(creature.position.y)),
                                         static_cast<int>(std::floor(creature.position.z)));
-        const bool burnedOff = !night && species.nocturnal && species.burnsInDay && sky >= 12;
+        const bool burnedOff =
+            !night && species.nocturnal && species.burnsInDay && sky >= 12 && !creature.inWater;
         const bool killed = creature.health <= 0;
 
         if (tooFar || burnedOff || killed || creature.position.y < -8.0f) {
@@ -1682,13 +3010,21 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
 
         const int y = surface + 1;
         const BiomeId biome = sampleBiome(world.seed(), x, z).dominant;
-        const int blockLight = world.blockLightAt(x, y, z);
 
         // Never spawn over ground that is not fully loaded, or the creature
         // starts its life falling through the world.
         if (!world.columnResident(x, z)) {
             continue;
         }
+
+        // A swimmer wants a cell in open water rather than the seabed the rest
+        // of the roster stands on, so the column is measured once here and the
+        // shortlist below picks whichever height each species actually wants.
+        const int swimY = waterColumnY(world, x, z, random01());
+
+        // Bedrock's `density_limit`, which is per species rather than global -
+        // without it a shoal of cod crowds every squid out of the same water.
+        const auto loaded = census();
 
         // Everything that could live here, weighted. Building the shortlist and
         // then rolling once is what keeps the table the only place rules live.
@@ -1700,13 +3036,26 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
             if (!spawnsIn(kind, biome)) {
                 continue;
             }
-            if (species.nocturnal != night) {
+            if (species.maxLoaded > 0 &&
+                loaded[i] >= static_cast<std::size_t>(species.maxLoaded)) {
                 continue;
             }
-            if (blockLight > species.maxBlockLight) {
+            const int spawnY = species.swims ? swimY : y;
+            if (spawnY < 0) {
                 continue;
             }
-            if (!canStandAt(world, species, x, y, z)) {
+            // Fish are the reference's `water_ambient` category, which carries
+            // neither a light rule nor a time-of-day one - the sea is dark
+            // enough at depth and they are there at noon regardless.
+            if (!species.swims) {
+                if (species.nocturnal != night) {
+                    continue;
+                }
+                if (world.blockLightAt(x, spawnY, z) > species.maxBlockLight) {
+                    continue;
+                }
+            }
+            if (!canSpawnAt(world, species, x, spawnY, z)) {
                 continue;
             }
             weights[i] = species.weight;
@@ -1729,7 +3078,9 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
         Creature creature;
         creature.kind = chosen;
         creature.health = speciesInfo(chosen).health;
-        creature.position = glm::vec3{static_cast<float>(x) + 0.5f, static_cast<float>(y),
+        creature.variant = rollVariant(chosen);
+        const int spawnY = speciesInfo(chosen).swims ? swimY : y;
+        creature.position = glm::vec3{static_cast<float>(x) + 0.5f, static_cast<float>(spawnY),
                                       static_cast<float>(z) + 0.5f};
         creature.yaw = random01() * kTwoPi;
         creature.targetYaw = creature.yaw;
@@ -1801,7 +3152,11 @@ bool Creatures::strike(const glm::vec3& eye, const glm::vec3& forward, float rea
     // None of which this function decides any more - it records that something
     // happened, and `Panic` and `HurtByTarget` read the species and disagree
     // about what to do with it.
-    target.provokedTimer = kFleeSeconds;
+    //
+    // **How long it keeps mattering is the species' own number.** A flat six
+    // seconds meant a polar bear you shot forgot about it before you had
+    // finished backing away; the reference gives it five hundred.
+    target.provokedTimer = speciesInfo(target.kind).angerSeconds;
 
     // A clean kill starts no war. The reference has the same exemption, and it
     // is what stops one-shotting a lone animal turning its whole species on
@@ -1879,8 +3234,15 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
         const int lx = static_cast<int>(std::floor(creature.position.x));
         const int ly = static_cast<int>(std::floor(creature.position.y + species.height * 0.5f));
         const int lz = static_cast<int>(std::floor(creature.position.z));
-        const float sky = static_cast<float>(world.skyLightAt(lx, ly, lz)) / static_cast<float>(kMaxLight);
-        const float block = static_cast<float>(world.blockLightAt(lx, ly, lz)) / static_cast<float>(kMaxLight);
+        float sky = static_cast<float>(world.skyLightAt(lx, ly, lz)) / static_cast<float>(kMaxLight);
+        float block = static_cast<float>(world.blockLightAt(lx, ly, lz)) / static_cast<float>(kMaxLight);
+        // Lit by itself rather than by the water around it. A proper emissive
+        // material waits for the renderer rebuild; feeding the skin full light
+        // is most of what one looks like in a dark ocean and costs nothing.
+        if (species.glows) {
+            sky = 1.0f;
+            block = 1.0f;
+        }
         // Struck creatures are tinted by the shader, not lit by it. A lit fuse
         // outranks that and strobes: the reference alternates every tenth of
         // the countdown, at a constant rate that does *not* speed up - only the
@@ -1931,8 +3293,10 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
         float pivotUp = 0.0f;
 
         // The species' own scale times this individual's, which is 1 for an
-        // adult and a fraction for a baby.
-        const float modelScale = species.modelScale * creature.scale;
+        // adult and a fraction for a baby. Not const: a pufferfish multiplies it
+        // to inflate, which is the one place a species changes its own size
+        // mid-frame, and doing it here means every box picks it up for free.
+        float modelScale = species.modelScale * creature.scale;
 
         // A lit fuse swells the whole animal. The curve is the reference's and
         // it matters that it is `s^4`: nothing visible happens for the first two
@@ -2032,7 +3396,8 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
 
             const auto uprightBox = [&](const glm::vec3& centre, float netW, float netH, float netD,
                                         float u, float v, float vBase, float grow, float pitch = 0.0f,
-                                        float growSide = 0.0f, float roll = 0.0f) {
+                                        float growSide = 0.0f, float roll = 0.0f,
+                                        bool mirror = false) {
                 const float cosPitch = std::cos(pitch);
                 const float sinPitch = std::sin(pitch);
                 const glm::vec3 depthAxis = forward * cosPitch - upAxis * sinPitch;
@@ -2050,10 +3415,17 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                          0.86f, vBase, u + netD, v + netD, netW, netH);
                 skinQuad(centre - f - s - up, centre - f + s - up, centre - f + s + up, centre - f - s + up,
                          0.72f, vBase, u + netD + netW + netD, v + netD, netW, netH);
+                // The two side rects, and **which one faces outward is a fact
+                // about the limb rather than about the net**. A pair of legs
+                // shares one net, so drawing both identically puts the painted
+                // flap outward on one and inward on the other - invisible while
+                // a texture is symmetric, and glaring the moment one is not.
+                // The skeleton horse paints bone on a single flap and leaves
+                // the other bare, which is what finally exposed it.
                 skinQuad(centre + s - f - up, centre + s + f - up, centre + s + f + up, centre + s - f + up,
-                         0.80f, vBase, u, v + netD, netD, netH);
+                         0.80f, vBase, mirror ? u + netD + netW : u, v + netD, netD, netH);
                 skinQuad(centre - s + f - up, centre - s - f - up, centre - s - f + up, centre - s + f + up,
-                         0.66f, vBase, u + netD + netW, v + netD, netD, netH);
+                         0.66f, vBase, mirror ? u : u + netD + netW, v + netD, netD, netH);
                 // Top and bottom run **forward toward the far edge of their
                 // rect**, because the top rect folds down to meet the front
                 // face - so its last row is the front, not its first. These two
@@ -2088,15 +3460,22 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // lets the roster convert one species at a time.
             const auto legBox = [&](const glm::vec3& restCentre, float netW, float netH, float netD,
                                     float u, float v, float vBase, float grow, float pitch,
-                                    float roll = 0.0f) {
+                                    float roll = 0.0f, bool mirror = false) {
                 const float halfHeight = (netH * kTexel * 0.5f + grow) * modelScale * swellTall;
+                // `grow` belongs in the overhang as much as in the extent,
+                // because the overhang is measured against the box that is
+                // actually drawn. Leaving it out puts the far end of the limb at
+                // exactly `-overhang` whatever the box's size - so two limbs
+                // sharing a net and differing only in `grow`, which is precisely
+                // a body and the clothing shell over it, land their far faces on
+                // one plane and fight over every pixel of it.
                 const float overhang =
-                    std::min(netW, netD) * kTexel * 0.5f * modelScale * swellTall;
+                    (std::min(netW, netD) * kTexel * 0.5f + grow) * modelScale * swellTall;
                 const float hang = std::max(halfHeight - overhang, 0.0f);
 
                 const glm::vec3 pivot = restCentre + upAxis * hang;
                 uprightBox(pivot - boxHeightAxis(pitch, roll) * hang, netW, netH, netD, u, v, vBase,
-                           grow, pitch, 0.0f, roll);
+                           grow, pitch, 0.0f, roll, mirror);
             };
 
             // A limb that runs *sideways* out of the body and pivots at its
@@ -2104,22 +3483,37 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // spider's eight legs, which `ANIMATION.md` §1.2 puts at the body
             // attachment, mid-height. Its swing is therefore a yaw about the
             // vertical, not a tilt, so it turns the local axes the way the head
-            // turn does instead of tipping the box. At zero it rebuilds exactly
-            // the box `uprightBox` would have.
+            // turn does instead of tipping the box.
+            //
+            // `splay` then droops it about its **own** forward axis, so the
+            // outer end drops however the leg happens to be fanned. That is
+            // what stands a spider off the ground rather than leaving it lying
+            // on its belly with eight level bars sticking out. At zero for both
+            // it rebuilds exactly the box `uprightBox` would have.
             const auto barBox = [&](float alongForward, float up, float alongSide, float netW,
                                     float netH, float netD, float u, float v, float vBase, float grow,
-                                    float yaw) {
-                const float reach =
-                    (netW * kTexel * 0.5f + grow) * modelScale * swellWide * (alongSide < 0.0f ? -1.0f : 1.0f);
+                                    float yaw, float splay = 0.0f) {
+                const float outward = alongSide < 0.0f ? -1.0f : 1.0f;
+                const float reach = (netW * kTexel * 0.5f + grow) * modelScale * swellWide * outward;
                 const glm::vec3 pivot = place(alongForward, up, alongSide) - side * reach;
 
                 const glm::vec3 restForward = forward;
                 const glm::vec3 restSide = side;
+                const glm::vec3 restUp = upAxis;
                 forward = restForward * std::cos(yaw) - restSide * std::sin(yaw);
                 side = restSide * std::cos(yaw) + restForward * std::sin(yaw);
+
+                // Rotating both axes rather than only tilting the long one, so
+                // the box stays a rigid body and its cut ends stay square to it.
+                const glm::vec3 fanned = side;
+                const float drop = std::sin(splay) * outward;
+                side = fanned * std::cos(splay) - restUp * drop;
+                upAxis = restUp * std::cos(splay) + fanned * drop;
+
                 uprightBox(pivot + side * reach, netW, netH, netD, u, v, vBase, grow);
                 forward = restForward;
                 side = restSide;
+                upAxis = restUp;
             };
 
             // The body is authored standing and then laid down a quarter turn,
@@ -2152,6 +3546,71 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                          0.66f, vBase, u + netD + netW, v + netD, netD, netH);
             };
 
+            // A fin or a spine, which the reference authors as a cube with one
+            // dimension of zero. Only the two faces carrying artwork are
+            // emitted, a fraction of a texel apart: a real box would put those
+            // two on one plane, and its four edge slivers would each sample a
+            // rect of zero width - which for a dorsal means a *negative* V,
+            // reading rows belonging to another species entirely.
+            //
+            // Whichever net dimension is zero decides which pair of rects the
+            // two faces take.
+            const auto finBox = [&](const glm::vec3& centre, float netW, float netH, float netD,
+                                    float u, float v, float vBase, float pitch = 0.0f,
+                                    float roll = 0.0f) {
+                const float cosPitch = std::cos(pitch);
+                const float sinPitch = std::sin(pitch);
+                const glm::vec3 depthAxis = forward * cosPitch - upAxis * sinPitch;
+                const glm::vec3 pitched = forward * sinPitch + upAxis * cosPitch;
+                const glm::vec3 sideAxis = side * std::cos(roll) + pitched * std::sin(roll);
+                const glm::vec3 heightAxis = pitched * std::cos(roll) - side * std::sin(roll);
+
+                const float thick = kFinHalfThickness * modelScale;
+                const glm::vec3 f =
+                    depthAxis * (netD <= 0.0f ? thick
+                                              : netD * kTexel * 0.5f * modelScale * swellWide);
+                const glm::vec3 s =
+                    sideAxis * (netW <= 0.0f ? thick
+                                             : netW * kTexel * 0.5f * modelScale * swellWide);
+                const glm::vec3 up =
+                    heightAxis * (netH <= 0.0f ? thick
+                                               : netH * kTexel * 0.5f * modelScale * swellTall);
+
+                if (netW <= 0.0f) {
+                    skinQuad(centre + s - f - up, centre + s + f - up, centre + s + f + up,
+                             centre + s - f + up, 0.80f, vBase, u, v + netD, netD, netH);
+                    skinQuad(centre - s + f - up, centre - s - f - up, centre - s - f + up,
+                             centre - s + f + up, 0.80f, vBase, u + netD, v + netD, netD, netH);
+                    return;
+                }
+                if (netH <= 0.0f) {
+                    skinQuad(centre + up + f - s, centre + up + f + s, centre + up - f + s,
+                             centre + up - f - s, 0.95f, vBase, u + netD, v, netW, netD);
+                    skinQuad(centre - up - f - s, centre - up - f + s, centre - up + f + s,
+                             centre - up + f - s, 0.72f, vBase, u + netD + netW, v, netW, netD);
+                    return;
+                }
+                skinQuad(centre + f + s - up, centre + f - s - up, centre + f - s + up,
+                         centre + f + s + up, 0.86f, vBase, u + netD, v + netD, netW, netH);
+                skinQuad(centre - f - s - up, centre - f + s - up, centre - f + s + up,
+                         centre - f - s + up, 0.72f, vBase, u + netD + netW + netD, v + netD, netW,
+                         netH);
+            };
+
+            // Runs `body` with the local frame turned about the vertical. The
+            // spider's legs and the head turn do the same thing; this is the
+            // form for a part that needs its *orientation* rotated rather than
+            // its position, so the centre is worked out before it is called.
+            const auto yawed = [&](float yaw, auto&& body) {
+                const glm::vec3 restForward = forward;
+                const glm::vec3 restSide = side;
+                forward = restForward * std::cos(yaw) - restSide * std::sin(yaw);
+                side = restSide * std::cos(yaw) + restForward * std::sin(yaw);
+                body();
+                forward = restForward;
+                side = restSide;
+            };
+
             // How far a limb has turned about its joint this frame, in
             // radians. **Negated because a positive pitch is nose-down**, which
             // swings a foot backward - so `swing` still reads as "this limb
@@ -2176,6 +3635,44 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // against the torso - and incidentally off its face planes.
             const float swayRoll = std::cos(creature.age * 1.8f) * 0.05f + 0.05f;
             const float swayPitch = std::sin(creature.age * 1.34f) * 0.05f;
+
+            // A blow, straight out of the two shipped animations. Bedrock runs
+            // `variable.attack_time` from 0 to 1 across the swing; ours counts
+            // the other way, so the phase is one minus what is left.
+            //
+            // **No "am I swinging" test is needed anywhere.** Both curves are
+            // zero at both ends by construction, so a creature that is not
+            // swinging has a timer of zero, a phase of one, and an angle of
+            // nothing.
+            const float attackPhase = 1.0f - creature.swingTimer / kAttackSwingSeconds;
+            const float back = 1.0f - attackPhase;
+
+            // `animation.zombie.attack_bare_hand`: `sin(t*180)*1.2 -
+            // sin((1-(1-t)^2)*180)*0.4`, in radians once the 57.3 that turns
+            // them into degrees is taken back out. It peaks a little over half
+            // a radian halfway through and is never negative, so an arm already
+            // held out in front swings **down** and comes back up.
+            const float rawChop =
+                std::sin(attackPhase * kPi) * 1.2f -
+                std::sin((1.0f - back * back) * kPi) * 0.4f;
+
+            // `animation.humanoid.attack.rotations`: `sin((1-(1-t)^3)*180)`,
+            // which is a different shape - it peaks a fifth of the way in and
+            // eases back over the rest, so the arm flicks up and falls. The
+            // 1.2 radian amplitude is the reference's.
+            //
+            // The two run in opposite senses and that is not a sign slip: a
+            // zombie starts with its arms up and chops down, while anything
+            // holding a weapon starts with them hanging and swings up.
+            //
+            // Both are gated on the species rather than on the rig, because
+            // the skeleton family share a rig with the Blackbone and are not
+            // the same kind of fighter - they are archers.
+            const float zombieChop = species.swingsArms ? rawChop : 0.0f;
+            const float humanoidRaise =
+                species.swingsArms
+                    ? std::sin((1.0f - back * back * back) * kPi) * 1.2f
+                    : 0.0f;
 
             if (creature.kind == CreatureKind::Chicken) {
                 // Reference net measurements: head 4x6x3, beak 4x2x2,
@@ -2356,7 +3853,7 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
-            const auto equine = [&](float skin, bool longEars) {
+            const auto equine = [&](float skin, bool longEars, bool bony = false) {
                 // One model at three sizes, as the original does it - the
                 // donkey and mule differ from the horse only by `modelScale`.
                 //
@@ -2387,22 +3884,42 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 uprightBox(place(0.77f, earY, 0.13f), 2.0f, earHeight, 1.0f,
                            earU, earV, skin, 0.0f, -0.20f);
                 uprightBox(place(0.77f, earY, -0.13f), 2.0f, earHeight, 1.0f,
-                           earU, earV, skin, 0.0f, -0.20f);
+                           earU, earV, skin, 0.0f, -0.20f, 0.0f, 0.0f, true);
                 endHead();
 
+                // Everything that comes in a left-and-right pair mirrors the
+                // one on the far side, so the painted flap faces outward on
+                // both. Without it a skeleton horse wears its leg bones on the
+                // inside down one flank.
+                //
+                // **The grow is not cosmetic.** A leg's top lands at exactly
+                // `0.34375 + 11/32` and the body's underside at exactly
+                // `1.00 - 10/32` - the same plane - and every creature quad
+                // here is double-sided, so the two fight over every pixel of
+                // the hip. On a brown horse both surfaces are opaque and much
+                // the same colour so it never showed; on a skeleton the body's
+                // underside is barely a third painted and the fight is visible
+                // through the gaps. Pushing the leg a few thousandths into the
+                // body separates them, which is §14.5b's rule: overlap, never
+                // touch.
+                constexpr float kHipOverlap = 0.006f;
                 const float legY = 0.34375f;
                 legBox(place(0.53f, legY, 0.25f), 4.0f, 11.0f, 4.0f,
-                       48.0f, 21.0f, skin, 0.0f, swing);
+                       48.0f, 21.0f, skin, kHipOverlap, swing);
                 legBox(place(0.53f, legY, -0.25f), 4.0f, 11.0f, 4.0f,
-                       48.0f, 21.0f, skin, 0.0f, -swing);
+                       48.0f, 21.0f, skin, kHipOverlap, -swing, 0.0f, true);
                 legBox(place(-0.55f, legY, 0.25f), 4.0f, 11.0f, 4.0f,
-                       48.0f, 21.0f, skin, 0.0f, -swing);
+                       48.0f, 21.0f, skin, kHipOverlap, -swing);
                 legBox(place(-0.55f, legY, -0.25f), 4.0f, 11.0f, 4.0f,
-                       48.0f, 21.0f, skin, 0.0f, swing);
+                       48.0f, 21.0f, skin, kHipOverlap, swing, 0.0f, true);
                 // Tilted so the tail trails behind the rump instead of hanging
-                // flat against it.
-                uprightBox(place(-0.78f, 0.78f, 0.0f), 3.0f, 14.0f, 4.0f,
-                           42.0f, 36.0f, skin, 0.0f, 0.30f);
+                // flat against it. **The skeleton horse paints nothing at all
+                // in this rect** - measured at 0% coverage - so drawing the box
+                // there contributes stray slivers and no tail.
+                if (!bony) {
+                    uprightBox(place(-0.78f, 0.78f, 0.0f), 3.0f, 14.0f, 4.0f,
+                               42.0f, 36.0f, skin, 0.0f, 0.30f);
+                }
             };
 
             if (creature.kind == CreatureKind::Horse) {
@@ -2415,7 +3932,22 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
-            if (creature.kind == CreatureKind::Llama) {
+            // `geometry.horse` unchanged, which is what the reference uses for
+            // both. Their skins differ from a horse's on most rows and share
+            // its net exactly - those are skeletal holes and a ragged mane in
+            // the artwork, not net boundaries, which is precisely why a
+            // whole-sheet alpha diff cannot decide a rig.
+            if (creature.kind == CreatureKind::SkeletonHorse) {
+                equine(kSkeletonHorseSkin, false, true);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::ZombieHorse) {
+                equine(kZombieHorseSkin, false);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Llama || creature.kind == CreatureKind::TraderLlama) {
                 // Independently measured 128x64 layout. The 18-texel body
                 // dimension runs forward, while its 10-texel depth becomes
                 // vertical after the quarter turn.
@@ -2459,6 +3991,15 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                        29.0f, 29.0f, kLlamaSkin, 0.0f, -swing);
                 legBox(place(-0.46f, legY, -0.28f), 4.0f, 14.0f, 4.0f,
                        29.0f, 29.0f, kLlamaSkin, 0.0f, swing);
+
+                // The trader's pack is a second cutout shell over the body, on
+                // the same net as the llama under it - the reference draws its
+                // decor over an ordinary llama rather than replacing the skin,
+                // which is the sheep-fleece arrangement exactly.
+                if (creature.kind == CreatureKind::TraderLlama) {
+                    lyingBox(place(-0.08f, 1.1875f, 0.0f), 12.0f, 18.0f, 10.0f,
+                             29.0f, 0.0f, kTraderLlamaDecorSkin, 0.25f * kTexel);
+                }
                 continue;
             }
 
@@ -2839,6 +4380,56 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
+            if (creature.kind == CreatureKind::MagmaCubeSmall ||
+                creature.kind == CreatureKind::MagmaCubeMedium ||
+                creature.kind == CreatureKind::MagmaCubeLarge) {
+                // `geometry.lavaslime`, and it is **not** a scaled slime, which
+                // is the obvious guess: the reference builds the shell from
+                // eight separate 8x1x8 slabs stacked on a 4x4x4 core, and pulls
+                // them apart as it jumps so the glow shows between them. One
+                // box could never do that, and the gaps are the whole animal.
+                //
+                // Every slab reads the same band. The reference gives each its
+                // own row, but our reference texture is Java's and only the
+                // first row carries a full 32-wide band there - the other seven
+                // measure half covered, which would render four faces of each
+                // slab as nothing. Measured, not assumed.
+                // Every slab and the core read Java's own 64x64 layout, taken
+                // off the alpha rather than from Bedrock's geometry - **the two
+                // genuinely disagree here**, and Bedrock's is a 64x32 sheet we
+                // do not have. Four slabs run down the left column at u=0 and
+                // four down the right at u=32, nine rows apart.
+                //
+                // **Index 0 is the top slab**, and that ordering is what puts
+                // the eyes where they belong: they are painted on the front
+                // faces of the third and fourth rows down, which is just above
+                // the middle. Reading one shared row for all eight is what lost
+                // them entirely.
+                static constexpr float kSlabU[8]{0.0f, 0.0f, 0.0f, 0.0f, 32.0f, 32.0f, 32.0f, 32.0f};
+                static constexpr float kSlabV[8]{0.0f, 9.0f, 18.0f, 27.0f, 0.0f, 9.0f, 18.0f, 27.0f};
+
+                // Shut on the ground and open in the air. The reference parts
+                // the slabs only while it is jumping, so a resting magma cube
+                // is a solid cube exactly the size of a slime - which is why a
+                // creature that has never ticked defaults to standing, or the
+                // showcase would only ever show it mid-leap.
+                const float spread = creature.onGround ? 0.0f : 0.55f;
+                for (int i = 0; i < 8; ++i) {
+                    const int row = 7 - i;
+                    const float rest = (static_cast<float>(i) + 0.5f) * kTexel;
+                    // Fanned about the middle of the stack so it swells evenly
+                    // rather than lifting off its own feet.
+                    const float lift = (static_cast<float>(i) - 3.5f) * kTexel * spread;
+                    uprightBox(place(0.0f, rest + lift, 0.0f), 8.0f, 1.0f, 8.0f,
+                               kSlabU[row], kSlabV[row], kMagmaCubeSkin, 0.0f);
+                }
+                // Only ever seen through the gaps, so it sits inside the stack
+                // rather than under it.
+                uprightBox(place(0.0f, 0.25f, 0.0f), 4.0f, 4.0f, 4.0f,
+                           24.0f, 40.0f, kMagmaCubeSkin, 0.0f);
+                continue;
+            }
+
             if (creature.kind == CreatureKind::SlimeSmall || creature.kind == CreatureKind::SlimeMedium ||
                 creature.kind == CreatureKind::SlimeLarge) {
                 // Measured off slime.png (64x32): an 8x8x8 outer shell at (0,0),
@@ -2899,38 +4490,76 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             }
 
             if (creature.kind == CreatureKind::Spider || creature.kind == CreatureKind::CaveSpider) {
-                // Measured off spider.png (64x32): thorax 6x6x6 at (0,0), head
-                // 8x8x8 at (32,4), abdomen 10x8x12 at (0,12), and one 16x2x2 leg
-                // net at (18,0) shared by all eight. `cave_spider.png` has
-                // byte-identical alpha, so it is the same rig at a smaller
-                // `modelScale` - the same arrangement the ocelot has with the cat.
+                // Rebuilt from Mojang's `geometry.spider.v1.8`. **One height
+                // carries the whole animal**: thorax, head, abdomen and all
+                // eight leg joints sit at texel 9 of 16, and the legs droop
+                // from there to the floor. The body used to sit at 0.40 with
+                // the legs as level bars either side of it, which read as a
+                // spider lying on its belly rather than standing on its legs.
                 //
-                // The leg net is 16 across and only 2 the other ways - it is a
-                // bar that runs *sideways*, not a limb standing up, so it takes
-                // the upright mapping with its width along the side axis. The
-                // reference angles each leg down at the knee, which an
-                // axis-aligned box cannot do; level legs read correctly from
-                // every angle a player actually sees one from.
+                // `cave_spider.png` has byte-identical alpha, so it is the same
+                // rig at a smaller `modelScale` - the arrangement the ocelot
+                // shares with the cat.
                 const float skin = creature.kind == CreatureKind::Spider ? kSpiderSkin : kCaveSpiderSkin;
-                uprightBox(place(-0.42f, 0.42f, 0.0f), 10.0f, 8.0f, 12.0f,
-                           0.0f, 12.0f, skin, 0.0f);
-                uprightBox(place(0.0f, 0.40f, 0.0f), 6.0f, 6.0f, 6.0f,
+                constexpr float kJoint = 9.0f * kTexel;
+
+                // The reference butts all three body boxes face to face. We
+                // cannot: every quad here is double-sided, so a shared plane
+                // flickers. Each is nudged a hundredth into its neighbour and
+                // given its own grow, so nothing lines up with anything.
+                uprightBox(place(-0.5525f, kJoint, 0.0f), 10.0f, 8.0f, 12.0f,
+                           0.0f, 12.0f, skin, 0.004f);
+                uprightBox(place(0.0f, kJoint, 0.0f), 6.0f, 6.0f, 6.0f,
                            0.0f, 0.0f, skin, 0.0f);
-                beginHead(0.11f, 0.40f);
-                uprightBox(place(0.36f, 0.40f, 0.0f), 8.0f, 8.0f, 8.0f,
-                           32.0f, 4.0f, skin, 0.0f);
+                beginHead(0.1875f, kJoint);
+                uprightBox(place(0.4275f, kJoint, 0.0f), 8.0f, 8.0f, 8.0f,
+                           32.0f, 4.0f, skin, 0.006f);
                 endHead();
 
-                // Eight legs in four pairs, each pair a half cycle out of step
-                // with the one behind it - which is what a scuttle looks like
-                // and costs one sign flip.
-                const float alongBody[4]{0.18f, 0.03f, -0.13f, -0.28f};
+                // `animation.spider.default_leg_pose`, rear pair first. The fan
+                // sweeps the back pair behind and the front pair ahead; the
+                // splay is the droop, 45 degrees on the outer pairs and 33.3 on
+                // the two inner ones - and **the splay is the whole reason the
+                // body is off the ground**.
+                constexpr float kFan[4]{0.7854f, 0.3927f, -0.3927f, -0.7854f};
+                constexpr float kSplay[4]{0.7854f, 0.5812f, 0.5812f, 0.7854f};
+                // Where each pair meets the body, in the reference's own
+                // one-texel steps from back to front.
+                constexpr float kAlong[4]{-0.125f, -0.0625f, 0.0f, 0.0625f};
+
+                const float amplitude = species.gaitSwing * creature.limbSwingAmount;
                 for (int pair = 0; pair < 4; ++pair) {
-                    const float step = (pair % 2 == 0) ? swing : -swing;
-                    barBox(alongBody[pair], 0.30f, 0.46f, 16.0f, 2.0f, 2.0f,
-                           18.0f, 0.0f, skin, 0.0f, step);
-                    barBox(alongBody[pair], 0.30f, -0.46f, 16.0f, 2.0f, 2.0f,
-                           18.0f, 0.0f, skin, 0.0f, -step);
+                    // `animation.spider.walk`. Three things about it are worth
+                    // knowing, because none of them is what you would write.
+                    //
+                    // **A quarter turn of phase per pair** is what sets
+                    // neighbours against each other - one reaching while the
+                    // one behind it is planted - instead of all eight rowing
+                    // together, which is what the single shared sine did.
+                    //
+                    // **The sweep runs at twice the rate of the lift**, so a
+                    // leg goes fore and aft twice for every time it picks up.
+                    //
+                    // **Both are absolute values**, so a leg only ever moves to
+                    // one side of its rest pose. That is what keeps the travel
+                    // small enough that no tip ever reaches its neighbour's.
+                    // Java takes the cosine unsigned; Bedrock does not, and
+                    // Bedrock is the reference.
+                    const float phase = static_cast<float>(pair) * 1.5708f;
+                    const float sweep =
+                        -std::abs(std::cos(creature.gait * 2.0f + phase)) * amplitude;
+                    const float lift = std::abs(std::sin(creature.gait + phase)) * amplitude;
+                    const float yaw = kFan[pair] + sweep;
+                    // Subtracted, so the leg straightens toward level as it
+                    // picks up and droops again as it plants.
+                    const float splay = kSplay[pair] - lift;
+
+                    // The same yaw mirrors on the far side for free - `barBox`
+                    // measures it against whichever way the leg points out.
+                    barBox(kAlong[pair], kJoint, 0.6875f, 16.0f, 2.0f, 2.0f,
+                           18.0f, 0.0f, skin, 0.0f, yaw, splay);
+                    barBox(kAlong[pair], kJoint, -0.6875f, 16.0f, 2.0f, 2.0f,
+                           18.0f, 0.0f, skin, 0.0f, -yaw, splay);
                 }
                 continue;
             }
@@ -2945,41 +4574,57 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // own leg, which is the whole of a walk cycle. Every part is grown a
             // third of a texel because a 12-tall limb against a 12-tall torso
             // otherwise shares a face plane exactly.
-            const auto biped = [&](float skin, float limb, bool armsOut) {
+            const auto biped = [&](float skin, float limb, bool armsOut, float inflate = 0.0f) {
                 const float half = limb * kTexel * 0.5f;
+                const float grow = 0.005f + inflate;
                 beginHead(0.0f, 1.5f);
                 uprightBox(place(0.0f, 1.75f, 0.0f), 8.0f, 8.0f, 8.0f,
-                           0.0f, 0.0f, skin, 0.005f);
+                           0.0f, 0.0f, skin, grow);
                 endHead();
                 uprightBox(place(0.0f, 1.125f, 0.0f), 8.0f, 12.0f, 4.0f,
-                           16.0f, 16.0f, skin, 0.0f);
+                           16.0f, 16.0f, skin, inflate);
 
                 // Hips are a fixed spacing, not derived from limb width: at
                 // half a 2-wide skeleton limb the legs meet in the middle and
                 // read as one column. A shade wider than the reference's exact
                 // touch, because our quads are double-sided and two legs sharing
-                // an inner plane would fight over it.
-                constexpr float kHip = 0.133f;
-                legBox(place(0.0f, 0.375f, kHip), limb, 12.0f, limb,
-                       0.0f, 16.0f, skin, 0.005f, swing);
-                legBox(place(0.0f, 0.375f, -kHip), limb, 12.0f, limb,
-                       0.0f, 16.0f, skin, 0.005f, -swing);
+                // an inner plane would fight over it - and the gap has to open
+                // with the shell, or an inflated pair of trousers overlaps in
+                // the middle with every extent identical, which is the same
+                // fight one step further out.
+                const float hip = 0.133f + inflate;
+                legBox(place(0.0f, 0.375f, hip), limb, 12.0f, limb,
+                       0.0f, 16.0f, skin, grow, swing);
+                legBox(place(0.0f, 0.375f, -hip), limb, 12.0f, limb,
+                       0.0f, 16.0f, skin, grow, -swing);
 
                 const float shoulder = 0.25f + half;
+                // A zombie's arms both come down together - the reference's
+                // zombie animations mirror the left arm onto the right
+                // throughout. Anything holding a weapon swings only the hand it
+                // is holding it in, and the other arm just keeps walking.
                 if (armsOut) {
                     // Held straight out in front. The pitch is **negative** so
                     // the net's top - the sleeve - stays at the shoulder and the
                     // bare hand ends up at the far end. Positive puts the sleeve
                     // on the hands, which is exactly how this shipped first.
-                    legBox(place(0.0f, 1.42f, shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, 0.005f, -1.5708f + swayPitch, swayRoll);
-                    legBox(place(0.0f, 1.42f, -shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, 0.005f, -1.5708f - swayPitch, -swayRoll);
+                    //
+                    // The rest height is the torso centre, exactly as the
+                    // arms-down branch below uses: `legBox` derives the joint
+                    // from it, so raising it raises the shoulder. It sat at
+                    // 1.42, which put the joint at 1.68 - inside a head that
+                    // spans 1.5 to 2.0 - and the arms hinged from the ears.
+                    //
+                    // The chop is **added**, which swings them down from here.
+                    legBox(place(0.0f, 1.125f, shoulder), limb, 12.0f, limb,
+                           40.0f, 16.0f, skin, grow, -1.5708f + swayPitch + zombieChop, swayRoll);
+                    legBox(place(0.0f, 1.125f, -shoulder), limb, 12.0f, limb,
+                           40.0f, 16.0f, skin, grow, -1.5708f - swayPitch + zombieChop, -swayRoll);
                 } else {
                     legBox(place(0.0f, 1.125f, shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, 0.005f, -swing + swayPitch, swayRoll);
+                           40.0f, 16.0f, skin, grow, -swing + swayPitch - humanoidRaise, swayRoll);
                     legBox(place(0.0f, 1.125f, -shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, 0.005f, swing - swayPitch, -swayRoll);
+                           40.0f, 16.0f, skin, grow, swing - swayPitch, -swayRoll);
                 }
             };
 
@@ -2990,6 +4635,17 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
 
             if (creature.kind == CreatureKind::Husk) {
                 biped(kHuskSkin, 4.0f, true);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Drowned) {
+                // The zombie rig twice over: the body, then the reference's
+                // `drowned_outer_layer` as a second shell a quarter of a texel
+                // larger. That layer is an ordinary alpha-tested cutout like
+                // every skin here, so it needs no new rendering path - the same
+                // arrangement the sheep's fleece has used since M19.
+                biped(kDrownedSkin, 4.0f, true);
+                biped(kDrownedOuterSkin, 4.0f, true, 0.25f * kTexel);
                 continue;
             }
 
@@ -3013,7 +4669,8 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
-            if (creature.kind == CreatureKind::Silverfish) {
+            if (creature.kind == CreatureKind::Silverfish ||
+                creature.kind == CreatureKind::Voidmite) {
                 // Seven tapering segments read off the alpha, front to back.
                 // There are no legs at all: the wriggle is a wave travelling
                 // down the body as a sideways offset, its amplitude growing
@@ -3036,20 +4693,36 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                     {2.0f, 1.0f, 2.0f, 11.0f, 0.0f, -0.34375f, 0.03125f, 0.007f},
                     {1.0f, 1.0f, 2.0f, 13.0f, 4.0f, -0.46875f, 0.03125f, 0.009f},
                 };
-                int index = 0;
-                for (const Segment& segment : kSegments) {
+                // `endermite.geo.json`, four sections rather than seven, with
+                // Bedrock's -Z forward negated into ours. Distinct grows
+                // because neighbouring sections overlap and every quad here is
+                // double-sided.
+                static constexpr Segment kVoidmiteSegments[]{
+                    {4.0f, 3.0f, 2.0f, 0.0f, 0.0f, 0.2125f, 0.09375f, 0.006f},
+                    {6.0f, 4.0f, 5.0f, 0.0f, 5.0f, -0.00625f, 0.125f, 0.0f},
+                    {3.0f, 3.0f, 1.0f, 0.0f, 14.0f, -0.1875f, 0.09375f, 0.007f},
+                    {1.0f, 2.0f, 1.0f, 0.0f, 18.0f, -0.25f, 0.0625f, 0.009f},
+                };
+                const bool voidmite = creature.kind == CreatureKind::Voidmite;
+                const float vermin = voidmite ? kVoidmiteSkin : kSilverfishSkin;
+                const Segment* body = voidmite ? kVoidmiteSegments : kSegments;
+                const int bodyCount =
+                    voidmite ? static_cast<int>(std::size(kVoidmiteSegments))
+                             : static_cast<int>(std::size(kSegments));
+                const auto tail = static_cast<float>(bodyCount - 1);
+                for (int index = 0; index < bodyCount; ++index) {
+                    const Segment& segment = body[index];
                     // A sideways distance rather than a joint angle: there is no
                     // limb here to turn, so this is the one place the swing stays
                     // a translation, and its amplitude belongs beside the shape
                     // it belongs to rather than in the species row.
                     constexpr float kWriggle = 0.10f;
                     const float amplitude =
-                        kWriggle * creature.limbSwingAmount * (static_cast<float>(index) / 6.0f);
+                        kWriggle * creature.limbSwingAmount * (static_cast<float>(index) / tail);
                     const float wave =
                         std::sin(creature.gait - static_cast<float>(index) * 0.8f) * amplitude;
                     uprightBox(place(segment.forward, segment.up, wave), segment.netW, segment.netH,
-                               segment.netD, segment.u, segment.v, kSilverfishSkin, segment.grow);
-                    ++index;
+                               segment.netD, segment.u, segment.v, vermin, segment.grow);
                 }
                 continue;
             }
@@ -3088,11 +4761,15 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                     // stop at 33 and the zombie villager's run to 37, so this
                     // is a full 12-long zombie limb rather than the villager's
                     // short folded 8. Same offsets as the biped's arms for
-                    // exactly that reason.
-                    legBox(place(0.0f, 1.42f, 0.375f), 4.0f, 12.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, -1.5708f + swayPitch, swayRoll);
-                    legBox(place(0.0f, 1.42f, -0.375f), 4.0f, 12.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, -1.5708f - swayPitch, -swayRoll);
+                    // exactly that reason - including the torso-centre rest
+                    // height, which is what keeps the joint on the shoulder
+                    // rather than in the head, and the chop that brings them
+                    // down on you. **Only this branch animates**: the folded
+                    // assembly below is closed and must stay still.
+                    legBox(place(0.0f, 1.125f, 0.375f), 4.0f, 12.0f, 4.0f,
+                           44.0f, 22.0f, skin, 0.005f, -1.5708f + swayPitch + zombieChop, swayRoll);
+                    legBox(place(0.0f, 1.125f, -0.375f), 4.0f, 12.0f, 4.0f,
+                           44.0f, 22.0f, skin, 0.005f, -1.5708f - swayPitch + zombieChop, -swayRoll);
                     return;
                 }
 
@@ -3177,39 +4854,507 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
-            if (creature.kind == CreatureKind::Princepin) {
+            if (creature.kind == CreatureKind::Princepin ||
+                creature.kind == CreatureKind::PrincepinBrute ||
+                creature.kind == CreatureKind::ZombiePrincepin) {
                 // Body, arms and legs are the biped rig at the standard
                 // player-skin offsets - right limbs at (0,16) and (40,16), left
                 // at (16,48) and (32,48), which is the first model here to use
                 // separate nets per side. Only the head is its own: 10 wide
                 // rather than 8, carrying two ears, a snout and two tusks.
+                //
+                // All three are `geometry.piglin` in the shipped data, so the
+                // cousins are a skin row apiece and nothing else.
+                const float skin = creature.kind == CreatureKind::PrincepinBrute
+                                       ? kPrincepinBruteSkin
+                                   : creature.kind == CreatureKind::ZombiePrincepin
+                                       ? kZombiePrincepinSkin
+                                       : kPrincepinSkin;
                 beginHead(0.0f, 1.5f);
                 uprightBox(place(0.0f, 1.75f, 0.0f), 10.0f, 8.0f, 8.0f,
-                           0.0f, 0.0f, kPrincepinSkin, 0.005f);
+                           0.0f, 0.0f, skin, 0.005f);
                 uprightBox(place(-0.03f, 1.82f, 0.34375f), 1.0f, 5.0f, 4.0f,
-                           39.0f, 6.0f, kPrincepinSkin, 0.0f);
+                           39.0f, 6.0f, skin, 0.0f);
                 uprightBox(place(-0.03f, 1.82f, -0.34375f), 1.0f, 5.0f, 4.0f,
-                           51.0f, 6.0f, kPrincepinSkin, 0.0f);
+                           51.0f, 6.0f, skin, 0.0f);
                 uprightBox(place(0.28125f, 1.72f, 0.0f), 4.0f, 4.0f, 1.0f,
-                           31.0f, 1.0f, kPrincepinSkin, 0.0f);
+                           31.0f, 1.0f, skin, 0.0f);
                 uprightBox(place(0.28f, 1.655f, 0.15625f), 1.0f, 2.0f, 1.0f,
-                           2.0f, 0.0f, kPrincepinSkin, 0.004f);
+                           2.0f, 0.0f, skin, 0.004f);
                 uprightBox(place(0.28f, 1.655f, -0.15625f), 1.0f, 2.0f, 1.0f,
-                           2.0f, 4.0f, kPrincepinSkin, 0.004f);
+                           2.0f, 4.0f, skin, 0.004f);
                 endHead();
 
                 uprightBox(place(0.0f, 1.125f, 0.0f), 8.0f, 12.0f, 4.0f,
-                           16.0f, 16.0f, kPrincepinSkin, 0.0f);
+                           16.0f, 16.0f, skin, 0.0f);
                 constexpr float kPigHip = 0.133f;
                 legBox(place(0.0f, 0.375f, kPigHip), 4.0f, 12.0f, 4.0f,
-                       16.0f, 48.0f, kPrincepinSkin, 0.005f, swing);
+                       16.0f, 48.0f, skin, 0.005f, swing);
                 legBox(place(0.0f, 0.375f, -kPigHip), 4.0f, 12.0f, 4.0f,
-                       0.0f, 16.0f, kPrincepinSkin, 0.005f, -swing);
+                       0.0f, 16.0f, skin, 0.005f, -swing);
                 constexpr float kPigShoulder = 0.375f;
                 legBox(place(0.0f, 1.125f, kPigShoulder), 4.0f, 12.0f, 4.0f,
-                       32.0f, 48.0f, kPrincepinSkin, 0.005f, -swing + swayPitch, swayRoll);
+                       32.0f, 48.0f, skin, 0.005f, -swing + swayPitch - humanoidRaise,
+                       swayRoll);
                 legBox(place(0.0f, 1.125f, -kPigShoulder), 4.0f, 12.0f, 4.0f,
-                       40.0f, 16.0f, kPrincepinSkin, 0.005f, swing - swayPitch, -swayRoll);
+                       40.0f, 16.0f, skin, 0.005f, swing - swayPitch, -swayRoll);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Cod || creature.kind == CreatureKind::Salmon) {
+                // Both are Mojang's `geometry.cod` and `geometry.salmon` read
+                // straight off `bedrock-samples`: every cube's centre is its
+                // origin plus half its size, converted from Bedrock's axes -
+                // forward is -Z there, so our `alongForward` is the negated one.
+                //
+                // **The body tips to the angle it is swimming at**, about its
+                // own mid-height rather than the point between its feet. A
+                // pivot at the feet would swing the nose through an arc every
+                // time it changed depth - the same fault the head turn had
+                // before it was given a neck to turn about.
+                const bool cod = creature.kind == CreatureKind::Cod;
+                const float skin = cod ? kCodSkin : kSalmonSkin;
+                const float bodyUp = cod ? 0.125f : 0.375f;
+
+                const float sinTip = std::sin(creature.pitch);
+                const float cosTip = std::cos(creature.pitch);
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = bodyUp;
+                frameOrigin = renderPosition + worldUp * (bodyUp * modelScale * swellTall);
+
+                // A pectoral fin is rotated 35 degrees in the reference, which
+                // bakes the turn into an odd cube origin so the bone rotation
+                // lands it right. Ours applies the angle as a roll instead and
+                // places the fin against the flank, which is the same fin
+                // without reproducing a pivot we have no use for.
+                constexpr float kFinRoll = 0.6109f;
+
+                if (cod) {
+                    uprightBox(place(-0.28125f, 0.125f, 0.0f), 2.0f, 4.0f, 7.0f,
+                               0.0f, 0.0f, skin, 0.0f);
+                    uprightBox(place(0.03125f, 0.125f, 0.0f), 2.0f, 4.0f, 3.0f,
+                               11.0f, 0.0f, skin, 0.0f);
+                    uprightBox(place(0.15625f, 0.15625f, 0.0f), 2.0f, 3.0f, 1.0f,
+                               0.0f, 0.0f, skin, 0.0f);
+                    finBox(place(-0.6875f, 0.125f, 0.0f), 0.0f, 4.0f, 6.0f, 20.0f, 1.0f, skin, 0.0f);
+                    finBox(place(-0.1875f, 0.28125f, 0.0f), 0.0f, 1.0f, 6.0f, 20.0f, -6.0f, skin, 0.0f);
+                    finBox(place(-0.25f, -0.03125f, 0.0f), 0.0f, 1.0f, 2.0f, 22.0f, -1.0f, skin, 0.0f);
+                    uprightBox(place(-0.0625f, 0.03125f, 0.125f), 2.0f, 1.0f, 2.0f,
+                               24.0f, 4.0f, skin, 0.002f, 0.0f, 0.0f, kFinRoll);
+                    uprightBox(place(-0.0625f, 0.03125f, -0.125f), 2.0f, 1.0f, 2.0f,
+                               24.0f, 1.0f, skin, 0.002f, 0.0f, 0.0f, -kFinRoll);
+                    continue;
+                }
+
+                // Two body halves rather than one long box, which is what lets
+                // the reference bend a salmon in the middle. Ours draws them
+                // straight - the bend is an animation we do not have - but the
+                // nets are the reference's either way.
+                uprightBox(place(0.0f, 0.375f, 0.0f), 3.0f, 5.0f, 8.0f, 0.0f, 0.0f, skin, 0.0f);
+                uprightBox(place(-0.5f, 0.375f, 0.0f), 3.0f, 5.0f, 8.0f, 0.0f, 13.0f, skin, 0.0f);
+                uprightBox(place(0.34375f, 0.40625f, 0.0f), 2.0f, 4.0f, 3.0f, 22.0f, 0.0f, skin, 0.0f);
+                finBox(place(-0.1875f, 0.59375f, 0.0f), 0.0f, 2.0f, 2.0f, 4.0f, 2.0f, skin, 0.0f);
+                finBox(place(-0.34375f, 0.59375f, 0.0f), 0.0f, 2.0f, 3.0f, 2.0f, 3.0f, skin, 0.0f);
+                finBox(place(-0.9375f, 0.375f, 0.0f), 0.0f, 5.0f, 6.0f, 20.0f, 10.0f, skin, 0.0f);
+                finBox(place(0.1875f, 0.2417f, 0.15625f), 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, skin,
+                       0.0f, kFinRoll);
+                finBox(place(0.1875f, 0.2417f, -0.15625f), 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, skin,
+                       0.0f, -kFinRoll);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Pufferfish) {
+                // Three separate geometries, not one model scaled: the spines
+                // are real parts that only exist once it is inflated, which is
+                // why `puff` picks a model rather than a size.
+                //
+                // **But the changeover happens where the two shapes measure the
+                // same.** The three bodies are 3, 5 and 8 texels wide, so
+                // swapping them outright trebles the fish between one frame and
+                // the next. Instead the model is scaled continuously across the
+                // transition and handed over at the geometric mean of the two
+                // widths - the size both shapes agree on - so what the eye sees
+                // is one animal swelling, with only the spines arriving.
+                constexpr float kPuffWidth[3]{3.0f, 5.0f, 8.0f};
+                const float skin = kPufferfishSkin;
+                const int lower = creature.puff < 1.0f ? 0 : 1;
+                const float span = std::clamp(creature.puff - static_cast<float>(lower), 0.0f, 1.0f);
+                // Eased rather than linear, so it swells and settles.
+                const float eased = span * span * (3.0f - 2.0f * span);
+                const float cross = std::sqrt(kPuffWidth[lower] * kPuffWidth[lower + 1]);
+                const int stage = eased < 0.5f ? lower : lower + 1;
+                const float reach = cross / kPuffWidth[stage];
+                modelScale *= eased < 0.5f ? 1.0f + (reach - 1.0f) * (eased * 2.0f)
+                                           : reach + (1.0f - reach) * ((eased - 0.5f) * 2.0f);
+
+                const float sinTip = std::sin(creature.pitch);
+                const float cosTip = std::cos(creature.pitch);
+                const float bodyUp = stage == 0 ? 0.0625f : (stage == 1 ? 0.21875f : 0.25f);
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = bodyUp;
+                frameOrigin = renderPosition + worldUp * (bodyUp * modelScale * swellTall);
+
+                // A spine sits flush against the body in the reference, which
+                // shares a face plane with it - and both of ours are drawn from
+                // both sides, so each one would flicker. A sixteenth of a texel
+                // outward separates every one of them and is invisible.
+                constexpr float kSpineGap = 0.006f;
+                constexpr float kSpineTilt = 0.7853982f;
+
+                if (stage == 0) {
+                    uprightBox(place(0.0f, 0.0625f, 0.0f), 3.0f, 2.0f, 3.0f, 0.0f, 27.0f, skin, 0.0f);
+                    uprightBox(place(0.0625f, 0.15625f, -0.0625f), 1.0f, 1.0f, 1.0f,
+                               24.0f, 6.0f, skin, 0.002f);
+                    uprightBox(place(0.0625f, 0.15625f, 0.0625f), 1.0f, 1.0f, 1.0f,
+                               28.0f, 6.0f, skin, 0.002f);
+                    finBox(place(-0.1875f, 0.0625f, 0.0f), 3.0f, 0.0f, 3.0f, -3.0f, 0.0f, skin);
+                    uprightBox(place(0.03125f, 0.03125f, -0.125f), 1.0f, 1.0f, 2.0f,
+                               25.0f, 0.0f, skin, 0.002f);
+                    uprightBox(place(0.03125f, 0.03125f, 0.125f), 1.0f, 1.0f, 2.0f,
+                               25.0f, 0.0f, skin, 0.002f);
+                    continue;
+                }
+
+                if (stage == 1) {
+                    uprightBox(place(0.0f, 0.21875f, 0.0f), 5.0f, 5.0f, 5.0f,
+                               12.0f, 22.0f, skin, 0.0f);
+                    uprightBox(place(0.03125f, 0.28125f, -0.21875f), 2.0f, 1.0f, 2.0f,
+                               24.0f, 3.0f, skin, 0.002f);
+                    uprightBox(place(0.03125f, 0.28125f, 0.21875f), 2.0f, 1.0f, 2.0f,
+                               24.0f, 0.0f, skin, 0.002f);
+                    // Eight flat spines, each hinged 45 degrees off the face it
+                    // grows from - the reference's `bind_pose_rotation`.
+                    finBox(place(0.15625f + kSpineGap, 0.40625f + kSpineGap, 0.0f), 5.0f, 1.0f, 0.0f,
+                           19.0f, 17.0f, skin, kSpineTilt);
+                    finBox(place(-0.15625f - kSpineGap, 0.40625f + kSpineGap, 0.0f), 5.0f, 1.0f, 0.0f,
+                           11.0f, 17.0f, skin, -kSpineTilt);
+                    finBox(place(0.15625f + kSpineGap, 0.03125f - kSpineGap, 0.0f), 5.0f, 1.0f, 0.0f,
+                           18.0f, 20.0f, skin, -kSpineTilt);
+                    finBox(place(-0.15625f - kSpineGap, 0.03125f - kSpineGap, 0.0f), 5.0f, 1.0f, 0.0f,
+                           18.0f, 20.0f, skin, kSpineTilt);
+                    // The four side spines turn about the vertical instead, so
+                    // their centres are worked out before the frame is turned.
+                    const glm::vec3 leftFront = place(0.15625f + kSpineGap, 0.21875f, -0.1875f - kSpineGap);
+                    const glm::vec3 leftBack = place(-0.15625f - kSpineGap, 0.21875f, -0.1875f - kSpineGap);
+                    const glm::vec3 rightFront = place(0.15625f + kSpineGap, 0.21875f, 0.1875f + kSpineGap);
+                    const glm::vec3 rightBack = place(-0.15625f - kSpineGap, 0.21875f, 0.1875f + kSpineGap);
+                    yawed(kSpineTilt, [&]() {
+                        finBox(leftFront, 1.0f, 5.0f, 0.0f, 1.0f, 17.0f, skin);
+                        finBox(rightBack, 1.0f, 5.0f, 0.0f, 9.0f, 17.0f, skin);
+                    });
+                    yawed(-kSpineTilt, [&]() {
+                        finBox(leftBack, 1.0f, 5.0f, 0.0f, 1.0f, 17.0f, skin);
+                        finBox(rightFront, 1.0f, 5.0f, 0.0f, 5.0f, 17.0f, skin);
+                    });
+                    continue;
+                }
+
+                uprightBox(place(0.0f, 0.25f, 0.0f), 8.0f, 8.0f, 8.0f, 0.0f, 0.0f, skin, 0.0f);
+                uprightBox(place(0.1244f, 0.40625f, -0.3125f), 2.0f, 1.0f, 2.0f,
+                           24.0f, 3.0f, skin, 0.002f);
+                uprightBox(place(0.1245f, 0.40625f, 0.3123f), 2.0f, 1.0f, 2.0f,
+                           24.0f, 0.0f, skin, 0.002f);
+                // Twelve spikes: three along the top, three underneath, three
+                // down each flank. The end ones are canted 45 degrees off the
+                // body and the middle ones are square to it, which is what
+                // gives the silhouette its points.
+                const float top = 0.53125f + kSpineGap;
+                const float bottom = -0.03125f - kSpineGap;
+                uprightBox(place(0.21875f, top, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 16.0f, skin, 0.0f,
+                           kSpineTilt);
+                uprightBox(place(-0.03125f, top, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 16.0f, skin, 0.0f);
+                uprightBox(place(-0.28125f, top, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 16.0f, skin, 0.0f,
+                           -kSpineTilt);
+                uprightBox(place(0.21875f, bottom, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 19.0f, skin, 0.0f,
+                           -kSpineTilt);
+                uprightBox(place(-0.03125f, bottom, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 19.0f, skin, 0.0f);
+                uprightBox(place(-0.28125f, bottom, 0.0f), 8.0f, 1.0f, 1.0f, 14.0f, 19.0f, skin, 0.0f,
+                           kSpineTilt);
+
+                const float flank = 0.28125f + kSpineGap;
+                const glm::vec3 sideSpines[6]{place(0.21875f, 0.25f, -flank),
+                                              place(-0.03125f, 0.25f, -flank),
+                                              place(-0.28125f, 0.25f, -flank),
+                                              place(0.21875f, 0.25f, flank),
+                                              place(-0.03125f, 0.25f, flank),
+                                              place(-0.28125f, 0.25f, flank)};
+                const float sideU[6]{0.0f, 4.0f, 8.0f, 4.0f, 8.0f, 8.0f};
+                const float sideYaw[6]{kSpineTilt, 0.0f, -kSpineTilt, -kSpineTilt, 0.0f, kSpineTilt};
+                for (int i = 0; i < 6; ++i) {
+                    yawed(sideYaw[i], [&]() {
+                        uprightBox(sideSpines[i], 1.0f, 8.0f, 1.0f, sideU[i], 16.0f, skin, 0.0f);
+                    });
+                }
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Squid || creature.kind == CreatureKind::GlowSquid) {
+                // A bell with eight tentacles hanging off it at forty-five
+                // degree spacing - the first thing here that is a ring of limbs
+                // rather than a spine with legs. The glow squid is the same rig
+                // and the same net; only the skin row and its own light differ.
+                const float skin = creature.kind == CreatureKind::Squid ? kSquidSkin : kGlowSquidSkin;
+                constexpr float kBellUp = 0.95f;
+
+                // **`bodyTilt`, not `pitch`.** The dive angle says where it is
+                // headed; this says how the animal is lying while it gets
+                // there, and for something that swims bell-first with its
+                // tentacles streaming behind those are not the same number.
+                const float sinTip = std::sin(creature.bodyTilt);
+                const float cosTip = std::cos(creature.bodyTilt);
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = kBellUp;
+                frameOrigin = renderPosition + worldUp * (kBellUp * modelScale * swellTall);
+
+                uprightBox(place(0.0f, kBellUp, 0.0f), 12.0f, 16.0f, 12.0f, 0.0f, 0.0f, skin, 0.0f);
+
+                // They flare and snap rather than swinging: the reference's own
+                // `sin(f^2 * pi)` over the first half of the cycle, still over
+                // the second. **Negated** because a positive pitch swings a
+                // hanging limb toward the ring's centre, and a flare is
+                // outward. `legBox` hangs each one from its top face and the
+                // derived pivot lands exactly on the underside of the bell, so
+                // the ring hinges where it meets the body.
+                const float half = kTwoPi * 0.5f;
+                const float phase = creature.jetPhase / half;
+                const float splay =
+                    creature.jetPhase < half ? std::sin(phase * phase * half) * kJetSplay : 0.0f;
+                for (int i = 0; i < 8; ++i) {
+                    const float around = static_cast<float>(i) * 0.7853982f;
+                    yawed(around, [&]() {
+                        legBox(place(0.3125f, kBellUp - 1.0f, 0.0f), 2.0f, 18.0f, 2.0f,
+                               48.0f, 0.0f, skin, 0.002f, -splay);
+                    });
+                }
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Turtle) {
+                // The shell and the belly plate are authored upright and laid
+                // down a quarter turn - the reference's own `bind_pose_rotation`
+                // of 90 degrees, which is exactly what `lyingBox` is for. The
+                // head and the four flippers are already flat in the data and
+                // take no rotation at all.
+                //
+                // The shell is centred against the *flippers* rather than by
+                // eye: the front pair sit at z -6..-1 and the rear at 11..21,
+                // so a body spanning -8..12 meets both.
+                lyingBox(place(-0.125f, 0.1875f, 0.0f), 19.0f, 20.0f, 6.0f,
+                         6.0f, 37.0f, kTurtleSkin, 0.0f);
+                lyingBox(place(-0.125f, 0.046875f, 0.0f), 11.0f, 18.0f, 3.0f,
+                         30.0f, 1.0f, kTurtleSkin, 0.0f);
+
+                // **Sunk into the shell rather than butted against it, and a
+                // shade lower than its roof.** Its crown used to land on
+                // exactly the shell's top plane, and two coincident faces on
+                // double-sided quads is a flicker right where the neck is.
+                //
+                // The net origin is 3, not the geometry's 2: measured off the
+                // texture, whose painted band runs x 9-20, and at 2 the top face
+                // sampled a transparent column and showed a slot across it.
+                beginHead(0.5f, 0.20f);
+                uprightBox(place(0.66f, 0.20f, 0.0f), 6.0f, 5.0f, 6.0f,
+                           3.0f, 0.0f, kTurtleSkin, 0.004f);
+                endHead();
+
+                // Flippers row rather than stride: the front pair are broad
+                // paddles and the rear pair long and narrow, and both sweep
+                // about their inner end the way the spider's legs do.
+                const float row = swing * 0.6f;
+                barBox(0.21875f, 0.15625f, 0.71875f, 13.0f, 1.0f, 5.0f,
+                       26.0f, 30.0f, kTurtleSkin, 0.0f, row);
+                barBox(0.21875f, 0.15625f, -0.71875f, 13.0f, 1.0f, 5.0f,
+                       26.0f, 24.0f, kTurtleSkin, 0.0f, -row);
+                barBox(-1.0f, 0.09375f, 0.21875f, 4.0f, 1.0f, 10.0f,
+                       0.0f, 23.0f, kTurtleSkin, 0.0f, -row);
+                barBox(-1.0f, 0.09375f, -0.21875f, 4.0f, 1.0f, 10.0f,
+                       0.0f, 12.0f, kTurtleSkin, 0.0f, row);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Dolphin) {
+                // Body, head and beak in a line, then the tail and its fluke.
+                // It tips with the swim angle like the fish do - it has a clear
+                // nose, so where it points is obvious without the squid's
+                // separate body angle.
+                const float sinTip = std::sin(creature.pitch);
+                const float cosTip = std::cos(creature.pitch);
+                constexpr float kSpineUp = 0.21875f;
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = kSpineUp;
+                frameOrigin = renderPosition + worldUp * (kSpineUp * modelScale * swellTall);
+
+                // **These net origins are measured off the texture, not taken
+                // from the Bedrock geometry.** Our reference art is Java's, and
+                // for this one mob the two disagree: Bedrock puts the tail at
+                // (0,33) and the tail fin at (0,49), where the Java sheet has
+                // nothing at all - which is why the whole back half rendered as
+                // empty. Head and nose happen to agree; body, tail and fin do
+                // not. `tools/alpha-runs.ps1` on `dolphin.png` shows it.
+                uprightBox(place(-0.21875f, 0.21875f, 0.0f), 8.0f, 7.0f, 13.0f,
+                           22.0f, 0.0f, kDolphinSkin, 0.0f);
+                // **The head is grown and pushed back into the body.** Its
+                // cross-section is the body's exactly - 8 by 7 - and the two met
+                // at a plane, so their touching faces were the same rectangle in
+                // the same place, drawn from both sides. That is the flicker at
+                // the neck; the beak had it against the head for the same
+                // reason.
+                uprightBox(place(0.355f, 0.21875f, 0.0f), 8.0f, 7.0f, 6.0f,
+                           0.0f, 0.0f, kDolphinSkin, 0.005f);
+                uprightBox(place(0.665f, 0.0625f, 0.0f), 2.0f, 2.0f, 4.0f,
+                           0.0f, 13.0f, kDolphinSkin, 0.009f);
+                uprightBox(place(-0.955f, 0.15625f, 0.0f), 4.0f, 5.0f, 11.0f,
+                           0.0f, 19.0f, kDolphinSkin, 0.004f);
+                uprightBox(place(-1.36f, 0.15625f, 0.0f), 10.0f, 1.0f, 6.0f,
+                           19.0f, 20.0f, kDolphinSkin, 0.006f);
+                // Swept back thirty degrees, which is the reference's own
+                // rotation - negative because a positive pitch tips a box's top
+                // forward and a dorsal leans the other way.
+                uprightBox(place(-0.1875f, 0.546875f, 0.0f), 1.0f, 5.0f, 4.0f,
+                           52.0f, 0.0f, kDolphinSkin, 0.002f, -0.5236f);
+                uprightBox(place(0.03125f, 0.09375f, 0.4375f), 8.0f, 1.0f, 4.0f,
+                           44.0f, 27.0f, kDolphinSkin, 0.002f, 0.0f, 0.0f, 0.3491f);
+                uprightBox(place(0.03125f, 0.09375f, -0.4375f), 8.0f, 1.0f, 4.0f,
+                           44.0f, 27.0f, kDolphinSkin, 0.002f, 0.0f, 0.0f, -0.3491f);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::Axolotl) {
+                // Five liveries, each a whole net on its own rows.
+                const float skin =
+                    kAxolotlSkin + static_cast<float>(creature.variant) * kAxolotlVariantRows;
+                // The model sits below its own feet in the reference - the
+                // limbs hang to -4 - so the whole thing is lifted to stand in
+                // its box rather than through it.
+                constexpr float kBodyUp = 0.125f;
+                constexpr float kLift = 0.14f;
+
+                const float sinTip = std::sin(creature.pitch);
+                const float cosTip = std::cos(creature.pitch);
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = kBodyUp;
+                frameOrigin =
+                    renderPosition + worldUp * ((kBodyUp + kLift) * modelScale * swellTall);
+
+                uprightBox(place(0.0f, 0.125f, 0.0f), 8.0f, 4.0f, 10.0f,
+                           0.0f, 11.0f, skin, 0.0f);
+                // The ridge along its back. **In water the tail does all the
+                // work and the legs hang still**; on land it is the other way
+                // about, which is the whole difference between the two gaits.
+                finBox(place(0.03125f, 0.15625f, 0.0f), 0.0f, 5.0f, 9.0f, 2.0f, 17.0f, skin);
+
+                // The tail sways about where it meets the body rather than
+                // about the animal's middle, or its root would swing clear of
+                // the hips on every beat.
+                const float sway = creature.inWater
+                                       ? std::sin(creature.age * 5.0f) * 0.45f
+                                       : std::sin(creature.age * 1.4f) * 0.08f;
+                const glm::vec3 tailRoot = place(-0.25f, 0.15625f, 0.0f);
+                const glm::vec3 tailCentre =
+                    tailRoot - forward * (0.375f * std::cos(sway) * modelScale) +
+                    side * (0.375f * std::sin(sway) * modelScale);
+                yawed(sway, [&]() {
+                    finBox(tailCentre, 0.0f, 5.0f, 12.0f, 2.0f, 19.0f, skin);
+                });
+
+                // **No `beginHead` here.** It rebuilds the frame from the
+                // creature's own position, which would throw away `kLift` and
+                // drop the head below the body it is attached to. A swimmer
+                // pitches its whole body anyway, so there is no separate head
+                // turn to want.
+                uprightBox(place(0.46875f, 0.15625f, 0.0f), 8.0f, 5.0f, 5.0f,
+                           0.0f, 1.0f, skin, 0.0f);
+                // **The gills are three real boxes cut by alpha, not decoration.**
+                // Two feathered fronds off the cheeks and one across the crown,
+                // and they are what makes the animal read as an axolotl at all.
+                finBox(place(0.375f, 0.21875f, -0.34375f), 3.0f, 7.0f, 0.0f, 11.0f, 40.0f, skin);
+                finBox(place(0.375f, 0.21875f, 0.34375f), 3.0f, 7.0f, 0.0f, 0.0f, 40.0f, skin);
+                finBox(place(0.375f, 0.40625f, 0.0f), 8.0f, 3.0f, 0.0f, 3.0f, 37.0f, skin);
+
+                // Four flat paddles, each turned a quarter about the vertical -
+                // the reference bakes that into the cube origin, so the centres
+                // here are worked out after the turn and only the orientation
+                // is rotated. Seated a little higher than the reference's exact
+                // offset: its plates have no thickness and ours do, so a single
+                // texel of overlap left them reading as detached.
+                const glm::vec3 limbs[4]{place(0.28125f, -0.03f, 0.25f),
+                                         place(-0.21875f, -0.03f, 0.25f),
+                                         place(0.28125f, -0.03f, -0.25f),
+                                         place(-0.21875f, -0.03f, -0.25f)};
+                const float limbYaw[4]{-1.5708f, 1.5708f, 1.5708f, -1.5708f};
+                // Splayed out and down rather than hanging straight, which is
+                // what a sprawling amphibian's legs do and what lets them meet
+                // the floor at all. Only the walk moves them - in water they
+                // are held still and the tail drives.
+                constexpr float kSprawl = 0.75f;
+                const float paddle = creature.inWater ? 0.0f : swing * 0.7f;
+                const float lean[4]{-kSprawl + paddle, kSprawl - paddle, -kSprawl - paddle,
+                                    kSprawl + paddle};
+                for (int i = 0; i < 4; ++i) {
+                    yawed(limbYaw[i], [&]() {
+                        finBox(limbs[i], 3.0f, 5.0f, 0.0f, 2.0f, 13.0f, skin, lean[i]);
+                    });
+                }
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::TropicalFish) {
+                // Two body shapes crossed with six patterns. The pattern rides
+                // over the body as a second cutout shell a fraction larger,
+                // which is the sheep's fleece arrangement and is what avoids
+                // authoring every combination as its own skin.
+                const bool tall = creature.variant >= kTropicalPatterns;
+                const int pattern = creature.variant % kTropicalPatterns;
+                const float base = tall ? kTropicalBSkin : kTropicalASkin;
+                const float overlay = base + static_cast<float>(pattern + 1) * kTropicalRows;
+                constexpr float kOverBody = 0.006f;
+
+                const float bodyUp = tall ? 0.1875f : 0.09375f;
+                const float sinTip = std::sin(creature.pitch);
+                const float cosTip = std::cos(creature.pitch);
+                forward = bodyForward * cosTip - worldUp * sinTip;
+                upAxis = bodyForward * sinTip + worldUp * cosTip;
+                pivotUp = bodyUp;
+                frameOrigin = renderPosition + worldUp * (bodyUp * modelScale * swellTall);
+
+                // Both skins share one net, so the shell is the same call twice
+                // at two row offsets and a hair of extra size.
+                for (int pass = 0; pass < 2; ++pass) {
+                    const float sheet = pass == 0 ? base : overlay;
+                    const float grow = pass == 0 ? 0.0f : kOverBody;
+                    if (tall) {
+                        uprightBox(place(-0.1875f, 0.1875f, 0.0f), 2.0f, 6.0f, 6.0f,
+                                   0.0f, 20.0f, sheet, grow);
+                        finBox(place(-0.1875f, -0.15625f, 0.0f), 0.0f, 5.0f, 6.0f,
+                               20.0f, 21.0f, sheet);
+                        finBox(place(-0.1875f, 0.53125f, 0.0f), 0.0f, 5.0f, 6.0f,
+                               20.0f, 10.0f, sheet);
+                        finBox(place(-0.53125f, 0.1875f, 0.0f), 0.0f, 6.0f, 5.0f,
+                               21.0f, 16.0f, sheet);
+                    } else {
+                        uprightBox(place(0.0f, 0.09375f, 0.0f), 2.0f, 3.0f, 6.0f,
+                                   0.0f, 0.0f, sheet, grow);
+                        finBox(place(0.0f, 0.3125f, 0.0f), 0.0f, 4.0f, 6.0f,
+                               10.0f, -6.0f, sheet);
+                        finBox(place(-0.3125f, 0.09375f, 0.0f), 0.0f, 3.0f, 4.0f,
+                               24.0f, -4.0f, sheet);
+                    }
+                }
+
+                // Pectorals, swept thirty-five degrees like every other fish
+                // here. Body art only - the pattern sheet does not paint them.
+                constexpr float kFinTurn = 0.6109f;
+                const float finForward = tall ? -0.14688f : 0.00662f;
+                const float finSide = tall ? 0.19104f : 0.0835f;
+                const glm::vec3 fins[2]{place(finForward, 0.0625f, finSide),
+                                        place(finForward, 0.0625f, -finSide)};
+                yawed(kFinTurn, [&]() { finBox(fins[0], 2.0f, 2.0f, 0.0f, 2.0f, 12.0f, base); });
+                yawed(-kFinTurn, [&]() { finBox(fins[1], 2.0f, 2.0f, 0.0f, 2.0f, 16.0f, base); });
                 continue;
             }
 
@@ -3270,30 +5415,61 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 continue;
             }
 
-            if (creature.kind == CreatureKind::Cow) {
+            if (creature.kind == CreatureKind::Cow || creature.kind == CreatureKind::MushroomCow) {
                 // Heavier than the sheep and on a 64-row net rather than 32.
-                lyingBox(place(-0.0625f, 1.0625f, 0.0f), 12.0f, 18.0f, 10.0f, 18.0f, 4.0f, kCowSkin, 0.0f);
+                // `geometry.mooshroom.v2` is the cow's bones exactly - the
+                // mushrooms are not in the skin at all, they are separate block
+                // models, which is why one is grown below rather than boxed.
+                const float skin =
+                    creature.kind == CreatureKind::MushroomCow ? kMushroomCowSkin : kCowSkin;
+                lyingBox(place(-0.0625f, 1.0625f, 0.0f), 12.0f, 18.0f, 10.0f, 18.0f, 4.0f, skin, 0.0f);
                 beginHead(0.5f, 1.25f);
-                uprightBox(place(0.6875f, 1.25f, 0.0f), 8.0f, 8.0f, 6.0f, 0.0f, 0.0f, kCowSkin, 0.0f);
+                uprightBox(place(0.6875f, 1.25f, 0.0f), 8.0f, 8.0f, 6.0f, 0.0f, 0.0f, skin, 0.0f);
                 endHead();
 
                 // The udder hangs under the rear and belongs to the body group,
                 // so it is laid down with it. Its net is at (52,0) - the pink
                 // one. The brown box at (0,32) is not an udder, and using it put
                 // a slab of hide through the animal's back.
-                lyingBox(place(-0.4375f, 0.71875f, 0.0f), 4.0f, 6.0f, 1.0f, 52.0f, 0.0f, kCowSkin, 0.0f);
+                lyingBox(place(-0.4375f, 0.71875f, 0.0f), 4.0f, 6.0f, 1.0f, 52.0f, 0.0f, skin, 0.0f);
 
                 // Both horns share one net.
                 beginHead(0.5f, 1.25f);
-                uprightBox(place(0.71875f, 1.46875f, 0.28125f), 1.0f, 3.0f, 1.0f, 22.0f, 0.0f, kCowSkin, 0.0f);
-                uprightBox(place(0.71875f, 1.46875f, -0.28125f), 1.0f, 3.0f, 1.0f, 22.0f, 0.0f, kCowSkin, 0.0f);
+                uprightBox(place(0.71875f, 1.46875f, 0.28125f), 1.0f, 3.0f, 1.0f, 22.0f, 0.0f, skin, 0.0f);
+                uprightBox(place(0.71875f, 1.46875f, -0.28125f), 1.0f, 3.0f, 1.0f, 22.0f, 0.0f, skin, 0.0f);
                 endHead();
 
                 const float legY = 0.375f;
-                legBox(place(0.375f, legY, 0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, kCowSkin, 0.0f, swing);
-                legBox(place(0.375f, legY, -0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, kCowSkin, 0.0f, -swing);
-                legBox(place(-0.4375f, legY, 0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, kCowSkin, 0.0f, -swing);
-                legBox(place(-0.4375f, legY, -0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, kCowSkin, 0.0f, swing);
+                legBox(place(0.375f, legY, 0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, skin, 0.0f, swing);
+                legBox(place(0.375f, legY, -0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, skin, 0.0f, -swing);
+                legBox(place(-0.4375f, legY, 0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, skin, 0.0f, -swing);
+                legBox(place(-0.4375f, legY, -0.25f), 4.0f, 12.0f, 4.0f, 0.0f, 16.0f, skin, 0.0f, swing);
+
+                if (creature.kind == CreatureKind::MushroomCow) {
+                    // A crossed pair of flat quads, which is how a plant is
+                    // drawn everywhere else here - the reference puts actual
+                    // mushroom *blocks* on its back, and a block model is a
+                    // crossed sprite. The sprite is stamped into an empty
+                    // corner of this species' own rows rather than given a
+                    // texture layer of its own, which would have moved
+                    // `TextureLayer::SpawnEggFirst` and slid every egg sprite.
+                    constexpr float kCapU = 32.0f;
+                    constexpr float kCapV = 48.0f;
+                    const auto mushroom = [&](float alongForward, float alongSide, float size) {
+                        const glm::vec3 base = place(alongForward, 1.34375f, alongSide);
+                        const float half = size * 0.5f * modelScale;
+                        const glm::vec3 tall = upAxis * (size * modelScale);
+                        const glm::vec3 a = (forward + side) * (half * 0.70710678f);
+                        const glm::vec3 b = (forward - side) * (half * 0.70710678f);
+                        skinQuad(base - a, base + a, base + a + tall, base - a + tall, 1.0f, skin,
+                                 kCapU, kCapV, 16.0f, 16.0f);
+                        skinQuad(base - b, base + b, base + b + tall, base - b + tall, 1.0f, skin,
+                                 kCapU, kCapV, 16.0f, 16.0f);
+                    };
+                    mushroom(-0.28f, 0.0f, 0.42f);
+                    mushroom(0.06f, 0.20f, 0.34f);
+                    mushroom(0.10f, -0.22f, 0.30f);
+                }
                 continue;
             }
 

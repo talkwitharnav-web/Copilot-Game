@@ -79,6 +79,24 @@ const std::vector<Recipe>& recipes() {
                    itemForBlock(BlockId::Furnace), 1),
             // Charcoal comes from smelting a log, so torches need no ore at all.
             shaped(1, 2, {ItemId::Charcoal, ItemId::Stick}, itemForBlock(BlockId::Torch), 4),
+            shaped(1, 2, {ItemId::Coal, ItemId::Stick}, itemForBlock(BlockId::Torch), 4),
+            shaped(2, 2,
+                   {itemForBlock(BlockId::Stone), itemForBlock(BlockId::Stone),
+                    itemForBlock(BlockId::Stone), itemForBlock(BlockId::Stone)},
+                   itemForBlock(BlockId::StoneBricks), 4),
+            shaped(2, 2,
+                   {itemForBlock(BlockId::Sand), itemForBlock(BlockId::Sand), itemForBlock(BlockId::Sand),
+                    itemForBlock(BlockId::Sand)},
+                   itemForBlock(BlockId::Sandstone), 1),
+            // The reference grows moss from vines, which do not exist here yet;
+            // tall grass is the stand-in and is a deliberate divergence.
+            shapeless({itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::TallGrass)}, 2,
+                      itemForBlock(BlockId::MossyCobblestone), 1),
+            // Three ingots in a V. Stored 3x2 rather than trimmed, because the
+            // empty cells are part of the shape.
+            shaped(3, 2,
+                   {ItemId::IronIngot, kNone, ItemId::IronIngot, kNone, ItemId::IronIngot, kNone},
+                   ItemId::Bucket, 1),
         };
 
         struct ToolShape {

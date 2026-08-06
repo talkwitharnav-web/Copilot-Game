@@ -59,10 +59,110 @@ enum class BlockId : std::uint8_t {
     Furnace,
     FurnaceLit,
     Torch,
+    /// Everything below is appended, never inserted: ids are what get written to
+    /// disk, so moving one silently rewrites every saved chunk.
+    Andesite,
+    Diorite,
+    Granite,
+    SmoothStone,
+    StoneBricks,
+    MossyCobblestone,
+    Obsidian,
+    Clay,
+    Sandstone,
+    Bookshelf,
+    Glass,
+    Dandelion,
+    Poppy,
+    DeadBush,
+    CoalOre,
+    IronOre,
+    CopperOre,
+    GoldOre,
+    RedstoneOre,
+    LapisOre,
+    DiamondOre,
+    EmeraldOre,
+    Deepslate,
+    Bedrock,
+    Terracotta,
+    PackedIce,
+    /// A furnace stores which way its mouth points, the way stairs store their
+    /// orientation. `Furnace` and `FurnaceLit` above are the north-facing pair
+    /// and stay exactly where they are - ids are on disk, so the other three
+    /// directions had to be appended rather than the run renumbered.
+    FurnaceEast,
+    FurnaceEastLit,
+    FurnaceSouth,
+    FurnaceSouthLit,
+    FurnaceWest,
+    FurnaceWestLit,
+    /// Water with water directly above it. **It is full, and it spreads only
+    /// downward** - which is the whole of why a waterfall is a column and not a
+    /// widening cone. The reference encodes it as bit 0x8 of `liquid_depth`,
+    /// where the level bits stop meaning anything; ours is one id for the same
+    /// reason, since a falling cell is always at its highest level.
+    WaterFalling,
+};
+
+/// The highest id in use. Anything that walks every block reads this rather
+/// than naming whichever block happens to be last, which is how the catalogue
+/// silently stopped one short of the newest one.
+constexpr BlockId kLastBlock = BlockId::WaterFalling;
+
+/// Which way a side face points.
+///
+/// `Unknown` is for callers with no direction to give - an item icon has no
+/// place in the world, and most blocks look the same all the way round anyway.
+enum class FaceDirection : std::int8_t {
+    Unknown = -1,
+    PosX = 0,
+    NegX = 1,
+    PosZ = 2,
+    NegZ = 3,
 };
 
 constexpr bool isFurnace(BlockId id) {
-    return id == BlockId::Furnace || id == BlockId::FurnaceLit;
+    return id == BlockId::Furnace || id == BlockId::FurnaceLit ||
+           (id >= BlockId::FurnaceEast && id <= BlockId::FurnaceWestLit);
+}
+
+constexpr bool isFurnaceLit(BlockId id) {
+    return id == BlockId::FurnaceLit || id == BlockId::FurnaceEastLit ||
+           id == BlockId::FurnaceSouthLit || id == BlockId::FurnaceWestLit;
+}
+
+/// Which way this furnace's mouth points.
+constexpr FaceDirection furnaceFacing(BlockId id) {
+    switch (id) {
+    case BlockId::FurnaceEast:
+    case BlockId::FurnaceEastLit:
+        return FaceDirection::PosX;
+    case BlockId::FurnaceSouth:
+    case BlockId::FurnaceSouthLit:
+        return FaceDirection::PosZ;
+    case BlockId::FurnaceWest:
+    case BlockId::FurnaceWestLit:
+        return FaceDirection::NegX;
+    default:
+        return FaceDirection::NegZ;
+    }
+}
+
+/// The furnace that faces this way and is lit or not. **The one place the two
+/// halves of a furnace's identity are combined**, so lighting one can never
+/// quietly turn it to face north.
+constexpr BlockId furnaceFacing(FaceDirection facing, bool lit) {
+    switch (facing) {
+    case FaceDirection::PosX:
+        return lit ? BlockId::FurnaceEastLit : BlockId::FurnaceEast;
+    case FaceDirection::PosZ:
+        return lit ? BlockId::FurnaceSouthLit : BlockId::FurnaceSouth;
+    case FaceDirection::NegX:
+        return lit ? BlockId::FurnaceWestLit : BlockId::FurnaceWest;
+    default:
+        return lit ? BlockId::FurnaceLit : BlockId::Furnace;
+    }
 }
 
 /// Opens a screen when it is right-clicked, rather than being placed against.
@@ -75,14 +175,26 @@ constexpr bool isInteractive(BlockId id) {
 constexpr int kMaxWaterLevel = 7;
 
 constexpr bool isWater(BlockId id) {
-    return id >= BlockId::Water0 && id <= BlockId::Water7;
+    return (id >= BlockId::Water0 && id <= BlockId::Water7) || id == BlockId::WaterFalling;
 }
 
-/// 0 for a source, rising as the flow thins out.
+/// Water that has water directly above it, so it may only continue downward.
+constexpr bool isFallingWater(BlockId id) {
+    return id == BlockId::WaterFalling;
+}
+
+/// 0 for a source, rising as the flow thins out. Falling water is full, which
+/// is why a column that lands spreads the full seven blocks rather than six.
 constexpr int waterLevel(BlockId id) {
+    if (id == BlockId::WaterFalling) {
+        return 0;
+    }
     return isWater(id) ? static_cast<int>(id) - static_cast<int>(BlockId::Water0) : kMaxWaterLevel + 1;
 }
 
+/// Level 0 is the **source**, so this must never be handed the level of a
+/// falling cell - which also reads 0 and would come back as a source that never
+/// drains. Only ever called with a level derived from `neighbour + 1`.
 constexpr BlockId waterAtLevel(int level) {
     const int clamped = level < 0 ? 0 : (level > kMaxWaterLevel ? kMaxWaterLevel : level);
     return static_cast<BlockId>(static_cast<int>(BlockId::Water0) + clamped);
@@ -98,7 +210,9 @@ constexpr bool isWaterSource(BlockId id) {
 /// away by the shader. Not the same thing as translucent: nothing is blended,
 /// depth is still written, and so no sorting is needed.
 constexpr bool isCutout(BlockId id) {
-    return id == BlockId::Leaves || id == BlockId::TallGrass || id == BlockId::Torch;
+    return id == BlockId::Leaves || id == BlockId::TallGrass || id == BlockId::Torch ||
+           id == BlockId::Glass || id == BlockId::Dandelion || id == BlockId::Poppy ||
+           id == BlockId::DeadBush;
 }
 
 /// Which way a stair's low step faces. The tall half sits on the opposite side.
@@ -158,7 +272,8 @@ constexpr BlockShape blockShape(BlockId id) {
     if (id == BlockId::Air || isWater(id)) {
         return BlockShape::Empty;
     }
-    if (id == BlockId::TallGrass || id == BlockId::Torch) {
+    if (id == BlockId::TallGrass || id == BlockId::Torch || id == BlockId::Dandelion ||
+        id == BlockId::Poppy || id == BlockId::DeadBush) {
         return BlockShape::Cross;
     }
     if (id == BlockId::StoneSlab || id == BlockId::StoneSlabTop) {
@@ -378,7 +493,10 @@ constexpr int kMaxLight = 15;
 
 /// How much light a block gives off. Zero for everything that is not a source.
 constexpr int blockLightEmission(BlockId id) {
-    if (id == BlockId::FurnaceLit) {
+    // Every facing of a lit furnace glows, so this asks the family rather than
+    // naming one id - which is what it did, and would have left three of the
+    // four directions dark.
+    if (isFurnaceLit(id)) {
         return 13;
     }
     if (id == BlockId::Torch) {
@@ -390,6 +508,13 @@ constexpr int blockLightEmission(BlockId id) {
 /// Falls if whatever it was standing on goes away. True for the flat things
 /// that have nothing to hold themselves up with.
 constexpr bool needsSupportBelow(BlockId id) {
+    return blockShape(id) == BlockShape::Cross;
+}
+
+/// Destroyed and dropped when water spreads into it, rather than damming the
+/// flow. The reference's list is plants, snow, torches, carpets and redstone;
+/// ours is everything cross-shaped, which is exactly that set today.
+constexpr bool isWashedAway(BlockId id) {
     return blockShape(id) == BlockShape::Cross;
 }
 
@@ -408,7 +533,10 @@ constexpr bool isLightTransparent(BlockId id) {
 /// without needing an attenuation value of their own. Ground plants do not
 /// shade anything, so they stay fully sky-transparent.
 constexpr bool isSkyTransparent(BlockId id) {
-    return id == BlockId::Air || isWater(id) || blockShape(id) == BlockShape::Cross;
+    // Glass is the one full cube that does not dim what is under it, which is
+    // the whole point of building with it.
+    return id == BlockId::Air || id == BlockId::Glass || isWater(id) ||
+           blockShape(id) == BlockShape::Cross;
 }
 
 /// Which face of a block a texture is for. Most blocks use the same image on
@@ -468,12 +596,45 @@ enum class TextureLayer : std::uint32_t {
     StoneShovel = 35,
     StoneSword = 36,
     StoneHoe = 37,
+    Andesite = 38,
+    Diorite = 39,
+    Granite = 40,
+    SmoothStone = 41,
+    StoneBricks = 42,
+    MossyCobblestone = 43,
+    Obsidian = 44,
+    Clay = 45,
+    SandstoneTop = 46,
+    SandstoneSide = 47,
+    SandstoneBottom = 48,
+    Bookshelf = 49,
+    Glass = 50,
+    Dandelion = 51,
+    Poppy = 52,
+    DeadBush = 53,
+    CoalOre = 54,
+    IronOre = 55,
+    CopperOre = 56,
+    GoldOre = 57,
+    RedstoneOre = 58,
+    LapisOre = 59,
+    DiamondOre = 60,
+    EmeraldOre = 61,
+    DeepslateSide = 62,
+    DeepslateTop = 63,
+    Bedrock = 64,
+    Terracotta = 65,
+    PackedIce = 66,
     /// One spawn egg per creature, **in `CreatureKind` order**, which is what
     /// lets an egg's item id, its sprite layer and the species it produces all
     /// be the same offset from their respective firsts. Only the first is
     /// named: the rest are reached by adding the species index, and a name for
     /// each would be thirty-six chances to get the order wrong.
-    SpawnEggFirst = 38,
+    ///
+    /// **This moves every time a block texture is added.** `Main.cpp` compares
+    /// it against the loaded list at startup, because getting it wrong does not
+    /// fail - it slides all thirty-six eggs by one and mistextures the lot.
+    SpawnEggFirst = 67,
 };
 
 /// How many sprite layers the spawn egg run occupies. Kept beside the enum
@@ -481,7 +642,84 @@ enum class TextureLayer : std::uint32_t {
 /// static-asserts it against `CreatureKind::Count`.
 constexpr int kSpawnEggLayers = 36;
 
-inline float blockTextureLayer(BlockId id, BlockFace face) {
+/// Resource item sprites, appended after the whole egg run so adding one can
+/// never shift an egg's layer.
+constexpr int kResourceSpritesFirst = static_cast<int>(TextureLayer::SpawnEggFirst) + kSpawnEggLayers;
+/// How many the resource run holds. `Item.hpp` takes its item count from this
+/// rather than writing 11 down a second time.
+constexpr int kResourceSpriteCount = 11;
+
+/// Bucket sprites - empty, then full of water - after the resource run, for the
+/// same reason that run sits after the eggs: appending can never shift a layer
+/// that something already saved to disk depends on.
+constexpr int kBucketSpritesFirst = kResourceSpritesFirst + kResourceSpriteCount;
+constexpr int kBucketSpriteCount = 2;
+
+/// The water surface's animation, one layer per frame, right at the end of the
+/// run so adding it shifts nothing that a save already depends on.
+///
+/// The reference ships `water_still` as a 16x512 strip - thirty-two frames of
+/// 16x16 stacked vertically - and plays it at two ticks a frame. The mesher
+/// still writes `TextureLayer::Water`; the fragment shader swaps in whichever
+/// of these the clock is on, so animating costs no re-meshing.
+constexpr int kWaterFrameFirst = kBucketSpritesFirst + kBucketSpriteCount;
+constexpr int kWaterFrames = 32;
+constexpr float kWaterFrameSeconds = 0.1f;
+
+/// Spawn eggs for species added after the first thirty-six, in `CreatureKind`
+/// order continuing from where that run stopped.
+///
+/// **A second run rather than a wider first one**, because the resource, bucket
+/// and water layers sit immediately behind the first - and the matching item
+/// ids are written into the player's inventory on disk. Widening the egg run
+/// would slide all of those and a saved world would come back holding the wrong
+/// things. `Creature.hpp` static-asserts that the two runs together cover every
+/// species.
+constexpr int kExtraSpawnEggFirst = kWaterFrameFirst + kWaterFrames;
+constexpr int kExtraSpawnEggLayers = 20;
+
+/// Which way this block's distinguishing face points, or `Unknown` for the
+/// majority that look the same all the way round.
+///
+/// An **icon** needs this: it draws two side faces at once, and they point
+/// different ways, so handing both the same direction put a furnace's mouth on
+/// both of them. A crafting table has no facing to store - the reference puts
+/// its tooled face on the two Z sides and a plainer one on the two X sides,
+/// fixed - so it answers with that axis.
+constexpr FaceDirection blockFacing(BlockId id) {
+    if (isFurnace(id)) {
+        return furnaceFacing(id);
+    }
+    if (id == BlockId::CraftingTable) {
+        return FaceDirection::NegZ;
+    }
+    return FaceDirection::Unknown;
+}
+
+/// A quarter turn about the vertical. `Unknown` stays unknown, which is what
+/// keeps every faceless block's icon exactly as it was.
+constexpr FaceDirection quarterTurn(FaceDirection direction) {
+    switch (direction) {
+    case FaceDirection::PosX:
+        return FaceDirection::PosZ;
+    case FaceDirection::PosZ:
+        return FaceDirection::NegX;
+    case FaceDirection::NegX:
+        return FaceDirection::NegZ;
+    case FaceDirection::NegZ:
+        return FaceDirection::PosX;
+    default:
+        return FaceDirection::Unknown;
+    }
+}
+
+/// Which layer of the texture array a face of this block samples.
+///
+/// `direction` only matters to blocks whose sides are not all alike, and
+/// defaults to `Unknown` so every caller that has no direction to give - item
+/// icons, the drop mesh, the hotbar - keeps working untouched.
+inline float blockTextureLayer(BlockId id, BlockFace face,
+                               FaceDirection direction = FaceDirection::Unknown) {
     if (isStairs(id)) {
         return static_cast<float>(TextureLayer::Cobblestone);
     }
@@ -499,32 +737,52 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
     case BlockId::PlanksFence:
         return static_cast<float>(TextureLayer::Planks);
     case BlockId::CraftingTable:
-        // The reference puts the tooled face on two sides and a plainer one on
-        // the other two, which needs a face direction the mesher does not
-        // supply. One texture on all four sides is the deliberate simplification
-        // - `CraftingTableSide` exists for when `BlockFace` gains a direction.
+        // The reference puts the tooled face on the two Z sides and a plainer
+        // one on the two X sides. It is fixed rather than a placement state, so
+        // it needs no facing stored - only a face that knows which way it
+        // points, which `FaceDirection` now supplies.
         switch (face) {
         case BlockFace::Top:
             return static_cast<float>(TextureLayer::CraftingTableTop);
         case BlockFace::Bottom:
             return static_cast<float>(TextureLayer::Planks);
         case BlockFace::Side:
+            if (direction == FaceDirection::PosX || direction == FaceDirection::NegX) {
+                return static_cast<float>(TextureLayer::CraftingTableSide);
+            }
+            // An unknown direction shows the face that identifies the block.
             return static_cast<float>(TextureLayer::CraftingTableFront);
         }
         return static_cast<float>(TextureLayer::CraftingTableFront);
     case BlockId::Furnace:
     case BlockId::FurnaceLit:
-        // Same simplification as the crafting table: the mesher cannot say
-        // which way a side face points, so the mouth appears on all four.
+    case BlockId::FurnaceEast:
+    case BlockId::FurnaceEastLit:
+    case BlockId::FurnaceSouth:
+    case BlockId::FurnaceSouthLit:
+    case BlockId::FurnaceWest:
+    case BlockId::FurnaceWestLit:
+        // Three plain sides and one mouth, which is what the reference has and
+        // what needs the face direction: without it the mesher could only say
+        // "a side", so the mouth went on all four.
         switch (face) {
         case BlockFace::Top:
         case BlockFace::Bottom:
             return static_cast<float>(TextureLayer::FurnaceTop);
         case BlockFace::Side:
-            return static_cast<float>(id == BlockId::FurnaceLit ? TextureLayer::FurnaceFrontLit
-                                                                : TextureLayer::FurnaceFront);
+            if (direction == furnaceFacing(id)) {
+                return static_cast<float>(isFurnaceLit(id) ? TextureLayer::FurnaceFrontLit
+                                                           : TextureLayer::FurnaceFront);
+            }
+            // An icon has no direction, so it shows the face that identifies
+            // the block rather than a blank side.
+            if (direction == FaceDirection::Unknown) {
+                return static_cast<float>(isFurnaceLit(id) ? TextureLayer::FurnaceFrontLit
+                                                           : TextureLayer::FurnaceFront);
+            }
+            return static_cast<float>(TextureLayer::FurnaceSide);
         }
-        return static_cast<float>(TextureLayer::FurnaceFront);
+        return static_cast<float>(TextureLayer::FurnaceSide);
     case BlockId::Dirt:
         return static_cast<float>(TextureLayer::Dirt);
     case BlockId::Grass:
@@ -557,6 +815,71 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
         return static_cast<float>(face == BlockFace::Side ? TextureLayer::LogSide : TextureLayer::LogTop);
     case BlockId::Leaves:
         return static_cast<float>(TextureLayer::Leaves);
+    case BlockId::Andesite:
+        return static_cast<float>(TextureLayer::Andesite);
+    case BlockId::Diorite:
+        return static_cast<float>(TextureLayer::Diorite);
+    case BlockId::Granite:
+        return static_cast<float>(TextureLayer::Granite);
+    case BlockId::SmoothStone:
+        return static_cast<float>(TextureLayer::SmoothStone);
+    case BlockId::StoneBricks:
+        return static_cast<float>(TextureLayer::StoneBricks);
+    case BlockId::MossyCobblestone:
+        return static_cast<float>(TextureLayer::MossyCobblestone);
+    case BlockId::Obsidian:
+        return static_cast<float>(TextureLayer::Obsidian);
+    case BlockId::Clay:
+        return static_cast<float>(TextureLayer::Clay);
+    case BlockId::Sandstone:
+        // Cut stone: a patterned cap, a plain base and a banded side.
+        switch (face) {
+        case BlockFace::Top:
+            return static_cast<float>(TextureLayer::SandstoneTop);
+        case BlockFace::Bottom:
+            return static_cast<float>(TextureLayer::SandstoneBottom);
+        case BlockFace::Side:
+            return static_cast<float>(TextureLayer::SandstoneSide);
+        }
+        return static_cast<float>(TextureLayer::SandstoneSide);
+    case BlockId::Bookshelf:
+        // Shelves on the sides only; the reference caps it with plain planks.
+        return static_cast<float>(face == BlockFace::Side ? TextureLayer::Bookshelf
+                                                          : TextureLayer::Planks);
+    case BlockId::Glass:
+        return static_cast<float>(TextureLayer::Glass);
+    case BlockId::Dandelion:
+        return static_cast<float>(TextureLayer::Dandelion);
+    case BlockId::Poppy:
+        return static_cast<float>(TextureLayer::Poppy);
+    case BlockId::DeadBush:
+        return static_cast<float>(TextureLayer::DeadBush);
+    case BlockId::CoalOre:
+        return static_cast<float>(TextureLayer::CoalOre);
+    case BlockId::IronOre:
+        return static_cast<float>(TextureLayer::IronOre);
+    case BlockId::CopperOre:
+        return static_cast<float>(TextureLayer::CopperOre);
+    case BlockId::GoldOre:
+        return static_cast<float>(TextureLayer::GoldOre);
+    case BlockId::RedstoneOre:
+        return static_cast<float>(TextureLayer::RedstoneOre);
+    case BlockId::LapisOre:
+        return static_cast<float>(TextureLayer::LapisOre);
+    case BlockId::DiamondOre:
+        return static_cast<float>(TextureLayer::DiamondOre);
+    case BlockId::EmeraldOre:
+        return static_cast<float>(TextureLayer::EmeraldOre);
+    case BlockId::Deepslate:
+        // Grained like a log: the cut end differs from the sides.
+        return static_cast<float>(face == BlockFace::Side ? TextureLayer::DeepslateSide
+                                                          : TextureLayer::DeepslateTop);
+    case BlockId::Bedrock:
+        return static_cast<float>(TextureLayer::Bedrock);
+    case BlockId::Terracotta:
+        return static_cast<float>(TextureLayer::Terracotta);
+    case BlockId::PackedIce:
+        return static_cast<float>(TextureLayer::PackedIce);
     case BlockId::Water0:
     case BlockId::Water1:
     case BlockId::Water2:
@@ -565,6 +888,7 @@ inline float blockTextureLayer(BlockId id, BlockFace face) {
     case BlockId::Water5:
     case BlockId::Water6:
     case BlockId::Water7:
+    case BlockId::WaterFalling:
         return static_cast<float>(TextureLayer::Water);
     case BlockId::Air:
         break;
@@ -622,6 +946,58 @@ constexpr const char* blockName(BlockId id) {
         return "Fence";
     case BlockId::CraftingTable:
         return "Crafting Table";
+    case BlockId::Andesite:
+        return "Andesite";
+    case BlockId::Diorite:
+        return "Diorite";
+    case BlockId::Granite:
+        return "Granite";
+    case BlockId::SmoothStone:
+        return "Smooth Stone";
+    case BlockId::StoneBricks:
+        return "Stone Bricks";
+    case BlockId::MossyCobblestone:
+        return "Mossy Cobblestone";
+    case BlockId::Obsidian:
+        return "Obsidian";
+    case BlockId::Clay:
+        return "Clay";
+    case BlockId::Sandstone:
+        return "Sandstone";
+    case BlockId::Bookshelf:
+        return "Bookshelf";
+    case BlockId::Glass:
+        return "Glass";
+    case BlockId::Dandelion:
+        return "Dandelion";
+    case BlockId::Poppy:
+        return "Poppy";
+    case BlockId::DeadBush:
+        return "Dead Bush";
+    case BlockId::CoalOre:
+        return "Coal Ore";
+    case BlockId::IronOre:
+        return "Iron Ore";
+    case BlockId::CopperOre:
+        return "Copper Ore";
+    case BlockId::GoldOre:
+        return "Gold Ore";
+    case BlockId::RedstoneOre:
+        return "Redstone Ore";
+    case BlockId::LapisOre:
+        return "Lapis Ore";
+    case BlockId::DiamondOre:
+        return "Diamond Ore";
+    case BlockId::EmeraldOre:
+        return "Emerald Ore";
+    case BlockId::Deepslate:
+        return "Deepslate";
+    case BlockId::Bedrock:
+        return "Bedrock";
+    case BlockId::Terracotta:
+        return "Terracotta";
+    case BlockId::PackedIce:
+        return "Packed Ice";
     default:
         return "Air";
     }

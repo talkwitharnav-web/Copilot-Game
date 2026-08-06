@@ -1,16 +1,22 @@
 # INTERFACE.md
 
-How the inventory and crafting screens should work, measured from primary sources, written for **this** codebase — a mesh-builder HUD with no widgets, no text input and no clipping.
+How the inventory and crafting screens should work, measured from primary sources, written for **this** codebase — a mesh-builder HUD with no widgets and no clipping. *(Text input existed nowhere when this was written; slice 1 added it.)*
 
 **Bedrock is the reference.** Java values are marked `[JE]`. Where the two differ I say which one we are taking and why.
 
 Companion documents: `SYSTEM_MEMORY.md` (what the HUD actually is today), `CRAFTABLE.md` (the recipe list), `TEXTURING.md` (§14 formulas, and the HUD sheet's construction).
 
-**There is a reference screenshot at `reference/crafting-ui.avif`** — a console (Switch) capture of the crafting-table screen, 1280 × 720. It is **exactly 3× vanilla's unit layout**, so every number in this document is confirmed against a real frame rather than only against the UI data. Windows cannot hand an AVIF to `System.Drawing`; `tools/convert-image.ps1` reads it through WIC and writes a PNG beside it. Like everything in `reference/`, it may be **measured from** and must **never** be copied under `assets/`.
+**There is a reference screenshot at `reference/crafting-ui.avif`** — a console (Switch) capture of the crafting-table screen, 1280 × 720, and **exactly 3× vanilla's unit layout** (the slot pitch measures 54 px = 18 × 3), so every measurement in this document divides back to whole units and is confirmed against a real frame rather than only against the UI data. Windows cannot hand an AVIF to `System.Drawing`; `tools/convert-image.ps1` reads it through WIC. Like everything in `reference/`, it may be **measured from** and must **never** be copied under `assets/`.
 
-> **▶ Where we stand (2026-08-04).** **Slices 1–3 are built.** `engine::Window` has a character callback and a `consumeTypedText()` queue; `allItems()`, `categoryFor` and per-recipe `category` / `fitsInTwoByTwo` exist and report **67 items and 15 recipes, 4 of which fit a 2×2**; and the catalogue card is on screen beside the inventory with five clickable tabs, a static 7-wide grid and hover tooltips. The signed-off click/drag/shift-click/double-click model is untouched — the inventory card only *translated*, through the one function every position comes from.
+**Two cautions about this particular capture.** It is a **console** screenshot — the `ZL`/`ZR` strip, the `L`/`R` bumper hints beside the tabs and the `A Show Craftable` / `B Exit` prompt bar are controller chrome and are **not** part of the PC layout. The two layout buttons themselves *are*; only their shoulder-button bindings are console-specific.
+
+> **▶ Where we stand (2026-08-05).** **Slices 1–4 are built.** `engine::Window` has a character callback and a `consumeTypedText()` queue; `allItems()`, `categoryFor` and per-recipe `category` / `fitsInTwoByTwo` exist and report **126 items and 20 recipes, 8 of which fit a 2×2**; and the catalogue card is on screen beside the inventory with five clickable tabs, a scrolling 7-wide grid and hover tooltips. Clicking an entry gives you the item, and the empty space around the entries destroys what you are carrying — both creative-only, per §4.5b. The signed-off click/drag/shift-click/double-click model is untouched: the inventory card only *translated*, through the one function every position comes from.
 >
-> What still does not exist: scrolling, the craftable colouring, the filter toggle, the search field, click-to-fill and groups — slices 4 to 9. **The live scroll bug in §6.2 is still live**; slice 4 owns it.
+> **The tabs are Mojang's crops staged beside the exe**, not art of ours — `tools/make-reference-hud.ps1`, same arrangement as the creature skins. Prove the layout first; author afterwards.
+>
+> **`allItems()` decides display order and it is not id order.** The fifty-six spawn eggs live in **two runs** of item ids — widening the first would have shifted every resource and bucket id, and those are written into the player's saved inventory. `allItems()` emits both runs together in species order, so the catalogue shows one unbroken block of eggs. Walking the id range instead, which is what it used to do, scattered ten of them behind the ingots.
+>
+> What still does not exist: the craftable colouring, the filter toggle, the search field, click-to-fill and groups — slices 5 to 9. **Slice 4 is built**: the catalogue scrolls a row at a time on the wheel, the tab resets it, and the wheel no longer drives the hotbar while a screen is open. The clipped last row now shows its entries, cut off exactly at the card's inner edge by a **real scissor rectangle** — the renderer gained `setClippedScreenMesh`, so §6.2's "no clip rectangle anywhere" no longer holds.
 
 ---
 
@@ -247,7 +253,7 @@ Measured from `Mojang/bedrock-samples`. **A catalogue cell is not a container sl
 
 **The empty space around the entries is the bin.** Bedrock overrides the shared scroll panel specifically to add destruction: `menu_select → destroy_selection`, `menu_secondary_select → container_reset_held`. So **left click destroys the carried stack, right click puts it back where it came from.** The cells, the tabs, the search field and the filter toggle are all *outside* the destroy zone — only the gaps between cells and the empty area below the last row. Java has no such zone; it has an explicit trash slot instead, and **we should not build one**.
 
-> **Ours:** left click destroys; right click leaves the stack on the cursor, because returning it needs an origin slot we do not track. Gated on creative — in survival the left card is a recipe book and conjuring items would be a cheat.
+> **Ours:** left click destroys; right click leaves the stack on the cursor, because returning it needs an origin slot we do not track. Gated on creative — in survival the left card is a recipe book and conjuring items would be a cheat. **Built.** One trap it walked into: a cell *past the end* of the list still hit-tests as a cell, so it has to fall **through** to the bin rather than swallowing the click, or the empty half of a short tab silently does nothing.
 
 ## 4.6 Ordering and grouping
 
@@ -334,11 +340,9 @@ The search field uses a **softer bevel than a slot** — `85` on its top/left wh
 
 ## 5.6 There are no tab icons
 
-**Zero tab-icon textures exist.** The icon on a tab is a *rendered item stack*, drawn by the same code that draws items in slots. There is no artwork to port — and we already have `appendBlockIcon`, so a Construction tab showing a brick block is free.
+**Zero tab-icon textures exist.** The icon on a tab is a *rendered item composition*, drawn by the same code that draws items in slots — Equipment is a sword crossed with a helmet, Nature is a grass block carrying a sapling and a flower, Items is a bed with a bucket. There is no artwork to port, and we already have `appendBlockIcon`, so our own tabs are free to author when the reference crops come out.
 
 ## 5.7 What the screenshot measures, at 3×
-
-`reference/crafting-ui.avif` is 1280 × 720 and the slot pitch measures **54 px**, which is 18 × 3 exactly — so it is vanilla's layout at a clean 3× and every measurement divides back to whole units.
 
 | Measured | px | ÷ 3 = units | Matches |
 |---|---|---|---|
@@ -353,24 +357,15 @@ The search field uses a **softer bevel than a slot** — `85` on its top/left wh
 
 The layout block is centred horizontally, which is why it starts at x ≈ 151 on a 1280-wide frame.
 
-**Two cautions about this particular capture.** It is a **console** screenshot — the `ZL`/`ZR` strip, the `L`/`R` bumper hints beside the tabs and the `A Show Craftable` / `B Exit` prompt bar along the bottom are all controller chrome and are **not** part of the PC layout. The two layout buttons themselves *are* part of the PC layout; only their shoulder-button bindings are console-specific.
-
 ## 5.8 The extracted icon set
 
-`tools/extract-ui-icons.ps1` crops 21 regions out of the capture into **`reference/ui-icons/`**, each written twice: `<name>@3x.png` as captured (what you look at) and `<name>.png` divided by three (the native grid, what you measure). The script **refuses to write under `assets/`**, the same mechanical guard the creature atlas tool carries.
+`tools/extract-ui-icons.ps1` crops 21 regions out of the capture into **`reference/ui-icons/`**, each written twice: `<name>@3x.png` as captured (what you look at) and `<name>.png` divided by three (the native grid, what you measure). The script **refuses to write under `assets/`**, the same mechanical guard the creature atlas tool carries. `ASSETS-REFERENCE.md` lists the full set; the measurements that matter here are:
 
-| Group | Files | Measured |
-|---|---|---|
-| Category tabs | `tab-construction` `tab-equipment` `tab-items` `tab-nature` `tab-search` | 66 × 74 px = **22 × 25 units**, on a **75 px (25 unit) pitch**; Search pushed right by an extra 63 px |
-| Layout switch | `layout-book-inventory` · `layout-inventory-only` | 29 × 19 and 27 × 19 units |
-| Toolbar | `button-help` `button-close` `bumper-zl` `bumper-zr` `toolbar-strip` | |
-| Craftable filter | `toggle-craftable` | 28 × 19 units |
-| Widgets | `scrollbar` `slot-empty` `slot-red-uncraftable` `slot-output-red` `panel-corner` `armour-slot-glyphs` | slots **exactly 18 × 18 units**, which is the check that the 3× assumption holds |
-| Whole cards | `card-left-full` `card-right-full` | 149 × 193 and 178 × 169 units |
+- **Category tabs** — 66 × 74 px = **22 × 25 units**, on a **75 px (25 unit) pitch**, with Search pushed right by an extra 63 px.
+- **Slots** — exactly **18 × 18 units**, which is the check that the 3× assumption holds.
+- **Craftable filter** 28 × 19, **layout switch** 29 × 19 and 27 × 19, **whole cards** 149 × 193 and 178 × 169.
 
 **What the layout switch actually means**, since it is not obvious from the glyphs: the left button shows a **green book overlapping a barrel** and selects *recipe book **and** inventory*; the right shows the **barrel alone** and selects *inventory only*. On console they are bound to `ZL` and `ZR`, which is why the bumper glyphs bracket the strip — but the buttons themselves are part of the PC layout too.
-
-**The tab icons are compositions, not sprites.** Equipment is a sword crossed with a helmet; Nature is a grass block carrying a sapling and a flower; Items is a bed with a bucket. §5.6 says there is no tab-icon artwork in the asset dump and this is why — the game renders item stacks into the tab. **We already have `appendBlockIcon`**, so our tabs can be built the same way and cost nothing to author.
 
 ---
 
@@ -389,19 +384,21 @@ The layout block is centred horizontally, which is why it starts at x ≈ 151 on
 
 `InventoryScreen::build` is a **pure function returning a mesh** — no state, no scroll offset, no selection. That is the most reusable fact in the module, and it is also the thing a scrolling, tabbed, searchable panel will force us to change: the screen will need state, and it should live in **one struct owned by the caller**, passed in, rather than becoming file-scope statics.
 
+**One fix landed in `appendBlockIcon` at M20j and is worth knowing before adding a screen.** An icon draws **two** side faces at once — the front and the right — and they do **not** point the same way. Both were being handed "a side" with no direction, so a furnace showed its mouth on both, everywhere an icon appears: the hotbar, the inventory, the catalogue and as a dropped item. It now reads `blockFacing` for the front and `quarterTurn` of it for the right. Every other block is byte-identical, because those two answer `Unknown` for the great majority — **which is exactly why the bug survived**: a defaulted parameter meaning "I have nothing to tell you" gets passed by every caller that *did* have something to tell you and did not think about it.
+
 ## 6.2 Genuinely missing, in order of how much they hurt
 
-1. **Text input does not exist.** No letters beyond `WASDEFQ`, no Backspace, no character callback. `Window` needs a GLFW char callback and a small typed-text queue. **This is a platform change and it gates the search bar entirely.**
-2. **No clip rectangle anywhere.** Nothing can be masked to a viewport. The reference **clips its last row mid-cell** (§1.1), so a faithful list needs the builder to emit a partial quad with partial UVs for the bottom row — `appendSprite` already takes an arbitrary pixel rect, so this is arithmetic rather than a new primitive.
-3. **No item enumeration.** There is no `allItems()`, no count, no iteration order. A catalogue needs one.
-4. **No recipe enumeration.** `recipes()` is in an anonymous namespace, and there is no result→recipe index.
-5. **Scroll input is not routed to the UI.** `consumeScrollDelta()` unconditionally drives hotbar selection — it is not gated on a screen being open, so scrolling with the inventory open *already* changes the hotbar selection invisibly. **That is a live bug, not just a gap.**
-6. **`appendStack` is file-private** in `InventoryScreen.cpp`. A second panel needs it promoted into `HudPrimitives`.
-7. **No per-item category**, and no display-name path that handles spawn eggs uniformly (`spawnEggName` lives in `Creature.hpp` because `Item.hpp` cannot know what a creature is called — every catalogue label needs the same two-branch fallback the tooltip already uses).
+1. ~~**Text input does not exist.**~~ **Built (slice 1).** `Window` carries a GLFW character callback and a typed-text queue; a key is a physical button and a character is what the OS produces after layout, shift and dead keys, so a key→letter map would have been wrong.
+2. **No clip rectangle anywhere.** ~~Nothing can be masked to a viewport.~~ **Fixed in slice 4.** The renderer's pipeline always had dynamic scissor state, so `Renderer::setClippedScreenMesh` was a second draw call with its own `vkCmdSetScissor` and nothing more. The reference **clips its last row mid-cell** (§1.1) and so do we now. The alternative that was tried first — shrinking a cut-through cell's icon to fit the sliver — shows the entry but changes its size, and the user asked for a flat cutoff instead.
+3. ~~**No item enumeration.**~~ **Built (slice 2).** `allItems()` walks to `kLastBlock` and then the non-block run, filtered by `isCanonicalBlockItem` so eight stair rotations do not appear eight times.
+4. ~~**No recipe enumeration.**~~ **Built (slice 2).** `recipes()` is public and each row carries `category` and `fitsInTwoByTwo`, both **derived once at table construction** rather than written per row, so neither can be forgotten on a new recipe.
+5. **Scroll input is not routed to the UI.** ~~`consumeScrollDelta()` unconditionally drives hotbar selection~~ — **fixed in slice 4.** While a screen is open the wheel scrolls the catalogue instead, the same way the movement keys already belonged to the screen. It was a live bug rather than a gap: the hotbar changed invisibly, because the bar is hidden behind the panel while you are looking at it.
+6. ~~**`appendStack` is file-private.**~~ **Promoted** into `HudPrimitives`.
+7. ~~**No per-item category.**~~ **Built (slice 2).** `ItemCategory` and `categoryFor()` live in `Item.hpp`; a `static_assert` ties `CatalogueTab` to it. The two-branch display-name fallback for spawn eggs is shared with the tooltip.
 
 ## 6.3 Two traps specific to us
 
-- **Depth.** Two overlapping cards, tabs that sit *above* a card's edge, a scroll shadow, cell backgrounds under icons under count labels. The hotbar-highlight incident is exactly this failure. **Assign every layer an explicit band up front** rather than interleaving.
+- **Depth.** Two overlapping cards, tabs that sit *above* a card's edge, a scroll shadow, cell backgrounds under icons under count labels. The hotbar-highlight incident is exactly this failure. **Assign every layer an explicit band up front** rather than interleaving. *(Done at slice 3: dim, unselected tab, panels, selected tab, cell, label, catalogue icon and count, inventory icon and count, held stack, tooltip — with `.0034` held in reserve for the scrollbar.)*
 - **The HUD rebuilds every frame while a screen is open** (the held stack follows the cursor), so a caret, hover highlighting and live filtering are free. But `hudDirty` doubles as a console-log trigger — typing in a search box would spam the log until that is separated.
 
 ---
@@ -412,14 +409,13 @@ Each slice ends in something runnable, per rule 1.
 
 | # | Slice | Why here |
 |---|---|---|
-| **1** | **Typed text in `Window`** — a GLFW char callback, Backspace, and a `consumeTypedText()` queue. No UI yet. | Everything else can be designed around it; nothing else can start without it. Smallest possible platform change. |
-| **1** | **Typed text in `Window`** — a GLFW char callback, Backspace, and a `consumeTypedText()` queue. No UI yet. ✅ | Everything else can be designed around it; nothing else can start without it. Smallest possible platform change. |
-| **2** | **Enumerate items and recipes** — `allItems()`, make `recipes()` public, add `category` and `fitsInTwoByTwo` per recipe. Still no UI. ✅ | Pure data. Provable by logging counts. |
-| **3** | **The second card, static** — draw a 146 × 166 panel beside the inventory, with the five tabs and a fixed, unscrolling grid of every item in the selected category. No search, no craftable colouring. ✅ | This is the layout risk. Get the two cards, the fold and the tab strip right while there is nothing else to blame. |
-| **4** | **Scrolling** — route the wheel to the panel when a screen is open (**fixing the live hotbar bug**), per-item culling, a scrollbar. | Makes slice 3 actually usable and removes the F10 egg/block-kit toggle's reason to exist. |
+| **1** ✅ | **Typed text in `Window`** — a GLFW char callback, Backspace, and a `consumeTypedText()` queue. No UI yet. | Everything else can be designed around it; nothing else can start without it. Smallest possible platform change. |
+| **2** ✅ | **Enumerate items and recipes** — `allItems()`, make `recipes()` public, add `category` and `fitsInTwoByTwo` per recipe. Still no UI. | Pure data. Provable by logging counts. |
+| **3** ✅ | **The second card, static** — draw a 146 × 166 panel beside the inventory, with the five tabs and a fixed, unscrolling grid of every item in the selected category. No search, no craftable colouring. | This is the layout risk. Get the two cards, the fold and the tab strip right while there is nothing else to blame. |
+| **4** ▶ | **Scrolling** — route the wheel to the panel when a screen is open (**fixing the live hotbar bug**), per-item culling, a scrollbar. Depth `.0034` is already reserved for it. | Makes slice 3 actually usable, and a tab with more entries than fit is currently unreachable past the last visible row. |
 | **5** | **Craftable colouring** — the six-state background, the greedy check with the bipartite counter-example written at the call site. | The first thing that needs the recipe data rather than the item list. |
 | **6** | **The filter toggle** — hide non-craftable entries, with the "All recipes" / "Craftable recipes" label. | Trivial once 5 exists. Deliberately separate, because they are separate features. |
-| **7** | **The search tab** — the field, the caret, beginning-of-word matching, and the clear button. | Needs slice 1 and nothing else. |
+| **7** | **The search tab** — the field, the caret, beginning-of-word matching, and the clear button. It consumes `consumeTypedText()` and replaces the temporary `"Typed: "` log that currently proves slice 1 works. | Needs slice 1 and nothing else. |
 | **8** | **Click to fill the grid** — left fills, right crafts one, shift crafts all, with the empty-the-grid-first rule. | The payoff. Needs 2 and 5. |
 | **9** | **Groups** — collapse recipes sharing a result, expand/collapse glyph, the two grey backgrounds. | Only worth it once there are enough recipes to need it. |
 

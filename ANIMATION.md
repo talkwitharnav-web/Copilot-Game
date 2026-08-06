@@ -1,18 +1,20 @@
 # ANIMATION.md
 
-How Minecraft rigs and animates its mobs, measured from primary sources, written for **this** engine — axis-aligned boxes rebuilt every frame, no rotation hierarchy, legs translated rather than rotated.
+How Minecraft rigs and animates its mobs, measured from primary sources, written for **this** engine — axis-aligned boxes rebuilt every frame, with limbs rotated about a derived pivot and no general rotation hierarchy. *(When this was written our legs were translated rather than rotated; §(b)1 records the change and why it mattered.)*
 
 **Bedrock is the primary reference.** Java values are marked `[JE]`. Where both editions are given, they usually agree exactly, because Bedrock's data files are a direct transcription of Java's hardcoded model code from degrees into Molang. That agreement is the strongest evidence in this document and it is shown explicitly in §0.3.
 
 Companion documents: `RESEARCH.md` (physics, AI, spawning), `TEXTURING.md` (box nets and the §14 formula reference), `SYSTEM_MEMORY.md` (what we actually have).
 
-> **▶ Where we stand (2026-08-04).** Built since this was written: **head yaw separate from body yaw**, eased and clamped, driven by `LookAtPlayer` (§3.1–3.2, §3.5); the **chicken's wing oscillator and slow fall**, verbatim from §5.1; **`uprightBox` gained a `roll` axis** — the first rotation in the model system about the *forward* axis, which is what a wing needs; and **a real jump**, so `stepHeight` and `jumpHeight` are per species.
+> **▶ Where we stand (2026-08-05).** Built since this was written: **head yaw separate from body yaw**, eased and clamped, driven by `LookAtPlayer` (§3.1–3.2, §3.5); the **chicken's wing oscillator and slow fall**, verbatim from §5.1; **`uprightBox` gained a `roll` axis** — the first rotation in the model system about the *forward* axis, which is what a wing needs; and **a real jump**, so `stepHeight` and `jumpHeight` are per species.
 >
 > **§(b)1 and §(b)2 are now done.** Limbs **rotate about a joint** instead of sliding: `legBox` hangs a limb from a pivot derived from the box's own extent, and `barBox` pivots the spider's sideways legs at their inner end. `CreatureSpecies::gaitSwing` is **radians, not metres**, and the roster is held to 0.70 rad — half the reference's 1.4 — because rotating lifts a foot by `L(1 − cos θ)`. The eased `limbSwingAmount` replaced the old two-valued `urgency`, saturating against each species' **own `runSpeed`** rather than the reference's flat 5 m/s, since our roster moves at about a third of Minecraft's speeds. §(b)3's **idle biped arm sway** is in on eight of the eleven bipeds; the three excluded are the villager, witch and wandering trader, whose arms are a *folded assembly* that is deliberately closed (`CLAUDE.md`).
 >
-> **Still outstanding:** the death fall (§7.1), the wolf's tail as a mood signal (§5.2), and the zombie's arm raise on acquiring a target (§5.5).
->
 > **§3.3's head pitch is done, and §1.5's pivot tables now apply properly.** The head used to rotate its frame about the **creature's origin**, so anything forward of centre orbited — heads and necks visibly swung out and lunged while looking. `beginHead(neckForward, neckUp)` turns the group about the **neck joint** instead, taken from the head box's own numbers: rear face for a head carried in front, bottom face for one sat on top, base of the neck for the long-necked. That pivot is also exactly what pitch needed, so the two landed together.
+>
+> **Step-ups ease the drawing, never the box** — for creatures since 2026-08-04 and for the **player's camera** since 2026-08-05. Ramping the collision box would leave a body part-way inside the block it is climbing, so the box snaps and only what is drawn trails, decaying by half every 50 ms. This is not in the reference at all; Minecraft's own step is instant and does read as a small pop.
+>
+> **Still outstanding:** the death fall (§7.1), the wolf's tail as a mood signal (§5.2), and the zombie's arm raise on acquiring a target (§5.5).
 
 ---
 
@@ -105,6 +107,8 @@ Every limb in Minecraft is **rotated about a pivot**. Nothing in the vanilla wal
 | Spider leg | body attachment, at the inner end | **inner end**, mid-height |
 
 Note the biped arm: pivot `[-5, 22, 0]`, cube origin `[-8, 12, -2]`, size `[4, 12, 4]` → the cube spans y = 12…24 while the pivot is at y = 22. So **2 units of the arm stick up above the shoulder joint**. That overhang is what stops a gap opening at the shoulder when the arm swings, and it is a deliberate rigging decision worth copying.
+
+> **▶ The trap this creates once a limb rotates.** `legBox` derives the joint from the limb's *rest centre*, so that centre stops being merely "where the box sits" and becomes "where the box sits **and** where it hinges". Any rest height that was hand-tuned while limbs were still translated is then wrong in a way nothing warns about. The zombie, husk and zombie villager held their arms out at a rest height of 1.42 — fine as a position, and as a pivot it put the shoulder at 1.68 against a head spanning 1.5 to 2.0, so the arms hinged from the ears. It survived the conversion because `legBox` at angle zero reproduces the old box exactly; these three are the only limbs posed at 90°, where the pivot is the whole of what the pose depends on. **After changing what a value is measured from, re-check the rows that were compensating for the old measurement** — they are exactly the ones that look most deliberately tuned.
 
 Note also the quadruped head: sheep head pivot `[0, 18, -8]`, cube origin `[-3, 16, -14]`. The pivot is at the *back* of the head box, at the neck. The head swings on the end of a notional neck rather than rotating in place.
 
@@ -668,7 +672,21 @@ The structure: `sin(p·π)` is an **envelope** that fades the shake in and out o
 
 **Sitting pose:** given in full in §1.3. Angles: body 45°, upper body 72°, hind legs 270°, front legs 333°, plus a repositioning of every bone.
 
-## 5.3 Spider
+## 5.3 Spider ✅ **built, M20j (2026-08-06)**
+
+> **▶ Where we stand.** Ported whole, and the model rebuilt under it: `barBox` gained a
+> **splay**, so a leg droops about its own forward axis after it has been fanned, and that
+> droop is the entire reason the animal stands off the ground rather than lying on its
+> belly. Thorax, head, abdomen and all eight joints share one height, texel 9 of 16. Both
+> spiders carry the reference's own gait numbers rather than the roster's — **2.665 rad/m**
+> (§2.2's rate for the whole of Minecraft) and a **0.4 rad** amplitude — because the
+> animation is the reference's exactly. Being driven by distance is what makes a chase
+> scuttle and a stroll amble with no second animation.
+>
+> The one thing worth adding to the three points below: **what keeps adjacent leg tips from
+> colliding is the lift, not the sweep.** Two neighbouring legs pass within half a degree of
+> each other in yaw, and are several texels apart vertically exactly when they do — which is
+> why the two terms must run at different rates.
 
 Eight identical boxes, all of the shape from rotation. Two layers: a **default pose** applied always, and a **walk** layered on top.
 
@@ -720,6 +738,67 @@ Read it as: one number, `jump_rotation`, drives **six** bones with different gai
 The **ears** are worth taking directly: they follow the head's look target with a **±15° yaw splay**, so they never perfectly overlap and the rabbit reads as alert.
 
 **Frog:** ⚠ **not found.** Java's frog uses the newer keyframed `AnimationDefinition` system (see §6.4), not a formula, and I did not retrieve the Bedrock frog animation. I am not going to invent keyframes.
+
+## 5.4b Swimmers — the squid's jet, and a tail that is not a leg
+
+**Built 2026-08-05 at M20i.** Nine aquatic species, and the swimming pose is not a
+walk cycle with the ground removed.
+
+**A squid does not swing, it flares and snaps.** The first version drove its eight
+tentacles on a plain `sin(t)`, which is symmetric — and a symmetric limb cycle *is*
+a walk cycle. The user's word for it was that the squid was walking. The
+reference's curve is
+
+```
+splay = sin(f² · π) · A   for f < ½ of the cycle
+        0                 for the rest
+```
+
+with `f` the phase normalised over the first half. The **squared** term is the
+entire read: it flares slowly (about 0.7 of that half) and snaps shut fast (about
+0.3), then hangs streamed behind while the animal coasts.
+
+Three things follow that would each have been awkward to author separately:
+
+1. **The thrust is taken from the same number**, applied only during the snap
+   (`f > 0.75`). The push and the picture cannot drift apart, because there is
+   only one of them.
+2. **It does not steer while it is pushing.** So a squid genuinely has to turn
+   about before it can go the other way, which is what a squid does, and it fell
+   out of the mechanism rather than being written.
+3. **The splay is negated.** A positive pitch swings a hanging limb *toward* the
+   ring's centre, and a flare is outward. Getting this backwards makes the animal
+   clench instead of open, which reads as almost nothing at all.
+
+**The body angle comes from where it is going, not where it is facing.** A squid
+that stays bolt upright while swimming horizontally looks wrong and no amount of
+tentacle work fixes it. `bodyTilt = atan2(horizontal speed, vertical speed)`,
+eased toward the target each tick, gives upright when still, flat when cruising
+and inverted when diving — one line, no states, and it is a *separate* number from
+the dive `pitch` the fish use, because for something that swims bell-first with
+its limbs streaming behind, "where am I headed" and "how am I lying" are not the
+same question.
+
+**A tail sways about its root.** The axolotl's tail turns about **where it meets
+the body**, not about the animal's middle — pivot the whole part about the
+creature's origin and its root swings clear of the hips on every beat. This is the
+same fault the head turn had before it was given a neck (§3.4), and it is the
+general rule for any part mounted off-centre.
+
+**A fish tips about its own mid-height**, not about the point between its feet. A
+pivot at the feet swings the nose through an arc every time the animal changes
+depth.
+
+**Gait can switch on medium, not just on speed.** In water an axolotl's tail does
+all the work and its legs hang still; on land it is the other way about. That is
+one branch on `inWater` and it is the whole difference between the two gaits —
+far cheaper than two animation sets.
+
+**And a frozen debug view cannot review any of this.** `creature_showcase` stops
+the simulation, so a squid's tentacles hang, a pufferfish never inflates and an
+axolotl never switches gait. Use a spawn egg. The one accommodation made is that
+an inflating species shows its three *stages* rather than three angles, because
+two thirds of its model would otherwise be unreviewable.
 
 ## 5.5 Bipeds — zombie arms and villager arms
 
@@ -938,7 +1017,23 @@ Exceptions ⚠: `getFlipDegrees()` returns 180 for the spider and cave spider (t
 
 **We already have this** — `kSkinHurtLayer` (−4) plus `hurtTimer`, per `SYSTEM_MEMORY.md`. Nothing to do.
 
-## 7.3 Melee attack swing
+## 7.3 Melee attack swing ✅ **built, M20j (2026-08-06)**
+
+> **▶ Where we stand.** Both curves shipped, on a `swingTimer` set when a blow lands
+> and run over the reference's own 0.3 s. **A curve that is zero at both ends needs no
+> state flag** — "am I swinging" is already answered by a timer that has run out, so
+> there is no pose to reset and nothing to get wrong.
+>
+> **The two rigs run in opposite senses and it is not a sign slip.** `zombieChop` is
+> **added** to an arms-out pitch, so arms already held in front chop *down*;
+> `humanoidRaise` is **subtracted** from a hanging pitch, so a weapon arm swings *up*.
+> The horizontal sweep and the torso twist are not built.
+>
+> **Which mobs swing is a species fact, not a rig fact**, and shipping it as the latter
+> cost a correction — every skeleton on the biped rig mimed a sword blow, and they are
+> **archers**. `CreatureSpecies::swingsArms` names the six that strike with their hands:
+> the zombie, husk, drowned, zombie villager, Princepin and the Blackbone. The Blackbone
+> is the one skeleton on the list, because it carries a stone sword rather than a bow.
 
 The swing is driven by a single 0…1 progress value, `attackTime` `[JE]` / `variable.attack_time` (BE), which runs over **6 ticks = 0.3 s** ⚠ and then resets.
 

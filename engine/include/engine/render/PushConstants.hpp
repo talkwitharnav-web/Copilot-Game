@@ -19,6 +19,14 @@ struct MeshPushConstants {
     /// x: ambient floor, y: how much the sun adds on top, z: 1 to apply
     /// directional light at all. HUD and sky geometry pass 0 and stay flat.
     glm::vec4 lighting{1.0f, 0.0f, 0.0f, 0.0f};
+    /// x: the texture layer an animated surface was meshed with, y: the layer it
+    /// should sample this frame. Swapping it here rather than in the mesh is
+    /// what lets water animate without rebuilding a single chunk. z and w spare.
+    glm::vec4 animation{-1.0f, -1.0f, 0.0f, 0.0f};
+    /// rgb: what everything fades to with distance, w: how far away it is fully
+    /// faded, or 0 for no fog at all. Screen-space geometry passes 0, or the
+    /// HUD would fade out along with the world.
+    glm::vec4 fog{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 } // namespace engine

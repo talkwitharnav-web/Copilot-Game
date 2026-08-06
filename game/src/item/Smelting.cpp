@@ -11,11 +11,15 @@ struct SmeltRule {
 };
 
 /// Ratios and burn times come from the reference recipe data - see
-/// `CRAFTABLE.md`. Glass is absent because sand needs a transparent block we do
-/// not have yet, not because the recipe is unknown.
-constexpr std::array<SmeltRule, 2> kSmelting{{
+/// `CRAFTABLE.md`.
+constexpr std::array<SmeltRule, 7> kSmelting{{
     {itemForBlock(BlockId::Cobblestone), ItemStack{itemForBlock(BlockId::Stone), 1}},
     {itemForBlock(BlockId::Log), ItemStack{ItemId::Charcoal, 1}},
+    {itemForBlock(BlockId::Sand), ItemStack{itemForBlock(BlockId::Glass), 1}},
+    {itemForBlock(BlockId::Stone), ItemStack{itemForBlock(BlockId::SmoothStone), 1}},
+    {ItemId::RawIron, ItemStack{ItemId::IronIngot, 1}},
+    {ItemId::RawGold, ItemStack{ItemId::GoldIngot, 1}},
+    {ItemId::RawCopper, ItemStack{ItemId::CopperIngot, 1}},
 }};
 
 struct FuelRule {
@@ -25,7 +29,8 @@ struct FuelRule {
 
 /// The reference measures fuel in items smelted; at ten seconds each that makes
 /// charcoal worth eight, wood one and a half, and a stick a half.
-constexpr std::array<FuelRule, 5> kFuels{{
+constexpr std::array<FuelRule, 6> kFuels{{
+    {ItemId::Coal, 80.0f},
     {ItemId::Charcoal, 80.0f},
     {itemForBlock(BlockId::Log), 15.0f},
     {itemForBlock(BlockId::Planks), 15.0f},

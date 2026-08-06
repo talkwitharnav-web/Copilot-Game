@@ -264,6 +264,18 @@ std::size_t catalogueCapacity() {
     return count;
 }
 
+/// How many rows the card shows *whole*. The clipped one is deliberately not
+/// counted: it draws no icon and answers no click, so scrolling has to be able
+/// to bring every entry into a whole row or the last few are unreachable -
+/// which is exactly how the bucket arrived and could not be seen.
+std::size_t catalogueWholeRows() {
+    std::size_t rows = 0;
+    while (catalogueCell(rows * static_cast<std::size_t>(kCatalogueColumns)).whole()) {
+        ++rows;
+    }
+    return rows;
+}
+
 glm::vec2 catalogueCellCentre(const CatalogueCell& cell) {
     return toBook(cell.artTopLeft.x + kSlotPitchPixels * 0.5f, cell.artTopLeft.y + kSlotPitchPixels * 0.5f);
 }
@@ -272,7 +284,8 @@ constexpr const char* tabName(CatalogueTab tab) {
     return tab == CatalogueTab::Search ? "Search" : categoryName(static_cast<ItemCategory>(tab));
 }
 
-void appendCatalogue(engine::MeshData& mesh, const CatalogueState& state, const std::vector<ItemId>& shown) {
+void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const CatalogueState& state,
+                     const std::vector<ItemId>& shown) {
     hud::appendSprite(mesh, kBookCentrePixels * kPixel, 0.0f, kBookHalfWidth, kPanelHalfHeight, kPanelDepth,
                       kBookPanelMin, kBookPixelSize, hud::kSheetSize);
 
@@ -293,7 +306,17 @@ void appendCatalogue(engine::MeshData& mesh, const CatalogueState& state, const 
     hud::appendText(mesh, tabName(state.tab), label.x, label.y, 8.0f * kPixel, kLabelDepth, kLabel);
 
     const std::size_t capacity = catalogueCapacity();
-    for (std::size_t i = 0; i < capacity; ++i) {
+    const auto columns = static_cast<std::size_t>(kCatalogueColumns);
+    const auto first = static_cast<std::size_t>(std::max(state.scrollRow, 0)) * columns;
+
+    // Only rows that hold something are drawn. A row of empty cells below the
+    // last entry reads as "the list goes on" when it does not, and the bin does
+    // not need them - `insideCatalogueList` covers the whole rectangle whether
+    // or not there is a cell under the pointer.
+    const std::size_t remaining = first < shown.size() ? shown.size() - first : 0;
+    const std::size_t cells = std::min(capacity, (remaining + columns - 1) / columns * columns);
+
+    for (std::size_t i = 0; i < cells; ++i) {
         const CatalogueCell cell = catalogueCell(i);
         const float height = cell.visiblePixels;
         const glm::vec2 centre =
@@ -301,12 +324,12 @@ void appendCatalogue(engine::MeshData& mesh, const CatalogueState& state, const 
         hud::appendSprite(mesh, centre.x, centre.y, kSlotPitchPixels * kPixel * 0.5f, height * kPixel * 0.5f,
                           kCellDepth, kCellSheetMin, {kCellSheetSize.x, height}, hud::kSheetSize);
 
-        // A cell the card cuts through gets its background and nothing else. An
-        // isometric icon is three quads on a cube, so a rectangle cannot clip
-        // it, and half an item spilling over the frame looks worse than an
-        // empty sliver saying "there is more below".
-        if (cell.whole() && i < shown.size()) {
-            hud::appendStack(mesh, ItemStack{shown[i], 1}, catalogueCellCentre(cell), kSlotHalf,
+        // Full size, in the cell it belongs to. The row the card cuts through
+        // is cut for real by the renderer's scissor rather than shrunk to fit,
+        // so a half-visible entry looks like the reference's - sliced at the
+        // frame - instead of like a smaller item.
+        if (first + i < shown.size()) {
+            hud::appendStack(clipped, ItemStack{shown[first + i], 1}, catalogueCellCentre(cell), kSlotHalf,
                              kCatalogueIconDepth, kCatalogueCountDepth);
         }
     }
@@ -340,21 +363,33 @@ std::optional<CatalogueTab> tabAt(Kind kind, float x, float y) {
     return std::nullopt;
 }
 
-std::optional<std::size_t> catalogueCellAt(Kind kind, float x, float y) {
+std::optional<std::size_t> catalogueCellAt(Kind kind, float x, float y, int scrollRow) {
     if (!showsCatalogue(kind)) {
         return std::nullopt;
     }
     const std::size_t capacity = catalogueCapacity();
+    const auto first = static_cast<std::size_t>(std::max(scrollRow, 0)) *
+                       static_cast<std::size_t>(kCatalogueColumns);
     for (std::size_t i = 0; i < capacity; ++i) {
         const CatalogueCell cell = catalogueCell(i);
-        // Only whole cells answer. A cell the card cuts in half has nowhere to
-        // draw its icon either, so treating it as clickable would mean picking
-        // something the player cannot see.
-        if (cell.whole() && within(x, y, catalogueCellCentre(cell), kSlotHalf)) {
-            return i;
+        // Anything drawn can be clicked, including a cut-through cell - which
+        // is hit-tested against the part of it the card actually shows, so the
+        // target matches what the eye sees.
+        const glm::vec2 centre = toBook(cell.artTopLeft.x + kSlotPitchPixels * 0.5f,
+                                        cell.artTopLeft.y + cell.visiblePixels * 0.5f);
+        const glm::vec2 half{kSlotHalf, kSlotHalf * (cell.visiblePixels / kSlotPitchPixels)};
+        if (std::abs(x - centre.x) <= half.x && std::abs(y - centre.y) <= half.y) {
+            return first + i;
         }
     }
     return std::nullopt;
+}
+
+int catalogueMaxScroll(std::size_t itemCount) {
+    const auto columns = static_cast<std::size_t>(kCatalogueColumns);
+    const std::size_t rowsNeeded = (itemCount + columns - 1) / columns;
+    const std::size_t whole = catalogueWholeRows();
+    return rowsNeeded > whole ? static_cast<int>(rowsNeeded - whole) : 0;
 }
 
 std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
@@ -380,10 +415,13 @@ bool insideCatalogueList(Kind kind, float x, float y) {
     if (!showsCatalogue(kind)) {
         return false;
     }
-    const glm::vec2 topLeft = toBook(kCatalogueLeft, kCatalogueTop);
-    const glm::vec2 bottomRight =
-        toBook(kCatalogueLeft + kCatalogueColumns * kSlotPitchPixels, kCatalogueBottom);
+    const auto [topLeft, bottomRight] = catalogueListBounds();
     return x >= topLeft.x && x <= bottomRight.x && y >= topLeft.y && y <= bottomRight.y;
+}
+
+std::pair<glm::vec2, glm::vec2> catalogueListBounds() {
+    return {toBook(kCatalogueLeft, kCatalogueTop),
+            toBook(kCatalogueLeft + kCatalogueColumns * kSlotPitchPixels, kCatalogueBottom)};
 }
 
 bool insidePanel(Kind kind, float x, float y) {
@@ -405,7 +443,8 @@ bool insidePanel(Kind kind, float x, float y) {
 
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
                        const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
-                       float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress) {
+                       float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
+                       engine::MeshData& clipped) {
     engine::MeshData mesh;
     const Layout layout = layoutFor(kind);
     const float panelCentreX = kPanelOffsetX(kind);
@@ -423,7 +462,7 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     std::vector<ItemId> catalogueList;
     if (showsCatalogue(kind)) {
         catalogueList = catalogueItems(catalogue.tab);
-        appendCatalogue(mesh, catalogue, catalogueList);
+        appendCatalogue(mesh, clipped, catalogue, catalogueList);
     }
 
     for (std::size_t i = 0; i < kInventorySlots; ++i) {
@@ -471,7 +510,7 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     if (heldStack.empty()) {
         const ItemStack* under = nullptr;
         ItemStack catalogueEntry;
-        if (const std::optional<std::size_t> cell = catalogueCellAt(kind, cursorX, cursorY);
+        if (const std::optional<std::size_t> cell = catalogueCellAt(kind, cursorX, cursorY, catalogue.scrollRow);
             cell.has_value() && *cell < catalogueList.size()) {
             catalogueEntry = ItemStack{catalogueList[*cell], 1};
             under = &catalogueEntry;
