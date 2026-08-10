@@ -173,6 +173,12 @@ constexpr glm::vec3 kFogColour{20 / 255.0f, 101 / 255.0f, 231 / 255.0f};
 /// the whole effect reads as unstable.
 constexpr float kFogDistance = 60.0f;
 
+/// The same two numbers for lava, and the reason you cannot see out of it.
+/// The reference's `fog_lava` is a dark red at almost zero distance - which is
+/// the whole point: inside lava you should see nothing but lava.
+constexpr glm::vec3 kLavaFogColour{0.44f, 0.09f, 0.02f};
+constexpr float kLavaFogDistance = 2.4f;
+
 /// One frame of "shed some velocity, then take a fixed push toward `terminal`".
 ///
 /// **Terminal velocity is exact at any frame rate**, which the naive conversion
@@ -284,11 +290,15 @@ inline FluidContact sampleFluid(const World& world, const Aabb& box) {
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
                 const BlockId block = world.blockAt(x, y, z);
-                if (!isWater(block)) {
+                // A waterlogged cell is water for every purpose except what it
+                // looks like, so it counts here as a full source block.
+                const bool logged = world.waterloggedAt(x, y, z);
+                if (!isWater(block) && !logged) {
                     continue;
                 }
                 contact.inWater = true;
-                surface = std::max(surface, static_cast<float>(y) + fluidHeight(block));
+                surface = std::max(surface,
+                                   static_cast<float>(y) + (logged ? 1.0f : fluidHeight(block)));
                 sum += flowVector(world, x, y, z);
                 ++cells;
             }

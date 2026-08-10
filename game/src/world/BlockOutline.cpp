@@ -37,9 +37,10 @@ void appendBox(engine::MeshData& mesh, const glm::vec3& lo, const glm::vec3& hi)
         for (const glm::vec3& corner : face.corners) {
             const glm::vec3 p = glm::mix(lo, hi, corner);
             mesh.vertices.push_back(engine::Vertex{{p.x, p.y, p.z},
-                                                   {kColor.r, kColor.g, kColor.b, 1.0f},
+                                                   engine::packVertexColor(kColor.r, kColor.g, kColor.b, 1.0f),
                                                    {0.5f, 0.5f},
-                                                   static_cast<float>(TextureLayer::White)});
+                                                   static_cast<float>(TextureLayer::White),
+                                                   engine::kVertexSurfaceDefault});
         }
 
         mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
@@ -48,11 +49,11 @@ void appendBox(engine::MeshData& mesh, const glm::vec3& lo, const glm::vec3& hi)
 
 } // namespace
 
-engine::MeshData makeBlockOutline(float height) {
+engine::MeshData makeBlockOutline(const glm::vec3& size) {
     engine::MeshData mesh;
 
     const glm::vec3 lo{-kInflate, -kInflate, -kInflate};
-    const glm::vec3 hi{1.0f + kInflate, height + kInflate, 1.0f + kInflate};
+    const glm::vec3 hi{size.x + kInflate, size.y + kInflate, size.z + kInflate};
     const float t = kThickness;
 
     // Four bars along each axis, one per edge of the box.

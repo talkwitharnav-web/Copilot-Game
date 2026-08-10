@@ -125,12 +125,56 @@ float fbm3D(std::uint32_t seed, float x, float y, float z, int octaves) {
     return normalisation > 0.0f ? total / normalisation : 0.0f;
 }
 
+float octaves2D(std::uint32_t seed, float x, float z, const float* amplitudes, int count) {
+    float total = 0.0f;
+    float normalisation = 0.0f;
+    float frequency = 1.0f;
+
+    for (int i = 0; i < count; ++i) {
+        const float amplitude = amplitudes[i];
+        // A skipped octave still advances the frequency, or the array would
+        // mean something different depending on where the zeros fall.
+        if (amplitude != 0.0f) {
+            const float sample = value2D(seed + static_cast<std::uint32_t>(i) * 0x9e3779b9u, x * frequency,
+                                         z * frequency);
+            total += amplitude * (sample * 2.0f - 1.0f);
+            normalisation += amplitude;
+        }
+        frequency *= 2.0f;
+    }
+
+    return normalisation > 0.0f ? total / normalisation : 0.0f;
+}
+
+float octaves3D(std::uint32_t seed, float x, float y, float z, const float* amplitudes, int count) {
+    float total = 0.0f;
+    float normalisation = 0.0f;
+    float frequency = 1.0f;
+
+    for (int i = 0; i < count; ++i) {
+        const float amplitude = amplitudes[i];
+        if (amplitude != 0.0f) {
+            const float sample = value3D(seed + static_cast<std::uint32_t>(i) * 0x9e3779b9u, x * frequency,
+                                         y * frequency, z * frequency);
+            total += amplitude * (sample * 2.0f - 1.0f);
+            normalisation += amplitude;
+        }
+        frequency *= 2.0f;
+    }
+
+    return normalisation > 0.0f ? total / normalisation : 0.0f;
+}
+
 std::uint32_t hash2D(std::uint32_t seed, std::int32_t x, std::int32_t z) {
     return hashCoords(seed, x, z);
 }
 
 float hashUnit2D(std::uint32_t seed, std::int32_t x, std::int32_t z) {
     return unitFloat(hashCoords(seed, x, z));
+}
+
+float hashUnit3D(std::uint32_t seed, std::int32_t x, std::int32_t y, std::int32_t z) {
+    return unitFloat(hashCoords3(seed, x, y, z));
 }
 
 } // namespace game::noise

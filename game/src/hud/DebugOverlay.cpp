@@ -18,13 +18,14 @@ const float kWhite = static_cast<float>(TextureLayer::White);
 // width and a height written here are already the same physical size.
 constexpr float kMargin = 0.035f;
 constexpr float kPadding = 0.024f;
-constexpr float kPanelWidth = 0.37f;
-/// One font cell is 14 px tall, and a unit here is half the window height, so
-/// this lands one texel per pixel at 720p. Nearest-neighbour sampling looks
-/// muddy at any other ratio.
+constexpr float kPanelWidth = 0.56f;
+/// The font cell is 8 px square and this draws it at a little under twice that,
+/// which is close to the size the overlay has always been. It is deliberately
+/// **not** derived from the cell: the panel is sized in screen units and the
+/// atlas can be swapped for one drawn at another resolution.
 constexpr float kCharHeight = 14.0f / 360.0f;
 constexpr float kLineHeight = 0.052f;
-constexpr float kValueColumn = 0.175f; // Values start here, so they line up.
+constexpr float kValueColumn = 0.20f; // Values start here, so they line up.
 constexpr float kGraphHeight = 0.15f;
 constexpr float kGraphGap = 0.026f;
 
@@ -85,7 +86,7 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 13> rows{{
+    const std::array<Row, 16> rows{{
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
@@ -99,6 +100,9 @@ engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<f
         {"draws", std::to_string(stats.drawCalls)},
         {"tris", formatCount(stats.triangles)},
         {"workers", std::to_string(stats.workerThreads)},
+        {"tone F10", stats.toneMapper},
+        {"shade G", stats.shadows},
+        {"cloud C", stats.clouds},
     }};
 
     const float panelLeft = -aspect + kMargin;

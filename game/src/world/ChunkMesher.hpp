@@ -33,10 +33,28 @@ struct ChunkVolume {
 
     BlockId blockAt(int x, int y, int z) const { return blocks[index(x, y, z)]; }
     std::uint8_t lightAt(int x, int y, int z) const { return light[index(x, y, z)]; }
+    bool waterloggedAt(int x, int y, int z) const {
+        return (flags[index(x, y, z)] & kWaterlogged) != 0u;
+    }
+    /// Which half of a double chest this cell is.
+    ///
+    /// **Filled in by the caller, not worked out here**, because deciding it
+    /// means walking a run of chests that can be longer than this volume's one
+    /// cell of padding - and only the main thread can see that far.
+    ChestHalf chestHalfAt(int x, int y, int z) const {
+        return static_cast<ChestHalf>((flags[index(x, y, z)] >> kChestHalfShift) & 3u);
+    }
+
+    static constexpr std::uint8_t kWaterlogged = 1u << 0;
+    static constexpr int kChestHalfShift = 1;
 
     std::array<BlockId, kSpan * kSpan * kSpan> blocks{};
     /// Sky light in the high nibble, block light in the low one.
     std::array<std::uint8_t, kSpan * kSpan * kSpan> light{};
+    /// Per-cell facts the mesher cannot derive from `blocks` alone. A byte
+    /// rather than the chunk's packed bit: this is a scratch copy handed to a
+    /// worker, and unpacking once is cheaper than masking per lookup.
+    std::array<std::uint8_t, kSpan * kSpan * kSpan> flags{};
 };
 
 /// Geometry for one chunk, split by how it has to be drawn.

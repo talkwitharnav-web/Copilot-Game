@@ -51,9 +51,9 @@ if (-not (Test-Path $outputDir)) { New-Item -ItemType Directory -Path $outputDir
 
 $skinWidth = 128
 $skinHeight = 32
-# Must match kCreatureSheetHeight in game/src/world/Creature.hpp. The last 32
-# rows are the charged Bramble's energy shell rather than a species.
-$sheetHeight = 3552
+# Must match kCreatureSheetHeight in game/src/world/Creature.hpp. The last 128
+# rows are the bee and its angry twin.
+$sheetHeight = 3680
 
 function ConvertTo-Color {
     param([string]$Hex)

@@ -4,9 +4,9 @@ Current technical truth for this voxel sandbox project: what exists, where it li
 
 Narrative history and rejected approaches live in `CLAUDE.md`, and the debugging lessons in `LESSONS.md` beside it. **If you are new to this project, read `START-HERE.md` first** — one page covering the current state, the build, and the traps; it also says which of the other ten documents to open and when. **Bedrock Edition is our primary reference**; `RESEARCH.md` marks Java-only values `[JE]`. **This file is factual and current-state only** — when something changes, replace the old fact in place rather than appending.
 
-> **Status:** Milestones 1–19 complete. **M20 is in progress** — M20a (entity foundation), M20c (the AI restructure) and M20f–20l are done; M20b (roster and behaviour) is *partly* done, with a death animation and the **flying** archetype still outstanding. The **water** archetype landed at M20i, the melee behaviour at M20j, **real pathfinding at M20k** and **ten more species at M20l**. M20d, M20e and M20g–20l were unplanned runs of work recorded in `TIMELINE.md`. **`INTERFACE.md` slices 1–4 are built; 5–9 are not.**
+> **Status:** Milestones 1–19 complete. **M20 is in progress** — M20a (entity foundation), M20c (the AI restructure) and M20f–20m are done; M20b (roster and behaviour) is *partly* done, with the **flying** archetype still outstanding. The **water** archetype landed at M20i, the melee behaviour at M20j, **real pathfinding at M20k**, **ten more species at M20l** and **the death fall at M20m**. M20d, M20e and M20g–20m were unplanned runs of work recorded in `TIMELINE.md`. **`INTERFACE.md` slices 1–5 are built; 6–9 are not.**
 >
-> **What the game is right now** is described once, in `START-HERE.md` §3 — this file is the detail underneath it, section by section. In one line: an endless streamed world with seven biomes, 66 block types including eight ores, timed and tiered digging, crafting, smelting, tools, torches, a 36-slot inventory with a creative item catalogue, 56 creature species with behaviour and animation — nine of them aquatic — and saves that survive a restart.
+> **What the game is right now** is described once, in `START-HERE.md` §3 — this file is the detail underneath it, section by section. In one line: an endless streamed world with seven biomes, 73 block types including nine ores, timed and tiered digging across five tool tiers, crafting, smelting, a smoker, a smithing table, a 27-slot chest that joins into a 54-slot double, tools, torches, a 36-slot inventory with a creative item catalogue, 56 creature species with behaviour and animation — nine of them aquatic — and saves that survive a restart.
 >
 > **Water was rebuilt on 2026-08-05** and the fudge is gone — entity physics, the block's own spread rules, and a real underwater fog, recorded as **M20h** in `TIMELINE.md`, with two rounds of correction at **M20j**. `world/Fluid.hpp` is the single owner of the constants; the player, creatures and dropped items all read it. `RESEARCH.md` §9.1 is now a pointer back here, because the work is done and a description of the reference beside a matching implementation is a second copy of the same facts. ⛔ **The fog colour is measured, not copied from the fog JSON** — see the box under "Water" before changing it, and **do not re-tune any water constant by eye**: `tools/simulate-swim.ps1` replays the vertical motion and reads every constant out of the headers. **Next:** `INTERFACE.md` slice 5, M20b's remaining flying archetype and death animation, and **M21 (survival systems), the first thing that gives the player health** — which is what every blast, blow and drowning tick already computes and currently throws away.
 
@@ -50,6 +50,19 @@ Confirmed working on this machine as of 2026-07-30.
 
 This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vulkan will happily pick either one.** Physical-device selection therefore prefers a discrete GPU explicitly rather than taking whatever Vulkan lists first. This is not theoretical: the Intel Arc iGPU enumerates as `GPU0` and the RTX 4070 as `GPU1`, so "take the first device" would silently select the slow one. The startup log prints the chosen GPU — check it before investigating any performance complaint.
 
+### What hardware this actually needs
+
+Two gates decide it, and **the second one is the tighter of the two**:
+
+1. **Vulkan 1.3**, because dynamic rendering and `shaderDemoteToHelperInvocation` are core 1.3. This rules out NVIDIA Kepler (GTX 600/700) and AMD GCN 1–3 (HD 7000 → Fury), both frozen at 1.2 on legacy drivers. The floor is **Maxwell (GTX 750 Ti)** and **Polaris (RX 460)**.
+2. **More than 128 bytes of push constants.** `MeshPushConstants` is 144 — a `mat4` plus five `vec4` — and 128 is all the specification guarantees. On the Vulkan hardware database **13.6% of Windows devices report exactly 128**, and the surprise is *who*: AMD's own Windows driver reported 128 for years before raising it to 256. So a modern Radeon on an older Adrenalin driver clears the 1.3 gate and still cannot run this.
+
+> ⛔ **The limit is checked during device *selection*, not after it.** A machine can genuinely hold one device that can run this and one that cannot, so scoring discrete-over-integrated first and checking the limit afterwards would pick the discrete card and refuse to start while a capable integrated one sat beside it. `Renderer` keeps its own check as a backstop.
+
+**The cheapest way to delete gate 2 entirely** is to move everything except `modelViewProjection` into a per-frame uniform buffer — sun, lighting, animation, fog and eye are all per-frame values riding in a per-draw block, so this would take the push constants to 64 bytes, halve the per-draw write across ~150 draws, and buy back that 13.6%. It needs a descriptor set and a buffer per frame in flight, and M23 rewrites this area anyway.
+
+Practical floor: **4 cores** (the pool takes half the threads, so 4 threads gives 2 workers and keeps generation off the main thread), **8 GB RAM** — the process peaks at 328 MB, so the OS is the constraint, not us — and a GTX 750 Ti class GPU at reduced render distance. Comfortable 60 fps at render distance 8 wants 6 cores / 12 threads and a GTX 1650 or RX 580; the measured GPU cost of ~1 M triangles in 104–186 draws at 0.5–1.4 ms is light, so **the CPU and the driver gates bind long before the GPU does.**
+
 ### Third-party Vulkan layers are present on this machine
 
 `vulkaninfo` reports `VK_LAYER_OBS_HOOK` (OBS) and `VK_LAYER_RTSS` (RivaTuner/MSI Afterburner) installed system-wide, both built against Vulkan 1.3 while this project requests 1.4. The loader warns about the mismatch on every launch. They are harmless so far, but if a bizarre rendering or present-mode bug ever appears that cannot be reproduced logically, disabling these overlays is a cheap early test.
@@ -86,6 +99,7 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 │   ├── make-spawn-egg-sprites.ps1     The 36 reference spawn egg sprites, staged beside the exe
 │   ├── make-reference-hud.ps1         The five catalogue tabs over a copy of our HUD sheet, beside the exe
 │   ├── make-reference-blocks.ps1      The reference block and item textures, staged beside the exe
+│   ├── make-reference-sounds.ps1     497 recordings across 159 events, staged beside the exe as sounds-reference/
 │   ├── analyze-alpha.ps1         Lists a texture's connected opaque islands - finds unwrapped model nets
 │   ├── alpha-runs.ps1            Per-row opaque runs - step 1 of the model procedure, and what islands cannot do
 │   ├── preview-grid.ps1          Magnifies one texture with coordinate lines, for reading net boundaries
@@ -93,7 +107,8 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 │   ├── compare-nets.ps1          Two skins' per-row opaque run boundaries, to test whether they share a model
 │   ├── compare-texture.ps1       Ours against the reference: palette, spread, saturation, run lengths
 │   ├── preview-textures.ps1     Magnifies textures into a labelled sheet for review
-│   ├── make-font.ps1            Regenerates the ASCII font atlas
+│   ├── make-font.ps1            Regenerates our own ASCII font atlas
+│   ├── make-reference-font.ps1  Stages Mojang's ascii.png beside each exe
 │   ├── make-hud-sheet.ps1       Composites the HUD and inventory art into one sheet
 │   ├── capture-window.ps1       Screenshots the running game, optionally after sending keys or placing the pointer
 │   ├── dump-pixels.ps1          Prints a texture as a character grid with a luminance-sorted legend and counts
@@ -113,7 +128,7 @@ This laptop has both a discrete NVIDIA GPU and an integrated Intel GPU, and **Vu
 
 **Why the `include/` vs `src/` split:** headers under `engine/include/engine/` are the engine's public surface — anything the game can call. Everything in `engine/src/` is internal. This makes it structurally obvious when the game starts depending on engine internals it should not.
 
-**What sits beside the built executable and is not in the tree.** `build/{debug,release}/bin/` holds `assets/` (copied), `settings.cfg`, `saves/`, `shaders/`, and **four placeholder art drops that must never be moved under `assets/`**: `creatures-reference.png`, `spawn-eggs/`, `hud-reference.png` and `blocks-reference/`. All four are regenerable, all four are restored by `run.ps1`, and all four are reference art — see `START-HERE.md` §5.
+**What sits beside the built executable and is not in the tree.** `build/{debug,release}/bin/` holds `assets/` (copied), `settings.cfg`, `saves/`, `shaders/`, and **six placeholder art drops that must never be moved under `assets/`**: `creatures-reference.png`, `spawn-eggs/`, `hud-reference.png`, `font-reference.png`, `blocks-reference/` and `sounds-reference/`. All six are regenerable, all six are restored by `run.ps1`, and all six are reference material — see `START-HERE.md` §5.
 
 ---
 
@@ -157,7 +172,11 @@ Fetched by CMake at configure time via `FetchContent`, pinned to exact Git tags.
 | Dependency | Version | Why it is here |
 |---|---|---|
 | GLFW | 3.4 | Creates the OS window, handles keyboard/mouse input, and creates the Vulkan drawing surface. Without it we would hand-write several hundred lines of raw Win32 code. |
+| miniaudio | 0.11.21 | Opens the operating system's audio device and hands us a callback asking for samples. One public-domain header; it does not mix, position or decode anything for us, which is exactly the right amount of library. Added at M22. |
+| stb_vorbis | (bundled with stb) | Decodes the staged `.ogg` recordings. It is C and warns freely, so it lives alone in `engine/src/audio/StbVorbis.cpp` with a short list of warnings disabled **by number** rather than by turning warnings off, which would trade one warning for `D9025`. |
 | Vulkan | SDK 1.4.357.0 | Found via `find_package(Vulkan)`; not fetched. Provides the headers and the loader import library. |
+
+**Four dependencies.** The vcpkg-versus-`FetchContent` decision in `CLAUDE.md` says to revisit at about five.
 
 **Adding a dependency requires a one-sentence justification of why the current milestone needs it.** "We'll want it eventually" is not sufficient.
 
@@ -177,11 +196,12 @@ Every type owns its Vulkan resources and destroys them in its destructor.
 | `Paths` | `engine/core/Paths.hpp` | `executableDirectory()`. Assets resolve relative to the `.exe`, not the working directory, which differs between terminal and editor launches. |
 | `FrameLimiter` | `engine/core/FrameLimiter.hpp` | Paces the main loop to a target frame rate, adjustable at runtime. A target of `0` means uncapped. |
 | `JobSystem` | `engine/core/JobSystem.hpp` | Fixed-size worker thread pool and job queue. Knows nothing about what a job is. Zero workers runs jobs inline. |
+| `AudioEngine` | `engine/audio/AudioEngine.hpp` | Opens one 48 kHz stereo device and mixes up to 48 voices into it. A voice is a sample, a position, a volume and a pitch — it has never heard of a block or a creature. Distance rolloff, a shallow left–right pan and pitch by linear interpolation all happen here, plus a separate music bus with its own volume. **The one mutex in the project lives here**, because the audio callback genuinely runs on the operating system's thread and there is no version of this that does not cross threads. |
 | `Window` | `engine/platform/Window.hpp` | Owns the GLFW window and its lifetime. Reports whether a close was requested, pumps OS events, and exposes a queue of key presses via the engine-level `Key` enum so the game never includes GLFW. Also carries a **typed-text queue** drained by `consumeTypedText()`: a *key* is a physical button and a *character* is what the OS produces after keyboard layout, shift and dead keys, so text comes from GLFW's character callback rather than a key→letter map. Capped at 256 characters, and cleared with the rest of the input state on focus loss. |
 | `VulkanContext` | `engine/render/VulkanContext.hpp` | Vulkan instance, debug messenger, window surface, physical device selection, logical device, and queues. The one-time setup that everything else needs. |
 | `Swapchain` | `engine/render/Swapchain.hpp` | The set of images that get shown on screen, plus their views. Rebuilt when the window resizes. |
 | `Vertex` | `engine/render/Vertex.hpp` | **The single definition of a vertex**, together with its Vulkan binding/attribute descriptions. Position, face shade, texture coordinate, and texture array layer. The shader's `layout(location = ...)` inputs must match it. Change the format here and in the shader, nowhere else. |
-| `TextureArray` | `engine/render/TextureArray.hpp` | A stack of same-sized images in one GPU resource, sampled by layer index, with a generated mip chain and its own sampler. |
+| `TextureArray` | `engine/render/TextureArray.hpp` | A stack of same-sized images in one GPU resource, sampled by layer index, with a generated mip chain and its own sampler. **It also keeps each layer's alpha**, so a caller can build geometry from a sprite's silhouette without decoding the file again — which is what turns a dropped tool into a shape rather than a card. |
 | `MeshPushConstants` | `engine/render/PushConstants.hpp` | The per-draw data block. Must match the shader's `layout(push_constant)` block field for field. |
 | `Buffer` | `engine/render/Buffer.hpp` | A `VkBuffer` plus the `VkDeviceMemory` backing it, released together. Copy and move are deleted. `uploadBufferData()` fills device-local buffers via a temporary staging buffer. |
 | `DepthImage` | `engine/render/DepthImage.hpp` | The depth attachment. Picks the best supported format (`D32_SFLOAT` preferred) and is rebuilt with the swapchain, since it must match the colour target's size. |
@@ -209,9 +229,10 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 | `Block` | `world/Block.hpp` | The block ID enum plus the three predicates that must stay distinct: solid (blocks movement), opaque (blocks vision), light-transparent. Also which texture layer each face uses — `BlockFace` is what lets grass differ on top, sides and bottom without special cases in the mesher — and `blockName`, the one place a block is named. Water encodes its depth in the id. |
 | `Collision` | `world/Collision.hpp` | The box-versus-world tests, shared by the player and by creatures: `overlapsSolid` and `highestSurfaceBelow`, both reading `collisionBoxes`. **Anything that collides with the world goes through here** — a second copy of "where is this block" is the recurring bug in this project, and creature physics carried one until it was folded in. |
 | `Chunk` | `world/Chunk.hpp` | A 32³ block of world as a flat array, indexed `x + z*32 + y*32*32`, plus a parallel light array. Reads outside the chunk return air rather than failing, so callers do not need bounds checks everywhere. |
-| `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion in 2D and 3D. An integer hash, so it is reproducible on any machine without storing anything. |
-| `Biome` | `world/Biome.hpp` | The table that answers "which block goes here, and why", and the temperature/humidity selection that picks between rows. |
-| `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. This is what makes the world deterministic and what lets generation run on a worker thread. |
+| `noise` | `world/Noise.hpp` | Seeded value noise and fractal Brownian motion in 2D and 3D, plus `octaves2D`/`octaves3D`, which take an **amplitude per octave** rather than always halving — a zero entry drops that octave outright, which is how the reference's spectra are shaped and is not expressible as "n octaves". An integer hash throughout, so it is reproducible on any machine without storing anything. |
+| `Climate` | `world/Climate.hpp` | The five noise fields every decision about the landscape is made from — temperature, humidity, continentalness, erosion and weirdness, plus `ridges` derived from the last — and the three shaping splines that turn them into a target height, a `factor` and a `jaggedness`. **Single owner of what the land is trying to be at a column.** |
+| `Biome` | `world/Biome.hpp` | Twenty-seven rows, each claiming a **box** in the five-dimensional climate space, plus the tag bitmask anything else asks questions through. It answers "which block goes on top and what lives here" — **not** "how tall is it", which moved to `Climate`. |
+| `TerrainGenerator` | `world/TerrainGenerator.hpp` | `generateChunk(seed, coord)` — **a pure function**, and required to stay one. No neighbour reads, no global state, no clock. Owns `columnHeight` (the one place a surface height is decided), the surface-rule sequence, the three cave systems and the ore table. Also owns `kWorldHeightChunks`, because the shaping splines are quoted against it. |
 | `ChunkMesher` | `world/ChunkMesher.hpp` | Turns a padded chunk volume into opaque and translucent mesh data, emitting only faces that can be seen. The volume is passed in rather than looked up, which keeps meshing pure. |
 | `World` | `world/World.hpp` | Owns every loaded chunk, streams them around the player, and runs light propagation and water flow. The single owner of block state, and the only thing that mutates it. |
 | `WorldStore` | `world/WorldStore.hpp` | Reads and writes the save directory. Stores only modified chunks, plus the player's position and view direction, the furnaces, and the creature population. Each side table is its own file with its own magic, version and seed, all checked on load. **A save record is always an explicit struct, never the live one** — `SavedCreature` names the six fields worth keeping, so the format cannot change silently when `Creature` gains a field, and everything transient is discarded on reload by construction. |
@@ -226,15 +247,230 @@ Everything below lives in `game/` and is invisible to the engine. The engine has
 | `Smelting` | `item/Smelting.hpp` | What an item smelts into, and how long a fuel burns. Two separate questions, because a log is both an input and a fuel and most things are exactly one. Every recipe takes the same ten seconds. |
 | `Furnace` | `world/Furnace.hpp` | One furnace's three slots and its burn and cook timers, plus the tick that advances them. **A block entity** — state belonging to a block that is not part of which block it is. Fuel is only lit when there is something worth cooking. |
 | `Tool` | `item/Tool.hpp` | How mining works: what each tool is and how fast, how hard each block is, which tool suits it, and the tier it demands before it drops anything. `breakSeconds` and `yieldsDrop` are the two answers the game actually asks for. |
-| `Creature` | `world/Creature.hpp` | Fifty-six species on one entity system: three-axis collision through `world/Collision.hpp`, step-up and jumping, a priority-sorted behaviour table with control flags, local steering, spawning both continuously and with a chunk, retiring, striking, splitting, herd alerting and soft separation. **All species policy is one row of `kSpecies`** — the update loop never asks which kind it is holding. Box layouts are the deliberate exception and stay in `buildMesh`, because a shape is not a number. Models sample the 128×3552 `assets/textures/creatures.png` net sheet through layer `-3.0` (`-4.0` while hurt); anything see-through goes to a second, translucent mesh, which so far is only a slime's shell. The sections below cover behaviour, spawning, sizes, limbs and step-ups; `TEXTURING.md` §13 covers the nets. |
+| `Creature` | `world/Creature.hpp` | Fifty-seven species on one entity system: three-axis collision through `world/Collision.hpp`, step-up and jumping, a priority-sorted behaviour table with control flags, local steering, spawning both continuously and with a chunk, retiring, striking, splitting, herd alerting and soft separation. **All species policy is one row of `kSpecies`** — the update loop never asks which kind it is holding. Box layouts are the deliberate exception and stay in `buildMesh`, because a shape is not a number. Models sample the 128×3680 `assets/textures/creatures.png` net sheet through layer `-3.0` (`-4.0` while hurt); anything see-through goes to a second, translucent mesh, which so far is only a slime's shell. The sections below cover behaviour, spawning, sizes, limbs and step-ups; `TEXTURING.md` §13 covers the nets. |
 | `Explosion` | `world/Explosion.hpp` | What a blast removes, and what it does to whatever is standing in it. **`blastResistance` is not mining hardness and the two must never be conflated** — stone is 1.5 to a pickaxe and 6 to an explosion, obsidian 50 against 1200; `Tool.hpp` owns one number and this owns the other. `explosionBlocks` is the reference's algorithm exactly: 1352 rays toward the faces of a 16³ grid, each starting at `power × [0.7, 1.3)`, advancing 0.3 blocks and paying a flat 0.225 per step plus `(resistance + 0.3) × 0.3` for what it passes through — a block is taken only if the ray still has intensity *after* paying, which is what makes a crater ragged rather than spherical. `explosionExposure` is the share of sample points on a box the blast can see, so cover genuinely protects; `explosionImpact` combines it with distance, and both damage and knockback read that one number rather than recomputing it. Damage is `7 × power × (impact² + impact) + 1`, scaled by `27.5 / 43` to land on **Bedrock's** point-blank figure instead of Java's harsher one. The trailing `+1` means everything inside twice the power takes at least a point even fully shielded. |
 | `slots` | `item/SlotOps.hpp` | What a click does to one slot given what the cursor holds: left takes or merges a whole stack, right takes half and places one, `distribute` spreads a stack over several slots, `quickMove` sends one elsewhere (shift-click) and `gather` pulls matching items in (double-click). Free functions over stacks, because the crafting grid is not part of the inventory but obeys the same rules. |
-| `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, isometric block icons, a slot's item-and-count, and the hover label. The label sizes its frame from the text and clamps itself to the window, flipping above the cursor rather than overflowing the bottom edge. `kSheetSize` is the **single owner** of the HUD sheet's dimensions (currently 185 × 773) and must follow whatever `tools/make-hud-sheet.ps1` reports; a stale copy silently skews every sprite on the sheet, so `Main.cpp` reads the PNG header and logs an error on mismatch. The game loads `hud-reference.png` from beside the executable in place of `assets/textures/hud.png` whenever it exists — the same proof-atlas arrangement the creature skins use, and it currently supplies the five catalogue tabs. |
+| `hud::HudPrimitives` | `hud/HudPrimitives.hpp` | Screen-space building blocks: quads, sprite-sheet regions, free-corner quads, text, isometric block icons, a slot's item-and-count, and the hover label. The label sizes its frame from the text and clamps itself to the window, flipping above the cursor rather than overflowing the bottom edge. `kSheetSize` is the **single owner** of the HUD sheet's dimensions (currently 185 × 1355) and must follow whatever `tools/make-hud-sheet.ps1` reports; a stale copy silently skews every sprite on the sheet, so `Main.cpp` reads the PNG header and logs an error on mismatch. The game loads `hud-reference.png` from beside the executable in place of `assets/textures/hud.png` whenever it exists — the same proof-atlas arrangement the creature skins use, and it currently supplies the five catalogue tabs. |
 | `Crosshair` | `hud/Crosshair.hpp` | The aiming reticle. |
-| `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. |
+| `Hotbar` | `hud/Hotbar.hpp` | The nine-slot bar, drawn from the HUD sprite sheet. A bow being drawn swaps to one of three pictures **and shrinks dead centre in its slot** on the charge curve, which is what fills the gaps between those three frames. |
 | `InventoryScreen` | `hud/InventoryScreen.hpp` | **Every** container screen: the player's inventory, a crafting table and a furnace. One `Kind` picks a small layout table — which panel sprite to draw, where the slots sit, and how wide the grid is — so the slot interaction exists once rather than three times. A furnace borrows the crafting region for its input and fuel, which is why it needed no new click handling. Every position is measured off the art in its own pixels and scaled through one constant. The inventory and crafting-table screens also draw the **catalogue card** beside the panel — see "The catalogue card" below. |
 | `DebugOverlay` | `hud/DebugOverlay.hpp` | The `F5` diagnostics panel: frame-time graph and labelled rows. |
-| `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. |
+| `Player` | `world/Player.hpp` | Player box, motion constants, and `updatePlayer()`, which reads the world and writes only the player. Input arrives as a `PlayerInput` struct, so the physics never touches the keyboard. Survival state — health, food, saturation, exhaustion and every timer that drives them — rides on the same struct, and `updateSurvival` runs at the end of the same function so falling and landing are already resolved when the fall damage is worked out. |
+| `survival` | `world/Survival.hpp` | **Single owner of every survival number**: twenty hearts, twenty hunger, half a second of invulnerability, three free blocks of fall, the exhaustion cost of every action, the two regeneration speeds, the starvation floor, and `foodValue` for all thirty-three foods. Header-only, so nothing had to be registered to add it. `damagePlayer`, `healPlayer`, `feedPlayer` and `respawnPlayer` are the only ways any of it changes. |
+| `StatusBars` | `hud/StatusBars.hpp` | Hearts, drumsticks and bubbles. Icons are 9×9 on a 10-pixel pitch in the strip at the bottom of the HUD sheet; a half heart is its own sprite rather than a clipped full one, because the sheet already has both. Bubbles only appear underwater. |
+| `Sounds` | `core/Sounds.hpp` | **The mapping between the game and the speakers.** Fifty-seven events and thirty-four creature voice families, each with up to eight recordings picked at random. Blocks resolve to one of ten **materials** by family test rather than by list, and a cut shape asks `shapedParent`, so six hundred stairs and slabs cost nothing. A creature resolves to a voice **family**, not a species, and a baby is pitched up from the adult's own recording. `kStems` must match `tools/make-reference-sounds.ps1` name for name and in order — a mismatch fails silently as an event that never sounds, which is why `has()` exists and why the probe checks every row. |
+
+---
+
+## World Generation
+
+Rebuilt on 2026-08-07 against the reference's own 1.18 architecture. `RESEARCH.md` §15 is the research; this is what we actually do.
+
+**The structural idea, and it is worth reading before touching anything here.** A biome used to carry a `baseHeight` and an `amplitude`, so the land was a *consequence of the label*: pick the biome, then look up how tall it is. The reference reversed that and so have we — **terrain and biome are both outputs of the same five noise fields**, so they agree without either driving the other. `Biome` no longer knows how tall it is, and a row that tried to say so would have nowhere to put the number.
+
+### The five stages
+
+| # | Stage | Input | Output | Owner |
+|---|---|---|---|---|
+| 1 | Climate | position | 5 fields + derived `ridges` | `Climate.cpp` |
+| 2 | Shape | climate | target height, `factor`, `jaggedness` | `Climate.cpp` |
+| 3 | Height | shape + noise | the surface, **one number per column** | `TerrainGenerator.cpp` |
+| 4 | Surface rules | uncarved column + biome | which block, top-down with a depth counter | `TerrainGenerator.cpp` |
+| 5 | Caves and ores | position | holes and veins cut into the finished column | `TerrainGenerator.cpp` |
+
+### The climate fields
+
+| Field | Wavelength | Octave weights | Gain | What it decides |
+|---|---|---|---|---|
+| Temperature | 1536 | `{1.5, 0, 1, 0, 0, 0}` | 2.2 | Snow, ice, and which of a biome family |
+| Humidity | 1024 | `{1, 1, 0, 0, 0, 0}` | 1.35 | Forest against plain against desert |
+| Continentalness | 1792 | `{1, 1, 2, 2, 2, 1, 1, 1, 1}` | 2.8 | **Where the sea is.** Coastlines are structural, not incidental |
+| Erosion | 1280 | `{1, 1, 0, 1, 1}` | 2.35 | How much relief, and how hard it is enforced |
+| Weirdness | 704 | `{1, 2, 1, 0, 0, 0}` | 2.4 | Ridge lines, and through them rivers |
+
+The octave weights are the reference's own; **a zero is meaningful** and is why `octaves2D` takes an array rather than a count. The wavelengths are ours, because our world is a quarter of the reference's height and copying its horizontal scale would give continents whose slopes are a quarter as steep as intended.
+
+**`ridges` is `1 - |3|w| - 2|`**, the reference's expression, and the thing to know about it is that it reaches **−1 exactly where weirdness crosses zero**. The zero contour of a smooth 2D field is a network of curves — so that is where the rivers are, and they need no river system of their own.
+
+**The gains are measured, not guessed.** Value noise piles up around its midpoint, so a normalised field reaches about a third of the way to ±1 and the biomes at the edge of the space are unreachable. A temporary startup probe reported each field's mean absolute value over a 2048-block square; one shared gain of 2.6 left humidity at 0.65, meaning it was clamped at an extreme almost all the time — forest, taiga and dense forest together came to under 7% of the world while badlands alone took 6.5%. Each field now sits near 0.40, which is where the bands are evenly used.
+
+### Shaping
+
+```
+offsetY = continentalBase(C) + inland(C) · erosionRelief(E) · peakProfile(PV) − river(PV)
+factor  = erosionFactor(E), or a flat 4.0 at sea
+jagged  = peakiness(PV) · unworn(E) · inland(C)
+```
+
+Splines are cubic Hermite with **linear extrapolation outside**, not clamped: a clamp puts a dead flat shelf at every extreme of the parameter space, and the extremes are exactly where mountains and deep ocean live.
+
+**`factor` is the least obvious and the most important.** It is not a height — it is how hard `offsetY` is enforced. The noise may move the surface by `kReliefBlocks / factor` blocks, so 5.6 is ±4 and reads as a plain while 1.4 is ±16 and reads as broken ground. **That one split is what lets flat plains and jagged hills exist at the same temperature, humidity and altitude**, which two noise fields could never do.
+
+> ⛔ **`factor` stays high everywhere except a narrow peak window, and that is a rule.**
+>
+> It ran 1.15 across the whole low-erosion third of the erosion axis for one build — ±19 blocks of displacement — and that produced terrain the ramp could not connect to the ground. Single-valued terrain turned each of those into a **sheer-sided pillar** rather than a floating island, which the user found by watching a sheep walk off one into the water.
+>
+> The reference holds **5.1–6.3** across ordinary land and drops to 0.625 only where peaks-and-valleys is high on unworn ground. Ours runs **4.6–6.2** with `kRuggedFactor` 1.4 blended in by the *same* window that gates jaggedness — ruggedness and cragginess are one decision, and splitting them is how a third of the world ended up rugged.
+
+**Rivers are cut outside the erosion term, deliberately.** Scaling the channel by relief like everything else looks principled and silently deletes every river on flat ground, which is most of them — a plain has relief 0.2, so a 6.5-block channel becomes one and a third and never reaches the waterline.
+
+### Density and the lattice
+
+**There is no lattice.** Terrain is single-valued, so the noise displaces the target height directly and the surface is exact for every block:
+
+```
+surface = clamp(floor(offsetY + noise(x, offsetY, z) * kReliefBlocks / factor), 4, 90)
+```
+
+The reference evaluates a 3D density on a 4 × 8 × 4 lattice and interpolates, and that was ported first. It was the right call for the reference — its terrain is genuinely 3D and it cannot afford a density evaluation per block — and the wrong one here the moment terrain became single-valued, because **an interpolated density is piecewise-linear across a cell, so its contour lines cluster on the cell boundaries and a gentle slope comes out banded every four blocks**. Regular enough to read as a pattern rather than as landscape, which is what the user reported as terrain that "looks random but at the same time, not random".
+
+Removing it made the height exact **and eight times faster**: a column costs one noise evaluation instead of four climate samples and fifty-two density samples.
+
+The noise is still read in three dimensions, at the column's own target height. It is a function of `(x, z)` either way; sampling it at altitude decorrelates a mountain's texture from a lowland's for free.
+
+> ⛔ **Terrain is single-valued: everything at or below the surface is ground. This is a rule, not a tuning — and it is not sufficient on its own.**
+>
+> It makes floating land impossible. It does **not** stop a would-be island being produced; it converts one into a column attached to the ground, and where the footprint is small that is a sheer-sided pillar. The condition that actually has to hold is `factor` beating the noise's vertical slope — see the box under Shaping.
+>
+> Cost: no overhangs, no arches. Gain: the surface rules get an exact depth counter for free, and the ore air-exposure test is a height comparison rather than six density evaluations.
+
+**`surfaceHeightAt` calls the same function chunk generation does**, so the two cannot disagree about where the ground is — which is what stops a tree hanging in the air.
+
+| Quantity | Value |
+|---|---|
+| World | y 0–95, sea level 24, surface clamped to 4–90 |
+| Deep ocean floor / coast / far inland | ≈ 11 / 26 / 35 |
+| Measured surface min / mean / max | **8 / 31.2 / 87** |
+| Columns below sea level | **23.3%** |
+| Bedrock | y 0 always, y 1–4 on a per-block roll fading out |
+| Deepslate | always below y 9, never above y 15, per-block roll between |
+
+### Surface rules
+
+A top-down walk over the **uncarved** column with a running depth counter — the reference's `preliminary_surface_level`, and the reason a cave roof never comes out turfed. Since terrain is single-valued the counter is simply `surface - y + 1` and needs no walk above the chunk at all.
+
+Order, first match wins: bedrock band → **top block** (exactly one block deep, as the reference has it) → filler → sandstone under sand → deepslate band → stone.
+
+Which block lands on top is itself a sequence, and **the shape of it is what stopped the rings of bare stone and the dry riverbeds**:
+
+| # | Condition | Places |
+|---|---|---|
+| 1 | below the waterline, within 6 blocks of it | dirt over dirt |
+| 2 | below the waterline, deeper | sand over sandstone in a hot or sandy biome, gravel over stone otherwise |
+| 3 | `steep` and the biome names a steep block | that block |
+| 4 | patch noise ≥ the biome's `patchThreshold` | the biome's `patch` |
+| 5 | — | the biome's `top` |
+| 6 | the result is grass and `freezesAt` | snow |
+
+> ⛔ **A bed material is unreachable above the waterline. Never give a water biome a bed material as its top block.**
+>
+> `river` and `frozen_river` are not named **anywhere** in the reference's surface rules. A river column falls through the whole tree to the generic terminal rule and comes out **grass**; gravel is reachable only after both of its water tests have failed, which cannot happen with no water overhead; and **sand never appears on a riverbed there at all**.
+>
+> The reference does not guarantee a river holds water either — at low erosion inland its river band sits at the equivalent of y 89–108, and it ships dry grass-covered river strips through its mountains. They are invisible purely because of that fallthrough.
+>
+> Ours painted the biome's own top block regardless of the waterline, so a channel that never reached the sea drew a **long ribbon of gravel and sand across dry grassland**. The four ocean rows and the two river rows now carry grass and dirt, and their top block is only ever consulted on dry ground.
+
+> ⛔ **A biome names what it *scatters*; anything that does not match falls through to its ordinary top block. Never write a biome's top as solid stone.**
+>
+> The reference's `windswept_hills` is grass with stone patches above a `surface` noise threshold of 4/33, and the branch then simply *ends* — control leaves it and reaches the generic grass rule. `plains`, `meadow` and `forest` are not named in its surface-rule tree at all. Bare stone never appears on an ordinary grassy hillside there, structurally rather than statistically.
+>
+> Ours had `top = Stone` on a biome occupying the reference's own narrow erosion band `[0.45, 0.55]`. A narrow interval of a smooth 2D field is an **annulus**, so it came out as contour rings across the landscape. Measured after the fix: plains 99% grass, savanna 100%, meadow 97%, windswept hills 62% grass with 40% stone patches.
+
+**`steep` is the reference's only slope-driven bare stone, and it belongs on peaks and slopes only.** A neighbouring column differing by `kSteepDrop` (2, being the reference's 4 scaled to our quarter-height world) makes a face steep; the chunk builds a height array with a one-column border so the test is a lookup. `jagged_peaks` in the reference is literally "steep → stone, else snow block", and **a port without it gets a peak that is a solid white blob** — which is exactly what was reported. Applying it to ordinary ground creates the artefact it exists to avoid.
+
+**Snow is an altitude rule, not a number on a biome row.** `freezesAt` carries the reference's temperature lapse — 0.00125 per block above y 80 of a 384-block world, rescaled to 0.0173 above y 29 of ours — so a warm lowland never whitens and a cold one is white at sea level. It only ever converts grass, so it cannot repaint the bare rock a steep face just exposed. Twenty-seven `snowLine` numbers were deleted for it.
+
+**Surface depth is noise-driven** (the filler gains 0–2 blocks) rather than constant, which is most of why the reference's ground does not look extruded: a fixed filler depth puts the dirt-to-stone boundary on a contour line.
+
+**Water fills what the uncarved terrain left empty, not what is empty now.** That one word is the difference between a sea and a drowned world: a cave cut into rock that happens to sit under the waterline stays **dry**. It is what the reference's aquifers are for and we get it here for nothing. Testing "is this cell air" instead flooded everything below y 24 — the probe measured deep-rock hollow space at exactly 0%.
+
+### Caves
+
+Three systems rather than one, because geometry cost tracks cave **surface area**, not hollow volume, and the three have completely different budgets.
+
+| System | Shape | Mechanism |
+|---|---|---|
+| Spaghetti | long winding tunnels | band either side of a signed field's zero crossing, wavelength 58 |
+| Cheese | open caverns | low-frequency field thresholded high, wavelength 104 |
+| Noodle | thin branching passages | high-frequency band, wavelength 27, gated on a 2D patchiness field and on depth |
+
+**Carved at full resolution.** The reference evaluates its carving noise on the same 4 × 8 × 4 lattice as its terrain and can afford to, because its caves are large relative to a cell; ours are not, and at four-block resolution a three-block tunnel rounds into a four-block blob. This was a named divergence when terrain still used a lattice; since M20r there is no lattice at all, so it is simply how caves work.
+
+**Cave mouths are a place.** A low-frequency 2D field relaxes the surface margin to nothing in patches, so an entrance is somewhere you can come back to rather than something that happens at random along a tunnel.
+
+Measured hollow fraction of deep rock: **18.0%**.
+
+### Ores
+
+Nine veins, **rarest first** so a common ore cannot overwrite a scarce one where bands overlap.
+
+**A vein is a placed feature, not a noise threshold, and that distinction is the whole section.** A threshold has no notion of size: it paints every cell that clears the bar, so wherever the field happens to sit high across a wide region you get one connected mass. A playtest found a coal seam "humongous", and there was no number to turn down, because the shape was an accident of the field rather than anything the table asked for. `placeVein` is the reference's `OreFeature` instead — a spindle of `size` overlapping spheres strung between two endpoints, each cell inside a sphere converted if it is stone. **The size is now a stated maximum rather than an emergent property**, and the measured largest vein matches the table's own arithmetic.
+
+`veinHeight` is a **triangle distribution** between `minY` and `maxY`, peaking at `peakY` — densest at the ore's own depth, thinning to nothing at both edges. A depth feels like a depth rather than a floor you cross.
+
+`airDiscard` is the reference's `discard_chance_on_air_exposure`, tested **per block** rather than per vein, so the rarest ores cannot be spotted from inside a cave.
+
+| Ore | size | attempts | min / peak / max | airDiscard |
+|---|---|---|---|---|
+| Ancient debris | 3 | 3 | 3 / 8 / 16 | 1.0 |
+| Emerald | 3 | 36 | 10 / 46 / 62 | 1.0 |
+| Diamond | 5 | 2 | 3 / 6 / 17 | 0.7 |
+| Lapis | 6 | 3 | 3 / 13 / 25 | — |
+| Gold | 7 | 3 | 3 / 9 / 20 | 0.5 |
+| Redstone | 7 | 10 | 3 / 5 / 17 | — |
+| Iron | 7 | 35 | 3 / 14 / 27 | — |
+| Copper | 8 | 26 | 10 / 26 / 39 | — |
+| Coal | 12 | 70 | 8 / 26 / 70 | 0.5 |
+
+`attempts` is quoted **per 32×32 column, not per chunk**, because that is how the reference counts. Sizes are the reference's own shrunk about a quarter: a vein is a gameplay unit measured against the player, so it does not scale with world height the way the bands do.
+
+> ⛔ **A vein straddles chunk borders, so its randoms must be drawn in the same order no matter who is asking.** Each column rolls its veins over a 3×3 column neighbourhood (`kVeinReach = 6` blocks of overhang), every vein takes its own `noise::Stream`, and the air-discard roll happens for **every** sphere cell *before* any chunk-bounds test. Skip a roll because a cell landed outside the chunk being built and the two chunks disagree about the same vein, leaving a seam down the border.
+
+Totals were held where a previous session's measurement had already put them, since the reported problem was the size of a seam and not how much ore there is. Density stayed within 3% of that baseline across the rewrite.
+
+### Biomes
+
+**Twenty-seven**, up from seven. Each claims a **box** in the five-dimensional climate space; the first row whose box contains the point wins, and a point outside every box falls to the nearest box by squared distance. Table order is priority, so specific rows are listed before general ones and a general row may quote a wide box without carving holes in it.
+
+A box says something a centre-and-falloff never could: *this biome is only ever cold*. The old scheme let every biome bleed a little way into every other.
+
+Frozen Ocean · Warm Ocean · Deep Ocean · Ocean · Snowy Beach · Stony Shore · Beach · Frozen River · River · Frozen Peaks · Jagged Peaks · Stony Peaks · Snowy Slopes · Grove · Meadow · Windswept Hills · Gravelly Hills · Snowy Taiga · Snowy Plains · Taiga · Dense Forest · Swamp · Badlands · Desert · Savanna · Forest · Plains.
+
+Measured coverage: Plains 14.7%, Ocean family 16.6%, snowy family 23.1%, rivers 6.1%, forests 9.6%, beaches 5.0%, peaks 3.5%. **Every one of the twenty-seven appears**; the probe logs a warning for any that does not.
+
+**`BiomeTag` is a bitmask and is how everything else asks questions.** The creature spawn rules used to name biomes outright, so growing the roster from seven to twenty-seven would have meant editing fifty rules and forgetting one would have been silent. A rule now asks for a property — `Grassland`, `Forest`, `Highland`, `Frozen`, `Swamp` — and a new biome inherits every rule it qualifies for. That is the reference's `has_biome_tag`.
+
+Two biomes the roster finally makes real: the **wolf** lives in taiga and forest as the reference has it rather than on a stony stand-in, and **slimes, the frog and the bogged** live in a swamp instead of on "damp low ground".
+
+### Named divergences
+
+- **Terrain is single-valued**, so no overhangs and no arches. See the box above; this is the one place we deliberately go further than the reference rather than matching it.
+- **No cave biomes.** Lush caves, dripstone and the deep dark need moss, dripstone and sculk, none of which exist. The `depth` climate parameter is therefore not sampled at all.
+- **No aquifers.** They give underground water a *local* level; we have one sea level, no lava, and dry caves below it, which is the same outcome for less machinery.
+- **No carvers.** Ravines and the reference's wide winding tunnels are gone; noise caves cover the rest. `RESEARCH.md` §15.9 records why a carver would break generation purity and what the one-line fix would be.
+- **Caves at full resolution**, as above — and since M20r nothing else is on a lattice either.
+- **Badlands has no banding.** The reference's 192-entry clay-band table needs colours of terracotta we do not have, so ours is plain terracotta with clay patches.
+- **No falling blocks.** Sand and gravel left over a carved cave stay put — which is the reference's behaviour too until a block update reaches them.
+- **No shoreline disk features.** The reference scatters `disk_sand`, `disk_gravel` and `disk_clay` over dirt and grass, each gated on the block above the ground being **water**. That is its real source of patchy sand at a waterline, and it is a legitimate thing to add later. It was skipped at M20r on purpose: the report being fixed was that there was already too much random patchiness, so more of it would have answered the wrong complaint.
+- **No biome tint on grass or leaves.** Tried at M19a, reverted; see `CLAUDE.md`.
+
+### Measuring it
+
+`worldgen_probe=1` in `settings.cfg` censuses the generated world to the log and exits without opening a window. It reports the surface range, the share of columns below sea level, every biome's share, **each biome's top block**, the hollow fraction of deep rock, and per-ore counts.
+
+Three counters are **assertions, not statistics, and every one of them must read zero.** Each exists because a player found the thing it now measures:
+
+| Counter | Counts | Found by |
+|---|---|---|
+| `FLOATING-TERRAIN` | solid cells above the column's surface, excluding water and tree parts | floating islands, M20q |
+| `PILLARS` | columns standing 5+ blocks above every one of their four neighbours | the sheep that walked off one, M20r |
+| `DRY-BED` | gravel or sand on the top of a column that is above the waterline | the ribbons across grassland, M20r |
+
+`FLOATING-TERRAIN` prints its own sanity check beside it (`tree cells above surface 22403, so the probe can see up there`), because a zero that means "the probe is blind" and a zero that means "the bug is fixed" look identical otherwise, and that has cost a round here before.
+
+It prints its own sanity check beside that last number (`tree cells above surface 22097`), because a count of zero is worthless unless the probe can be shown to see anything up there at all.
+
+**Run it after any change to terrain.** Every number in the two sections above has been wrong at least once in a build that compiled clean at `/W4` and produced no validation errors.
 
 ---
 
@@ -264,7 +500,28 @@ This requires two things that must not be removed:
 - `VkPhysicalDeviceVulkan13Features::dynamicRendering` enabled at device creation.
 - Physical-device selection rejects anything reporting less than `VK_API_VERSION_1_3`, so an unsuitable GPU produces a clear "no suitable GPU" error rather than a confusing failure inside `vkCreateDevice`.
 
-The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`. The depth image is transitioned `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL` at `EARLY_FRAGMENT_TESTS` and cleared to `1.0` (the far plane) each frame; its contents are never needed after the frame, so `storeOp` is `DONT_CARE`.
+The swapchain image is transitioned `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` before rendering and `→ PRESENT_SRC_KHR` afterwards, and the submit waits at `COLOR_ATTACHMENT_OUTPUT`. The depth image is cleared to `1.0` (the far plane) each frame and **kept**: the lighting pass reads it back to work out where each pixel is in the world, so it is created `SAMPLED` and its `storeOp` is `STORE`.
+
+### What a frame is made of
+
+Eight passes, in this order, all through `vkCmdBeginRendering` except the copy, which is a plain image copy:
+
+| Pass | Writes | Why it is separate |
+|---|---|---|
+| Shadow | one depth layer per cascade | Everything that shades reads it, so it goes first |
+| Geometry | three G-buffer images + depth | Writes what a surface **is**, and shades nothing |
+| Deferred | HDR scene colour | Lights every opaque pixel on the screen in one draw |
+| Scene copy | a duplicate of the scene colour | Water reflects the world out of it; it cannot read the image it is drawing into, and must not see itself |
+| Forward | HDR scene colour | Sky, water, rain, the block outline — everything that blends, which cannot go through a G-buffer at all |
+| Bloom | the bloom pyramid | Eight downsamples and seven upsamples |
+| Tone map | the swapchain | Exposure, a curve, and the bloom mixed in |
+| UI | the swapchain | **No depth attachment at all**; order alone decides what covers what |
+
+> ⛔ **Alpha in the scene colour is a distance, not an opacity.** The deferred pass writes each pixel's distance from the eye there, and the sky is parked at a million. That is what lets water both reflect the world and measure how much water a view ray crosses out of **one** copied image, instead of a second depth image with its own layout transitions. Nothing downstream reads alpha — bloom and the tone curve take rgb — and the forward pass overwrites it afterwards.
+
+**A blended normal is not a normal and a blended roughness is not a roughness**, which is the whole reason transparency stays forward. The G-buffer is written opaque or alpha-tested, never mixed.
+
+The three G-buffer images hold: albedo and face shade; sky light, block light, ambient occlusion and emissive; roughness, metallic and an **octahedrally encoded** normal in two bytes. Octahedral rather than storing three components, because a rotated creature limb and a plant blade at forty-five degrees have to go through the same path as an axis-aligned face.
 
 ### Winding and culling — do not "fix" this by reasoning
 
@@ -302,6 +559,14 @@ Temporary, until there is a real settings and input-binding screen (`TIMELINE.md
 | `F5` | Toggle the diagnostics overlay |
 | `F6` / `F7` | Decrease / increase render distance (saved to `settings.cfg`) |
 | `F8` / `F9` | Spawn a Bramble 12 m ahead / a charged one. **Debug** |
+| `F10` | Cycle the tone curve. The one setting that is purely taste, so it exists to be compared on screen |
+| `F11` | Toggle bloom |
+| `F12` | Cycle ten surface debug views. **Debug** — this is how a deferred renderer is read |
+| `G` | Cycle shadow quality: off, low, medium, high |
+| `C` | Cycle clouds: off, fast, fancy |
+| `V` | Force the weather: rain, storm, clear, back to the cycle |
+
+The F-keys were full by M23, which is why shadow quality is on `G`. The current tone curve and shadow quality are both **shown on the F5 overlay**, because choosing between them means looking at the screen and the screen has to say which one it is showing.
 
 **The debug keys are deliberately their own keys, not modifiers.** `Shift+F8` spawned a charged Bramble for about an hour, and because `Shift` is *sneak* the act of spawning one left the player crouched at 1.3 m/s against a creeper doing 2.4 — so backing away, which is the entire defence against an exploder, could not work. It read as a fuse bug and was an input one.
 
@@ -358,7 +623,9 @@ These are tuning numbers, not part of the game's identity, and are expected to c
 1. **Falling water is its own block.** `BlockId::WaterFalling` is water with water directly above it — the reference's `0x8` bit. It counts as **full**, which is why a column that lands spreads the whole seven blocks.
 2. **The block above is answered before any neighbour.** Fed from overhead means falling, and a falling cell consults nothing sideways.
 3. **A cell with somewhere to drop does not run sideways at all.** This is what makes a waterfall a column rather than a widening cone: every cell in mid-air has air beneath it, so none of them feeds a neighbour, and only the one that lands pools. **"Can I drain" and "do I pool" are separate predicates and must stay separate** - draining needs a cell below that can *receive* water, pooling needs **solid ground**, and a cell resting on water can do neither. Answering both with one test dead-ended every flow at the first dip it found, because a filled hole still scored as a hole forever.
-4. **The weight search picks the direction.** Every direction starts at 1000 and is replaced by the number of steps to a drop reachable within four; water runs only the lowest-scoring ways. That sends a stream one block wide at a cliff edge and lets it find a hole in the floor. With no drop in range every direction ties at 1000 and a flat floor gets the even spread it should. **A source within four blocks of an edge therefore runs *only* at the edge and spreads nowhere else** - that is the reference's behaviour, not a fault.
+4. **The weight search picks the direction, and it only ever picks where water *goes*.** Every direction starts at 1000 and is replaced by the number of steps to a drop reachable within four; water runs only the lowest-scoring ways. That sends a stream one block wide at a cliff edge and lets it find a hole in the floor. With no drop in range every direction ties at 1000 and a flat floor gets the even spread it should. **A source within four blocks of an edge therefore runs *only* at the edge and spreads nowhere else** - that is the reference's behaviour, not a fault.
+
+> ⛔ **The weights decide what an empty cell receives. They never re-decide a cell that already holds water.** The reference's `getNewLiquid` recomputes a level from the neighbours with no slope test in it at all; the weights belong to spreading alone. Running them on every evaluation let a settled cell be starved by a weight that changed **because of its own outflow** — water reaches a ledge, the column below fills, that direction stops scoring as a drop, a rival wins, the cell empties, the column drains, the weight flips back. Air, water, air, water, once per tick, for ever, and only ever within four blocks of a drop. `arriving` in `updateFluids` is the one line holding the two apart; do not merge them back.
 
 **Water washes plants away.** Tall grass, flowers, dead bush and torches are destroyed and dropped when a flow reaches them, rather than damming it - without that, water on a meadow spread full of holes. `World` records what it destroyed and the owning loop turns it into drops, because `World` has no idea items exist.
 
@@ -470,7 +737,7 @@ A vertex carries a texture coordinate and a layer index. The layer is declared `
 
 ### Creature skins
 
-All fifty-six models read their box faces out of `assets/textures/creatures.png`, one net per species at a named row offset. **Every net origin and box dimension is recorded in `TEXTURING.md` §13** and the code must agree with it exactly. The sheet is **128×3552**; `kCreatureSheetWidth`/`Height` in `Creature.hpp` is the single owner of that size and `Main.cpp` checks the PNG header against it.
+All fifty-seven models read their box faces out of `assets/textures/creatures.png`, one net per species at a named row offset. **Every net origin and box dimension is recorded in `TEXTURING.md` §13** and the code must agree with it exactly. The sheet is **128×3680**; `kCreatureSheetWidth`/`Height` in `Creature.hpp` is the single owner of that size and `Main.cpp` checks the PNG header against it.
 
 The sheet is generated in **two stages, by two scripts with disjoint row ownership**:
 
@@ -491,6 +758,8 @@ powershell -NoProfile -File tools\make-creature-skins.ps1   # runs both stages
 | 768–3071 | **none** | the atlas only — every species from the wolf onward, plus the charged Bramble's shell, the drowned's clothing, the five axolotl liveries and the tropical fish's two shapes with six pattern overlays each |
 
 **A species may have more than one skin.** `CreatureSpecies::variantCount` with `Creature::variant` picks a whole net at `base + variant × rows`: five liveries for the axolotl, twelve for the tropical fish. The variant is rolled at spawn and **is not saved yet**, so a reload re-rolls it — cosmetic, and it waits on a save-format version bump.
+
+**A mood is a second skin row, not a variant.** The wolf and the bee each get one, chosen by `creature.target != CreatureTarget::None` at draw time rather than stored — the same "derive it, never remember it" rule the chest pairing follows, and it cannot go stale because there is nothing to update. The bee's angry sheet differs from its calm one in exactly **22 texels**, all in the face at x 9–17, y 12–15, where the near-black eyes become `228,0,24` red. Measured, not guessed: comparing the two rows texel by texel is a two-line check and the only way to know a mood sheet is not simply a duplicate.
 
 **This is sanctioned and temporary, not a mistake to clean up** — `START-HERE.md` §5 has the arrangement and why it exists. Do not re-author these skins; keeping `TEXTURING.md` §13 and §14 accurate is the useful contribution. `assets/textures/hud.png` is the other sanctioned exception, also to be replaced before release.
 
@@ -562,6 +831,18 @@ Two things to know before using it. **Creatures are frozen**, so they never sett
 
 **The aquatic fields, added at M20i.** `swims` is the whole archetype: no gravity in water, a heading in three dimensions, and no ability to walk unless `walksOnLand` says otherwise — a cod flops when stranded, a turtle walks. `breathesAir` false runs the *same* air counter the other way round, so a fish suffocates out of water. `dryOutSeconds` is a separate clock again, because a dolphin drowns if held under **and** dries if kept out. `jets` makes speed a pulse rather than a constant. `puffs` drives three whole models. `glows` feeds the skin full light. `spawnsInWater`, `maxSpawnY` (Bedrock's `height_filter`) and `maxLoaded` (its `density_limit`) decide where and how many.
 
+**`flies` is the airborne mirror of `swims`, and the bee is its first user.** No gravity at all, a heading in three dimensions, and no pathfinder — there are no floors to plan a route across, so `walkTo` hands a flier straight to the steering fan the way it already did a swimmer. `steerInAir` is `steerInWater` with the second test deleted: a heading is good when the body still fits, and air needs no confirming the way a water cell does.
+
+**They are two flags rather than one "moves in 3D"**, because everything else about them differs — a swimmer is confined to water and suffocates outside it, a flier is confined to nothing and is perfectly happy to land. `flies` deliberately does *not* imply `walksOnLand = false`: a bee settles on a flower.
+
+Three things a flier needs that a swimmer does not:
+
+- **A height band**, held by `FlyWander` at 2–6 blocks above whatever is beneath it. A swimmer has a surface and a seabed; a flier has neither, so without the band a bee climbs on its first upward roll and never comes back. Below the floor it climbs *outright* rather than merely being forbidden to sink — it spawns on the ground, and a clamp alone would strand it there whenever the rolled angle happened to be level.
+- **A dive angle while chasing.** The band belongs to `FlyWander`, and `FlyWander` is not running while `MeleeAttack` holds the movement controller — so `walkTo` sets the pitch itself for a flier. Without it a provoked bee kept its cruising altitude and sailed over the player forever, close enough to look interested and never once in reach.
+- **No knockback.** `strike` skips the impulse for anything that flies, because a flier's own locomotion owns every axis of its velocity: the assignment fights it rather than moving it, and what it reads as is the animal being thrown across the sky.
+
+**The wing beat is a separate branch from the bird's, not a widened one.** A bird's three flap numbers exist so the wings open on takeoff and keep beating for a moment after landing; an insect's never fold, so only the phase moves, at the reference's 2.1 radians a tick. The gate could not simply be widened because `fallDrag < 1` is *also* what grants slow descent, and a bee wants the beat without the drag.
+
 ### How a population arrives, and what happens to it
 
 **Two spawn systems, not one**, which is how the reference does it too.
@@ -613,13 +894,19 @@ Reworked 2026-08-05 against the shipped Bedrock behaviour pack. Six rules, all i
 - **Anger has a species' own length.** `angerSeconds` replaces a flat six seconds for the entire roster: a wolf holds a grudge for 25, a polar bear for 500, a spider for 10, a silverfish effectively forever. It also carries the spider's light rule past the moment you light a torch — `NearestAttackableTarget` sets the grudge when it acquires in the dark, and `canContinue` accepts a live grudge as a reason on its own, so brightening the room no longer calls it off mid-chase.
 - **A blow does not always call for help.** `alertRange` is per species and **zero for the undead**, because the reference's `alert_same_type` is off everywhere but the silverfish and its anger broadcasts belong to `minecraft:angry`. So a horde has to be walked into rather than summoned by hitting one of them. A wolf pack hears at 20 m, a bear at 41, a silverfish at 20. The herd ranges on the passives are **ours** — the reference gives farm animals no alerting whatsoever, and a flock that scatters together is worth keeping.
 
-Two more numbers came off the same pass. **Melee reach is the creature's own box grown by 0.8 m horizontally** (`melee_box_attack.horizontal_reach`) plus the target's half-width, rather than a flat 1.5 m that gave a silverfish a polar bear's bite. And a blow needs the creature **facing** you within `melee_fov`'s 90°, so walking around one buys the half-second it takes to come about. `chaseSpeedScale` and `panicSpeedScale` are the reference's per-behaviour `speed_multiplier`: the skeleton family and the Bramble sprint the last stretch, a fleeing villager is slower than it walks.
+Two more numbers came off the same pass. **Melee reach is the creature's own box grown by 0.8 m horizontally** (`melee_box_attack.horizontal_reach`) plus the target's half-width, rather than a flat 1.5 m that gave a silverfish a polar bear's bite. And a blow needs the creature **facing** you within `melee_fov`'s 90°, so walking around one buys the half-second it takes to come about.
+
+`chaseSpeedScale` and `panicSpeedScale` are the reference's per-behaviour `speed_multiplier` — but **in our unit, which multiplies `runSpeed`**, and the two are not interchangeable. A Bedrock mob has a single `movement` speed and scales that; we author walk and run separately, so `runSpeed` already carries the meaning of "in earnest". A value below 1.0 in that column therefore says *flee slower than you run*, which lands within a whisker of a stroll.
+
+> ⛔ **Never transplant a reference `speed_multiplier` straight into these fields.** The villager and wandering trader carried the reference's 0.6 for exactly that reason and it shipped: struck, a trader bolted at `1.8 × 0.65 = 1.17` against a walk of 1.0, a 17% margin nobody can see, and a playtest reported he "was walking as if i wasn't a threat". The animals were authored in our unit (1.2–1.5, i.e. *faster* than a run) so the same column held two different units at once. Both humanoids are now 1.0 — the least athletic bolt on the roster against a rabbit's 1.5, which is the reference's timid villager surviving the change of unit.
 
 ### Closing in, and the blow itself
 
 **A chase ends when the two bodies meet.** The reference paths to a node beside its target and the path simply stops there, so a mob arrives, stands, and swings. Ours had no arrival condition at all: it steered at the player for as long as it had a target, and since nothing here collides with the player it walked straight through, overshot, and had to come all the way about — which at a limited turn rate is an orbit, with the player on the inside of it taking a hit on every pass.
 
-The stop distance is the two half-widths, so the boxes touch. **Reach is deliberately wider than that**, which is what lets a blow still land on someone who has just been knocked back out of contact. "Arrived" also means *on the same footing* — the vertical gap has to be within the creature's own `stepHeight`, because anything more is something to climb and both the step-up and the jump read `walking`, so a zombie at the foot of a one-block ledge has to keep walking into it.
+The stop distance is the two half-widths, so the boxes touch. **Reach is deliberately wider than that**, which is what lets a blow still land on someone who has just been knocked back out of contact. "Arrived" also means *on the same footing* — the vertical gap has to be within the creature's own `stepHeight`, because anything more is something to climb and both the step-up and the jump read `walking`, so a zombie at the foot of a one-block ledge has to keep walking into it. **A flier is exempt for the same reason the hopper is**: it has no footing to share and closes in three dimensions, so proximity alone is arrival, and without the exemption a bee sails through the player and has to come about for another pass.
+
+> ⚠️ **The blow's vertical gate is a real box overlap, and briefly was not.** It read `abs(toPlayer.y) < species.height`, which is roughly right for two things standing on the same ground and badly wrong otherwise: the creature spans `[0, height]` and the player spans `[toPlayer.y, toPlayer.y + 1.8]`, so the honest test is `toPlayer.y < height && toPlayer.y > -1.8`. The symmetric version measured the player against **the creature's own** height, so a bee — half a block tall and never on your footing — could reach you, face you, and never once land a sting. `touching` three lines above had computed the correct asymmetric test all along; the attack gate simply was not using it, and now both read one named value.
 
 **A hopper never stops, it rebounds.** A slime has no melee goal at all in the reference — it has `slime_attack` and an `area_attack` that hurts whatever it lands on, so arriving on top of you *is* the attack and stopping short would leave it sitting in front of you doing nothing. Bedrock separates the two bodies with `pushable`, which we have no equivalent of, so **the player's body is treated as a wall instead**: the part of the slime's velocity heading into you is reflected back out at 60% of its speed, its sideways component is kept, and it is lifted clear of the floor so the recoil is a real hop rather than something the next tick flattens. It lands, gathers and comes again. Bedrock also shortens `movement.jump.jump_delay` from 0.5–1.5 s to 0.16–0.5 once a slime turns aggressive, so the gather is a third as long while it has a target — worked out once and used for the burst speed as well, or the two disagree about how much ground a hop has to cover.
 
@@ -638,8 +925,23 @@ Neither needs an "am I swinging" test: both curves are zero at both ends by cons
 
 **The quadrupeds do not animate a blow**, which is the reference's behaviour too — a wolf and a spider simply bite. The reference's `leap_at_target` (wolf and spider, 0.4 upward from 2–4 m out) and the polar bear's `stomp_attack` are **not built**.
 
+### Dying
+
+**A killed creature tips over onto its side before it goes**, and it is one rule for every species. `health <= 0` starts `deathTimer`; the model rolls a quarter turn about its **own forward axis**, pivoting where it stands, and the body is retired at one second — the reference's twenty-tick life. There is no per-species table and there is not meant to be one: every box, limb and head group in `buildMesh` is placed along three local axes, so rolling *those* rotates the whole animal rigidly and anything added later inherits it. `modelUp` is named that rather than `worldUp` for exactly this reason — it is world up only while the creature is standing.
+
+**The easing is smoothstep where the reference uses `sqrt`.** Java's curve puts a quarter of the whole turn inside its first tick, which reads as the body being swatted flat; ours accelerates over and decelerates into the ground, which is what was asked for. The timings are the reference's: 0.625 s of fall, then it lies there.
+
+**The damage tint stays on for the whole fall.** Fading back to the animal's own colours half way over reads as it recovering.
+
+**The body is raised as it falls**, by `halfWidth` times the sine of the angle, because the fall pivots at the feet and anything a half-width to one side would otherwise finish that far under the floor. `halfWidth` is the collision box and is deliberately narrower than the model, so a broad animal settles slightly *into* the ground rather than hovering over it.
+
+**What a swing can hit is the creature's own collision box**, through a ray-versus-box test padded by 0.15 m. It was a 0.6 m sphere centred on the body's middle, which is not a shape any animal has: it covered most of a chicken and a fraction of a camel, so a camel could only be struck in a band around its belly and its legs could not be hit at all. The padding is there because `halfWidth` is deliberately narrower than the model, so a limb that is visibly in the way should land a blow.
+
+A corpse stops deciding, stops answering the aim ray — or it shields whatever is behind it for a second after it is already dead — and is not written to the save. **It stops where it died**: the killing blow assigns knockback like any other, and carrying it slides the body along the ground through the whole fall, so the horizontal velocity is dropped outright rather than decayed. A **flowing cell does not carry it either**, which is the one place a corpse diverges from everything else in the water. Downward motion is kept, because something killed in mid-air still has to reach the floor; upward is not, or the same blow's lift tosses it. Its intent is *cleared* rather than left alone, because `walking` is sticky; and the corpse case comes first in the locomotion chain rather than relying on that flag, because a stranded fish flops and a slime hops on their own timers and neither reads `walking`. **A slime splits when the fall finishes** rather than the instant it is hit, which falls out of the retirement moving and is also better.
+
 **`target` and `running` are re-derived from nothing every tick**, so neither can go stale: a producer that stops running stops asserting the target, and the consumers simply find nothing there.
 
+**What a kill leaves behind is `lootFor`**, a switch beside the species table rather than three more columns on sixty rows, and it carries **two drops** because most of the roster has two — an animal leaves its meat and its hide, a spider its string and its eye. Only a kill drops anything: retiring at a distance or burning off at dawn is the world forgetting about an animal, not it dying in front of you. It covered six species until 2026-08-08, which is why most of the food and mob materials in the catalogue had no source at all — and **the salmon shared the cod's row**, so the one fish with its own meat item could never produce it.
 **A creature's head turns separately from its body.** `LookAtPlayer` claims `Look` alone and sits *below* `Wander`, which claims `Move` — so the two must run together, and a chicken that walks and watches at once is the proof that flag arbitration works. In `buildMesh` the head parts are drawn between `beginHead(neckForward, neckUp)` and `endHead()`, which swap the three local axes for the duration; a species that never calls them renders exactly as it did before, which is what let this be rolled out one animal at a time. The frog, the slimes and the silverfish have no separable head and do not turn one.
 
 **The head turns about the neck joint, and getting that wrong is very visible.** It used to rotate the head's frame about the *creature's own origin*, so anything placed forward of centre **orbited** rather than turning — the head physically swung out sideways and lunged forward as it looked, dragging the neck with it. `beginHead` now takes the neck joint in model units and the frame turns about that, so the neck stays planted and the head turns on top of it. The pivot is taken from the head box's own numbers by one of three rules: the **rear face** for a head carried out in front, the **bottom face** for one sat on top, and the **base of the neck** for anything long-necked, where the neck is part of what turns. Splitting the old single `headParts(bool)` into two lambdas is what makes that safe — a head group that forgets its pivot does not compile.
@@ -734,7 +1036,7 @@ Three things make it actually work, and each was a separate bug on the way:
 
 **Right-click reuses `placeTimer`.** Without a cooldown one click at 120 fps drops seven creatures on the same square — the same shape as the instant-dig bug that stripped a row of blocks per click.
 
-**Fifty-six eggs would overflow the thirty-six inventory slots**, so they are not handed out at startup at all. Creative begins on the block kit and every egg is taken from the catalogue on the inventory's left card, which is what that card is for. An `F10` toggle used to swap the two sets and was removed once the catalogue existed.
+**Fifty-seven eggs would overflow the thirty-six inventory slots**, so they are not handed out at startup at all. Creative begins on the block kit and every egg is taken from the catalogue on the inventory's left card, which is what that card is for. An `F10` toggle used to swap the two sets and was removed once the catalogue existed.
 
 ### Creature sizes
 
@@ -782,26 +1084,115 @@ Two different numbers, and conflating them is a bug either way. The **collision 
 
 Chicken, donkey, rabbit and wolf were moved from Java's heights to Bedrock's on 2026-08-03, so the chicken and rabbit grew, the donkey grew to match the horse (as Bedrock has it), and the wolf shrank slightly. Cow and Bramble stay on their playtested boxes deliberately.
 
+### The smoker
+
+**A furnace that cooks at twice the rate, and it cost no new screen.** `isFurnace` answers true for both families, so the block entity, the screen, opening it, breaking it and spilling its contents all work untouched - none of them ever needed to know which kind it is. Eight ids in the same order as the furnace's, four facings unlit then lit, so the facing is arithmetic rather than a second switch.
+
+**The speed is one multiplier on the whole tick**, not two rates. The reference's smoker cooks in five seconds instead of ten *and* burns its fuel twice as fast, so the items per lump of charcoal are unchanged - running the entire tick at double time reproduces both exactly, and there is no second number to fall out of step.
+
+**Named divergence:** the reference's smoker takes food and nothing else. There is no food yet, so ours cooks whatever a furnace would. Narrowing it is a predicate on the smelt table the day food exists.
+
+### The smithing table
+
+**Two inputs and a result**, borrowing the furnace's slot regions so the whole click, drag and shift-click path works unchanged. The result is a **preview** computed from what is in front of it, like a crafting grid, rather than something the block is slowly making - so it goes through the crafting take path, with `pendingResult` and `spendIngredients` standing in for the two calls that used to be hard-coded to the grid matcher.
+
+**It is where the Emberite upgrade lives**, and that is the point of building it: the upgrade shipped as a shapeless two-item recipe for exactly one milestone, which was a named divergence made because there was no table. `smithingResult(base, addition)` is its own small table rather than a `Recipe`, because an upgrade *keeps* the item it is given and no grid pattern can express that. The reference also needs a template item, which we have no source for.
+
+**No facing ids.** The reference keeps a smithing table's faces pointing the same way however it is placed, so which side you see is a fact about the block - the crafting table's arrangement exactly.
+
+### The chest
+
+**Twenty-seven slots, and the first screen with a slot region of its own.** Every other screen reuses `craftSlots` — the furnace and the smithing table both borrow its first two. A chest cannot: its contents are neither ingredients nor a result, they outlive the screen being closed, and there are twenty-seven of them against a maximum grid of nine. So it gets `Region::Chest`, and `stackAt` resolves that straight into the block's own storage rather than into a shared buffer.
+
+**Closing is where the shared buffer bites.** A crafting grid's contents are handed back to the player, because they exist only while the screen is up. A furnace's are **discarded** — they were only a view onto the block, which keeps its own copy. For one milestone the furnace branch did neither: it skipped the give-back (right) but did not clear the slots (wrong), so the copies were still sitting there when the next screen opened, showed up in its crafting grid, and were handed over when *that* closed. Two keystrokes for free items. A chest needs nothing here, because its stacks were never in the buffer at all.
+
+**Shift-click crosses the two halves rather than shuffling within one.** In every other screen a shift-click moves between hotbar and storage. With a chest open the interesting move is inventory→chest and chest→inventory, so `quickMoveTargets` takes an earlier branch and returns the *other* container. This is the reference's behaviour and the only one that is any use.
+
+**Persistence mirrors the furnace exactly** — `chests.dat` beside `furnaces.dat`, same magic-version-seed header, same atomic temp-then-rename, same rule that an empty table *deletes* the file rather than leaving a stale one that would restore chests the player has already broken. `PlacedChest` is written as raw bytes and has the same `static_assert` guarding that.
+
+**Four facing ids**, unlike the smithing table, because the latch is on one face. `chestFacing` has the same two overloads the furnace's does.
+
+**Two chests shoulder to shoulder open as one fifty-four slot container**, and the pairing is **worked out from position alone, never remembered**. That is the important decision: a saved "who is joined to whom" would have to survive a reload, stay consistent when a neighbour is broken, and be written into `chests.dat`. Instead `chestPartnerAt` walks back to the start of the run of matching chests and pairs off in twos from there, so both halves always agree and the answer costs no saved state. A run of three leaves the third single; a run of four is two pairs. They must share a facing, and they join **across** the latch (`chestJoinsAlongX`) so the side faces touch, never front to back.
+
+The two blocks stay two separate `Chest` entries holding twenty-seven each - only the screen joins them, so breaking one half spills only that half and leaves the other as an ordinary chest.
+
+**The double chest is the first screen taller than the standard card.** `panelPixelHeight(kind)` and `storageShiftY(kind)` replaced two constants; `kPixel` stays fixed to the 166-tall panel on purpose, so a taller screen grows downward at the same slot size rather than shrinking everything to fit. The panel art is the ordinary one with its empty middle **stretched** by three rows and the player's grid moved down with it, so no frame or bevel is redrawn.
+
+**A double chest is textured as one wide chest**, so the latch sits in the middle of a single long lid rather than appearing twice. This cost **six** layers rather than the eight ids once predicted, because the half is not stored in the block at all — it is *derived*. `chestHalfFor(facing, dx, dz)` turns "which way am I facing and which neighbour am I joined to" into `Left` or `Right`, `gatherVolume` packs that answer into two spare bits of the flags array the waterlogged bit already occupies, and the mesher passes it to `blockTextureLayer`. **Zero extra block ids and zero extra memory**, and nothing new to save — the half is recomputed from position exactly the way the pairing itself is.
+
+The outer side face was measured against the single chest's and is **pixel-identical** (0 differing texels), so it is reused rather than duplicated; only the top, front and back differ per half. The back needs the opposite alignment from the front, because a back face's `u` runs the other way in the mesher's face table.
+
+> ⚠️ **The paired lids are not mirrored, and that was measured.** They used to be, on the theory that a box's UP rect unwraps with `u` reversed — which a single chest can never contradict, because its lid is symmetric. Per-column luminance settles it: the dark border sits at column 0 of `normal_right`'s UP rect and column 14 of `normal_left`'s, exactly where each front's does. Mirrored, both borders land against the seam and every double chest wears a dark line down the middle of its lid.
+
+> ⚠️ **Mojang's `normal_left.png` is the viewer's *right* half, and `normal_right.png` is the viewer's *left*.** The names describe the chest's own handedness, not the camera's. This was settled by measurement, not by reading the filename: per-column luminance shows `normal` carries a border at *both* ends while each half carries one at a single end, and the buried face is the transparent one. Trusting the filename puts the latch on the outside corners and splits the lid down the middle.
+
+**Named divergences:** no opening animation, no moving lid, and the block is a full opaque cube rather than the reference's slightly-inset model.
+
+### The id space
+
+`BlockId` is a **`std::uint16_t`**, and `ItemId::kFirstToolItem` is **4096**. Both were widened together when the byte-wide id space ran down to three free values.
+
+**Why widening rather than reclaiming.** The eight water levels and eight stair orientations are the two biggest consumers of ids, and packing them into a side array would have bought back roughly thirty values — a year's worth at the rate blocks are being added, in exchange for unpicking `isWater`, `waterLevel` and `blockShape`, a second per-cell array to save and load, and the same conversation again later. Widening costs one byte per cell **once** and ends the question permanently: 253 blocks used of 4096.
+
+**The 4096 ceiling is not the type's limit, it is the item space's.** Block items share the block numbering and non-block items start above them, so the two runs must not collide. A `static_assert` on `kLastBlock` holds the line, and it is the thing that will fail loudly if blocks ever do get that far.
+
+**Old inventories still read correctly** because `upgradeLegacyItemId` shifts any stored id at or above the old 256 boundary up by the difference. Chest and furnace files carry their own version constants, so the shift is applied exactly once, only to files written before the move.
+
+**What it costs, measured.** A chunk's block array went 32 KB → 64 KB, so a resident chunk is 36 KB → 68 KB including its waterlogged bits. At `render_distance=8` with 1083 chunks resident the process peaks at **328 MB** working set, of which the widen accounts for about **34 MB**. For scale, the reference eats roughly 1.6 GB at a comparable render distance. Growth here is expected and is answered by optimisation over time — a palette per chunk would give most of it back whenever that becomes worth doing.
+
 ### Adding a block type
 
-Ten steps, and the compiler catches almost none of them. Work through the list.
+Eleven steps, and the compiler catches almost none of them. Work through the list.
 
-1. Append a `BlockId`. **Never insert** — ids are written to disk, so moving one rewrites every saved chunk.
+**First, check whether it is a *cut shape* of a block that already exists** — a stair, a slab, a wall, a fence, a gate, a carpet or a pane. If it is, none of this applies: add one row to the matching `kXFamilies` table in `Block.hpp`, bump the count beside the enum, and add the recipe loop's material. Everything else is forwarded through `shapedParent`. That is how six hundred and forty blocks arrived with no art and no table rows.
+
+1. Append a `BlockId`. **Never insert** — ids are written to disk, so moving one rewrites every saved chunk. There is plenty of room: `BlockId` is a `std::uint16_t` and a `static_assert` holds the last id below 4096.
+
+   **The table-driven run is now three runs, and that is why.** `kFirstExtraBlock`…`kLastExtraBlock` is followed in the enum by the hive, and the second run is followed by the cut-shape runs, so growing either in place would renumber everything above it and silently rewrite saved worlds. Each new run is appended at the end instead, and `isExtraBlock` spans all three exactly as `isCrossBlock` already spans its two. `extraBlockIndex` maps all three onto one table; **their sprite layers stay in one run**, because `ExtraBlockInfo::layer` is an offset from `kTableSpritesFirst` and one origin is easier to keep true than three.
 2. Move `kLastBlock` to the new id. Anything that walks every block reads it, so a stale one silently leaves the newest block out of the catalogue.
 3. Map its texture to `block\<name>` in `tools/make-reference-blocks.ps1` and re-run it. Our own 16×16 in `assets/textures/blocks/` is the fallback; a missing file falls back to the white layer and is named in the log.
+
+   **`kTableSprites` is derived, not written down.** It was the single most dangerous constant in the file — nothing asserted it, and one too small meant the last few blocks silently sampled whichever run followed, which is a wrong texture with no error anywhere. `maxTableLayer()` now scans the table for the highest `.layer`/`.topLayer` and adds one.
 4. Add its filename to the texture list in `game/src/Main.cpp`, in layer order.
 5. Add an entry to `TextureLayer` in `game/src/world/Block.hpp` — **and move `SpawnEggFirst` by however many you added** (it is 67 today). Getting this wrong does not fail; it slides all thirty-six sprites of the *first* spawn egg run *and* the eleven resource sprites behind them. `Main.cpp` compares it against the loaded list at startup and names the mismatch.
 
    **Spawn eggs live in two runs and that is deliberate.** The first is 36 long and is followed on disk by the resources, the buckets and the water frames; species 36 and up take a *second* run at the very end (`kExtraSpawnEggFirst` / `ItemId::SpawnEggExtraFirst`). Widening the first would shift every resource and bucket id, and an item id is written into the player's saved inventory. `spawnEggIndex`, `spawnEggForIndex` and `itemTextureLayer` all span both runs; **`allItems()` re-orders them so the catalogue shows all fifty-six together** even though their ids are not contiguous.
 6. Return it from `blockTextureLayer()`.
 7. Name it in `blockName()`.
-8. Give it a category in `categoryFor()` in `item/Item.hpp`, or it silently lands in the Items tab.
+8. Give it a category in `categoryFor()` in `item/Item.hpp`, or it silently lands in the Items tab. **If it spends ids on orientation or contents, add its family test to `isCanonicalBlockItem` too** — otherwise the catalogue shows one row per id. The beehive's eight appeared as eight separate entries until it was named there, and the user found it by opening the inventory.
 9. Give it hardness, a harvest tool and a tier in `item/Tool.cpp`, and a blast resistance in `world/Explosion.cpp`. Both have defaults, so a missed block works but behaves blandly.
-10. If it is not a full cube, add it to `blockShape()`, and to `isCutout()` if it has transparent pixels.
+
+   > ⛔ **`harvestTier`'s default is what decides whether a block drops at all bare-handed**, and the second table run defaulted every one of its ~200 blocks to the wood tier — so punching a plank, a wool block, a plant or any soil in that run destroyed it and yielded nothing. The rule the function's own comment states is that **only rock withholds its drop**, and it is now written as `harvestTool(block) == Pickaxe ? kWoodTier : kHandTier`. `harvestTool` likewise answers `None` for anything cross- or flat-shaped up front, because the run's pickaxe default had reached seventeen plants.
+10. If it is not a full cube, add it to `blockShape()`, and to `isCutout()` if it has transparent pixels. **A new `BlockShape` needs nothing in the mesher's two lists** — `usesShapePass` owns that question now — but it does need a `collisionBoxes` case, and a `selectionBoxes` one if it collides with nothing.
+11. **If it has a front, add it to `blockFacing()`** — that is what the *icon* reads. The world mesher passes a real direction, so a miss there renders correctly in the world and wrongly in every inventory and hotbar slot: both visible side faces get `Unknown`, which `blockTextureLayer` answers with the front. The furnace, the chest and the smithing table have each hit this.
 
 Blocks whose faces differ are handled by the `BlockFace` parameter rather than by special cases in the mesher. Grass is the worked example: top, bottom and sides all resolve to different layers. Sandstone and the bookshelf are the newer ones.
 
 Appearing in the **world** is separate from existing: that is a row in the biome table, a few lines in `TerrainGenerator.cpp`'s ground-cover pass, or a row in its ore table.
+
+> ⛔ **A block that exists but is placed nowhere is invisible, and nothing warns you.** Thirteen plants and both mushrooms were added over two milestones and generated *nowhere at all*, because the ground-cover pass held one hardcoded eight-entry flower array and nothing else. The catalogue showed them, the textures loaded, the build was clean. **After adding anything natural, confirm it against a census** — and see the box below about which biomes a census actually covers.
+
+### What the ground-cover pass places
+
+One pass over each surface column, in `TerrainGenerator.cpp`. Eleven things now, all verified generating by count:
+
+| What | Where | Rule |
+|---|---|---|
+| Grass, fern | any grassy top | fern only in `Forest`-tagged biomes, 35% of the cover there |
+| 12 flowers | grassy top | **regional** — a cell hash picks one species per 64-block region, with 30% strays so a region is not a monoculture |
+| Blue orchid | `Swamp` | overrides the regional pick entirely; it is the swamp's alone |
+| Cactus, dead bush | `Dry` + sand, clear of the shore | cactus 1%, 1–3 tall |
+| Sweet berry bush | `Cold` | 0.6% |
+| Brown / red mushroom | `Wet` | 0.6% |
+| Bamboo | `Wet` **and** `Forest` | 4.5%, 3–7 tall |
+| Sugar cane | surface exactly one above sea level | 18%, 2–3 tall — the waterline strip a river or lake edge produces |
+| Lily pad | `Swamp` or `River`, unfrozen, shallow | 5%, placed **at** sea level on the water surface |
+| Coral, sea pickle | warm ocean bed | pickles only on a reef |
+| Kelp, seagrass | any ocean bed | |
+
+> ⚠️ **The worldgen probe's block census covers about 352×352 blocks around the origin and contained only five biomes** — river, jagged peaks, meadow, windswept hills and plains. The biome *share* list is sampled far more coarsely over a much wider area, so it lists biomes the census cannot see. **A zero in the census is not evidence a plant is broken** if the plant's biome is not in that list; it took a temporary wide scan across ±70 chunks to show that ferns, cactus, bamboo, berries and mushrooms had been working all along.
+
+A multi-block plant grows with a helper that **stops at the top of the chunk** rather than writing into the one above. A stalk near a chunk ceiling is simply shorter there — writing across the boundary would break generation purity, which is the rule that lets chunks be generated in any order on any thread.
 
 ### Authoring
 
@@ -821,7 +1212,7 @@ Third-party textures kept for visual reference live in `reference/`, which is gi
 
 ### Items and drops
 
-**`ItemId` is a separate type from `BlockId`.** Every placeable block has an item form, but not every item is a block — a tool never is. Block items share the block's numbering so there is only one list to maintain, and non-block items start at `kFirstToolItem`.
+**`ItemId` is a separate type from `BlockId`.** Every placeable block has an item form, but not every item is a block — a tool never is. Block items share the block's numbering so there is only one list to maintain, and non-block items start at `kFirstToolItem`, which is **4096**.
 
 `dropForBlock` decides what breaking yields. It is a table, not an identity: stone gives cobblestone, grass gives dirt, an ore gives its resource, and all eight stair orientations collapse to one item so an inventory cannot fill with rotations of the same thing. `dropCountForBlock` is a **separate** question, because only three blocks answer it with anything but one — copper 3, redstone 4, lapis 6, which are the midpoints of the reference's ranges flattened to a fixed number.
 
@@ -831,11 +1222,19 @@ Third-party textures kept for visual reference live in `reference/`, which is gi
 
 Filling it needs its own ray. Water has no selection geometry, so the ordinary aim passes straight through to the riverbed — `raycast` therefore takes a `stopAtWater` flag rather than gaining a second walker beside it, which is the same "one walker, two questions" arrangement `hasLineOfSight` already uses. It fills from a **source** only, because scooping a flowing cell leaves a gap its own source refills a moment later and reads as the bucket having done nothing; and it places `Water0`, a source rather than a full level, because a flowing level drains itself on the next fluid update. An empty bucket stacks to sixteen and a full one not at all, both the reference's. Swapping full for empty is the **cost** of using it, which is the one thing creative is allowed to skip.
 
-**Ores are gated one tier below the reference.** Gold, redstone, diamond and emerald demand an iron pickaxe there; we have only wood and stone, so they demand stone. That is a named divergence, not an oversight — revisit when an iron tier exists.
+**Ores demand the reference's own tier.** Gold, redstone, diamond and emerald need an iron pickaxe, obsidian and ancient debris a diamond one. They all sat at stone until 2026-08-06 for one reason - stone was the highest tier that existed - and that was a named divergence rather than a balance decision. It is closed.
 
 **Dropped items are the smallest possible entity** — position, velocity, stack — and resolve on all three axes through `overlapsSolid` and `highestSurfaceBelow`, the same helpers the player and the creatures use. They were vertical-only until 2026-08-05, on the reasoning that a drop is small and decorative; the cost was that **nothing stopped one entering a block sideways, and once inside, the ground probe found that block and lifted the drop onto its top** — so an item nudged against a step climbed it. Their geometry is **rebuilt every frame rather than transformed**, because world meshes are drawn with an identity model matrix and the shader recovers normals from screen-space derivatives of world position; that only holds while vertex positions *are* world positions. The mesh handle is reused, or every frame would retire a GPU buffer.
 
-**A non-block drop is a sprite with one texel of thickness**, two quads either side of centre. The number is the reference's — a dropped item is extruded by one texel of its own 16-pixel grid — and it was 0.045 until 2026-08-05, which is nearly half the sprite's width and read as two swords side by side rather than one with depth. Each quad is already emitted with both windings, so the pair buys the thickness and the front-to-back shading difference, not visibility. Plants keep the crossed pair, which is the shape they have once placed.
+**A non-block drop is its sprite made solid**, the way the reference builds one: the artwork extruded **one texel of its own grid** deep, with a wall raised on every boundary between a solid texel and an empty one. Those walls are the whole of it — they are what give a blade an edge and a handle a round side, and what makes the object read as a shape from every angle rather than only from the two flat ones. It was two bare quads a texel apart for a long time, which read as *two* swords side by side, because edge on there was a gap and nothing caught the light between them; the thickness had been correct since 2026-08-05 and the sides simply did not exist.
+
+A wall samples its own texel at the **centre**, the same coordinate on all four corners. That carries the right colour, and it also pins the face to the sharpest mip level — a one-texel strip averaged down would fall under the cutout threshold and be discarded, so the object would go hollow as you walked away from it. A typical tool comes out around 60–80 walls, so roughly 300 triangles a drop.
+
+The silhouette comes from `game::SpriteMask`, built once at startup from the alpha `engine::TextureArray` **keeps from its load** — about 46 KB for the whole sheet, against decoding every PNG a second time. The threshold is the fragment shader's own half-alpha, deliberately: a texel the shader would throw away has to count as absent here too, or a wall is left standing around a hole. `Renderer` hands the numbers out through `textureWidth`/`textureHeight`/`textureLayerCount`/`textureAlphaAt` rather than exposing the texture, so nothing outside the engine touches a Vulkan type to ask what shape a sprite cuts out.
+
+Plants take the same path deliberately. In the ground a flower is two crossed quads, which is the shape it grows in; lying on the floor it is **one flower with real thickness**, exactly like everything else that has been dropped — the crossed pair read as two flowers passing through each other, which is the same complaint the sword had.
+
+**A drop is 0.30 blocks across**, against the reference's quarter of a block. Larger on purpose — at the reference's size a dropped tool is hard to pick out of grass. It is the collision box as well as the model, so the two cannot disagree about how big the thing is.
 
 Drops are **thrown**, not released: without a forward impulse a dropped stack lands at your feet and is collected again immediately. Each drop carries **its own pickup delay** — 0.35 s from breaking, 1.2 s when thrown — because the delay has to outlast the flight or the item is pulled straight back inside the 2 m attraction radius.
 
@@ -855,7 +1254,11 @@ A recipe's pattern is stored **at its own size**, not padded to the grid. The ma
 
 Shapeless matching **counts leftovers**: after ticking off each ingredient it checks nothing else is in the grid, or a grid holding an extra item would still craft and quietly eat it.
 
-Recipes live in one table in `item/Recipe.cpp` — **nineteen of them**, ten being the tools, and eight fit a 2×2 so they are craftable without a table. Shapes and yields come from the reference recipe JSON; `CRAFTABLE.md` records every recipe, whether we can build it today, and what art it still needs.
+Recipes live in one table in `item/Recipe.cpp` — **three hundred and forty of them**, a hundred and twenty-five of which fit a 2×2 so they are craftable without a table. **Most are generated in loops rather than written out**: eleven woods times eleven shared shapes, sixteen colours times three dyed families, five tool shapes times fourteen materials. Shapes and yields come from the reference recipe JSON; `CRAFTABLE.md` records every family and what is still missing.
+
+> ⛔ **The tool helper broke the "stored at its own size" rule and cost sixteen recipes.** `tool()` draws each shape as a 3×3 picture and used to store it padded to 3×3, so the matcher — which compares against the *bounding box* of what is in the grid — could never match an axe, shovel, sword or hoe, every one of which leaves a column empty. Only the pickaxe filled all three columns, so it was the one craftable tool in the game and nothing else in the table was affected. It now trims the pattern to the cells it fills. **A rule written down in one place and re-implemented in a helper is the same second copy this codebase keeps paying for**, and the guard is cheap: feed every recipe's own pattern back through `craftResult` and assert it makes itself. Measured across all 340 — none broken, none shadowed by an earlier identical pattern.
+
+> **Named divergence: a recipe cannot mix two woods.** The reference matches an item *tag*; `Recipe::pattern` holds concrete ids, and the craftable check explicitly relies on no ingredient naming a set. So the shared wooden recipes are generated once per wood, and four oak planks make a crafting table where two oak and two spruce do not.
 
 Closing a screen **returns crafting ingredients** to the inventory, not just the cursor stack. Items left in a grid the player cannot see are items that quietly vanish.
 
@@ -901,7 +1304,11 @@ The multipliers are the reference's own pair, and so is the hardness table: **×
 
 **The tier demand is the whole progression.** Stone, cobblestone, bricks, slabs, stairs and furnaces require a wooden pickaxe or better; without one they still come away, three times slower, and give nothing. Everything else drops bare-handed, or a fresh world would be unplayable.
 
-Tools are wood (speed 2, 60 uses) and stone (speed 4, 132 uses). Wear is counted per block broken and only on blocks that resist — plants and torches cost nothing. **Tools do not stack**, because two with different wear are not interchangeable, which is why `maxStackFor` exists rather than a bare `kMaxStack`.
+**Five tiers**, and their speeds and durabilities are the reference's own rather than invented: wood 2× and 60 uses, stone 4× and 132, **iron 6× and 250, diamond 8× and 1561, Emberite 9× and 2031**. A sword's number is deliberately smaller than its tier's mining speed, because a sword is not a mining tool — the reference gives it a flat 1.5× on everything and scales the *blow* with the material instead, and `strike` reads that same field for damage. Wear is counted per block broken and only on blocks that resist — plants and torches cost nothing. **Tools do not stack**, because two with different wear are not interchangeable, which is why `maxStackFor` exists rather than a bare `kMaxStack`.
+
+**`isTool` spans two runs of item ids and has to.** The upper three tiers were appended at the very end of the item list rather than beside the wood and stone tools, because an item id is written into the player's saved inventory and inserting there would have turned every spawn egg, resource and bucket in a saved world into something else. Missing the second run in that predicate does not fail — it makes fifteen tools stack, never wear out, and mine like a fist.
+
+**Emberite is ours, and it is the one tier you cannot make from raw material.** The reference's name is coined and needs replacing; *ancient*, *debris*, *scrap* and *ingot* are ordinary English and stay. Ancient debris is the rarest vein in the ground, about five times scarcer than diamond and in the same deep band; it smelts to scrap, four scrap and four gold make an ingot, and an ingot plus a **diamond tool** makes the Emberite one. The reference upgrades at a smithing table with a template; we have neither, so the upgrade is a shapeless pair — which keeps what the tier means without a new screen. Its ore does not avoid air the way the reference's does, because that rule exists to stop it being spotted across a lava lake and we have no lava.
 
 Dig progress is drawn as a bar under the crosshair. The HUD only rebuilds when asked, so the frame digging *stops* has to ask too — otherwise the last bar drawn stays on screen forever, which is exactly what happened first time.
 
@@ -913,13 +1320,65 @@ A torch is a **cutout cross**, the same shape tall grass uses, so it needed no n
 
 ---
 
+## Staying Alive
+
+Built at M21. `world/Survival.hpp` is the single owner of every number named here; the sequence below is what actually happens each frame, in `updateSurvival` at the end of `updatePlayer`.
+
+**Damage does not use a plain cooldown, and the difference matters.** For half a second after being hit you are invulnerable — but a *bigger* blow inside that window still lands, for the difference between it and the one already taken. Without that rule an ordinary punch would absorb the creeper standing next to you. RESEARCH §2.4 owns the reasoning; the worked example there (7 damage, then 12 in the same window, lands 5 more) is what the implementation is checked against.
+
+**Hunger drains by exhaustion, not by time.** Every action has a cost — a sprinted metre, a jump, a broken block, a landed blow — and four points of accumulated exhaustion spends one leg of the food bar. Standing still costs nothing at all, which is why a bar that only ticks down on a timer feels wrong and this does not.
+
+What the bar then gates:
+
+| Food | What happens |
+|---|---|
+| 18 or more | Health regenerates, one point every four seconds |
+| 18 or more **with saturation left** | Every half second instead, at a cost of 1.5 saturation a time |
+| Below 6 | Sprinting is refused |
+| 0 | Starvation, one point every four seconds, stopping at half a heart |
+
+**Saturation is a hidden buffer above the visible bar**, filled by eating and spent before hunger is. It is clamped to the current food level, which is what stops a steak eaten at 19/20 banking twelve invisible points.
+
+Hazards, all of them on their own timers so leaving one stops the damage immediately: falling more than three blocks (one point a block), drowning, suffocating inside a solid block, standing in fire or lava, still burning for a few seconds after stepping out, touching a cactus, and falling out of the world below Y −8.
+
+**Eating is held, not clicked** — 1.6 seconds with the right button down, and a full bar refuses outright. Thirty-three foods carry a hunger value and a saturation value.
+
+Dying drops the whole inventory where you stood and respawns you 1.6 seconds later. Creative mode is immune to all of it, which arrives through `PlayerInput::invulnerable` rather than by the survival code knowing what mode the game is in.
+
+---
+
+## Sound
+
+Built at M22. Two halves that do not know about each other: `engine::AudioEngine` mixes, `game::Sounds` decides what to mix.
+
+**The engine's half.** One 48 kHz stereo device, opened at startup before the window so a machine with no sound card logs a line and carries on. Up to 48 voices mix at once; each is a sample, a position, a volume and a pitch. Pitch is linear interpolation through the sample, distance falls off to a floor of 0.005 and then stops, and the left–right pan is deliberately shallow — a sound hard in one ear is disorienting rather than immersive. Music is a separate bus with its own volume.
+
+> ⛔ **This is the one place in the project with a mutex, and it is legitimate.** The audio callback runs on a thread the operating system owns and there is no arrangement in which it does not cross threads. `CLAUDE.md`'s "if you want a mutex the design is probably wrong" holds everywhere else; here the design *is* two threads sharing one voice pool.
+
+**The game's half.** Fifty-seven events and thirty-four creature voice families, each with up to eight recordings picked at random and pitched slightly differently on every play, which is most of what stops a repeated noise reading as a loop.
+
+Two groupings carry almost all of it:
+
+- **Blocks resolve to one of ten materials by family test, not by list** — stone, wood, grass, gravel, sand, cloth, snow, glass, coral, wet, or silent. Eleven hundred blocks are covered by about a dozen questions, a new block inherits the right footstep the day it is added, and a cut shape asks `shapedParent`, so six hundred stairs and slabs cost one line. Unknown blocks fall through to stone unless they burn, in which case wood.
+- **Creatures resolve to a voice family, not a species.** Fifty-seven creatures share thirty-four voices; a llama and a trader llama are one row. **A baby is pitched up from the adult's own recording** rather than needing its own, which is what the reference does too.
+
+Creatures report what they said through `takeVoices()`, on exactly the hand-off `takeLoot` already used — `Creatures` still has no idea audio exists.
+
+> ⛔ **`kStems` in `Sounds.cpp` and the `$events` table in `tools/make-reference-sounds.ps1` must name the same things in the same order.** A mismatch does not fail; it produces an event that silently never sounds. `has()` and `hasVoice()` exist so a probe can check every row in one run, which is the cheapest verification available here.
+
+**The recordings are staged, never shipped.** `tools/make-reference-sounds.ps1` copies 497 files out of the reference dump into `sounds-reference/` beside the executable — gitignored, never under `assets/`, exactly like the block and creature art. A missing folder is not an error: every bank is empty and every call becomes a no-op. `ASSETS-REFERENCE.md` is the full map.
+
+`sound_volume` and `music_volume` live in `settings.cfg`. The screen that edits them is M34.
+
+---
+
 ## HUD
 
 Screen-space geometry is a separate mesh drawn last, with no view or projection — only an aspect correction, so coordinates are relative to window **height** on both axes and a square stays square. Y is positive *downward*.
 
 Everything is built from `hud::` primitives: axis-aligned quads, sprite-sheet regions, free-corner quads, text, and isometric block icons.
 
-**Block icons follow the block's shape.** A slab is drawn at half height and a cross-shaped plant is drawn as a flat sprite, because wrapping a plant's artwork around a cube shows a box of grass rather than what actually gets placed. Only `Full` blocks get the three-quad isometric cube.
+**Block icons follow the block's shape.** A slab is drawn at half height and a cross-shaped plant is drawn as a flat sprite, because wrapping a plant's artwork around a cube shows a box of grass rather than what actually gets placed. Only `Full` blocks get the three-quad isometric cube. *(A **dropped** plant is a different question and is answered differently — see "Items and drops".)*
 
 **Every HUD quad is emitted with both windings.** Backface culling is on, and screen geometry skips the projection that establishes which way is front. Deriving that has gone wrong before and fails completely silently, so two extra triangles per quad buys certainty.
 
@@ -935,7 +1394,13 @@ The inventory art arrives as an **integer upscale** of its real pixel grid, so t
 
 ### Text
 
-`assets/textures/font.png` is a **third texture binding**, selected by layer `-2.0` (the HUD sheet is `-1.0`). It is a 128×84 atlas: printable ASCII 32–126 in a 16×6 grid of 8×14 cells, rendered from Consolas with hinted 1-bit rasterisation so every glyph lands on whole pixels. `tools/make-font.ps1` regenerates it.
+The font is a **third texture binding**, selected by layer `-2.0` (the HUD sheet is `-1.0`). It is a **128×128 atlas: a 16×16 grid of 8×8 cells in which the cell index *is* the codepoint**, which is the reference's own `ascii.png` layout — so `font-reference.png` beside the exe is a drop-in replacement for `assets/textures/font.png` and one set of constants serves both. `tools/make-font.ps1` regenerates ours in that layout; `tools/make-reference-font.ps1` stages Mojang's.
+
+**It is proportional, and the advances are never written down.** A glyph's advance is its rightmost opaque column plus one texel of spacing, measured **at startup off whichever atlas actually loaded** through `Renderer::fontAlphaAt`. That is the reference's own rule and it reproduces its published widths exactly — `i` 2, `l` 3, `I` 4, `a` 6, `@` 7 — which is the check that the layout is right at all. The space is the one advance that has to be a number (4), because a blank cell has no column to measure.
+
+> ⛔ **Each glyph's quad is cropped to its advance, and must stay that way.** Drawing the full 8-texel cell and letting the transparent columns overlap the next letter looks equivalent and is not: **the font layer has no alpha discard**, so those texels still write depth and the neighbour's left columns are rejected by the depth test. That ate two columns off every character after the first.
+
+`appendText` takes an optional `shadow`, which draws the string again one texel down and right at a quarter brightness, behind. That is the reference's own text shadow and most of what makes text read as belonging to the game rather than pasted onto it.
 
 `hud::appendText` emits one textured quad per character at a fixed advance. Sizes should be chosen so a cell maps to whole pixels — `14.0f / 360.0f` is 1:1 at 720p — because the sampler is nearest-neighbour and any other ratio doubles some rows and not others.
 
@@ -953,15 +1418,17 @@ Block icons are isometric: three quads (top, front, right) at 30°, using the sa
 
 The inventory and crafting-table screens draw a **second card** to the left of the panel: a 146 × 166 framed panel, a 4-unit fold and the existing 176-unit inventory card, centred together as one 326-unit block. `INTERFACE.md` holds the design and every measurement; this is what exists.
 
-**Five tabs** \u2014 Construction, Equipment, Items, Nature, then Search pushed hard right \u2014 sit *above* the card's top edge, 22 units wide on a 25-unit pitch. Each shows every item in its category on a static 7-wide grid of 18 \u00d7 18 cells, with a hover tooltip. `ItemCategory` and `CatalogueTab` are tied by a `static_assert`, so a new category cannot exist without a tab.
+**Five tabs** — Construction, Equipment, Items, Nature, then Search pushed hard right — sit *above* the card's top edge, 22 units wide on a 25-unit pitch. Each shows every item in its category on a static 7-wide grid of 18 × 18 cells, with a hover tooltip. `ItemCategory` and `CatalogueTab` are tied by a `static_assert`, so a new category cannot exist without a tab.
 
-**A catalogue cell is a source, not a container slot.** It never depletes and nothing can be placed into it. Left click puts a full stack on the cursor, right click puts one, shift-click sends a stack straight to the inventory \u2014 and **the empty space around the cells is a bin**, so a left click there destroys what the cursor is carrying. All of that is gated on creative: in survival the left card is a recipe book, and conjuring items would be a cheat. A cell past the end of the list deliberately falls *through* to the bin rather than swallowing the click.
+**A catalogue cell is a source, not a container slot.** It never depletes and nothing can be placed into it. Left click puts a full stack on the cursor, right click puts one, shift-click sends a stack straight to the inventory — and **the empty space around the cells is a bin**, so a left click there destroys what the cursor is carrying. All of that is gated on creative: in survival the left card is a recipe book, and conjuring items would be a cheat. A cell past the end of the list deliberately falls *through* to the bin rather than swallowing the click.
 
-**Depth bands are assigned up front, not interleaved** \u2014 dim, unselected tab, panels, selected tab, cell, label, icons, counts, held stack, tooltip. Two overlapping cards with tabs overhanging one of them is exactly the arrangement that made the hotbar's selection highlight invisible for two iterations.
+**Depth bands are assigned up front, not interleaved** — dim, unselected tab, panels, selected tab, cell, label, icons, counts, held stack, tooltip. Two overlapping cards with tabs overhanging one of them is exactly the arrangement that made the hotbar's selection highlight invisible for two iterations.
 
 **`toScreen(Kind, x, y)` is the single owner of the horizontal layout offset.** Every slot centre, hit test and panel bound goes through it, which is why widening the screen was a translation rather than a rewrite of the click handling. Scroll position, search text and selection live in a `CatalogueState` the caller owns, so `build` stays a pure function of its arguments.
 
-**Not built yet:** the craftable colouring, the filter toggle, the search field, click-to-fill and groups \u2014 `INTERFACE.md` \u00a77 slices 5\u20139. Slices 1-4 are built.
+**Every cell says whether you can make that thing right now.** Four background states, stamped from the same 18x18 tile the storage slots use so the bevels cannot drift: **the ordinary slot grey** or red for affordable or not, each with a brighter form for the cell under the pointer. The accessible state is deliberately the *same* `139,139,139` recess every slot on the right-hand card already uses — an entry you can have should look like an ordinary slot, so only the ones you cannot have stand out. **Hover is the only emphasis**: a *selected* state was built and removed, because a cell that stays lit after you have taken what was in it reads as a stuck slot and nothing set it anyway. **Nothing is ever red in creative** - the catalogue is a source there and every entry is one click away, so the check is not run at all rather than run and ignored. Otherwise affordability is asked of the **recipe table**, once for the whole table rather than per cell, and **against the grid the open screen actually has** - so a three-by-three recipe is red at the inventory and pale at a crafting table. The check is a greedy count and is correct only while every ingredient is one concrete item; the bipartite counter-example that breaks it is written at the call site in `item/Recipe.cpp`, because the day a second wood type exists it becomes wrong for some players and nothing will report it. `INTERFACE.md` §3.1 asks for six states too, but not the same six: it spends three on expandable groups, which are slice 9, where ours spends them on emphasis so the selected and hovered cells still carry the affordability.
+
+**Not built yet:** the filter toggle, the search field, click-to-fill and groups - `INTERFACE.md` §7 slices 6-9. Slices 1-5 are built.
 
 **The catalogue scrolls** a row at a time on the wheel, clamped so the last row can always be brought into view, and switching tab returns it to the top. While a screen is open the wheel belongs to the catalogue rather than the hotbar - it used to drive the hotbar invisibly, since the bar sits behind the panel while you are looking at it. **Rows with nothing in them are not drawn**, so a short tab ends where its entries end rather than trailing empty cells.
 
@@ -1051,7 +1518,13 @@ Placement gates on `Biome::treeDensity`, on the biome's surface block being gras
 
 ### Block shapes
 
-Everything before M17b was a unit cube, and both meshing and collision assumed it. `BlockShape` is where that assumption is now written down: `Empty`, `Full`, `Cross` (plants), `Slab`, `Stairs` and `Fence`.
+Everything before M17b was a unit cube, and both meshing and collision assumed it. `BlockShape` is where that assumption is now written down: `Empty`, `Full`, `Cross` (plants), `Slab`, `Stairs`, `Fence`, `Hovering` and `Flat`.
+
+`Hovering` is a 15/16 cube lifted one texel off the floor, and **lit TNT is its only user**. The reference turns a struck charge into an entity; ours stays a block, so the detachment has to live in the shape or nothing shows it. Its top stays flush at 1.0 so a charge under a ceiling still culls that face, and it is `isSolid` — you can stand on it and you cannot walk through it.
+
+`Flat` is a full-width plate 1.5 sixteenths tall lying on the floor of its cell, and **the lily pad is its only user**. It was cross-shaped until 2026-08-08, which made it a plant *standing in* a cell — and since `canWaterlog` is the Cross test, a pad and the water were contesting the same cell. A pad now rests on the surface instead: `restsOnWater` is the one block whose support is not solid, so `needsSupportBelow` became a question with two answers rather than a bare `isSolid` test. Placing one aims with `stopAtWater` and lands it in the cell *above* the surface, because every other block's ray goes straight through water to the seabed.
+
+**`isReplaceable` decides which cell a placement lands in**, and it is the reference's `canBeReplaced`: air, either fluid, fire, and anything cross-shaped. Aiming at a plant puts the block *in* its cell rather than a step above it, and the same rule is what lets flint and steel light a fire on grassy ground. It doubles as what a falling block displaces on its way down — one rule, two readers, which is how it stays honest.
 
 Dimensions match the reference models exactly, verified at M19b against `models/block/*.json`: slabs at `0–8` and `8–16` sixteenths, a stair's step at `[8,8,0]→[16,16,16]`, the fence post at `[6,0,6]→[10,16,10]`, its rails at `6–9` and `12–15`, and a plant's blades spanning `0.8–15.2`.
 
@@ -1094,6 +1567,74 @@ Three predicates that are easy to confuse and must stay separate:
 
 Conflating the first two gets you either walking on water or an invisible seabed.
 
+### How a water surface is drawn
+
+All of it is in the forward pass, in `triangle.frag` with `water.glsl`. A fragment knows it is water because its **meshed** layer matches the animation redirect table — never the redirected one, since all thirty-two frames are still water.
+
+- **Ripples, not waves.** Three crossing sine trains, each shorter, shallower and slower than the last, gradients analytic. **The geometry is never displaced**, only the normal: a surface that moved vertically would part company with the block edge it is meshed against and open a seam at every shoreline. Only horizontal faces get them — a waterfall's side face has no "up" for a wave to travel along.
+- **Everything is computed from a snapped position.** One block face is one texture, so dividing a block by that texture's width gives exactly the grid the world is drawn on, and the reflection comes out in square pixels. **This is a player instruction, not an accident** — a smooth mirror in a game made of squares looks borrowed.
+- **Fresnel is the physical fifth power.** 2% looking straight down, nearly all of it a few degrees off the horizon. That asymmetry *is* water, and its absence was the original complaint. `water_reflection` scales it.
+- **The reflection is the world, not just the sky.** A ray marched through the scene copy in twenty-four lengthening steps; a step is a hit when it has travelled further than the surface standing at that pixel. Misses fall back to the sky gradient, and the reflection fades toward the screen border because anything off screen was never drawn.
+- **Opacity follows Beer's law through the water's thickness**, which comes from the same copy. Clear at the edge, solid a few metres out. One flat opacity made ten metres of water exactly as legible as one.
+- **All of it is skipped while submerged**, or the surface seen from below would take the sky's distance as an infinite thickness and go opaque, sealing the player in.
+- **Rain lands on it.** Expanding rings from four tiles around the point, each firing on its own offset and dying as it spreads, added to the wave **gradient** rather than being a normal of its own — so it costs a few sines and no extra machinery.
+
+> ⛔ **A water face is never greedily merged, and that is what a moving surface costs.** The wave displaces vertices and a quad has only four corners, so a sixteen-block merged face becomes one flat tilted plane instead of a swell — and where it meets a differently-sized neighbour their shared edge disagrees about its own height. That is a straight crease across open water, and the bigger the merge the longer and straighter the cut. Unit quads for water cost **+0.4% triangles and no measurable GPU time**; the merge is still on for lava, which is never displaced.
+
+> ⛔ **A water surface vertex may only move if all four columns meeting it are water.** Where water meets anything else it has to stay **exactly flush**, and both ways of getting that wrong look like a hole. Lift the waterline above the bank and you expose the top of a water side face that was culled precisely because that bank was supposed to hide it - so you see straight through the seam. Drop it below and you uncover a strip of the bank's own side face. Pinning the shoreline vertices fixes both at once and flattens the swell at the shore, which is what real water does anyway.
+
+> ⛔ **A rain ring's place and moment must be hashed on the cycle, not just the tile.** Hashing the tile alone gives it one fixed spot and one fixed phase, so the same few places on a lake are struck over and over for ever. Whether a tile is struck at all is re-rolled against how hard it is raining, and the ring is damped by the wave's own gradient where it lands — swamped on a swell, crisp on flat water.
+
+> ⛔ Reflections do **not** contain the sun, the moon or the clouds: the copy is taken before the forward pass draws them. They arrive through the sky gradient instead, which is why that gradient has one owner in `sky.glsl` and both passes call it.
+
+## Lava, fire and TNT
+
+**Lava reuses water's encoding exactly** — `Lava0`…`Lava7` plus `LavaFalling`, with `isLava`, `lavaLevel` and `lavaAtLevel` mirroring water's three accessors. Everything that genuinely means "either fluid" asks **`isFluid`**; anything about swimming, drowning or fish stays on `isWater`, because lava answers those differently or not at all.
+
+**Eight ids but only four reachable, and that is the point.** The reference's Overworld lava drops **two** levels per block rather than one (`kLavaSpreadStep`), so 0, 2, 4 and 6 occur and the flow stops **three blocks out** where water reaches seven. Measured in a probe run: source, then three cells, then nothing. The odd levels exist because the Nether uses a step of one, and leaving room costs nothing now and an id shift later.
+
+**Its own queue, because it is six times slower.** `kLavaSpreadDelay` is 1500 ms against water's 250. One queue holding both would no longer be in due order, and the drain loop's "the front one is not ready, so none of them is" shortcut — which is what keeps it O(ready) rather than O(queued) — depends on that. `setBlock` pushes every edit to **both** queues rather than guessing which fluid is involved: the cell that changed may be air that lava is about to reach, and a queue that finds the wrong fluid there simply does nothing.
+
+**Mixing is decided by source-versus-flowing, not by geometry.** This is the part that reads backwards until you see it stated:
+
+| | Lava is a **source** | Lava is **flowing** |
+|---|---|---|
+| Water beside or above | **Obsidian** | **Cobblestone** |
+| Lava falls into water | that water becomes **Stone** | same |
+
+Water *below* is excluded from both — that case is lava falling in, and it is the water that changes.
+
+**Fire is `BlockShape::Cross`, and four behaviours fall out of that for free**: no collision, swept away by water (`isWashedAway`), needing something beneath it (`needsSupportBelow`), and drawn as two crossed cutout blades. It was briefly `Empty` like the fluids, which rendered a solid cube of flame. It reschedules *itself* — unlike the fluids, which only run when something nearby is edited — and dies when it has neither fuel beside it nor a floor under it. `feedsEternalFire` (netherrack, magma block, soul sand, soul soil) keeps one alive for ever.
+
+> ⛔ **`World::fireCanSurvive` is the single owner of "may fire exist here", and lighting one reads the same function the tick does.** They used to be written twice: the tick accepted fuel *or* a floor, the placement demanded a floor. Fire could therefore burn in places it could not be lit. Together with the replaceable rule below, that is why a fire could not be lit on ordinary grassy ground — the cell above it holds a plant far more often than not.
+
+> ⚠️ **Lava reschedules itself only while something flammable is within one block.** A settled lava cell otherwise never ticks again, so it would stop setting fires the moment it stopped spreading — but rescheduling unconditionally would leave a lava lake in open stone queueing work for ever.
+
+**A lit charge is a block id, not a timer beside one.** `TntPrimed` is saved, meshed and named like any other block, where a parallel table of burning positions would need all three building again. The fuse is a queue on the same pattern as the fluids; when it fires, `World` pushes the cell to `m_detonations` and the main loop turns it into a blast **on the creeper's existing path** — so destruction, container spilling and the one-in-`power` drop roll are shared rather than written twice. Breaking a lit charge needs no bookkeeping: the fuse simply finds the block missing.
+
+**The fuse is spent as sixteen 250 ms blinks**, toggling the id between `Tnt` and `TntPrimed`, so the charge visibly counts down instead of sitting still for four seconds. The lit id carries `BlockShape::Hovering` and **all three** bleached face textures — a side-only flash left the top and bottom unlit, which reads as the block not flashing at all from above. `tnt_primed_{top,bottom,side}.png` are derived in `tools/make-reference-blocks.ps1` as **pure white with the alpha kept**; the reference has no texture for them because it tints the whole entity in a shader, and a partial mix toward white leaves the lettering legible and reads as dull grey rather than as a flash.
+
+> ⛔ **Blast knockback is `impact * 7` blocks a second, not `impact * 20`.** The reference's figure is one block per *tick* at point blank, and converting that to a per-second speed is arithmetically the same start and nothing like the same shove: the reference decays it 9% a tick, and our player keeps whatever horizontal speed it left the ground with. Twenty threw the player off the map's worth of distance; seven is just under a jump's worth of lift at point blank.
+
+**A lit charge falls, and keeps counting while it does.** `isFalling` includes `TntPrimed`, and `FallingBlock` re-primes on landing, so pulling the floor out from under one drops it and it still goes off. Verified: 16 blinks then air, and a charge dropped two blocks lands and detonates where it lands.
+
+**Named divergences:** lava does not run the downhill slope search water does (at three blocks the difference is not visible), primed TNT hovers in place rather than being launched as an entity, fire spread is one chance per neighbour rather than the reference's per-block ignite-odds table, and **lava does not generate in terrain** — it is reachable through the creative catalogue's lava bucket. Terrain lava needs a chunk format bump, which would cost the player their buildings.
+
+### Waterlogging
+
+**One bit per cell, held beside the block array — not a block id.** A cell can be both a plant and water at once.
+
+Kelp and seagrass used to be written *over* the water they grow in, which left a plant-shaped hole in the ocean with the seabed visible through it. Encoding "submerged" as its own block id was the obvious alternative and was rejected: it doubles every waterloggable block in the id space, and every predicate that already asks a question about a block would have had to learn about the twin.
+
+- `Chunk` carries `kBlockCount / 8` bytes, with `waterloggedAt` / `setWaterlogged`.
+- `canWaterlog` is true for the Cross shape only — plants. Slabs and stairs were briefly included and were taken back out: a block placed into a water source has to **cut the supply off**, which is what the player expects and what a waterlogged stair silently refused to do.
+
+> ⛔ **A fluid drew its face only against the literal air block, and that is the same hole by another route.** Waterlogging fixes the plants that share a cell with water; it does nothing for a block standing in the cell *beside* or *above* it. A lily pad, torch, fence, pane of glass or plant next to water made the water's face vanish there, because the neighbour is not `BlockId::Air` — and the neighbour does not supply the water's own face, so you saw straight through the surface. The test is now `!isFluid(ahead) && !occludesFace(ahead, offsetY)`, which is the question that was always meant. Measured before the fix: **204 erased faces in the loaded region, every one a lily pad** — kelp and seagrass were already correct because the generator sets their waterlog bit.
+- `setBlock` maintains it: clearing a waterlogged cell to Air leaves **`Water0`**; placing a non-waterloggable block clears the bit; placing a waterloggable block into water sets it.
+- The mesher's `ChunkVolume` carries the bits too, and the greedy pass reports `Water0` for both `block` and `ahead` when the cell is waterlogged, so the water surface is continuous across the plant.
+
+Generation verified at 1246 seabed plants, 1246 of them waterlogged.
+
 ### Cutout blocks
 
 A third category beside opaque and translucent. **Cutout** geometry is drawn in the *opaque* pass, and the fragment shader `discard`s any texel below half alpha. What survives writes depth normally, so it needs no sorting — which is the whole reason it is not simply translucent. Leaves are the only one so far.
@@ -1120,6 +1661,108 @@ Blending depends on draw order, so water cannot share a buffer with the terrain 
 
 ---
 
+## Falling blocks
+
+Sand and gravel fall. `isFalling` names them; `isReplaceable` names what they will fall *through* (air, either fluid, fire, replaceable plants).
+
+The world half is a scheduled check: `setBlock` calls `scheduleFallUpdate` on the cell and the one above it, and `updateFalls` runs the queue on a `kFallDelay` of 60 ms. A block that has lost its support is **detached** — removed from the world and reported through `takeDetachedBlocks()`.
+
+From there it is an entity, not a block. `FallingBlocks` integrates it under its own `kGravity = 16.0f` — deliberately **half the player's**, because a block that falls at player gravity reads as a dropped frame rather than as weight — up to a terminal velocity of 39.2. It tests **every cell it passes through** rather than only its resting position, so a long fall cannot tunnel past a one-block ledge. Anything crushed on landing is returned as drops.
+
+> ⛔ **A resting cell has to be free as well as supported.** The scan asked only whether the block *under* a cell would hold it, so two blocks falling down one shaft both picked the same floor — the second settled *into* the first and turned it into a dropped item. Three sand stacked in a column left two. It now stops one cell higher when the cell itself is not replaceable, which is also what lets a falling block crush a plant rather than a neighbour.
+
+`buildMesh` emits a full lit cube, so a falling block is lit like the world rather than flat-shaded.
+
+---
+
+## Cut shapes: stairs, slabs, walls, fences, gates, carpets and panes
+
+**Six hundred and forty blocks, and not one of them has a texture.** `ShapedFamily` in `Block.hpp` is one row per material: a **parent block** and a display name. `shapedParent(id)` is the single owner of the forwarding, and it answers the texture, the tool, the hardness, the blast resistance and whether the thing burns — so a sandstone stair keeps sandstone's own top, sides and underside, an oak fence wants an axe and burns, and a blackstone wall wants a pickaxe and does not. Nothing anywhere lists six hundred ids.
+
+| Shape | Families | Ids each | Table |
+|---|---|---|---|
+| Stairs | 52 | 8 (4 facings × 2 halves) | `kStairFamilies` |
+| Slab | 55 | 2 (bottom, top) | `kSlabFamilies` |
+| Wall | 25 | 1 | `kWallFamilies` |
+| Fence | 12 | 1 | `kFenceFamilies` |
+| Gate | 11 | 8 (4 facings × open/shut) | `kGateFamilies` |
+| Carpet | 16 | 1 | `kCarpetFamilies` |
+| Pane | 17 | 1 | `kPaneFamilies` |
+
+> **Cobblestone stairs, the stone slab and the oak fence are family 0 of their own kind.** Their ids predate the runs and are in saved worlds, so they could not be renumbered. That is the one branch in `stairsAt`, `slabAt` and `fenceAt`, and it is why the run lengths subtract a family. A `static_assert` pins each legacy id to the material it always was.
+
+Connection is a **shape** test, never a material one: a fence reaches toward fences and gates, a wall toward walls and gates, a pane toward panes and iron bars, and none reaches toward another kind - which is the reference's rule, for free. `connectionBits` in `Block.hpp` is the **single owner** of that rule, and `collisionBoxesWith`/`selectionBoxesWith` take its answer; `worldCollisionBoxes` and `worldSelectionBoxes` in `Collision.hpp` look up the four neighbours and call them, so the mesher, the player's feet and the crosshair cannot disagree about where a fence is. A gate swings on right-click through `gateAt`, **the one place its facing and its state are combined**, so opening one can never quietly turn it round.
+
+> ⛔ **A lone pane is a two-texel post, not a full cross.** Asking `collisionBoxes` with only an id has to assume every arm, and that gave every unconnected pane, wall and fence in the game an invisible shell the size of its cell. Two arms meeting at a cell wall also each drew their own end cap - coplanar quads fighting over one depth, which read as a hard border line down the middle of two joined panes - so the mesher culls a flush horizontal face whose neighbour is the same shape.
+
+`usesShapePass(BlockShape)` is the single owner of "the mesher must build this box by box". It replaced the same six-shape list written out twice — once to skip these in the greedy pass, once to accept them in the shape pass — where adding a shape to one and forgetting the other draws a block twice or not at all.
+
+---
+
+## Projectiles
+
+`world/Projectile.hpp/.cpp`. Three kinds - the arrow, the thrown pearl and the thrown egg - and a `ProjectileSpecies` table, because a second copy of a launch speed is the recurring bug here.
+
+> ⛔ **Every number is per *tick*, and `Projectiles::update` runs a fixed twenty-hertz accumulator because of it.** Multiplying by an inertia of 0.99 once a frame at 120 fps is six times the intended drag. The fixed step is also what buys the cheapest real check available: the closed form `v(t) = k^t (v₀ + g/(1−k)) − g/(1−k)` holds *exactly*, and a temporary probe measured the drift at 1e-6 over forty ticks. **Do not convert this to `deltaSeconds`.**
+
+> ⛔ **What is *drawn* is interpolated between ticks, and that is not optional either.** Twenty positions a second on a screen doing 120 shows each one for six frames, which is exactly what the user reported as "very very rough". Every shot keeps its `previousPosition` and `previousHeading` from the last tick, and `buildMesh` blends toward the current pair by `accumulator / tick`. That is one tick of latency, invisible, and it leaves the simulation untouched — measured frame by frame, the drawn x now advances on every frame in proportion to the frame time. **Fix smoothness in the renderer, never by raising the tick rate**, or every published constant above stops meaning what it says.
+
+Per tick, in this order — **position, then drag, then gravity**: `position += velocity; velocity *= inertia; velocity.y -= gravity`. The order is provable rather than a guess: it gives a terminal speed of `g/(1−k)` = 5.00 blocks a tick, where dragging the acceleration too would give 4.95, and the reference publishes 5.00 for an arrow and 4.95 for a thrown potion. A `static_assert` holds it.
+
+- Arrow: `power` 3.0 b/t, `gravity` 0.05 b/t², `inertia` 0.99 air / 0.6 water, box 0.25.
+- Void pearl: `power` 1.5, `gravity` 0.025, **`inertia` and `liquid_inertia` both exactly 1** - the reference overrides the thrown-item family's defaults, so a pearl has no drag and no terminal speed at all. That is why it reaches 45 blocks thrown straight up where a snowball reaches 28, and a `static_assert` on `v²/2g` holds it.
+- Egg: `power` 1.5, `gravity` 0.03, and the family's own 0.99 / 0.6 drag. Two rows rather than one "thrown item", because those are the numbers that differ.
+- Neither thrown item damages anything: `damagePerSpeed` of zero is the reference's `impact_damage: null`, and it is also what makes them skip the creature sweep entirely. **Named divergence:** the reference stops them on entities and ours do not.
+- **A thrown item is drawn as the same solid object it would be lying on the floor**: its sprite extruded a texel deep with a wall on every boundary between a solid texel and an empty one, built by `appendSpriteModel` in `item/SpriteModel.hpp` — the one function a dropped item uses. Two crossed flat quads read as two pearls passing through each other. It is billboarded toward the camera, which is what the reference's own thrown-item renderer does, and drawn at the dropped item's own half-extent so the two are the same size. Measured: 54 quads and a thickness of exactly one sprite texel.
+- `reportsImpact` puts a landing on a queue the owner drains, exactly as `Creatures::takeLoot` does - this system reads the world and never writes it, and has no idea a player or a roster exists. A pearl moves the thrower; an egg leaves a chick one throw in eight, and four one throw in thirty-two.
+- **A pearl lands the player where it stopped, or does not land them at all.** The body is wider and taller than the 0.25 pearl, so the cell it stopped in is a starting guess: the exact point, then the middle of that cell, then the same two a block higher, up to three blocks. A throw with nowhere to stand is spent without moving you rather than melding you into the wall. Cooldown 1 s, the reference's own.
+- **The reference publishes no in-air limit for a thrown item**, checked against `ender_pearl.json` (no `minecraft:despawn`, no timer) - so both fall under the same 60 s cap the arrow has.
+- **Blocks are swept before entities**, and the segment is clamped to the block hit before anything is asked about what is standing there — the other order lets an arrow hit something behind a wall. `sweepBlocks` in `Raycast.hpp` is a **third question for the one walker**, reading `collisionBoxes`; `raycast` reads `selectionBoxes` and was deliberately not widened.
+- **Damage is `ceil(2 × current speed)`**, never the launch speed. Rounded up *before* the critical roll, which the reference has an explicit flag for. A fully charged shot crits.
+- Owner immunity is 5 ticks — a window, not a permanent exemption.
+- A landed arrow sticks, wobbles for 0.35 s on pitch alone, is collectable if a player fired it in survival, and expires after 60 s. **A mob's arrow is never collectable**, even in creative, or a skeleton is an arrow farm.
+- The model is the reference's: two flat quads crossed through the shaft plus a nock square. The fletching is *painted*, not modelled. Its 32×32 sheet is cropped to its top-left sixteenth rather than resized, because a texture array needs every layer the same size.
+
+**The bow.** `bowCharge(seconds)` is the reference's quadratic `(f² + 2f)/3`, and four `static_assert`s pin it to the four rows of the reference's own published damage table. Below `kMinBowCharge` nothing fires — no arrow spent, no wear taken. `bowPullStage` picks the icon and **finishes in half the time the charge does**, which is the reference's own split; it must never decide the shot. Durability 385, spent per arrow fired. Firing happens on the button's **falling edge**, so the main loop keeps `bowHeld` from the previous frame. The three drawn-bow pictures are the *artwork* of the pull; what fills the gaps between them is the hotbar icon **shrinking on the charge curve, dead centre in its slot** — it reads as the bow being drawn back away from you, and a fraction of the icon's own size is a limit by construction. Sliding it back along the arrow's axis was tried and read as the bow slipping into the corner of the slot.
+
+> ⛔ **A drawing bow has to be in the HUD's rebuild condition.** `hudDirty` is set when the draw starts and when it ends, so without `|| bowHeld` the hotbar is built once at the beginning of the pull and not again until the arrow leaves — the picture and the size are computed correctly every frame and never uploaded. Same bug as the dig bar; the condition names all four continuous cases.
+
+> ⛔ **There is deliberately no first-person view of the held item.** One was built and removed the same day: the user's whole reaction to it was *"the hell is this grass block in the bottom right corner?? remove it."* The request it answered was that the bow's three-frame pull looked choppy, and the fix belonged in the slot the bow already occupies.
+
+### Two screen layers, plus a third for the cursor
+
+`setScreenMesh`, then `setClippedScreenMesh` (scissored, for the catalogue's cut last row), then `setTopScreenMesh`. The third exists because **a blended fragment still writes depth**: the stack on the cursor was nearest of everything in the inventory mesh, and the catalogue icons are a separate draw that comes after it, so wherever the held artwork was transparent it had already stamped its depth and punched a rectangular hole through the list behind it. Ordering is the only fix while the HUD shares the world pipeline. The top layer carries the carried stack and its tooltip, and is empty whenever no screen is open.
+
+**Archers.** `CreatureSpecies::shootsArrows` is the other half of the split `swingsArms` already recorded: skeleton, stray and bogged. `RangedAttack` is a real behaviour row at priority 4, above `MeleeAttack` and claiming the same controllers, and `meleeAttackStart` refuses an archer outright so neither the tie nor the ordering is load-bearing alone. It backs off inside 4 m, closes outside 9 m, and looses once a second at Bedrock's `mob_arrow` power of 1.6 with the Normal-difficulty spread of 8. `Creatures::takeLaunches()` hands the shot over rather than firing it — the same arrangement as `takeLoot`.
+
+---
+
+## Ladders, vines and the third table run
+
+`WhiteStainedGlass..EndRod` is a **third** table-driven run, appended for the reason the second exists: everything before it is on disk. Sixteen stained glass, iron bars, both lanterns, the soul and redstone torches and the end rod.
+
+A **ladder** spends four ids on which wall it is fixed to, and takes that facing from *where it landed* rather than from the camera — it is the one placed block whose orientation is a fact about the world. It has **no collision box at all** (a ladder you bump into is one you cannot get onto), so `selectionBoxes` answers with its drawn rungs or it would be unbreakable, and `Player::climbableAt` tests whole cells rather than shape or nothing would ever climb.
+
+**Vines are sixteen ids, one per combination of the four sides they cling to.** That is Bedrock's own `vine_direction_bits`; Java spends a fifth bit on the sheet under a ceiling, and Bedrock derives that from whether anything is above — so the mesher asks the world for it and sixteen ids cover the block completely. `placeVine` **merges** a side into whatever is already there, which is the whole reason those sixteen exist: a cell between two trunks clings to both. Drawn double-sided, because a vine sheet is seen from either face.
+
+**Only shears collect a vine**, and no tier comparison can say that — so `ToolKind::Shears` exists and `yieldsDrop` asks what *kind* of tool is held when `harvestTool` names it. Shears are deliberately no faster than a bare hand; the axe is the quick tool. Vines burn, are washed away by water, and are `isReplaceable`.
+
+**Cocoa** is four facings times three ages, so the facing is the offset within a triple and the age is which triple. It hangs off the side of a jungle log with the top of the pod a quarter of a block below the top of the log at every age, which is what makes a row of them line up. Ripe gives three beans, younger gives one, and the beans are the reference's brown dye.
+
+> ⛔ **Cocoa has to be placed before the trunk vines, not after.** A cell already holding a vine refuses a pod, and the trunk is 75 % vined — putting cocoa second meant not one tree in the world carried a pod, and nothing anywhere reported it.
+
+Climbing **replaces** gravity rather than fighting it, the same rule water follows, and you climb by **pushing into** the block rather than by moving at all: strafing along a wall has no component into it, so A and D move you sideways instead of hauling you up. A vine with no side at all — a curtain hanging from the one above — is climbed from any direction. Jump climbs, sneak holds you still, and letting go slides you down at 1.4 m/s.
+
+### Modelled blocks
+
+Every other shape here is *cut out of a cube*, so where a box sits in its cell is also where it samples the texture — right for a stair, a slab or a fence, and wrong for a lantern, whose six-texel body is painted in the corner of a 16×48 sheet. `ModelBox` carries **its own texture rectangles** beside its extent - one for the four walls and a second for the lid, because a net paints those in different places and reusing the wall rect put the lantern's glass on its top and squashed its cap's plate into a sliver. `postModel` holds the reference's own `template_lantern`, `end_rod` and `cocoa_stage2` geometry, face rectangle for face rectangle. The mesher uses that rect when a shape has a model and derives one from position otherwise, and `appendBlockIcon` draws the same boxes isometrically - which is what makes an end rod's slot picture a rod rather than a two-texel sliver.
+
+The lantern's handle is the reference's two crossed quads, a texel thick and crossing at a right angle where the reference turns them 45°, because the box mesher has no rotation. The hole through the middle of each is the artwork's own transparency, which works because a lantern is a cutout block. Its collision and selection are the reference's body alone, 5-11 across and 0-7 tall.
+
+> ⛔ **A face is buried only when *all* of it is.** The mesher probed the centre of a face against the block's other boxes, which is right for a stair's step and wrong for a lantern - the cap covers the middle of the body's lid and leaves a one-texel ring showing all round, and the ring vanished. Five probes now: the centre and the four corners pulled a hundredth inward.
+
+---
+
 ## World Persistence
 
 Generation is a pure function of `(seed, chunkCoord)`, so an untouched chunk is already perfectly reproducible. A save is therefore the **difference** between the generated world and the played one, which keeps it small no matter how far the player travels.
@@ -1128,7 +1771,19 @@ A chunk is flagged `modified` the moment `setBlock` changes something, and only 
 
 Each chunk is one file under `saves/world_<seed>/chunks/`, written to a `.tmp` name and then **renamed**. Rename is atomic on Windows and POSIX, so the file on disk is always either the complete old version or the complete new one, never a mixture.
 
-Every file carries a header with magic, format version, seed, its own coordinates and block count, **all four checked on load**. This is the only place the game reads bytes it did not produce this run, so it validates rather than assumes. Player position and view direction live in `player.dat` beside the chunks, furnace contents in `furnaces.dat`, and the creature population in `creatures.dat`. All three side tables follow the same shape: magic, version, seed, count, then fixed-size records written as raw bytes and `static_assert`ed trivially copyable. An empty table deletes its file rather than leaving a stale one — a leftover would restore furnaces the player has broken, or repopulate a world they have cleared.
+Every file carries a header with magic, format version, seed, its own coordinates and block count, **all four checked on load**. This is the only place the game reads bytes it did not produce this run, so it validates rather than assumes.
+
+> ⛔ **Chunks and the player file carry separate version constants, and that separation is load-bearing.** `kChunkFormatVersion` (currently 3) versions chunk files; `kFormatVersion` (currently 2) versions `player.dat`. **Bumping the chunk version is how a worldgen fix reaches a world that has already been played** — every stale chunk fails its header check and is regenerated. Doing that must not cost the player their inventory or position, which is exactly why the two numbers are not one. Waterlogging bumped the chunk version to 2; the 16-bit block id bumped it to 3. M21's survival fields bumped the *player* version to 2, and nothing about the world changed.
+>
+> **Version 2 was migrated rather than discarded for a while, and that upgrade path has now been retired.** Widening each id in place was lossless and saved a player's building, which was the right call at the time — and it also meant that anything wrong in a version-2 chunk could never be reached by any later fix. M24 found exactly that: a sheet of water hanging in mid-air, left by a long-deleted test harness, in a chunk two versions old. Bumping the current version did nothing, because the bad file was not the current version. **A migration path is a promise that old data stays; check what that promise costs before making it, and be willing to withdraw it.**
+>
+> **An out-of-date version is now rejected silently**, unlike a wrong magic number, seed or coordinate. It is not a fault — it is this number doing the job it exists for, and warning about it would print one line per chunk in the world. See `CLAUDE.md` on warning about faults rather than about states the user chose.
+>
+> This matters more often than it sounds. Water flow calls `setBlock`, which flags a chunk modified, so **merely standing near an ocean writes chunks to disk**. A generator fix that tests clean can still be plainly broken on screen because the world being loaded predates it.
+
+Player position and view direction live in `player.dat` beside the chunks, furnace contents in `furnaces.dat`, and the creature population in `creatures.dat`. All three side tables follow the same shape: magic, version, seed, count, then fixed-size records written as raw bytes and `static_assert`ed trivially copyable. An empty table deletes its file rather than leaving a stale one — a leftover would restore furnaces the player has broken, or repopulate a world they have cleared.
+
+`player.dat` also carries health, food, saturation and exhaustion since M21. **A version-1 file is not migrated, it is refused**, which costs nothing: the player reappears at the default spawn with a full bar rather than at whatever four zeroes would mean, which is dead.
 
 One file per chunk is deliberately crude: a bad write damages exactly one chunk and it needs no index to stay consistent. A packed region format belongs with M13 if file count ever becomes the problem.
 
@@ -1152,19 +1807,232 @@ The overlay mesh rebuilds at **20 Hz**, not every frame. It changes constantly, 
 
 ---
 
-## Sun and sky
+## Sun, moon and sky
 
-A placeholder day cycle: one sun on a fixed arc, no moon, no seasons. Real directional lighting with cast shadows is M24 and needs the renderer restructure first.
+One sun and one moon on a fixed arc, no seasons. The sky itself is still three colours mixed by the sun's height rather than anything atmospheric; that is M25.
 
-The sun is a **billboarded quad** drawn in world space at a fixed distance from the camera, using a layer of the block texture array so it needs no extra binding. It is depth-tested against terrain, so a hill hides it.
+Both bodies are **billboarded quads** drawn in world space just inside the far plane, using layers of the block texture array so they need no extra binding. They are depth-tested against terrain, so a hill hides them. `Renderer` has exactly **two sky slots**, because there are exactly two things in the sky and they are on opposite sides of it — one mesh and one transform cannot describe both.
 
-World surfaces take a **Lambert term** against the sun direction, on top of the baked sky/block light and ambient occlusion. Sun direction, ambient floor and sun strength travel in the **push constants**, with a per-draw flag so HUD and sky geometry stay unlit.
+> ⛔⛔ **The arc runs due east, through the zenith, to due west, and that is load-bearing rather than decorative.** It was tilted 15.6° out of that plane (`kOrbitTilt = 0.28`) so the sun would miss the zenith and still light vertical faces at noon — and **that tilt is why four attempts at the bodies' orientation failed.** Once the arc leaves that plane the camera's own vertical plane no longer contains it, so any square referenced to the world rolls by the miss as the body climbs: measured as far as **36° off upright by mid-morning**, which is a diamond, and which is exactly what the player reported as the sun "rotating". **Every arc that misses the zenith does this, and none of it is tunable.** `kOrbitAxis` in `Sky.hpp` is the single owner — the arc is built by turning `kSunrise` about it, so the plane the body travels in and the axis its quad is squared against cannot drift apart.
+>
+> **The quad is spanned by that axis and the arc's own tangent.** Both are perpendicular to the body at every point of the arc, so it is face-on with nothing projected away and no angle at which the pair collapses — and because the axis is fixed, the square is attached to the sky rather than to the camera or to the body. Near the horizon the axis lies along the screen's horizontal and the tangent along its vertical, so the square is upright at sunrise looking east and at sunset looking west. Overhead the same pair *are* the world's two horizontal axes, so it is upright facing north, south, east or west and stands on a corner facing the four directions between them. Measured over every one of those cases and over the whole arc while tracking the body: **0.000° off square, aspect 1.000, no shear.**
+>
+> **Do not span it by the camera's own right and up.** That is a square on screen no matter where you look, and the player rejected it — it makes the sun a sticker on the lens rather than a thing in the sky. The rejected attempts, in order: world up with a threshold near the zenith (snapped a quarter turn mid-arc), the orbit axis against the *tilted* arc (rolled steadily), world up with no threshold (the same roll), and the camera's own basis.
+>
+> **The price, taken knowingly:** at the moment of noon nothing vertical faces the sun, so walls receive only ambient light for about a minute of a day. That is the reference's own arc, and it is what the tilt was buying.
 
-**The face normal is recovered in the fragment shader** from how world position changes across the triangle, rather than carried per vertex. Every face here is flat, so it is exact, and it kept a normal out of the vertex format — which would have cost memory on every vertex in the world. This works only because chunk geometry is drawn with an identity model matrix, so its vertex position *is* its world position.
+> ⛔ **It sits just inside the far plane and is exempt from distance fog.** Drawn nearer than the world is drawn, a sky body passes behind hills a few hundred metres off and appears to sink into the ground; left in the fog, it dissolves as it sets. Its size is a **fraction of that distance** rather than a length, so it cannot change size when the render distance does. `kDrawFlagSky` is what carries the fog exemption, and it keeps the fog that starts at the eye so it still vanishes underwater.
 
-Sky colour is blue overhead, warm near the horizon and dark at night, driven by the sun's elevation. Night keeps a usable ambient floor rather than going black; this is a placeholder, and a world nobody can see in is not worth shipping over realism.
+The moon runs the reference's **eight phases**, one texture layer each, advancing a phase per in-game day. The quad is rebuilt only when the phase changes, since each rebuild retires a GPU buffer.
 
-> **There are no cast shadows.** A surface is lit by which way it faces, not by whether anything stands between it and the sun. Do not describe this as shadows.
+> ⛔ **Reference celestial art is opaque with a black surround**, because the reference draws it additively and we have no additive pass. `tools/make-reference-blocks.ps1` derives alpha from brightness for these, which is what an additive blend does and what gives the crescents their shape. It also **crops the centre 16×16** rather than resizing: the body itself is only the middle eight columns of a 32×32 sheet and everything around it is a very dim halo. `kSunSize` is sized for that proportion — it is the quad, not the disc.
+
+> ⛔ **That alpha needs a floor and a ceiling, not a snap to zero.** The halo never reaches black — inside the cropped tile it bottoms out at **14** — so a threshold of 10 left every texel slightly opaque and the whole tile showed as a faint square of dark blue sitting behind the moon. Anything at or under 40 becomes truly nothing and what survives is rescaled to reach full opacity. **Measure the corner alpha of any sprite that is meant to have clear corners**; it is one command and the fault is invisible until it is on screen against the right background.
+
+**One directional light, not two.** `sky::lighting` returns whichever body is above the horizon along with its strength; moonlight is about a fifth of daylight and fades on the same ramp, so the handover at dawn and dusk has no step in it. That one decision is why the night has a lit side and a dark side, and why moonlight casts shadows through the same cascades.
+
+World surfaces take a **Lambert term** against that direction, on top of the baked sky/block light and ambient occlusion. Direction, ambient floor and strength travel in the **frame uniform block**.
+
+**The face normal is exact and comes from the vertex**, packed into three bits of the `surface` word. A seventh code means "no axis to name" — a rotated creature limb, a plant blade at forty-five degrees — and only those fall back to recovering it from how world position changes across the triangle.
+
+Sky colour is blue overhead, warm near the horizon and dark at night, driven by the sun's elevation. Night keeps a usable ambient floor rather than going black; a world nobody can see in is not worth shipping over realism.
+
+### The sky is a gradient, written by the lighting pass
+
+There is no sky dome and no sky pass. `deferred.frag` writes the sky wherever the depth buffer says nothing was drawn, which costs nothing and has the ray direction to hand already.
+
+**It is single-scattered sunlight, not a tint.** Rayleigh coefficients in the reference's own one-over-wavelength-to-the-fourth proportions, a Mie term for haze, both phase functions written out, and an air-mass approximation that grows toward the horizon. A sunset is not painted on — light arriving from a low sun has crossed enough air that its blue is scattered out of it before it arrives, and that is a term in the expression.
+
+> ⛔ **The model is used as a ratio against its own value at the horizon, never as an absolute radiance.** The horizon must stay *exactly* `frame.fog.rgb`, because that is what terrain fades to and anything else puts a visible line where the world ends. Dividing by the model's own value along the horizon at the same azimuth keeps that join exact and lets everything above it be physical. **Do not replace this with an absolute radiance and a tuned exposure** — the join is the constraint, not the brightness.
+
+> ⛔ **Two things take the shaping back out, and both matter.** Rain, because overcast air scatters so many times that the gradient washes into flat grey. And **darkness**: scattered light is only ever as bright as what is doing the scattering, and at night that is the moon at a fifth of the sun. Shaping a full blue gradient out of it is what made a midnight sky read as daytime — the player's own report. The night sky colour is also a third of what it was and much less blue; `kNightSky` in `Sky.cpp` owns it.
+
+**Altitude is deliberately exaggerated.** Air thins on a 70-block scale height against a real atmosphere's 8,500 m, because our whole world is 96 blocks tall and at any honest scale climbing a mountain would change nothing.
+
+**The horizon is exactly the fog colour**, the zenith is what the model makes of it, and two glow lobes around whichever body is up give the sun its halo and the sunset its spread.
+
+Underwater and in lava the whole sky is one flat colour, because a fog that starts at the eye should swallow it.
+
+> ⛔ **Nothing below the horizon is asked of the sky model.** Every closed form for how much air a ray crosses is undefined or negative down there, and the one first shipped divided by zero — which painted a **black band exactly where the loaded chunks stop**, in the one place the fog exists to hide. Below the horizon the shader answers with the horizon in the same direction, which is the fog colour exactly and is what the world fades into.
+
+> ⛔ **Distance fog is measured in chunks, not as a fraction of the view.** It exists to hide the boundary and nothing else, so it covers the same short run — `kFogChunks = 1.25` — whatever the render distance is. As a fraction it hazed a third of the world at distance 12 and almost nothing at distance 4. **Clouds take the same fog at 2.5× the reach**, because you see cloud much further than ground haze; at the terrain's own reach it washed most of the visible deck into the sky colour.
+
+### Rain on a surface, and shafts under water
+
+**Wet surfaces darken and shine.** Water fills the pores of a surface so less light escapes back out of it, and leaves a smooth film on top — so albedo drops and roughness drops together, in the lighting pass, gated on sky light so the inside of a house stays dry. Snow is exempt: it does the opposite.
+
+**Underwater light shafts** are twelve steps along the view ray, inside the lighting pass, with no pass or target of their own. Each step samples **the same caustic field** that draws the net on the seabed, taken where a vertical ray from that step would leave the water — so the shafts line up with the pattern on the floor rather than being a second, unrelated effect. `frame.volumetric.x` carries the surface height above the eye and `.y` the strength; being submerged used to be one bit, which is enough to fog and not enough to know where the light comes from.
+
+### Resolution scaling
+
+`render_scale`, 0.5 to 1. **The world shrinks and the interface does not.** Every pass up to and including lighting, water and bloom runs at `Renderer::renderExtent()`; the tone map stretches it back to the window, and the UI pass is drawn afterwards at full resolution — so text and inventory slots stay sharp however low it goes. That split is the whole reason it is worth having.
+
+The extent is rounded to an even number on each axis, because the bloom pyramid halves it and an odd width leaves the first mip half a texel out of step with the image it was filtered from. Changing it does exactly what a window resize already does, so it is live rather than restart-only.
+
+> **Measured: 2.42 ms at 1.0, 2.14 at 0.75, 2.11 at 0.5.** That is a small return and an honest one — this frame is bound by the shadow pass, which is a fixed size and does not scale at all, and by 2.6 M triangles. **Scaling pixels only helps a frame that is pixel-bound.** Do not conclude the setting is broken from the number; a probe confirmed 1280x720 window against a 640x360 world at 0.5.
+
+---
+
+## Clouds
+A slab between y 140 and 145, **raymarched in a full-screen pass inside the forward pass** — after the sun and moon so a cloud occludes them, and before water so a reflection can pick them up.
+
+> ⛔ **The deck sits above the world's 96-block ceiling on purpose.** A cloud field is a field, not geometry, so nothing stops it. The first attempt put it at 74 to stay inside the world, where the whole visible sky spanned less than one cloud and the layer rendered as a uniform white veil. How big a feature *looks* is set by how far away the layer is, and the reference's own deck is about 128 blocks above the player.
+
+> ⛔ **The shapes are square, and that is the point.** The coverage field is quantised to the reference's 12-block cell grid and thresholded hard — 1 or 0, never in between. The reference assembles a cloud out of square pieces and that blockiness is the look; a `smoothstep` on the raw field gives round blobs that belong in a different game. The volumetric part is the *shading*, not the shape.
+
+**No geometry** is what makes flying through the layer work: no near plane slicing a quad, nothing to sort, no inside face to vanish. `gl_FragDepth` carries the depth of the ray's entry point so terrain occludes it, **clamped to just under the depth of the sun and moon** — a cloud beyond the far plane writing exactly 1.0 loses the `LESS` test against the cleared sky and the entire horizon disappears.
+
+> ⛔ **That clamp is computed from the distance the sky bodies are drawn at, never hardcoded.** Depth values out there are crowded close enough together that a constant is a race rather than an ordering: `0.999999` against a sun at about `0.999992` meant **every cloud further away than the sun lost, and the sun showed through the deck** — which near the horizon is most clouds, and exactly where a sunset is watched. `Renderer::setSkyDistance` is what keeps the two from drifting apart.
+
+**Clouds take the world's own distance fog**, on the same ramp and measured from the same entry point the depth is. A deck that stays crisp where the terrain beneath it has dissolved is what gives the boundary away. **The colour is mixed toward fog; the alpha is not touched** — a cloud lost in haze still blocks the sun behind it, which is what a hazy sunset looks like, and fading it out instead would hand back the bug where the sun shines through the deck.
+
+Shading is Beer's law, a **three-tap light march spaced against the cell size**, and a Henyey-Greenstein phase with a floor (pure HG gives a cloud with its back to the sun a tenth of the light, and a real one is still plainly white). There is deliberately **no ray dither**: it is what hides banding in a smooth field and it frays the crisp edges this deck exists to have.
+
+**Cloud shadows on the ground** are one coverage sample walked from the surface along the sun, in the lighting pass. Six lines, and most of what makes the layer read — a shadow crossing open ground is visible from anywhere while the deck itself needs you to look up.
+
+`clouds` in `settings.cfg` and `C` while playing: off, fast (14 steps), fancy (32). Measured at 0.1–0.2 ms on release.
+
+> ⛔ **How stormy the deck looks is derived from its own coverage, not passed in.** The game raises coverage as weather comes on, and an overcast sky is exactly what a dark deck means — so a second uniform saying the same thing could only ever disagree with the first. `smoothstep(0.45, 0.88, coverage)` takes the sunlight down 80% and the skylight 62%.
+
+---
+
+## Weather
+
+**Two independent boolean flags with their own countdowns, not a three-way state.** Rain on for 12,000–24,000 ticks and off for 12,000–180,000; thunder on for 3,600–15,600 and off for 12,000–180,000. A thunderstorm is both at once, and **the thunder flag keeps cycling while it is dry** — which is why storms are rare, why one can begin partway through a rainstorm, and why an enum with transitions would need a probability table the reference does not have.
+
+`rainLevel` and `thunderLevel` ramp at 0.2 a second. **Cloud cover runs on its own far slower ramp and leads the rain**, because clouds gather and *then* it rains; everything moving on one ramp reads as a slider being dragged.
+
+**What falls is per biome.** A biome tagged `Dry` or `Badlands` gets nothing — the reference's downfall-of-zero test wearing our tags, so a new biome inherits the right answer. Otherwise the biome's fixed `warmth`, less 0.00125 per block above y 81, decides rain or snow at the reference's 0.15. **`warmth`, never the climate noise**: the noise is continuous across a biome edge and asking it would scatter snow through the warm side of every border.
+
+### The falling curtain
+
+**One vertical quad per world column**, built on the CPU in a disc around the camera and rebuilt only when the camera changes column.
+
+> ⛔ **The quad starting at the top of whatever blocks that column *is* the entire roof and cave test.** Stand under an overhang and the rain is above it, with nothing else to check. This is the whole reason the effect is geometry rather than a full-screen march — a screen-space version needs the heightmap on the GPU to answer the same question, and would have to be smooth to be cheap.
+
+- The streaks are **procedural, not a texture**, so they land on the block grid. Rain is a three-texel translucent blue streak, snow a single fully opaque white texel that wanders on two frequencies and is forced bright so a blizzard does not go grey at dusk.
+- **Sheared, never tilted.** A drop's path is `x = x0 + slant·y`, so subtracting the slant recovers `x0`, which is constant down that path and is what lets one hash identify a whole streak. Tilting a 44-block quad for a gale would swing it eight blocks sideways.
+
+> ⛔ **The shear has to be a direction in the *world*, not in the quad.** Every quad is turned to face the camera's own column, so a flat slant in quad-local space leans a different way for each one, and looking straight up at that reads as the rain spiralling around you. The mesh carries the wind's component along each quad in the vertex colour's blue channel, and the along-quad coordinate in `uv.x` is in **world units** rather than a 0-1 span for the same reason. The mesh is rebuilt when the wind turns more than 0.08 radians, since that component is baked per vertex.
+
+> ⛔ **And the sign of that shear is which way the weather is going.** A drop blown along +wind travels with it as it falls, so its path is `x = C - drift·y` and the streak's identity is `C = x + drift·y`. Negated, the rain leans into the wind while the grass bends away from it, and the two read as two different storms at once.
+- **Anchored to absolute world height and hashed on the world column.** Measure from the quad's own foot and the pattern jumps every time the terrain under it changes; hash on a grid slot instead of the world column and the whole field re-randomises every time you cross a block.
+- **Depth tested, never depth written**, and faded out inside 3.5 m of the eye — a drop two blocks away covers a sixth of the screen and no amount of tuning the count fixes it.
+- Drawn after water: rain in front of a lake draws, rain behind its surface is depth-rejected.
+
+> ⛔ **A drop here is four times fatter than the reference's**, because one texel of our 16-per-block grid is six centimetres where the reference draws rain at 64 texels to the block. Keeping its drop *count* with our drop *width* fills the screen with white slabs. Density is 0.06, not 0.25.
+
+### Lightning
+
+Random midpoint displacement, five generations, three strands; each segment is a **cross of two quads**, so it reads the same from every angle without the mesh knowing where the camera is. Drawn white and emissive on layer −6, so bloom gives it a halo — which is what the reference gets from four nested shells blended additively.
+
+- The rate is the reference's **resulting rate**, not its per-chunk probability: our chunks are 32 blocks where its columns are 16, and our render distance reaches three times further, so porting the probability would have multiplied the strike rate by an order of magnitude.
+- A strike re-checks that **rain, not snow**, falls there, which is why lightning never hits a cold or dry biome.
+- The flash is **two to four return strokes**, not one ramp. A single fade reads as a camera going off.
+- Thunder follows at `distance / 343`. **The reference does not do this** — it plays thunder to the whole world at once. Ours is a deliberate divergence.
+
+**What a strike does.** Five points of damage to the player and to every creature in the reference's own 6×12×6 box, a fire lit where it lands, a puff of smoke, and **a Bramble caught by it is charged** — which is where a charged one is supposed to come from, and which the species table had been apologising for in a comment since M20d.
+
+> ⛔ **The fire is only safe to light because the same storm puts it out.** Anything burning under an open sky is extinguished on its next fire tick while `World::setPrecipitating` holds — that pairing is the reference's, and without it the first bolt of a storm could burn a forest down permanently. `m_precipitating` is plain data rather than a handle on the weather: the fire update needs one bit.
+
+### Snow settling and ice forming
+
+Columns near the player are picked on a timer and asked whether snow should deepen there, which is the reference's random tick in everything but name. Under an open sky only (**sky light is "can this cell see up", not brightness, so it holds at night**), and never within reach of a torch — the reference's own rule, and the only thing that stops a sheltered doorway filling in.
+
+**Snow is seven layer depths plus the solid cube.** Two texels each; the eighth depth *is* `BlockId::Snow`, which already existed. Every depth draws the snow texture that was already loaded, so the family cost no art, no texture layer and no staging row — and each one drops a single layer, so only one of the seven is a catalogue entry.
+
+> ⛔ **`harvestTool` answers snow before its flat-shape rule.** That rule returns "no tool at all" for carpets and lily pads, and snow is the one flat block that is dug rather than picked up.
+
+**Ice forms on the same pass**: a water *source* only, under an open sky, with air above and no torch near. Freezing a flowing cell would be undone by the next fluid tick and leave the shoreline flickering.
+
+---
+
+## Particles
+
+**Simulated on the CPU**, plain data in one contiguous array, capped at three thousand. `game/src/world/Particles.hpp` owns it. "GPU-driven" was a vision-document phrase, not a player request, and a compute path means a storage buffer, an indirect draw and a compaction pass for a few hundred quads that cost microseconds to build.
+
+**No pipeline of their own.** A particle is a camera-facing quad carrying a **quarter** of a block's texture — a whole sprite reads as a shrunken block rather than a chip off one — with sky light, block light and a face shade in the same three vertex channels world geometry uses. It goes down the existing lit cutout path with no case for particles in any shader. The quads face the camera because they are built that way on the CPU, which costs two cross products for the whole set instead of a matrix multiply per vertex.
+
+> ⛔ **They shrink as they die; they do not fade.** The cutout path discards below half alpha, so an alpha ramp does nothing until it crosses the threshold and then blinks the particle out whole.
+
+**A particle has no colour of its own**, because the three vertex channels are sky light, block light and face shade. So smoke is the white sprite darkened by its shade, and a flame is the fire block's own texture with a self-lit term — without which a flame that drifted a block from its torch would go dark, which is not a flame. Smoke also leans on the same wind vector that bends the grass and slants the rain.
+
+**Emitters**: a broken block, rain landing (on water as well as on ground — the scatter finds the water surface, since the highest *solid* block in a lake is the bed), a hard landing, crumbs while eating drawn from the food's own sprite, a blast's smoke ball scaled by its own power, and ambient smoke and flame from torches, fire, lit furnaces and lava.
+
+> **The ambient emitters near the player are found on a half-second timer and cached.** A torch is a rare block, so finding one costs far more than drawing its smoke — a full scan every frame and a random stab that almost always lands on air are both worse than remembering where they were.
+
+Collision is a point test against the block grid, one axis at a time, so a chip that meets a wall slides along it. **A chip rests where it lands rather than bouncing** — a bouncing one reads as a dropped item and there is already a system that looks like that.
+
+Spawned by: breaking a block, rain landing where the sky can reach the ground, and a hard landing. `particles` in `settings.cfg`.
+
+---
+
+## Wind and foliage
+
+**One wind vector drives everything that should agree about the weather** — the cloud deck's drift, the rain's slant and the sway of grass and leaves. Neither the reference nor the well-known shader packs model wind at all; this is a deliberate improvement on both.
+
+The bend is `min(0.22, 0.016 × windStrength)` blocks, scaled by `foliage_sway`. Direction rotates slowly rather than being pinned due west, so a cloud still roughly tells you which way west is.
+
+> ⛔ **Wind gusts; it does not blow steadily.** `windStrength` is the weather's own contribution plus a gust made of **two slow sine waves multiplied**, so the product spends real time at zero — on a clear day the world stands still and then a gust crosses it. A constant breeze reads as an animation somebody left running.
+
+> ⛔ **The sway flag is decided against the quad's own extent, never against a block boundary.** A plant blade's corners sit at whole world heights, so a `fract(y) > 0.5` test is one whose answer is always no — which is why grass stood perfectly still for two rounds while leaves moved.
+
+> ⛔ **The sway phase must turn slowly across space.** At better than a radian per block, two corners of the same blade land on opposite parts of the cycle and move in opposite directions, which shears the plant apart instead of bending it. A fifth of a radian per block keeps one plant coherent and still separates it from its neighbours.
+
+- **Always along the wind, never through zero.** Grass bends; it does not wag. A blade oscillating about its rest position reads as a metronome.
+- A per-position phase stops a field moving in unison, and a shared gust term makes it occasionally do exactly that — which is the part people notice.
+- **Only the top half of a plant blade moves**, so it stays rooted where it was planted.
+
+> ⛔ **A leaf block moves every one of its vertices, not just its top.** The displacement is a pure function of world position, so two blocks sharing an edge move identically and the canopy stays watertight. Moving only the tops tears it open.
+
+The vertex surface word now carries the flags: bits 0-2 normal, 3-10 ambient occlusion, **bit 11 fluid top**, **bits 12-15 sway height**. `triangle.vert` must mask when it unpacks occlusion — see `LESSONS.md`.
+
+> ⛔ **The sway field is a height above the plant's own root, in half blocks, not a flag.** A flag can only say "this vertex moves", so every block of a multi-block plant bent its own top half against its own bottom half and a sugar cane came apart at every block boundary. Measured from the root, the value is continuous across a block edge and the stalk leans as one piece; zero means it does not move, which is what keeps a blade planted. Leaves carry exactly one block's worth, which is what they had before. **The phase is a function of the column alone** — it used to include the vertex's height, which twisted a tall plant along its own length.
+
+---
+
+## Image quality
+
+**Contact shadows have no pass of their own.** Eight taps in a small screen-space disc off the depth buffer the lighting pass is already reading, each rotated by an interleaved-gradient offset so the pattern differs per pixel and banding becomes grain. A proper SSAO pass with a bilateral blur would be better and costs two images, a second descriptor set and two layout transitions; this is a tenth of the work for most of the effect, measured at 0.2 ms.
+
+It adds only what the mesher's baked occlusion **cannot** know: a creature's feet, a dropped item, two surfaces meeting far from any vertex. It range-checks each tap and fades out past twenty-four metres — without the range check a foreground object draws a dark halo on the sky behind it, and without the fade a screen-space radius covers whole blocks and reads as a smear.
+
+**Anti-aliasing runs after the tone curve and is off by default.** Both halves are decisions:
+
+> ⛔ **After the curve, because a bright pixel next to a dark one is a 40:1 ratio in HDR and about 2:1 once graded.** Blending beforehand is dominated by whichever neighbour is brightest and barely moves the edge. This is why the whole grade lives in a `graded()` function that the anti-aliaser runs over its neighbours — five extra grades on one full-screen pass.
+
+> ⛔ **Off, because everything here is a hard-edged square.** An anti-aliaser strong enough to soften a diagonal also softens every texel boundary in the world, which is the look rather than an artefact.
+
+Blending is **along** the detected edge, never across it. Motion blur and depth of field are deliberately absent: both exist to hide sharpness, and sharpness is the art direction. Resolution scaling is owed and is its own slice — it touches the extent of eight passes plus the depth image.
+
+---
+
+## Cast shadows
+
+The world is rendered from the light's point of view into a depth-only image — how far away the nearest surface is in each direction. Shading a pixel then asks whether it is further from the light than whatever the light saw first; if it is, something is in the way.
+
+One map covering the whole view would have to be enormous to be crisp underfoot, so it is split into **cascades**: slices of the distance in front of the camera, the nearest small and sharp and the furthest large and coarse. They are **layers of one image**, which is what lets the lighting pass pick between them with an index instead of branching between separate textures. `ShadowMap` owns the image, one view per cascade to render into and one array view to sample.
+
+`shadows` in `settings.cfg`, cycled live with **G**:
+
+| | Resolution | Cascades | Reach |
+|---|---|---|---|
+| 0 | off | — | — |
+| 1 | 1024 | 2 | 64 m |
+| 2 | 1536 | 3 | 128 m |
+| 3 | 2048 | 4 | 192 m |
+
+> ⛔ **The shadow pass culls nothing, and that is not laziness.** Front-face culling is the textbook cure for shadow acne and it is wrong here: a voxel mesh is a **hollow shell** — the mesher never emits the face between two solid blocks — so the far side of a hill does not exist. Front-culling would leave flat ground casting no shadow whatsoever. A slope-scaled depth bias in the pipeline plus a normal offset in the shader do that job instead.
+
+> ⛔ **Each cascade is fitted to a bounding sphere and then snapped to whole texels.** A box fitted to the slice changes size as the camera turns, so the map's scale changes with it and every shadow edge crawls. A sphere is rotation-invariant. Snapping is what stops the map sliding a fraction of a texel as the player walks.
+
+The lookup walks the cascades in order and takes the first one that contains the point, so there are no split distances to keep in step with the fitting. Nine comparison samples, each already filtered by the hardware across its own 2×2 neighbourhood. Beyond the last cascade the shadow fades out over the final fifth, or the reach ends at a visible line across the ground.
+
+**Skipped entirely when the sun is at or below the horizon**, which is most of what makes it affordable: a light that low would cast shadows the length of the world and its own strength has already faded to nothing. The map is still moved to the layout the lighting pass expects, or validation flags the descriptor.
+
+Measured on release at render distance 12, medium: draws 121 → 568, triangles 551k → 3.28M, GPU 0.46 ms → 2.24 ms. The extra work is the world drawn once more per cascade.
+
+> ⛔ **A shadow darkens the ambient sky too, and that is where its depth actually comes from.** Cutting the directional half is all a shadow map can do on its own, and on its own it left shadows reading as pale patches — a shadowed surface was still receiving the entire sky. A point the sun cannot see is also cut off from a good part of the sky, so `shadow_darkness` (default 0.55) takes that share of the ambient with it. It is gated by sky light as well, or a cave would be darkened twice.
 
 ---
 
@@ -1179,6 +2047,8 @@ The free fall only happens through **sky-transparent** blocks, which is a narrow
 They are also kept apart **all the way into the fragment shader**, and that is load-bearing rather than tidiness. Only sky light answers to the sun's direction and the time of day; block light must not, or a glowstone underground gets multiplied by the ambient term and lights nothing. See `CLAUDE.md`.
 
 Propagation runs on the **main thread**, budgeted per frame. Generation and meshing get self-contained snapshots and run on workers; light cannot, because it walks freely between chunks. Adding light is a flood fill. Removing it is the harder half: it walks back everything the dead source lit, and any cell found brighter than expected has its own supply and becomes a seed to re-fill the hole.
+
+> ⛔ **Removal has to mirror the free fall, and it did not.** "Brighter than expected" is the standard test, and it cannot see a cell that was lit *at the same level* — which is exactly what sky light does straight downward. So placing a roof cleared the cell it occupied and stopped: **the whole column underneath kept its full sky light, and a sealed room read as broad daylight.** `unpropagate` now also removes a cell directly below a removed full-strength one. Whatever the sides still supply floods back in at one level per step, so an open ledge is unaffected.
 
 **Block light propagates before sky light**, even though sky light is what makes newly streamed terrain look right. Block light is rare and its queue is short, so going first costs sky light almost nothing — but behind sky light it can be starved outright, because streaming refills the sky queue every frame and the two share one budget.
 
@@ -1246,6 +2116,27 @@ GLM is column-major and the project builds with `GLM_FORCE_DEPTH_ZERO_TO_ONE`, s
 | `spawn_underground` | Start in the most open cave near that column | No — restart |
 | `creature_showcase` | Freeze the spawner and line the roster up for review | No — restart |
 | `creative_mode` | Infinite blocks, no drops | No — restart |
+| `sound_volume` | Everything except music, 0 to 1 | No — restart |
+| `music_volume` | Music only, on its own bus | No — restart |
+| `tone_map` | Which curve squashes the bright end of the image, 0-3 | Yes, `F10` |
+| `exposure` | Multiplies the scene before that curve | No — restart |
+| `bloom` / `bloom_strength` | Light bleeding out of bright surfaces | Yes, `F11` |
+| `shadows` | Cast shadow quality, 0 off to 3 high | Yes, `G` |
+| `handheld_light` | A lamp on the camera, 0 to 1. **Off by default** | No — restart |
+| `clouds` | Cloud deck, 0 off, 1 fast, 2 fancy | Yes, `C` |
+| `cloud_coverage` | How much of the sky is cloud, 0 to 1 | No — restart |
+| `cloud_shadow` | How far a cloud darkens the ground under it | No — restart |
+| `weather` | 1 lets rain and storms come and go on their own; 0 freezes them | No — restart |
+| `rain_distance` | How far the falling curtain is drawn, in columns | No — restart |
+| `start_weather` | 0 cycle, 1 rain, 2 storm, 3 clear — what the world opens with | No — restart |
+| `particles` | Breaking showers, rain splashes and landing puffs | No — restart |
+| `foliage_sway` | How far the wind bends grass and leaves; 0 leaves the world still | No — restart |
+| `anti_alias` | Softens hard edges after the tone curve, 0 to 1. **Off by default** | No — restart |
+| `contact_shadows` | Radius in screen pixels for the darkening where surfaces meet | No — restart |
+| `render_scale` | What fraction of the window the **world** is drawn at, 0.5 to 1. The interface stays full size | No — restart |
+| `shadow_darkness` | How far a shadow darkens the sky light as well as the sun, 0 to 1 | No — restart |
+| `water_waves` | How steeply the ripples tilt a water surface; 0 is a flat mirror | No — restart |
+| `water_reflection` | How much sky and world the surface returns, 0 to 1 | No — restart |
 
 `spawn_underground` **searches** the surrounding area for the roomiest cave floor rather than trusting the spawn column to contain one. It exists because testing anything underground otherwise means minutes of flying per attempt, which is enough friction that the test stops being run. The three spawn keys only apply to a fresh world; a saved player position wins.
 
@@ -1268,6 +2159,7 @@ The worker count is different and deliberately restart-only — see `CLAUDE.md`.
 |---|---|
 | Chunk generation and disk load | Worker |
 | Meshing | Worker |
+| Audio mixing | **The operating system's own audio thread**, not ours. It is handed a voice pool and a mutex and nothing else; see "Sound". |
 | Everything else: block edits, physics, raycasting, GPU upload, saving | Main |
 
 **The main thread remains the only thing that mutates the world.** A worker never sees `m_chunks`. Before a mesh job is submitted the main thread copies the chunk and its six neighbouring border layers into a `MeshJobInput`, so the job owns everything it reads and the question of what the main thread may do meanwhile never arises. That copy is ~38 KB against a mesh build that costs far more.
@@ -1378,13 +2270,14 @@ Program flow:
 
 ## Current Validation Baseline
 
-Verified 2026-08-06 on this machine. The environment lines were first taken 2026-07-31 and have not changed since.
+Verified 2026-08-08 on this machine. The environment lines were first taken 2026-07-31 and have not changed since.
 
 **Per-milestone results are deliberately not kept here.** What a build measured on the day it shipped is history, and history belongs in `TIMELINE.md`; this file is current state only.
 
-- **Configure:** `cmake --preset debug` succeeds. GLFW 3.4 fetched, `Found Vulkan: 1.4.357` with `glslc` and `glslangValidator` components.
+- **Configure:** `cmake --preset debug` succeeds. GLFW 3.4, GLM 1.0.1, stb and miniaudio 0.11.21 fetched, `Found Vulkan: 1.4.357` with `glslc` and `glslangValidator` components.
 - **Compile:** clean build in both debug and release, **zero warnings** at `/W4 /permissive-`. Shaders compile to SPIR-V as part of the build.
 - **Runtime:** window opens at 1280x720; validation layers report **no errors**, including across a continuous ~50-minute session.
+- **Audio:** the device opens at 48 kHz stereo, all 497 staged recordings decode, and all 57 events plus all 102 creature voice banks find recordings. Distance rolloff verified by a sound played out of range starting no voice.
 - **GPU selection:** correctly picks `NVIDIA GeForce RTX 4070 Laptop GPU`, not the Intel iGPU that enumerates first.
 - **Swapchain:** 3 images, `mailbox` present mode, rebuilt cleanly on every resize.
 - **Frame pacing:** holds 120–121 fps against a 120 fps target while the machine is active. Extended idle sessions show stretches near 66 fps, attributed to laptop power management dropping the panel refresh rate — not an engine fault, and not investigated further per user direction.

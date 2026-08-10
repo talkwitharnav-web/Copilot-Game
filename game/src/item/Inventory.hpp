@@ -40,6 +40,14 @@ public:
     /// Removes one from a slot, clearing it when the last is used.
     void consumeOne(std::size_t index);
 
+    /// How many of an item are carried, across every slot.
+    int count(ItemId item) const;
+
+    /// Spends up to `wanted` of an item wherever it is held, returning how many
+    /// were actually taken. Ammunition is spent from the whole inventory rather
+    /// than from the selected slot, which is holding the bow.
+    int consume(ItemId item, int wanted);
+
 private:
     std::array<ItemStack, kInventorySlots> m_slots{};
 };

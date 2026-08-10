@@ -1,5 +1,7 @@
 #include "world/ChunkMesher.hpp"
 
+#include "world/FaceShading.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,8 +21,13 @@ struct Face {
     BlockFace facing;
     /// Fixed brightness by orientation, so surfaces stay readable even where the
     /// light is flat. Multiplied with the computed lighting rather than
-    /// replacing it.
+    /// replacing it. **Read from `FaceShading.hpp`, which owns it** - the value
+    /// used to be written out here and in three other files, and one of those
+    /// copies had drifted.
     float shade;
+    /// The three-bit code a vertex on this face carries, so the shader knows
+    /// which way the surface points without recovering it from derivatives.
+    std::uint32_t normalCode;
     /// Which world axis the face's normal points along.
     int axis;
     /// World axes that U and V run along. Merged quads scale their texture
@@ -43,7 +50,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{1, 0, 1}, glm::vec3{1, 0, 0}, glm::vec3{1, 1, 0}, glm::vec3{1, 1, 1}},
      kBottomLeftWinding,
      BlockFace::Side,
-     0.72f,
+     faceShade(AxisFace::PosX),
+     faceNormalCode(AxisFace::PosX),
      0,
      2,
      1,
@@ -53,7 +61,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{0, 0, 0}, glm::vec3{0, 0, 1}, glm::vec3{0, 1, 1}, glm::vec3{0, 1, 0}},
      kBottomLeftWinding,
      BlockFace::Side,
-     0.72f,
+     faceShade(AxisFace::NegX),
+     faceNormalCode(AxisFace::NegX),
      0,
      2,
      1,
@@ -63,7 +72,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{0, 1, 1}, glm::vec3{1, 1, 1}, glm::vec3{1, 1, 0}, glm::vec3{0, 1, 0}},
      kBottomLeftWinding,
      BlockFace::Top,
-     1.00f,
+     faceShade(AxisFace::PosY),
+     faceNormalCode(AxisFace::PosY),
      1,
      0,
      2,
@@ -73,7 +83,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{0, 0, 0}, glm::vec3{1, 0, 0}, glm::vec3{1, 0, 1}, glm::vec3{0, 0, 1}},
      kBottomLeftWinding,
      BlockFace::Bottom,
-     0.45f,
+     faceShade(AxisFace::NegY),
+     faceNormalCode(AxisFace::NegY),
      1,
      0,
      2,
@@ -83,7 +94,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{0, 0, 1}, glm::vec3{1, 0, 1}, glm::vec3{1, 1, 1}, glm::vec3{0, 1, 1}},
      kBottomLeftWinding,
      BlockFace::Side,
-     0.86f,
+     faceShade(AxisFace::PosZ),
+     faceNormalCode(AxisFace::PosZ),
      2,
      0,
      1,
@@ -93,7 +105,8 @@ constexpr std::array<Face, 6> kFaces{{
      {glm::vec3{1, 0, 0}, glm::vec3{0, 0, 0}, glm::vec3{0, 1, 0}, glm::vec3{1, 1, 0}},
      kBottomLeftWinding,
      BlockFace::Side,
-     0.60f,
+     faceShade(AxisFace::NegZ),
+     faceNormalCode(AxisFace::NegZ),
      2,
      0,
      1,
@@ -102,6 +115,32 @@ constexpr std::array<Face, 6> kFaces{{
 
 /// Empty slot in the merge mask. Texture layers are never negative.
 constexpr float kNoFace = -1.0f;
+
+/// Whether the U and V flips the shape pass derives reproduce the face tables
+/// exactly, on a box that fills its cell.
+///
+/// **This is the check that was missing.** `flipV` was derived and `flipU` was
+/// not, so every +X and -Z face of every shaped block was mirrored - invisible
+/// until a texture had a letter on it, which is why lit TNT read backwards
+/// while ordinary TNT, which goes through the merged pass, did not.
+constexpr bool shapeUvsMatchFaceTables() {
+    for (const Face& face : kFaces) {
+        const float u0 = face.corners[0][face.uAxis];
+        const float v0 = face.corners[0][face.vAxis];
+        const bool flipU = face.uvs[0].x - u0 > 0.5f || u0 - face.uvs[0].x > 0.5f;
+        const bool flipV = face.uvs[0].y - v0 > 0.5f || v0 - face.uvs[0].y > 0.5f;
+        for (int c = 0; c < 4; ++c) {
+            const float u = face.corners[c][face.uAxis];
+            const float v = face.corners[c][face.vAxis];
+            if ((flipU ? 1.0f - u : u) != face.uvs[c].x || (flipV ? 1.0f - v : v) != face.uvs[c].y) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static_assert(shapeUvsMatchFaceTables(),
+              "a shaped block's faces must sample exactly where the merged ones do");
 
 /// How dark a fully enclosed corner becomes. Ambient occlusion is a cheat, not a
 /// simulation, so this is tuned by eye: too strong and the world looks grubby,
@@ -143,7 +182,11 @@ struct FaceSample {
     /// or unlit caves lose their ambient occlusion entirely.
     std::array<float, 4> sky{};
     std::array<float, 4> block{};
-    std::array<float, 4> shading{};
+    /// **Ambient occlusion alone, no longer multiplied by the face shade.**
+    /// A deferred pass has to be able to tell the two apart - one is a property
+    /// of the corner, the other of which way the surface points - and once they
+    /// are fused into a single float they cannot be recovered.
+    std::array<float, 4> occlusion{};
     /// True when all four corners match, which is the only case where a face may
     /// be merged with its neighbours.
     bool flat = false;
@@ -155,6 +198,15 @@ struct FaceSample {
     float alpha = 1.0f;
     /// How far the top of this block is lowered, for partly filled water.
     float surfaceDrop = 0.0f;
+    /// Marks the quad's top edge as a water surface, which the vertex stage is
+    /// allowed to move with the waves. Zero surface drop cannot stand in for it:
+    /// a source block has none and is exactly the case that must move.
+    ///
+    /// **Water only, not every fluid.** Lava is never displaced, so flagging it
+    /// would cost it its greedy merge for nothing.
+    bool wavy = false;
+    /// Bends with the wind.
+    bool sways = false;
 };
 
 /// How much of a block each level of water gives up. Level 7 is a thin film.
@@ -170,6 +222,17 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
 
     constexpr int size = Chunk::kSize;
     std::array<FaceSample, size * size> faces{};
+
+    const auto waterAt = [&volume](int x, int y, int z) {
+        return volume.waterloggedAt(x, y, z) || isWater(volume.blockAt(x, y, z));
+    };
+    // True when every one of the four columns meeting this corner holds water at
+    // this level - and therefore when the wave may move it without pulling the
+    // surface away from something solid.
+    const auto surfaceIsOpen = [&waterAt](int y, int cornerX, int cornerZ) {
+        return waterAt(cornerX - 1, y, cornerZ - 1) && waterAt(cornerX, y, cornerZ - 1) &&
+               waterAt(cornerX - 1, y, cornerZ) && waterAt(cornerX, y, cornerZ);
+    };
 
     for (const Face& face : kFaces) {
         // The two axes the face spans. Which is called which does not matter;
@@ -189,7 +252,9 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     FaceSample& sample = faces[static_cast<std::size_t>(j) * size + i];
                     sample = FaceSample{};
 
-                    const BlockId block = volume.blockAt(p.x, p.y, p.z);
+                    const BlockId block = volume.waterloggedAt(p.x, p.y, p.z)
+                                              ? BlockId::Water0
+                                              : volume.blockAt(p.x, p.y, p.z);
                     if (block == BlockId::Air) {
                         continue;
                     }
@@ -198,8 +263,7 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // would slow down the path that carries the whole world for
                     // the sake of a few decorative blocks.
                     const BlockShape shape = blockShape(block);
-                    if (shape == BlockShape::Cross || shape == BlockShape::Slab || shape == BlockShape::Stairs ||
-                        shape == BlockShape::Fence) {
+                    if (usesShapePass(shape)) {
                         continue;
                     }
 
@@ -208,7 +272,9 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // Water only shows where it meets air, so the faces between
                     // water and the seabed are skipped and you can see through.
                     const glm::ivec3 front = p + face.neighbourOffset;
-                    const BlockId ahead = volume.blockAt(front.x, front.y, front.z);
+                    const BlockId ahead = volume.waterloggedAt(front.x, front.y, front.z)
+                                              ? BlockId::Water0
+                                              : volume.blockAt(front.x, front.y, front.z);
                     // Water shows against air, and against thinner water, whose
                     // lower surface would otherwise leave a gap to see through.
                     //
@@ -225,25 +291,48 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     const bool sharedWithOwnKind = isCutout(block) && ahead == block;
                     const bool positiveFacing =
                         face.neighbourOffset.x + face.neighbourOffset.y + face.neighbourOffset.z > 0;
+                    // **A fluid's face rules, not a translucent block's.** Lava
+                    // is opaque and still needs these: a fluid draws only where
+                    // it meets air or a thinner fluid below, so its internal
+                    // faces never appear and the block behind it supplies its
+                    // own face.
+                    //
+                    // "Air" here has to mean *anything that does not hide the
+                    // face*, not the air block. Testing for air alone deleted
+                    // the water surface under every lily pad, torch, plant,
+                    // fence, pane of glass and slab standing in it - the block
+                    // beside the water does not supply the water's own face, so
+                    // the result was a hole you could see straight through.
                     const bool visible =
-                        isTranslucent(block)
-                            ? (ahead == BlockId::Air ||
-                               (isWater(ahead) && face.neighbourOffset.y <= 0 &&
-                                waterLevel(ahead) > waterLevel(block)))
+                        isFluid(block)
+                            ? ((!isFluid(ahead) &&
+                                !occludesFace(ahead, face.neighbourOffset.y)) ||
+                               (isFluid(ahead) && ahead != block &&
+                                face.neighbourOffset.y <= 0 &&
+                                fluidLevel(ahead) > fluidLevel(block)))
                             : (!occludesFace(ahead, face.neighbourOffset.y) &&
                                (positiveFacing || !sharedWithOwnKind));
                     if (!visible) {
                         continue;
                     }
 
-                    sample.layer = blockTextureLayer(block, face.facing, face.direction);
+                    sample.layer = blockTextureLayer(block, face.facing, face.direction,
+                                                     volume.chestHalfAt(p.x, p.y, p.z));
                     sample.translucent = isTranslucent(block);
                     sample.doubleSided = isCutout(block);
                     sample.alpha = sample.translucent ? kWaterAlpha : 1.0f;
                     // Thinner flows sit lower, so a stream visibly tapers away
                     // from its source rather than running at full depth.
                     sample.surfaceDrop =
-                        isWater(block) ? static_cast<float>(waterLevel(block)) * kWaterLevelDrop : 0.0f;
+                        isFluid(block) ? static_cast<float>(fluidLevel(block)) * kWaterLevelDrop
+                                       : 0.0f;
+                    sample.wavy = isWater(block);
+                    // Leaves move with the wind too, at a quarter of a blade's
+                    // reach. **Every vertex of a leaf block, not just its top**:
+                    // the displacement is a pure function of world position, so
+                    // two blocks sharing an edge move identically and the canopy
+                    // stays watertight. Moving only the tops would tear it.
+                    sample.sways = isLeafBlock(block);
 
                     for (std::size_t c = 0; c < 4; ++c) {
                         // Each corner leans toward one end of both in-plane axes.
@@ -286,13 +375,13 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
 
                         sample.sky[c] = lightCurve(skySum * scale);
                         sample.block[c] = lightCurve(blockSum * scale);
-                        sample.shading[c] = face.shade * kOcclusionSteps[static_cast<std::size_t>(occlusion)];
+                        sample.occlusion[c] = kOcclusionSteps[static_cast<std::size_t>(occlusion)];
                     }
 
                     sample.flat = true;
                     for (std::size_t c = 1; c < 4; ++c) {
                         if (sample.sky[c] != sample.sky[0] || sample.block[c] != sample.block[0] ||
-                            sample.shading[c] != sample.shading[0]) {
+                            sample.occlusion[c] != sample.occlusion[0]) {
                             sample.flat = false;
                             break;
                         }
@@ -323,27 +412,56 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     glm::vec3 position = quadOrigin + face.corners[c] * extent;
                     // Only the top of the block moves; the sides follow it down
                     // so the column stays closed.
+                    //
+                    // **A surface vertex may only move if all four columns
+                    // meeting it are water.** A wave that lifts the waterline
+                    // above the bank beside it exposes the top of a water side
+                    // face that was culled precisely because that bank was
+                    // supposed to hide it - so you see straight through the
+                    // seam. Dipping below the bank instead uncovers a strip of
+                    // the bank's own side face. Both are the same mistake:
+                    // **where water meets anything else it has to stay exactly
+                    // flush**, and only open water is free to move.
+                    const bool topCorner = face.corners[c].y > 0.5f;
+                    const bool fluidTop =
+                        sample.wavy && topCorner &&
+                        surfaceIsOpen(origin.y,
+                                      origin.x + static_cast<int>(face.corners[c].x * extent.x + 0.5f),
+                                      origin.z + static_cast<int>(face.corners[c].z * extent.z + 0.5f));
                     if (sample.surfaceDrop > 0.0f && face.corners[c].y > 0.5f) {
                         position.y -= sample.surfaceDrop;
                     }
                     const glm::vec2 uv = face.uvs[c] * uvScale;
-                    // Red is sky light, green is block light, blue is face shade
-                    // times ambient occlusion. The vertex format was already
-                    // wide enough, because the shading was only ever greyscale.
-                    mesh.vertices.push_back(
-                        engine::Vertex{{position.x, position.y, position.z},
-                                       {sample.sky[c], sample.block[c], sample.shading[c], sample.alpha},
-                                       {uv.x, uv.y},
-                                       sample.layer});
+                    // Red is sky light, green is block light, blue is the face
+                    // shade. Ambient occlusion rides in the surface word beside
+                    // the normal instead of being folded into the blue channel,
+                    // so a lighting pass can tell a dark corner from a
+                    // downward-facing surface.
+                    //
+                    // **A double-sided quad keeps its own face normal**, and
+                    // the fragment shader flips it toward the eye. Naming it
+                    // "unaligned" instead - which is what this did until M25 -
+                    // made the shader derive it from the triangle, and a
+                    // derived normal on a two-sided quad always faces the
+                    // camera. Every leaf on a tree was therefore lit as though
+                    // it were turned to face you, so the sun's highlight
+                    // followed you round the trunk.
+                    mesh.vertices.push_back(engine::Vertex{
+                        {position.x, position.y, position.z},
+                        engine::packVertexColor(sample.sky[c], sample.block[c], face.shade, sample.alpha),
+                        {uv.x, uv.y},
+                        sample.layer,
+                        engine::packVertexSurface(face.normalCode, sample.occlusion[c], fluidTop,
+                                                  sample.sways ? engine::kSwayOneBlock : 0u)});
                 }
 
                 // Split along the darker diagonal. Quads with occlusion on
                 // opposite corners otherwise show a visible seam running the
                 // wrong way, which reads as a crease in flat ground.
-                const float lit0 = sample.shading[0] * std::max(sample.sky[0], sample.block[0]);
-                const float lit1 = sample.shading[1] * std::max(sample.sky[1], sample.block[1]);
-                const float lit2 = sample.shading[2] * std::max(sample.sky[2], sample.block[2]);
-                const float lit3 = sample.shading[3] * std::max(sample.sky[3], sample.block[3]);
+                const float lit0 = sample.occlusion[0] * std::max(sample.sky[0], sample.block[0]);
+                const float lit1 = sample.occlusion[1] * std::max(sample.sky[1], sample.block[1]);
+                const float lit2 = sample.occlusion[2] * std::max(sample.sky[2], sample.block[2]);
+                const float lit3 = sample.occlusion[3] * std::max(sample.sky[3], sample.block[3]);
                 if (lit0 + lit2 > lit1 + lit3) {
                     mesh.indices.insert(mesh.indices.end(),
                                         {base + 1, base + 2, base + 3, base + 1, base + 3, base + 0});
@@ -377,10 +495,23 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         ++i;
                         continue;
                     }
+                    // **A moving surface cannot be merged.** The wave displaces
+                    // vertices, and a quad has only its four corners - so a
+                    // sixteen-block merged face becomes one flat tilted plane
+                    // instead of a swell, and where it meets a differently-sized
+                    // neighbour their shared edge disagrees about its own
+                    // height. That is a visible crease across open water, and
+                    // the larger the merge the straighter and longer the cut.
+                    if (sample.wavy) {
+                        emit(i, j, 1, 1, sample);
+                        ++i;
+                        continue;
+                    }
 
                     const auto matches = [&](const FaceSample& other) {
                         return other.layer == sample.layer && other.flat && other.sky[0] == sample.sky[0] &&
-                               other.block[0] == sample.block[0] && other.shading[0] == sample.shading[0] &&
+                               other.block[0] == sample.block[0] &&
+                               other.occlusion[0] == sample.occlusion[0] &&
                                other.translucent == sample.translucent && other.doubleSided == sample.doubleSided &&
                                other.surfaceDrop == sample.surfaceDrop;
                     };
@@ -427,14 +558,35 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
     };
 
     const auto pushQuad = [&](const std::array<glm::vec3, 4>& corners, const std::array<glm::vec2, 4>& uvs,
-                              float layer, float sky, float blockLight, float shading, bool doubleSided) {
+                              float layer, float sky, float blockLight, float shading,
+                              std::uint32_t normalCode, bool doubleSided, bool sways = false,
+                              std::uint32_t rootHalfBlocks = 0) {
         engine::MeshData& mesh = result.opaque;
         const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+        // **Measured against this quad's own extent, not against a block
+        // boundary.** A plant blade's corners sit at whole world heights, so
+        // asking for a fractional part above a half is asking a question whose
+        // answer is always no - which is why grass stood perfectly still while
+        // leaves moved.
+        float lowest = corners[0].y;
+        float highest = corners[0].y;
+        for (const glm::vec3& corner : corners) {
+            lowest = std::min(lowest, corner.y);
+            highest = std::max(highest, corner.y);
+        }
+        const float middle = (lowest + highest) * 0.5f;
         for (std::size_t c = 0; c < 4; ++c) {
-            mesh.vertices.push_back(engine::Vertex{{corners[c].x, corners[c].y, corners[c].z},
-                                                   {sky, blockLight, shading, 1.0f},
-                                                   {uvs[c].x, uvs[c].y},
-                                                   layer});
+            // Height above the plant's own root, so the value is continuous
+            // across a block edge and a stalk leans as one piece. The very
+            // bottom of the root block is zero, which is what keeps it planted.
+            const std::uint32_t sway =
+                sways ? rootHalfBlocks + (corners[c].y > middle ? engine::kSwayOneBlock : 0u) : 0u;
+            mesh.vertices.push_back(
+                engine::Vertex{{corners[c].x, corners[c].y, corners[c].z},
+                               engine::packVertexColor(sky, blockLight, shading, 1.0f),
+                               {uvs[c].x, uvs[c].y},
+                               layer,
+                               engine::packVertexSurface(normalCode, 1.0f, false, sway)});
         }
         mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3});
         if (doubleSided) {
@@ -447,8 +599,7 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
             for (int x = 0; x < size; ++x) {
                 const BlockId block = volume.blockAt(x, y, z);
                 const BlockShape shape = blockShape(block);
-                if (shape != BlockShape::Cross && shape != BlockShape::Slab && shape != BlockShape::Stairs &&
-                    shape != BlockShape::Fence) {
+                if (!usesShapePass(shape)) {
                     continue;
                 }
 
@@ -460,6 +611,24 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // A plant sits in an otherwise empty cell, so it is lit by
                     // its own cell rather than by a neighbour.
                     lightOf({x, y, z}, sky, blockLight);
+
+                    // **How much of this plant is underneath this block.** A
+                    // stalk of sugar cane or bamboo is several blocks of the
+                    // same id in one column, and the wind has to see it as one
+                    // plant or each block bends against the one below it.
+                    //
+                    // The walk stops at the volume's own edge, so a stalk that
+                    // straddles a chunk boundary leans slightly less below the
+                    // join than above it. Meshing may not read outside what it
+                    // was given, and a stalk is at most seven blocks against a
+                    // thirty-two block chunk.
+                    std::uint32_t rootHalfBlocks = 0;
+                    for (int below = 1; below <= 7; ++below) {
+                        if (y - below < -1 || volume.blockAt(x, y - below, z) != block) {
+                            break;
+                        }
+                        rootHalfBlocks += engine::kSwayOneBlock;
+                    }
 
                     // Reference plants span 0.8 to 15.2 in sixteenths, so the
                     // blade very nearly reaches the cell corners. Holding it
@@ -479,7 +648,10 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         for (std::size_t c = 0; c < 4; ++c) {
                             corners[c] = cellOrigin + blade[c];
                         }
-                        pushQuad(corners, kBottomLeftWinding, layer, sky, blockLight, 1.0f, true);
+                        // A blade stands at 45 degrees, so it has no axis to
+                        // name and takes the unaligned code.
+                        pushQuad(corners, kBottomLeftWinding, layer, sky, blockLight, 1.0f,
+                                 engine::kNormalUnaligned, true, true, rootHalfBlocks);
                     }
                     continue;
                 }
@@ -492,25 +664,39 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                 // which the id alone cannot express, so the drawn shape is
                 // computed here while collision assumes every arm.
                 BlockBoxes shapeBoxes = collisionBoxes(block);
-                if (shape == BlockShape::Fence) {
-                    const auto reaches = [&](int dx, int dz) {
-                        const BlockId neighbour = volume.blockAt(x + dx, y, z + dz);
-                        return isOpaque(neighbour) || blockShape(neighbour) == BlockShape::Fence;
-                    };
-                    std::uint8_t connections = 0;
-                    if (reaches(0, -1)) {
-                        connections |= ConnectNorth;
+                // A *model* rather than a shape cut out of a cube, so each box
+                // names the rectangle of texture it samples instead of taking
+                // it from where the box happens to sit.
+                ModelBoxes model;
+                if (shape == BlockShape::Post || shape == BlockShape::Cocoa) {
+                    model = postModel(block);
+                    shapeBoxes = BlockBoxes{};
+                    for (int i = 0; i < model.count; ++i) {
+                        shapeBoxes.boxes[shapeBoxes.count++] = model.boxes[i].box;
                     }
-                    if (reaches(0, 1)) {
-                        connections |= ConnectSouth;
-                    }
-                    if (reaches(-1, 0)) {
-                        connections |= ConnectWest;
-                    }
-                    if (reaches(1, 0)) {
-                        connections |= ConnectEast;
-                    }
-                    shapeBoxes = fenceRailBoxes(connections);
+                } else if (shape == BlockShape::Vine) {
+                    // The ceiling sheet is **derived from the world, not from
+                    // the id** - which is Bedrock's own arrangement and why
+                    // sixteen ids cover the block where Java needs thirty-two.
+                    shapeBoxes = vineBoxes(vineSides(block),
+                                           isOpaque(volume.blockAt(x, y + 1, z)));
+                } else if (shape == BlockShape::Ladder) {
+                    // Drawn but not collided with, the same split the fence
+                    // uses in the other direction: `collisionBoxes` answers
+                    // nothing here so you can step onto the rungs.
+                    shapeBoxes = ladderBoxes(ladderFacing(block));
+                } else if (shape == BlockShape::Fence || shape == BlockShape::Wall ||
+                           shape == BlockShape::Pane) {
+                    // A fence reaches toward fences and gates; a wall reaches
+                    // toward walls and gates; a pane reaches toward panes and
+                    // bars. `connectionBits` owns that rule, so what is drawn
+                    // and what is bumped into cannot disagree about it.
+                    const std::uint8_t connections =
+                        connectionBits(shape, volume.blockAt(x, y, z - 1), volume.blockAt(x, y, z + 1),
+                                       volume.blockAt(x - 1, y, z), volume.blockAt(x + 1, y, z));
+                    shapeBoxes = shape == BlockShape::Fence  ? fenceRailBoxes(connections)
+                                 : shape == BlockShape::Wall ? wallBoxes(connections)
+                                                             : paneBoxes(connections);
                 }
 
                 for (int i = 0; i < shapeBoxes.count; ++i) {
@@ -528,6 +714,14 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                             const glm::ivec3 ahead{x + face.neighbourOffset.x, y + face.neighbourOffset.y,
                                                    z + face.neighbourOffset.z};
                             if (occludesFace(volume.blockAt(ahead.x, ahead.y, ahead.z), face.neighbourOffset.y)) {
+                                continue;
+                            }
+                            // Two arms meeting at a cell wall each drew their
+                            // own end cap: coplanar quads fighting over one
+                            // depth, which is the hard line that ran down the
+                            // middle of what should be one sheet of glass.
+                            if (connectsToNeighbours(shape) && face.neighbourOffset.y == 0 &&
+                                blockShape(volume.blockAt(ahead.x, ahead.y, ahead.z)) == shape) {
                                 continue;
                             }
                             lightOf(ahead, sky, blockLight);
@@ -563,9 +757,26 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         // never seen, and emitting them leaves two coplanar
                         // quads fighting over one depth - a stair's step sits
                         // directly on its own lower half.
-                        glm::vec3 probe{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
-                        probe[axis] = positive ? hi[axis] : lo[axis];
-                        probe += glm::vec3{face.neighbourOffset} * 0.01f;
+                        //
+                        // **The whole face, not its middle.** A lantern's cap
+                        // covers the centre of its body's lid and leaves a ring
+                        // of it showing all round; a centre probe called that
+                        // buried and cut a hole straight through the top of
+                        // every lantern in the game.
+                        const glm::vec3 mid{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+                        const glm::vec3 outward = glm::vec3{face.neighbourOffset} * 0.01f;
+                        std::array<glm::vec3, 5> probes{};
+                        probes[0] = mid;
+                        for (std::size_t c = 0; c < 4; ++c) {
+                            // Pulled a hundredth in from the corner, so a face
+                            // exactly flush with another box's edge still counts
+                            // as covered.
+                            probes[c + 1] = glm::mix(lo + face.corners[c] * (hi - lo), mid, 0.01f);
+                        }
+                        for (glm::vec3& probe : probes) {
+                            probe[axis] = positive ? hi[axis] : lo[axis];
+                            probe += outward;
+                        }
 
                         bool buried = false;
                         for (int j = 0; j < shapeBoxes.count && !buried; ++j) {
@@ -573,19 +784,44 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                                 continue;
                             }
                             const BlockBox& o = shapeBoxes.boxes[j];
-                            buried = probe.x > o.minX && probe.x < o.maxX && probe.y > o.minY && probe.y < o.maxY &&
-                                     probe.z > o.minZ && probe.z < o.maxZ;
+                            buried = true;
+                            for (const glm::vec3& probe : probes) {
+                                if (!(probe.x > o.minX && probe.x < o.maxX && probe.y > o.minY &&
+                                      probe.y < o.maxY && probe.z > o.minZ && probe.z < o.maxZ)) {
+                                    buried = false;
+                                    break;
+                                }
+                            }
                         }
                         if (buried) {
                             continue;
                         }
 
-                        // V runs the same way as the corner on some faces and
-                        // the opposite way on others, so it is read off the
-                        // tables rather than assumed.
+                        // U and V each run the same way as the corner on some
+                        // faces and the opposite way on others, so both are
+                        // read off the tables rather than assumed. **Leaving U
+                        // out is what mirrored every shaped block's +X and -Z
+                        // faces** - visible the moment a texture had a letter
+                        // on it, which is why lit TNT read backwards.
                         const int uAxis = face.uAxis;
                         const int vAxis = face.vAxis;
+                        const bool flipU = std::abs(face.uvs[0].x - face.corners[0][uAxis]) > 0.5f;
                         const bool flipV = std::abs(face.uvs[0].y - face.corners[0][vAxis]) > 0.5f;
+
+                        // A model box paints its lid from a different corner of
+                        // its net than its walls.
+                        float uLow = 0.0f;
+                        float uHigh = 1.0f;
+                        float vLow = 0.0f;
+                        float vHigh = 1.0f;
+                        if (model.count > 0) {
+                            const ModelBox& m = model.boxes[i];
+                            const bool lid = axis == 1;
+                            uLow = lid ? m.topUMin : m.uMin;
+                            uHigh = lid ? m.topUMax : m.uMax;
+                            vLow = lid ? m.topVMin : m.vMin;
+                            vHigh = lid ? m.topVMax : m.vMax;
+                        }
 
                         std::array<glm::vec3, 4> corners{};
                         std::array<glm::vec2, 4> uvs{};
@@ -594,11 +830,20 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                             // winding the face tables established.
                             const glm::vec3 local = lo + face.corners[c] * (hi - lo);
                             corners[c] = cellOrigin + local;
-                            uvs[c] = {local[uAxis], flipV ? 1.0f - local[vAxis] : local[vAxis]};
+                            if (model.count > 0) {
+                                const float fu = face.corners[c][uAxis];
+                                const float fv = face.corners[c][vAxis];
+                                uvs[c] = {flipU ? glm::mix(uHigh, uLow, fu) : glm::mix(uLow, uHigh, fu),
+                                          flipV ? glm::mix(vHigh, vLow, fv) : glm::mix(vLow, vHigh, fv)};
+                            } else {
+                                uvs[c] = {flipU ? 1.0f - local[uAxis] : local[uAxis],
+                                          flipV ? 1.0f - local[vAxis] : local[vAxis]};
+                            }
                         }
                         pushQuad(corners, uvs, blockTextureLayer(block, face.facing, face.direction), sky,
                                  blockLight, face.shade,
-                                 false);
+                                 shape == BlockShape::Vine ? engine::kNormalUnaligned : face.normalCode,
+                                 shape == BlockShape::Vine);
                     }
                 }
             }

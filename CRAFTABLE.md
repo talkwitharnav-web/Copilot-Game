@@ -20,19 +20,42 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 ## What exists right now
 
-**Blocks (66):** the originals — Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab, Cobblestone Stairs, Plank Fence, Crafting Table, Furnace, Torch — plus **Andesite, Diorite, Granite, Smooth Stone, Stone Bricks, Mossy Cobblestone, Obsidian, Clay, Sandstone, Bookshelf, Glass, Dandelion, Poppy, Dead Bush, eight ores, Deepslate, Bedrock, Terracotta and Packed Ice.**
+*(Counts verified from the startup log, 2026-08-08.)*
 
-**Items (61):** Stick, Charcoal, ten tools, fifty-six spawn eggs, and **eleven resources** — coal, raw iron/gold/copper, iron/gold/copper ingots, diamond, emerald, lapis lazuli and redstone.
+**One thousand and ninety-four blocks and 748 catalogue entries, against 592 recipes** — of which **145 fit a 2×2**. Most of the table is **generated in loops rather than written out**, because the families repeat: eleven woods × eleven shared shapes, fifty-two stair materials, fifty-five slab materials, sixteen colours × five dyed families, five tool shapes × fourteen materials. Written out by hand that is well over a thousand rows and a thousand chances to paste the wrong ingredient into one cell. **Every one of the 592 is checked at startup to make itself, with no two claiming the same pattern.**
 
-**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works** with seven recipes, fuelled by coal, charcoal, logs, planks, fences or sticks.
+**Blocks (73):** the originals — Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab, Cobblestone Stairs, Plank Fence, Crafting Table, Furnace, Torch — plus **Andesite, Diorite, Granite, Smooth Stone, Stone Bricks, Mossy Cobblestone, Obsidian, Clay, Sandstone, Bookshelf, Glass, Dandelion, Poppy, Dead Bush, eight ores, Deepslate, Bedrock, Terracotta and Packed Ice**, and now **Ancient Debris, Block of Emberite, Smoker, Smithing Table and Chest**.
 
-**Mining is timed and tiered.** Stone-family blocks and every ore need a pickaxe or they drop nothing.
+**Items (77):** Stick, Charcoal, **twenty-five tools across five tiers**, fifty-seven spawn eggs, **thirteen resources** — coal, raw iron/gold/copper, iron/gold/copper ingots, diamond, emerald, lapis lazuli, redstone, **Emberite scrap and Emberite ingot** — and a **bow and arrow**.
 
-**Recipes shipped (20):** `Log → 4 Planks`, `2 Planks → 4 Sticks`, `4 Planks → Crafting Table`, `8 Cobblestone → Furnace`, `Charcoal + Stick → 4 Torches`, `Coal + Stick → 4 Torches`, `4 Stone → 4 Stone Bricks`, `4 Sand → Sandstone`, `Cobblestone + Tall Grass → Mossy Cobblestone`, `3 Iron Ingots in a V → Bucket`, and all ten tools. **Eight fit a 2×2**, so they are craftable without a table.
+**Cut shapes (640, none with a texture of its own).** Stairs in 52 materials, slabs in 55, walls in 25, fences in 12, gates in 11, carpets in 16 and glass panes in 17. Each is one row naming its **parent block**, and everything else — texture, tool, hardness, blast resistance, whether it burns — is forwarded to that parent. Recipes are the reference's: 6 → 4 stairs (both mirrorings), 3 → 6 slabs, 6 → 6 walls, 4 planks + 2 sticks → 3 fences, 2 sticks + 2 planks → 1 gate, 2 wool → 3 carpets, 6 glass → 16 panes.
 
-**Smelting shipped (7):** Cobblestone → Stone, Stone → Smooth Stone, Log → Charcoal, Sand → Glass, and the three raw metals → their ingots.
+**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works** with twenty-two recipes, fuelled by coal, charcoal and **anything wooden** — logs, planks and every wooden cut shape, answered by `isFlammable` rather than by a list — and a **smoker** runs the whole cycle at double speed. A **smithing table** upgrades a diamond tool to Emberite.
 
-**Still missing:** wall torches (need a tilted shape), the chest (needs a non-cube model), and the whole of Tier 2's slab and stair variants.
+**Storage:** a **chest** holds 27, and two side by side holding the same facing open as one **54-slot double chest**.
+
+**Mining is timed and tiered.** Stone-family blocks and every ore need a pickaxe or they drop nothing, and each ore now demands the reference's own tier. **Nothing else withholds its drop** — wood, wool, soil and every plant come away bare-handed, which is what the second block run's blanket wood-tier default was breaking until 2026-08-08.
+
+- **Wood.** Every wood makes its own planks (log *or* stripped log → 4 planks), and from those planks: sticks, crafting table, chest, note block, jukebox, fence, gate, stairs, slabs, bowl, bookshelf, smithing table, smoker, and all five wooden tools. **Until 2026-08-08 only oak did any of this** — spruce and birch had a wrong-rate 4-logs-to-4-planks recipe and the other eight woods had nothing at all, so a spruce forest was scenery.
+- **Stone.** Stairs, slabs and walls for every material that has them in the reference — which **had no recipe of any kind** and were creative-only. Polished and brick forms of andesite, diorite, granite, deepslate, blackstone, tuff, basalt, end stone, quartz and purpur; cut copper; bricks from clay.
+- **Colour.** Twelve flowers each give their dye, bone → bone meal → white, ink sac → black, lapis → blue, cactus smelts to green, and the reference's nine mixes make the rest. Those sixteen dyes then feed wool (from string), terracotta (from smelted clay), concrete powder, **stained glass** and through it **stained glass panes** — and a dyed terracotta fires into its glazed form.
+- **Ranged.** Three sticks and three string make a **bow**; flint, a stick and a feather make **four arrows**. Flint comes from gravel about one time in ten. A skeleton, stray or bogged fires the same arrow back at you.
+- **Light and access.** Lantern and soul lantern (iron + the matching torch), soul torch (coal, stick, soul sand), redstone torch, end rod, **iron bars** (6 iron → 16) and a **ladder** (7 sticks → 3) that you can actually climb.
+- **The rest.** Paper, sugar, book, glass bottle, bone block, slime block, dried kelp block, magma block, honeycomb block, the three raw-metal blocks, flint and steel, and TNT.
+
+> ⛔ **The four non-pickaxe tool shapes were uncraftable at every tier until 2026-08-08.** A pattern is stored trimmed to the cells it fills, because the matcher compares it against the bounding box of what is in the grid — and the `tool()` helper padded its 3×3 picture instead. The axe, shovel, sword and hoe all leave a column empty, so sixteen recipes never matched anything; the pickaxe fills all three columns and was the one tool in the game you could make. **Any new recipe helper has to trim, and the cheap guard is to feed every recipe's own pattern back through `craftResult` and check it makes itself** — measured across all 340: **0 broken, 0 shadowed**.
+
+> ⚠️ **Named divergence: you cannot mix two woods in one recipe.** The reference matches an item *tag* (`#planks`); ours holds concrete ids, so four oak planks make a crafting table and two oak plus two spruce do not. Fixing it properly means an ingredient that names a set, which is exactly what the craftable check relies on not existing.
+
+**Emberite tools are not in that table on purpose** — they are a smithing-table upgrade, not a recipe, because an upgrade *keeps* the item it is given and no grid pattern can say that.
+
+**Smelting shipped (22):** Cobblestone → Stone, Stone → Smooth Stone, Log → Charcoal, Sand → Glass, the three raw metals → their ingots, **Ancient Debris → Emberite Scrap**, Stone Bricks → Cracked, Sandstone → Smooth, Wet Sponge → Sponge, **Kelp → Dried Kelp**, raw rabbit and salmon → their cooked forms, **Clay → Terracotta**, **Clay Ball → Brick**, **Cactus → Green Dye**, Nether Quartz Ore → Quartz, Quartz Block → Smooth Quartz, Basalt → Smooth Basalt, Nether Bricks → Cracked, and **Netherrack → Nether Brick**. Every raw food cooks through `isRawFood`, and **the sixteen dyed terracottas fire into their glazed forms by arithmetic** rather than sixteen rows — both runs are declared white-first in the same order.
+
+> ⚠️ **About thirty-two catalogue entries still cannot be obtained, and every one is waiting on a system rather than a recipe.** Farming is the bulk of it (wheat and its seeds, carrots, potatoes, beetroot, melon, pumpkin, and the six foods made from them, plus milk); the rest is bee harvesting (honeycomb, honey bottle), a few mob and interaction drops (egg, flint, rabbit's foot, phantom membrane, nautilus shell, heart of the sea, the two prismarine drops), and the nether/end materials whose dimensions do not exist. **Everything that is craftable in the reference and whose ingredients exist here is now craftable here** — checked by walking the whole catalogue and asking what produces each entry.
+
+> A further nineteen entries — grass, the sixteen ores and deepslate, and bedrock — are creative-only **on purpose**, because they drop a resource rather than themselves exactly as the reference does. Silk touch is what would change that, and it does not exist yet. Sweet berry bush and amethyst cluster joined them on 2026-08-08 when they started dropping their fruit and shards.
+
+**Still missing:** wall torches (need a tilted shape) and the whole of Tier 2's slab and stair variants.
 
 ---
 
@@ -172,13 +195,13 @@ Stick Planks Stick   →  1 Fence Gate
 Stick Planks Stick
 ```
 
-### Chest · *entity model, not a cube — defer*
+### Chest · ✅ **shipped 2026-08-06**
 ```
 Planks Planks Planks   →  1 Chest
 Planks .      Planks
 Planks Planks Planks
 ```
-3×3. Needs a UV-unwrapped sheet and a non-cube model, so it is meaningfully more work than any block above.
+3×3. **The "needs a non-cube model" objection turned out to be wrong.** The reference's chest texture is one 64×64 unwrapped sheet, but a box net is exactly what a cube wants — `New-ChestFace` in `tools/make-reference-blocks.ps1` crops the top, front and side straight out of it and pads the 14-pixel-wide bands to 16 by replicating edge pixels. What we give up by staying a cube is the slightly-inset model and the lid, neither of which is on the critical path.
 
 ---
 
@@ -197,7 +220,7 @@ Planks Planks Planks
 
 **Every texture on the critical path has reference material, and all of it is currently staged in the running game.** `tools/make-reference-blocks.ps1` writes the reference block and item art to `blocks-reference/` beside each executable; our own 16×16s under `assets/textures/blocks/` are the fallback. Delete the folder to return to ours everywhere. See `START-HERE.md` §5 for why the reference goes in first and ours follows.
 
-**Chest is the one real exception.** Its texture is a single 64×64 UV-unwrapped sheet for a non-cube model, not four square faces — so it needs model support before the texture matters at all.
+**The chest is no longer an exception.** It was listed here for months as needing a model pipeline before its texture meant anything. It does not: its 64×64 sheet is a box net, and cropping three faces out of it is arithmetic. **Check whether an "impossible" asset is actually just an unwrapped cube before deferring it again.**
 
 Before inventing any shape's dimensions, read `models/block/*.json` in the reference dump. Our fence post at `0.375–0.625` already matches the reference's `[6,0,6]→[10,16,10]` exactly, and that was arrived at by guessing — next time it can be read.
 

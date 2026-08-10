@@ -27,7 +27,13 @@ constexpr int kCellSize = 8;
 
 /// Furthest any structure extends horizontally from its origin. Anything larger
 /// than this would be silently clipped at chunk borders.
-constexpr int kReach = 3;
+/// How far a structure may reach outside the cell it belongs to.
+///
+/// A branching oak throws clusters about `height/4 * 1.33` sideways and each
+/// one is a blob two blocks wide, so 6 rather than the 3 a fixed canopy needed.
+/// Too small and a tree straddling a chunk border is built by one chunk and not
+/// the other, which is a seam you can walk up to.
+constexpr int kReach = 6;
 
 /// Writes every structure overlapping this chunk into it.
 void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord);

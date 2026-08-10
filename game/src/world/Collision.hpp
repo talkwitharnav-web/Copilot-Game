@@ -19,6 +19,37 @@ struct Aabb {
     glm::vec3 max{0.0f};
 };
 
+/// A block's collision geometry **where it stands**.
+///
+/// `collisionBoxes` can only see an id, so it has to assume a fence, wall or
+/// pane grows every arm. That is right for a fence in a line and wrong for a
+/// lone pane of glass, which is drawn as a two-texel post and was collided with
+/// as a full cross - an invisible shell round it, which is exactly the
+/// complaint the ladder had answered.
+inline BlockBoxes worldCollisionBoxes(const World& world, int x, int y, int z) {
+    const BlockId id = world.blockAt(x, y, z);
+    const BlockShape shape = blockShape(id);
+    if (!connectsToNeighbours(shape)) {
+        return collisionBoxes(id);
+    }
+    return collisionBoxesWith(
+        id, connectionBits(shape, world.blockAt(x, y, z - 1), world.blockAt(x, y, z + 1),
+                           world.blockAt(x - 1, y, z), world.blockAt(x + 1, y, z)));
+}
+
+/// The same question for the crosshair. Kept beside its twin so the two cannot
+/// drift apart, which is the whole reason the connection rule has one owner.
+inline BlockBoxes worldSelectionBoxes(const World& world, int x, int y, int z) {
+    const BlockId id = world.blockAt(x, y, z);
+    const BlockShape shape = blockShape(id);
+    if (!connectsToNeighbours(shape)) {
+        return selectionBoxes(id);
+    }
+    return selectionBoxesWith(
+        id, connectionBits(shape, world.blockAt(x, y, z - 1), world.blockAt(x, y, z + 1),
+                           world.blockAt(x - 1, y, z), world.blockAt(x + 1, y, z)));
+}
+
 /// True if any block's collision geometry overlaps the box.
 ///
 /// **Everything that collides with the world goes through here**, because
@@ -40,7 +71,7 @@ inline bool overlapsSolid(const World& world, const Aabb& box) {
     for (int y = minY; y <= maxY; ++y) {
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
-                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                const BlockBoxes shape = worldCollisionBoxes(world, x, y, z);
                 for (int i = 0; i < shape.count; ++i) {
                     const BlockBox& b = shape.boxes[i];
                     if (box.min.x < static_cast<float>(x) + b.maxX &&
@@ -77,7 +108,7 @@ inline float highestSurfaceBelow(const World& world, const Aabb& box, float notA
     for (int y = minY; y <= maxY; ++y) {
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
-                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                const BlockBoxes shape = worldCollisionBoxes(world, x, y, z);
                 for (int i = 0; i < shape.count; ++i) {
                     const BlockBox& b = shape.boxes[i];
                     // Only boxes actually under the footprint can be landed on.

@@ -23,6 +23,9 @@ enum class Key {
     D,
     E,
     F,
+    G,
+    C,
+    V,
     Q,
     Space,
     LeftShift,
@@ -49,6 +52,8 @@ enum class Key {
     F8,
     F9,
     F10,
+    F11,
+    F12,
     /// Editing commands are not characters: the OS never sends them to the
     /// character callback, so text editing needs them from the key path.
     Backspace,

@@ -16,12 +16,20 @@ enum class ToolKind : std::uint8_t {
     Shovel,
     Sword,
     Hoe,
+    /// The one kind that is about **collecting** rather than speed. Shears cut
+    /// a vine no faster than a bare hand does; they are simply the only thing
+    /// that hands one back.
+    Shears,
 };
 
 /// Bare hands. Tiers rise from here, and a block can demand a minimum.
 constexpr int kHandTier = 0;
 constexpr int kWoodTier = 1;
 constexpr int kStoneTier = 2;
+constexpr int kIronTier = 3;
+constexpr int kDiamondTier = 4;
+/// Our name for the reference's dark alloy - see `BlockId::AncientDebris`.
+constexpr int kEmberiteTier = 5;
 
 struct ToolProperties {
     ToolKind kind = ToolKind::None;
@@ -49,5 +57,4 @@ float breakSeconds(BlockId block, ItemId item);
 
 /// Whether breaking it with `item` actually yields its drop.
 bool yieldsDrop(BlockId block, ItemId item);
-
 } // namespace game

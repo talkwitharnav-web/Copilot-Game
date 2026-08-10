@@ -30,7 +30,7 @@ How Minecraft actually works, measured and written down, organised around **what
 | 12 | [Light](#12-light) |
 | 13 | [Time, weather and sky](#13-time-weather-and-sky) |
 | 14 | [Ticking, chunks and persistence](#14-ticking-chunks-and-persistence) |
-| 15 | [World generation](#15-world-generation) |
+| 15 | [World generation — climate, terrain, surface, caves, features](#15-world-generation) |
 | 16 | [Priority list — what to take first](#16-priority-list) |
 
 ---
@@ -400,7 +400,7 @@ The effective range is $\max(\text{range} \times \text{modifier},\ 2.0)$ — so 
 
 **Most mobs perform one melee attack per second.** Players have unlimited attack frequency and greater reach than most mobs, "allowing them to continuously attack targets without being reached."
 
-> **▶ Where we stand.** **Taken verbatim on 2026-08-05**: 5 m blocks in every mode, 3 m entities in survival and 5 in creative. The game had shipped **12 m** since M7, which is this table's *touch creative* row — a different input mode entirely, and picking the wrong row is exactly the kind of error that survives because the number looks plausible. Entity reach is still a **distance check**, not the bounding-box expansion described above; that only starts to matter once a mob is wide enough for the difference to show.
+> **▶ Where we stand.** **Taken verbatim on 2026-08-05**: 5 m blocks in every mode, 3 m entities in survival and 5 in creative. The game had shipped **12 m** since M7, which is this table's *touch creative* row — a different input mode entirely, and picking the wrong row is exactly the kind of error that survives because the number looks plausible. **What the aim ray hits is now the creature's own box** (2026-08-06): it used to be a 0.6 m sphere at the body's middle, which is most of a chicken and a fraction of a camel — so a camel's legs could not be struck at all, only a band around its belly. Padded by 0.15 m, because `halfWidth` here is deliberately narrower than the model. Reach itself is still a distance along that ray rather than the attacker's box expanded.
 
 ## 2.7 Difficulty scaling
 
@@ -438,7 +438,7 @@ CRD = 0                if RD < 2
 
 Chunk inhabited time is **cumulative across players** and capped at 50 hours. CRD is **always 0 on Easy** and always ≥ 0.125 on Hard.
 
-> **▶ Where we stand (2026-08-06).** We have a melee swing with knockback and creatures that compute a blow and hand it back as a `CreatureAttack` rather than applying it — exactly the shape needed when player health arrives.
+> **▶ Where we stand (2026-08-06, extended 2026-08-08).** We have a melee swing with knockback and creatures that compute a blow and hand it back as a `CreatureAttack` rather than applying it — exactly the shape needed when player health arrives. **M21 supplied it**, so those blows now land: the same `CreatureAttack` goes straight into `damagePlayer` and through §2.4's overwrite rule, and blast damage does the same. Creative immunity rides in on `PlayerInput::invulnerable` rather than by the survival code knowing what mode the game is in.
 >
 > **M20j added the half that was missing, and it was not a number — it was a destination.** A chase had no arrival condition at all: `MeleeAttack` steered at the player for as long as it had a target, nothing here collides with the player, so a zombie walked *through*, overshot and came about at a limited turn rate. That is an orbit, and reach being a distance put the player inside it on every pass. **The reference does not fix this with a turn rate or a reach; `melee_box_attack` paths to a node *beside* its target and the path ends there.** Anything that closes on something has to say where it stops, and **"it stops when it can hit" is not the same distance as "it stops when it arrives"**.
 >
@@ -536,7 +536,13 @@ The second term is what makes armour weaker against big hits.
 
 Armour loses **1 durability per 4 HP absorbed**, minimum 1.
 
-> **▶ Where we stand.** None of this exists; M21 owns it. The structural point is that **exhaustion is driven by actions we already have hooks for** — block breaking, attacking, jumping, taking damage — so hunger is one float and a handful of increments in code that already exists. It does not need a new system.
+> **▶ Where we stand (2026-08-08).** **Built as M21.** The prediction above held: exhaustion rode in on hooks that already existed — block breaking, attacking, jumping, sprinting, taking damage — and hunger really is one float and a handful of increments. `world/Survival.hpp` is the single owner of every number in this section, header-only so nothing had to be registered to add it.
+>
+> Taken verbatim: twenty hearts, twenty hunger, the half-second invulnerability window **with the overwrite rule** (§2.4's worked example reproduces exactly), the exhaustion cost of each action, four exhaustion to one leg of the bar, regeneration at 18 food, the saturated fast-regeneration path at half-second intervals, sprinting refused below 6, starvation stopping at half a heart on Normal, three free blocks of fall at one point a block, and the whole food table — thirty-three items with a hunger and a saturation value each.
+>
+> **Not taken:** armour, potions, difficulty levels other than Normal, and experience — each is its own system and none is a survival number. **Divergence:** eating is 1.6 seconds held, which is the reference's own figure, but there is no eating *animation* yet because the first-person arm does not exist.
+>
+> **What it caught:** twelve foods were edible and worth nothing, three of them (rotten flesh, cooked rabbit, cooked salmon) listed in §3.3 above.
 
 ---
 
@@ -634,7 +640,7 @@ Breeding foods: wheat (cow, sheep, goat), carrot/potato/beetroot (pig), seeds (c
 
 **Tempt ranges** are per species and worth having: sheep/cow/pig 6 blocks, chicken a **6×4×6 box**, **rabbit 8 blocks (approaches slowly)**, **goat 10**, frog 6, stray cat 10, wolf 8. Break-off distance is **≥16 blocks in Bedrock**, ≥10 in `[JE]`.
 
-> **▶ Where we stand (2026-08-04).** We have dropped items with physics and pickup, but creatures drop nothing — there is no food item and no hunger, so meat has nowhere to go. M21's ordering is right.
+> **▶ Where we stand (2026-08-04, updated 2026-08-08).** Creatures drop loot, and since **M21** the meat has somewhere to go: thirty-three foods carry a hunger and a saturation value, and eating is a held 1.6-second action. The drop range including zero was taken as recommended below.
 >
 > The detail worth stealing early is the **drop range including zero**. `0–2 leather` feels like a roll; a flat "always 1" feels like a vending machine. It costs one line.
 >
@@ -1484,59 +1490,1016 @@ Location entry: 3-byte sector offset + 1-byte sector count → **max 256 sectors
 
 # 15. World generation
 
-## 15.1 The multi-noise biome system
-
-Six parameters, each its own noise field:
-
-| Parameter | Range | Decides |
-|---|---|---|
-| Temperature | −1..1, bands at −0.45/−0.15/0.2/0.55 | hot/cold |
-| Humidity | −1..1, bands at −0.35/−0.1/0.1/0.3 | wet/dry |
-| **Continentalness** | −1.2..1 | ocean → coast → inland |
-| **Erosion** | −1..1, 7 bands | flat vs mountainous |
-| Weirdness / ridges | −1..1, via $1-|3|w|-2|$ | variants |
-| Depth | +0.0078125 per block down | surface vs cave biome |
-
-Continentalness bands: < −0.455 deep ocean; −0.455..−0.19 ocean; −0.19..0.03 coast; > 0.03 inland.
-
-**Each biome is a point in that 6D space and a location gets whichever is nearest.** That is the key structural idea: biomes are not regions on a map, they are **nearest neighbours in a parameter space**. Adding a biome is adding a point, not redrawing a map.
-
-Terrain height is **not** a separate noise field — it comes from continentalness, erosion and ridges through **splines** producing a height offset and a vertical squash factor, which feed a 3D density function (positive = solid).
-
-**Caves** are three layered systems: **cheese** (big cavities), **spaghetti** (long tunnels), **noodle** (thin branching passages that break up the cheese). Plus **aquifers**, which give underground water its own local level rather than one global sea level.
-
-## 15.2 Ore distribution
-
-Modern placement uses **triangular** distributions — densest at a target Y, tapering both ways:
-
-| Ore | Range | Densest |
-|---|---|---|
-| Coal | 0..320 | 96 |
-| Copper | −16..112 | 48 |
-| Iron | −24..56 and 80..320 | 16 |
-| Gold | −64..32 | −16 |
-| Redstone | −64..15 | −59 |
-| Lapis | −64..64 | 0 |
-| Diamond | −64..16 | −59 |
-| Emerald | mountains only, −16..320 | 236 |
-
-**Large ore veins** for copper (y 0..50, granite filler) and iron (y −60..−8, tuff filler) generate as long branching spaghetti: **70% untouched filler, 30% is 10–30% ore plus 2% raw ore blocks.**
-
-> **▶ Where we stand.** **Eight ores generate**, from a table ordered **rarest first** so a common ore cannot overwrite a scarce one where their bands overlap. Two deliberate simplifications. Ours are **thresholded 3D noise** rather than triangular-distributed vein placement — same mechanism as the caves at a much higher frequency, which gives connected blobs for free where a per-cell roll would read as speckle. And the bands are **compressed onto our world**: y 0–96 with sea level 24 against the reference's −64–320 with sea level 63, so depths below sea level scale by about 0.17 and heights above it by 0.28. Each threshold comes from the reference's share of rock via `t = 1 − sqrt(share)`, which holds because one octave of value noise is near enough triangular. `worldgen/configured_feature/ore_*.json` in the reference dump carries the exact vein sizes and counts if this is ever worth doing properly.
-
-## 15.3 Trees
-
-Saplings have **2 growth stages**; the block **above** needs **light ≥ 9**. Bone meal bypasses the light requirement at **45% per use**. Space requirements are checked before growth and failure means no growth: oak needs ≥5 vertical and 3×3; spruce ≥6 and 5×5; cherry ≥8 and 5×5; giant spruce ≥14 and 6×6. **If a block blocks an oak's growth space (but not directly above), the oak is forced to grow the large variant instead of failing.**
-
-> **▶ Where we stand.** We have two noise fields (temperature and humidity) giving 7 biomes by proximity in a 2D space — the same *structure* as the reference's 6D nearest-neighbour, just smaller. The lesson in `CLAUDE.md` (two independent fields beat one "climate" value, because a single value can only order biomes along a line) is the reference's own reasoning arrived at independently.
+> **The primary source for this section is the local data dump, not the wiki:** `reference/minecraft-assets-26.2/minecraft-assets-26.2/data/minecraft/worldgen/` (Java 26.2, released 2026-06-16). Paths below are relative to that folder. Three tags are used where it matters: **[D]** read directly out of the JSON; **[code]** Java engine behaviour that is *not* in the data files and was quoted from decompiled source; **[wiki]** taken from minecraft.wiki.
 >
-> **Continentalness and erosion are the two most valuable additions, in that order.** Continentalness makes coastlines structural rather than "wherever the height noise dips below sea level". Erosion lets flat plains and jagged mountains coexist at the same temperature and humidity.
+> **Edition warning, and it is a real one.** The whole `noise_settings` / `density_function` / `placed_feature` format is Java-only — Bedrock ships nothing equivalent, so **nothing in this section was measured in Bedrock.** The one strong parity signal is minecraft.wiki's *World seed* page: a seed "generates the same terrain and biomes in both Java and Bedrock Edition. However, structures, features (i.e. decorators), carver caves, and mob spawns will generate differently." Read that literally: **terrain and biome numbers are Bedrock-parity by strong implication; feature, carver and spawn numbers are explicitly not.** `[JE]` marks values that are Java-only outright.
+
+## 15.1 The shape of the system
+
+Five stages run in this order. Each is a pure function of position and seed except the last two.
+
+| # | Stage | Input | Output | Lives in |
+|---|---|---|---|---|
+| 1 | **Climate sample → biome** | 6 climate values at a 4×4×4 cell | a biome id per cell | `OverworldBiomeBuilder` **[code]**, fed by `noise_settings/overworld.json` `noise_router` |
+| 2 | **Climate → terrain density** | continentalness, erosion, weirdness, y | one number per 4×8×4 cell corner; `> 0` = stone | `density_function/overworld/*` + `final_density`. **Noise caves are part of this expression**, not a later pass |
+| 3 | **Surface rules** | the finished stone column, biome, y, noise | replaces stone with grass/sand/gravel/bedrock/deepslate | `surface_rule` in `noise_settings/overworld.json` |
+| 4 | **Carvers** | per-chunk RNG, biome's carver list | tunnels and ravines cut out of the finished column | `configured_carver/*.json` + `ChunkGenerator.applyCarvers` **[code]** |
+| 5 | **Features** | per-chunk RNG, biome's 11-step feature array | ores, trees, grass, lakes, springs | `placed_feature/` + `configured_feature/` |
+
+**The reframing that matters most: in the 1.18 rewrite the biome stopped deciding the landscape.** Pre-1.18, a biome carried `depth` and `scale` fields and terrain height was literally looked up from the biome map, which is why old worlds had hills that stopped dead at a biome border. Now causality runs the other way — **terrain and biome are both outputs of the same three noises**, so they agree without either driving the other.
+
+Confirmed structurally **[D]**: the top-level keys of every one of the 65 biome files in 26.2 are exactly `attributes, carvers, downfall, effects, features, has_precipitation, spawn_costs, spawners, temperature`. There is no `depth`, no `scale`, no `height`.
+
+| Question | Does the biome decide it? | Where it lives instead |
+|---|---|---|
+| Terrain height, hilliness, cliffs | **No** | `offset` / `factor` / `jaggedness` splines → `sloped_cheese` (§15.4) |
+| Where the oceans are | **No** | continentalness spline (§15.4) |
+| Noise caves — cheese, spaghetti, noodle | **No.** Entirely global | `final_density` (§15.6) |
+| Aquifer water levels | **No** | `aquifer_*` noise router slots (§15.6) |
+| Surface block | **No — but biome is an input.** The rule *tests* biome identity | `surface_rule` (§15.5) |
+| Carver caves and ravines | **Yes**, by listing carvers — but all 55 overworld biomes list the identical three, so in practice no | `carvers` (§15.6) |
+| Ores, trees, grass, lakes, springs | **Yes** | `features` (§15.7) |
+| Mob spawning | **Yes** | `spawners`, `spawn_costs` (§15.8) |
+| Colour, precipitation, temperature | **Yes** | `effects`, `temperature`, `downfall` (§15.8) |
+
+The only feedback edge is `depth`: terrain shape flows *into* biome selection so that cave biomes can exist underneath surface ones. Nothing flows the other way.
+
+## 15.2 Climate parameters and how a biome is chosen
+
+### The six parameters
+
+All six are `shifted_noise` reads of a double-Perlin field at `xz_scale: 0.25` (one sample per 4-block cell) and `y_scale: 0.0` (height ignored), with the read position jittered horizontally by `shift_x`/`shift_z` — which are `shift_a`/`shift_b` of the `minecraft:offset` noise. **[D]**
+
+| Parameter | Range | Controls | Noise file (`noise/`) | `firstOctave` | `amplitudes` |
+|---|---|---|---|---|---|
+| temperature | −1…1 | climate row of the biome grid; **no terrain effect** | `temperature.json` | −10 | `[1.5, 0, 1, 0, 0, 0]` |
+| humidity (= vegetation) | −1…1 | vegetation column; **no terrain effect** | `vegetation.json` | −8 | `[1, 1, 0, 0, 0, 0]` |
+| continentalness | −1.2…1 | ocean/coast/inland **and** the terrain offset spline | `continentalness.json` | −9 | `[1, 1, 2, 2, 2, 1, 1, 1, 1]` |
+| erosion | −1…1 | flat vs mountainous; feeds offset **and** factor splines | `erosion.json` | −9 | `[1, 1, 0, 1, 1]` |
+| weirdness (= ridges) | −1…1 | biome variant; source of PV | `ridge.json` | −7 | `[1, 2, 1, 0, 0, 0]` |
+| depth | ≈ −1.5…1.5 | surface vs cave biome | derived, below | — | — |
+| *(sample shift)* | — | jitters the XZ read position | `offset.json` | −3 | `[1, 1, 1, 0]` |
+
+**Depth is not a noise.** It is a vertical ramp plus the terrain offset **[D]** (`density_function/overworld/depth.json`):
+
+$$\text{depth}(x,y,z) = 1.5 - \frac{y + 64}{128} + \text{offset}_{xz}$$
+
+which is exactly **+1/128 = 0.0078125 per block downward**, with `overworld/offset` (a 60 KB spline tree ending in a `-0.5037500262260437` bias) pulling depth to ≈ 0 at the local ground surface.
+
+**Peaks-and-valleys (PV)** is a fold of weirdness **[D]** (`overworld/ridges_folded.json` = `mul(-3, add(-1/3, abs(add(-2/3, abs(ridges)))))`):
+
+$$\text{PV} = 1 - \bigl|\,3|w| - 2\,\bigr|$$
+
+PV drives terrain *and* indexes the biome grid, but **it is not one of the seven stored parameters** — the stored axis is raw weirdness, and the same PV band therefore appears twice, once each side of zero. That doubling is what "W<0 / W>0" means below.
+
+**Large Biomes `[JE]`** swaps in `_large` noises at a lower `firstOctave` (temperature −12, vegetation −10, continentalness −11, erosion −11 — i.e. 4× the wavelength). There is deliberately **no `ridge_large`**.
+
+### Band cutoffs **[wiki]**
+
+| T | range | | H | range | | E | range |
+|---|---|---|---|---|---|---|---|
+| T0 | −1.0 … −0.45 | | H0 | −1.0 … −0.35 | | E0 | −1.0 … −0.78 |
+| T1 | −0.45 … −0.15 | | H1 | −0.35 … −0.1 | | E1 | −0.78 … −0.375 |
+| T2 | −0.15 … 0.2 | | H2 | −0.1 … 0.1 | | E2 | −0.375 … −0.2225 |
+| T3 | 0.2 … 0.55 | | H3 | 0.1 … 0.3 | | E3 | −0.2225 … 0.05 |
+| T4 | 0.55 … 1.0 | | H4 | 0.3 … 1.0 | | E4 | 0.05 … 0.45 |
+| | | | | | | E5 | 0.45 … 0.55 |
+| | | | | | | E6 | 0.55 … 1.0 |
+
+| Continentalness band | range | | PV band | PV range | weirdness slices producing it |
+|---|---|---|---|---|---|
+| Mushroom fields | −1.2 … −1.05 | | Valleys | −1.0 … −0.85 | −0.05 … 0.05 |
+| Deep ocean | −1.05 … −0.455 | | Low | −0.85 … −0.2 | ±(0.05 … 0.26666668) |
+| Ocean | −0.455 … −0.19 | | Mid | −0.2 … 0.2 | ±(0.26666668 … 0.4), ±(0.93333334 … 1.0) |
+| Coast | −0.19 … −0.11 | | High | 0.2 … 0.7 | ±(0.4 … 0.56666666), ±(0.7666667 … 0.93333334) |
+| Near-inland | −0.11 … 0.03 | | Peaks | 0.7 … 1.0 | ±(0.56666666 … 0.7666667) |
+| Mid-inland | 0.03 … 0.3 | | | | |
+| Far-inland | 0.3 … 1.0 | | | | |
+
+The weirdness slices are a **derivation, not a measurement** — the algebraic preimage of the published PV cutoffs. Check: $w=0.05 \Rightarrow PV=-0.85$; $w=0.26666668 \Rightarrow PV=-0.2$; $w=0.4 \Rightarrow PV=0.2$; $w=0.7666667 \Rightarrow PV=0.7$. All land exactly on published cutoffs.
+
+### The selection algorithm
+
+**A biome is not a point.** Each entry is a 7-tuple of closed intervals — an axis-aligned box in 7D. The axes, in engine order and visible in the `spawn_target` block of `noise_settings/overworld.json` **[D]**, are `temperature, humidity, continentalness, erosion, depth, weirdness, offset`. There is no PV axis.
+
+| Mechanism | Detail |
+|---|---|
+| **Fixed point** | Every value, sampled and stored, is a 64-bit integer equal to `round(value × 10000)` **[code]** |
+| **Distance** | Per axis: 0 inside the interval, otherwise the gap to the nearest edge. Total = **squared Euclidean sum** of those gaps: $D^2=\sum_{i=0}^{6}\max(v_i-\max_i,\;\min_i-v_i,\;0)^2$ |
+| **Consequence** | Unnormalised and unweighted — **one unit of temperature costs exactly what one unit of continentalness costs.** A point inside a box scores 0 and wins outright; ties break on traversal order |
+| **Coverage** | Nearest-box, not containment, so **the space is fully covered**: a point outside every box still resolves |
+| **Search** | An R-tree — interior nodes hold the union box of their children. Best-first with pruning, seeded with the *previous query's* result, which is the single biggest optimisation because consecutive samples in a chunk are almost always the same biome |
+| **The `offset` axis** | The sampled point's 7th coordinate is **always 0**; a biome stores `[offset, offset]`, so it contributes a constant `offset²` penalty forever. It is a **handicap, not a coordinate**. **Every Overworld entry uses offset 0** — the mechanism only does work in the Nether, where biomes are single points with offsets 0 / 0.175 / 0.375 |
+
+### The overworld surface biome table **[wiki]**
+
+Every surface entry is emitted **twice**, once at `depth = [0.0, 0.0]` and once at `[1.0, 1.0]`, always with **`offset = 0`** — so those two columns are constant for all 55 rows and are stated here once rather than repeated.
+
+Cells resolve first to a **group**, which is then expanded by T, H and the sign of W. `grp` below names the group(s) a biome is reached through, and the C/E/PV columns are the **union envelope** of the cells that group occupies — the engine builds a per-biome union of boxes, so a single numeric range per biome is a summary, not the exact box set.
+
+| grp | C | E | PV |
+|---|---|---|---|
+| **M** Middle | Coast … Far-inland | E0–E6 | Valleys … Peaks |
+| **P** Plateau | Near … Far-inland | E0–E3 | Mid … Peaks |
+| **S** Shattered | Coast … Far-inland | E5 only | Mid … Peaks |
+| **D** Badland | Near … Far-inland | E0–E3 | Valleys … Peaks |
+| **B** Beach | Coast only | E3–E6 | Low … Mid |
+
+| Biome | T | H | C | E | PV | W | grp |
+|---|---|---|---|---|---|---|---|
+| mushroom_fields | all | all | −1.2 … −1.05 | all | all | ± | — |
+| deep_frozen_ocean | T0 | all | −1.05 … −0.455 | all | all | ± | — |
+| deep_cold_ocean | T1 | all | −1.05 … −0.455 | all | all | ± | — |
+| deep_ocean | T2 | all | −1.05 … −0.455 | all | all | ± | — |
+| deep_lukewarm_ocean | T3 | all | −1.05 … −0.455 | all | all | ± | — |
+| frozen_ocean | T0 | all | −0.455 … −0.19 | all | all | ± | — |
+| cold_ocean | T1 | all | −0.455 … −0.19 | all | all | ± | — |
+| ocean | T2 | all | −0.455 … −0.19 | all | all | ± | — |
+| lukewarm_ocean | T3 | all | −0.455 … −0.19 | all | all | ± | — |
+| warm_ocean | T4 | all | −1.05 … −0.19 | all | all | ± | — |
+| frozen_river | T0 | all | Coast … Far | E0–E6 | Valleys | ± | — |
+| river | T1–T4 | all | Coast … Far | E0–E5 (+E6 Coast) | Valleys | ± | — |
+| swamp | T1–T2 | all | Near … Far | E6 | Valleys–Mid | ± | — |
+| mangrove_swamp | T3–T4 | all | Near … Far | E6 | Valleys–Mid | ± | — |
+| stony_shore | all | all | Coast | E0–E2 | Low–Mid | ± | — |
+| beach | T1–T3 | all | Coast | E3–E6 | Low–Mid | ± | B |
+| snowy_beach | T0 | all | Coast | E3–E6 | Low–Mid | ± | B |
+| snowy_slopes | T0–T2 | H0–H1 | Near … Far | E0–E1 | Low–Peaks | ± | — |
+| grove | T0–T2 | H2–H4 | Near … Far | E0–E1 | Low–Peaks | ± | — |
+| jagged_peaks | T0–T2 | all | Coast … Far | E0–E1 | High–Peaks | − | — |
+| frozen_peaks | T0–T2 | all | Coast … Far | E0–E1 | High–Peaks | + | — |
+| stony_peaks | T3 | all | Coast … Far | E0–E1 | High–Peaks | ± | — |
+| snowy_plains | T0 | H0–H2 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P |
+| ice_spikes | T0 | H0 | Coast … Far | E0–E6 | Valleys–Peaks | + | M, P |
+| snowy_taiga | T0 | H2–H4 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P |
+| plains | T1–T3 | H0–H2 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, S |
+| flower_forest | T2 | H0 | Coast … Far | E0–E6 | Valleys–Peaks | − | M |
+| sunflower_plains | T2 | H0 | Coast … Far | E0–E6 | Valleys–Peaks | + | M |
+| forest | T1–T3 | H2 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P, S |
+| taiga | T0–T1 | H3–H4 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P |
+| birch_forest | T2 | H3 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P |
+| old_growth_birch_forest | T2 | H3 | Coast … Far | E0–E6 | Valleys–Peaks | + | M |
+| old_growth_spruce_taiga | T1 | H4 | Coast … Far | E0–E6 | Valleys–Peaks | − | M, P |
+| old_growth_pine_taiga | T1 | H4 | Coast … Far | E0–E6 | Valleys–Peaks | + | M, P |
+| dark_forest | T2 | H4 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M |
+| jungle | T3 | H3–H4 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, P |
+| sparse_jungle | T3 | H3 | Coast … Far | E0–E6 | Valleys–Peaks | + | M, S |
+| bamboo_jungle | T3 | H4 | Coast … Far | E0–E6 | Valleys–Peaks | + | M, S |
+| savanna | T3 | H0–H1 | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, S |
+| desert | T4 | all | Coast … Far | E0–E6 | Valleys–Peaks | ± | M, S, B |
+| meadow | T1–T2 | H0–H3 | Near … Far | E0–E3 | Mid–Peaks | ± | P |
+| cherry_grove | T1–T2 | H0–H1 | Near … Far | E0–E3 | Mid–Peaks | + | P |
+| savanna_plateau | T3 | H0–H1 | Near … Far | E0–E3 | Mid–Peaks | ± | P |
+| pale_garden | T2 | H4 | Near … Far | E0–E3 | Mid–Peaks | ± | P |
+| windswept_gravelly_hills | T0–T1 | H0–H1 | Coast … Far | E5 | Mid–Peaks | ± | S |
+| windswept_hills | T0–T2 | H0–H2 | Coast … Far | E5 | Mid–Peaks | ± | S |
+| windswept_forest | T0–T2 | H3–H4 | Coast … Far | E5 | Mid–Peaks | ± | S |
+| windswept_savanna | T2–T4 | H0–H3 | Coast, Near | E5 | Low–Peaks | **+** | — |
+| badlands | T4 | H0–H2 | Near … Far | E0–E3 | Valleys–Peaks | ± | D, P |
+| eroded_badlands | T4 | H0–H1 | Near … Far | E0–E3 | Valleys–Peaks | + | D, P |
+| wooded_badlands | T4 | H3–H4 | Near … Far | E0–E3 | Valleys–Peaks | ± | D, P |
+
+Two structural notes. `desert` is reached three ways — it is the T4 column of *both* Middle and Shattered **and** the T4 entry of the Beach group, which is why deserts run straight into the sea with no beach. And `dappled_forest` (Middle H0/T1, W>0) is **26.3+** and is not in this 26.2 dump; the roster here is 65 biome files including `sulfur_caves` and `pale_garden`.
+
+### Cave biomes, and how `depth` separates them **[wiki]**
+
+Surface entries pin depth to exactly 0.0 or 1.0. Cave entries claim a *span* between and beyond those points, so anywhere with depth strictly between them the cave boxes are the nearest ones. That is the whole mechanism — cave biomes are a **layer underneath** the surface biome at the same XZ, not a replacement for it.
+
+| Biome | T | H | C | E | D | W |
+|---|---|---|---|---|---|---|
+| dripstone_caves | all | all | **0.8 … 1.0** | all | **0.2 … 0.9** | all |
+| lush_caves | all | **0.7 … 1.0** | all | all | **0.2 … 0.9** | all |
+| deep_dark | all | all | all | **−1.0 … −0.375** (E0–E1) | **1.1** (a point) | all |
+| sulfur_caves *(26.2+)* | all | all | **−0.19 … 0.55** | **0.45 … 1.0** (E5–E6) | **0.2 … 0.9** | **−1.1 … −0.85** |
+
+Dripstone and lush **overlap** where C ≥ 0.8 and H ≥ 0.7 — a documented ambiguity (MC-262252). Deep dark is a point at depth 1.1, so it only wins *below* the depth-1.0 surface entries and only under low-erosion (mountainous) terrain. Sulfur caves' weirdness lower bound of −1.1 sits outside the noise's own −1…1 range — the same deliberate over-extension mushroom fields uses on continentalness.
+
+## 15.3 Seed, noise and sampling resolution
+
+### Seed → RNG
+
+`legacy_random_source` picks the generator, and it is a per-preset field **[D]**:
+
+| Preset | `legacy_random_source` | height | min_y | size_h | size_v | sea level |
+|---|---|---|---|---|---|---|
+| overworld / amplified / large_biomes | **false** → Xoroshiro128++ | 384 | −64 | 1 | 2 | 63 |
+| caves | true → legacy LCG | 192 | −64 | 1 | 2 | 32 |
+| nether | true | 128 | 0 | 1 | 2 | 32 |
+| end | true | 128 | 0 | 2 | 1 | 0 |
+| floating_islands | true | 256 | 0 | 2 | 1 | −64 |
+
+The **legacy** source is `java.util.Random`: $s_{n+1}=(25214903917\,s_n+11)\ \&\ (2^{48}-1)$. Only 48 seed bits are reachable, which is why the first 1.18 experimental snapshot temporarily cut the seed space to 48-bit and 21w41a fixed it by swapping in xoroshiro **[wiki]**.
+
+The **modern** path upgrades the 64-bit seed to 128 bits first **[code]**: $\ell=\text{seed}\oplus\texttt{0x6A09E667F3BCC909}$, $h=\ell+\texttt{0x9E3779B97F4A7C15}$, then both halves through `mixStafford13`. `Xoroshiro128PlusPlus.nextLong()` outputs $\text{rotl}(\ell+h,17)+\ell$.
+
+### Per-noise seeding, and why it is the good idea
+
+**Every noise is instantiated as `factory.fromHashOf(resourceLocation.toString())`** — the MD5 of the literal string `"minecraft:continentalness"`, split into two big-endian longs and XORed into the world seed halves. **[code]**
+
+**The consequence is the whole point: adding a 68th noise to the registry cannot shift any existing one.** Under the legacy scheme noises were seeded by consuming longs in registration order, so inserting one anywhere reshuffled every noise after it and changed the terrain of every existing world. The same trick nests one level deeper — inside `PerlinNoise` each octave is seeded `fromHashOf("octave_" + n)`, so a zero amplitude skips constructing that octave without disturbing its neighbours.
+
+The positional variant is `at(x,y,z)`, which XORs in `Mth.getSeed(x,y,z)`: $L=(x\cdot3129871)\oplus(z\cdot116129781)\oplus y$; $L=L\cdot L\cdot42317861+L\cdot11$; return $L\gg16$.
+
+### `NormalNoise` construction
+
+A `NormalNoise` is **two** `PerlinNoise` instances built back to back **[code]**:
+
+$$N(x,y,z)=\bigl(P_1(x,y,z)+P_2(\kappa x,\kappa y,\kappa z)\bigr)\cdot V,\qquad \kappa=1.0181268882175227$$
+
+$\kappa$ is deliberately just above 1 and irrational-ish, so the second copy drifts out of phase with the first and kills the grid-aligned artefacts a single Perlin field shows. The normalisation factor is
+
+$$V=\frac{0.16666666666666666}{0.1\left(1+\frac{1}{k-j+1}\right)}$$
+
+where $j$ and $k$ are the indices of the **first and last non-zero** amplitude. The $0.1(1+\tfrac{1}{n+1})$ term is the empirically measured standard deviation of a sum of $n{+}1$ octaves; dividing $1/6$ by it maps the output to roughly $[-1,1]$. Within one `PerlinNoise` with `firstOctave` $F$:
+
+$$P(x,y,z)=\sum_{k=0}^{n-1} a_k\, I_k\!\left(2^{F+k}x,\,2^{F+k}y,\,2^{F+k}z\right)\cdot\frac{2^{n-1}}{2^{n}-1}\cdot 2^{-k}$$
+
+Worked example, `continentalness` (`firstOctave −9`, `amplitudes [1,1,2,2,2,1,1,1,1]`): $j=0$, $k=8$, so $V = 0.1\overline{6}/(0.1\times\tfrac{10}{9}) = \mathbf{1.5}$, and $2^{n-1}/(2^n-1)=256/511=0.500978$. Because `overworld/continents` samples at `xz_scale: 0.25`, one noise unit is 4 blocks, so octave 0 has a **2048-block wavelength** (continent scale ≈ 2 km) and octave 8 an 8-block one. `y_scale: 0.0` — continentalness is strictly 2D.
+
+### Resolution — the crux
+
+| Field | Grid | Interpolated? | Cost per chunk |
+|---|---|---|---|
+| **Terrain density** | cells of **4 × 8 × 4** blocks (`size_horizontal: 1`, `size_vertical: 2`, cell = 4 × the value) | **Yes**, trilinear | $(4{+}1)^2\times(48{+}1)=\mathbf{1225}$ corner samples for 98,304 blocks — **≈ 80 blocks per density sample** |
+| **2D fields** (`continents`, `erosion`, `ridges`, `offset`, `factor`, `jaggedness`) | one sample per **4×4 column** via `flat_cache` | **No** — nearest-lower quart wins | 25 evaluations instead of 256 |
+| **Biomes** | one sample per **4×4×4 quart**, stored as a palette per subchunk | **No** | 4×4×4 quarts per subchunk |
+
+Independently confirmed in the data: `preliminary_surface_level` carries `"cell_height": 8` **[D]**. Interpolation is trilinear, done as three nested passes (Y, then X, then Z) with fractions $\tfrac{y\&7}{8}$, $\tfrac{x\&3}{4}$, $\tfrac{z\&3}{4}$. The visible cost is mild terracing on very steep cliffs.
+
+**The 4-block staircase on the 2D fields is invisible** because they feed `sloped_cheese`, which *is* interpolated downstream. And **only functions wrapped in `minecraft:interpolated` get the cell treatment** — in `final_density`, `noodle` sits *outside* the wrapper and is evaluated per block **[D]**, which is exactly why noodle caves are 1-block-wide worms while cheese caves are smooth blobs.
+
+Biome storage is per quart, but **queries** (grass colour, mob spawning) add a per-block fuzz: subtract 2 from x/y/z, then for each of the 8 surrounding quart corners compute a "fiddled" squared distance offset by $\pm0.45$ quarts $=\pm1.8$ blocks from a chained LCG salted by the coordinates, and return the nearest corner's biome **[code]**. The salt is `SHA-256(worldSeed)`, deliberately decorrelated from the terrain noise. Net effect: biome borders wobble ±1.8 blocks instead of showing a clean 4-block staircase.
+
+**`blend_alpha` / `blend_offset` / `blend_density` are inert in a fresh world.** They exist only to stitch 1.18+ terrain against chunks generated by an older format, using `BlendingData` stored in neighbouring chunk NBT. With no such chunk, `Blender.EMPTY` gives `blend_alpha = 1.0`, `blend_offset = 0.0`, `blend_density` = identity — **hard-code all three and lose nothing.** Every expression in §15.4 and §15.6 below is quoted with that collapse already applied.
+
+## 15.4 Terrain shaping: splines, density, and the Y geometry
+
+### World geometry **[D]**, `noise_settings/overworld.json`
+
+| Field | Value | Line |
+|---|---|---|
+| `noise.min_y` | **−64** | 16 |
+| `noise.height` | **384** → Y = −64 … 319 | 15 |
+| `sea_level` | **63** | 401 |
+| `noise.size_horizontal` | **1** → cell width 4 | 17 |
+| `noise.size_vertical` | **2** → cell height 8 | 18 |
+| `default_block` / `default_fluid` | `stone` / `water` | 3–11 |
+| `aquifers_enabled` / `ore_veins_enabled` | `true` / `true` | 2, 400 |
+| `legacy_random_source` `[JE]` | `false` | 13 |
+
+`amplified.json` and `large_biomes.json` carry **identical** values for every field in that table.
+
+### The three shaping outputs
+
+| Output | File | What it physically does |
+|---|---|---|
+| `offset` | `density_function/overworld/offset.json` | **Base height of the column** — shifts the vertical density gradient up or down |
+| `factor` | `.../factor.json` | **How strongly that height is enforced.** It multiplies depth, so a *large* factor makes density change fast with Y (flat, hard-to-disturb terrain) and a *small* factor lets the 3D noise wander far above and below (dramatic, chaotic terrain) |
+| `jaggedness` | `.../jaggedness.json` | A **high-frequency spike term** added to depth, scaled by the `jagged` noise at `xz_scale: 1500.0` |
+
+All three are `flat_cache(cache_2d(…))` — evaluated **once per XZ column** and reused for the whole vertical stack — and all three nest the same way: **continentalness → erosion → ridges**. With blending collapsed **[D]**:
+
+```
+offset     = -0.5037500262260437 + spline(continents…)
+factor     = 10.0 + (-10.0 + spline(continents…))
+jaggedness =  0.0 + ( -0.0  + spline(continents…))
+```
+
+**`offset`, level 1 (keyed on `continents`)** — the complete top level, all derivatives 0.0 **[D]**:
+
+| location | value |
+|---|---|
+| −1.1 | 0.044 |
+| −1.02 | −0.2222 |
+| −0.51 | −0.2222 |
+| −0.44 | −0.12 |
+| −0.18 | −0.12 |
+| −0.16 / −0.15 / −0.1 | → erosion spline **A** (7 points) |
+| 0.25 / 1.0 | → erosion spline **B** (11 points) |
+
+Two level-3 branches in full, to show the shape (`ridges_folded` → value):
+
+| erosion | continents = −0.16 (ocean/coast) | continents = 1.0 (deep inland) |
+|---|---|---|
+| −0.85 | (−1.0, −0.08880186, d 0.38940096) · (1.0, 0.69000006, d 0.38940096) | (−1.0, 0.34792626) · (0.0, 0.9239631, d 0.5760369) · (1.0, **1.5**, d 0.5760369) |
+| −0.35 | (−1.0, −0.3, d 0.5) · (−0.4, 0.05) · (0.0, 0.05) · (0.4, 0.05) · (1.0, 0.06) | (−1.0, −0.2, d 0.5) · (−0.4, 0.5) · (0.0, 0.5) · (0.4, 0.5) · (1.0, 0.6) |
+| 0.2 | (−1.0, −0.15, d 0.5) · (−0.4, 0.0) · (0.0, 0.0) · (0.4, 0.0) · (1.0, 0.0) | (−1.0, −0.05, d 0.5) · (−0.4, 0.01) · (0.0, 0.01) · (0.4, 0.03) · (1.0, 0.1) |
+| 0.7 | (−1.0, −0.02) · (−0.4, −0.03) · (0.0, −0.03) · (0.4, 0.0, d 0.06) · (1.0, 0.0) | (−1.0, −0.02) · (−0.4, 0.01) · (0.0, 0.01) · (0.4, 0.03) · (1.0, 0.1) |
+
+**`factor` leaf values**, which is where the design is legible **[D]**. Top level keys on `continents` with a leaf `3.95` at −0.19 and erosion splines at −0.15 / −0.1 / 0.03 / 0.06; the ridges level is a lo/hi pair:
+
+| erosion | ridges pair | c=−0.15 | c=−0.1 | c=0.03 | c=0.06 |
+|---|---|---|---|---|---|
+| −0.6 / −0.35 / −0.25 / 0.03 | (−0.2, 0.2) | 6.3 / 6.25 | 6.3 / 5.47 | 6.3 / 5.08 | 6.3 / 4.69 |
+| −0.5 / −0.1 | (−0.05, 0.05) | 6.3 / 2.67 | ← | ← | ← |
+| 0.45 / 0.55 | ridges_folded | 6.25 · 6.25/**0.625** | 5.47 · 5.47/0.625 | 5.08 · 5.08/0.625 | 6.3 / 4.69 · **1.37** |
+| 0.58 / 0.62 | leaf | 6.25 | 5.47 | 5.08 | 4.69 |
+
+**Low erosion → factor ≈ 6.3 (mountains held firmly); high erosion on a peak ridge → factor falls to 0.625–1.56**, which is where the 3D noise is allowed to run wild and produce shattered terrain.
+
+**`jaggedness` is complete in ten rows** — it is zero everywhere except continentalness ≳ 0.03, erosion ≲ −0.375, and `ridges_folded` near 1.0. **Everything else in the world is smooth by construction.** Peak values are 0.63 (ridges −0.01) / 0.3 (ridges +0.01) at continentalness 0.65 across erosion −1.0 … −0.5775, halving to 0.315 / 0.15 at continentalness 0.03 for erosion −0.78 and −0.5775.
+
+### The density chain, in order **[D]**
+
+| Step | Definition |
+|---|---|
+| 1. `depth` | `y_clamped_gradient(-64 → 1.5, 320 → -1.5)` **+** `offset` |
+| 2. `base_3d_noise` | `old_blended_noise` — `xz_scale 0.25, y_scale 0.125, xz_factor 80.0, y_factor 160.0, smear_scale_multiplier 8.0` |
+| 3. `sloped_cheese` | `4.0 × quarter_negative((depth + flat_cache(jaggedness × half_negative(noise jagged @ xz 1500, y 0))) × factor)` **+** `base_3d_noise` |
+| 4. cave carve | `range_choice` on `sloped_cheese` at **1.5625** — see §15.6 |
+| 5. slides | bottom and top clamps, below |
+| 6. `final_density` | `min(squeeze(interpolated(0.64 × <slides>)), overworld/caves/noodle)` |
+| 7. solid test | `final_density > 0` → stone; otherwise air, or fluid supplied by the aquifer **[code]** |
+
+The three shaping operations, all **[code]** for their semantics but present by name in the data:
+
+| Op | Definition | Why |
+|---|---|---|
+| `quarter_negative(x)` | `x < 0 ? x/4 : x` | Compresses negative density so **air is easier to reach than stone** — terrain sits lower and caves open more readily than a symmetric version would give |
+| `half_negative(x)` | `x < 0 ? x/2 : x` | Applied to the `jagged` noise, so spikes go **up twice as far as they go down** — peaks, not pits |
+| `squeeze(x)` | `c = clamp(x,-1,1); c/2 - c³/24` | Outermost op of `final_density`; soft-limits into roughly ±0.4583 so extreme values do not produce razor cliffs |
+
+**The slides**, literally as written at `noise_settings/overworld.json` lines 44–86:
+
+```
+0.1171875 + ycg(-64:0 → -40:1) * ( -0.1171875 + ( -0.078125 + ycg(240:1 → 256:0) * ( 0.078125 + <caves> ) ) )
+```
+
+| Slide | Target | Band | Effect |
+|---|---|---|---|
+| bottom | **+0.1171875** (solid) | Y −64 → −40 | Density forced solid at the floor, the world's own density fading in linearly over 3 cells |
+| top | **−0.078125** (air) | Y 240 → 256 | Density forced to air at the ceiling, fading out over 2 cells. Amplified `[JE]` moves this to **304 → 320** |
+
+**`preliminary_surface_level`** is new in 26.2 — it replaces the old `initial_density_without_jaggedness` router key with a data type `minecraft:find_top_surface` (`cell_height: 8`, `lower_bound: -64`, `upper_bound = clamp(128 - 128·(0.2734375·invert(factor) - offset), -40, 320)`). Its density argument is the same slide sandwich **with jaggedness and caves removed**, so the surface and aquifer systems get a stable "where is the ground" answer that caves cannot punch holes in.
+
+### Y cutoffs, explicitly
+
+| Thing | Y | Hard or probabilistic |
+|---|---|---|
+| World bottom / build limit | **−64** / **319** | hard |
+| Terrain forced solid | ≤ **−64**, fading out to −40 | hard clamp |
+| Terrain forced air | ≥ **256**, fading in from 240 (Amplified `[JE]`: 320 / 304) | hard clamp |
+| **Bedrock floor** | **−64 … −60** | **probabilistic per block**, P = 1.0 / 0.8 / 0.6 / 0.4 / 0.2, zero at −59 |
+| Bedrock roof | **none in the Overworld** | only `nether.json` has `bedrock_roof` |
+| **Deepslate** | ≤ **8**, guaranteed at ≤ **0** | **probabilistic per block**, P = (8−Y)/8 |
+| Sea level (water fill) | **63** | hard |
+| Aquifer lava level | **−54** | hard — **[code]**, *not* in the data files |
+| Ore-vein band | **−60 … 50** (`min_inclusive -60.0, max_exclusive 51.0`) | hard Y gate |
+
+### The three overworld variants
+
+Both variants are `[JE]` — Bedrock's world types are Infinite / Flat / Old — and both use the same biome-source preset; only the noise settings change.
+
+**Amplified**, measured by flattening both spline trees and comparing every leaf: `offset` has **126 positive leaves doubled and 56 negative leaves unchanged** (land rises twice as far, ocean depths stay put); `jaggedness` has **every leaf exactly doubled**; `factor` leaves the ocean branches alone and replaces all 65 land leaves with `f' = f / (4 + 0.8·f)` — 6.3 → 0.697, 0.625 → 0.139. **That factor collapse, roughly 9× on land, is the real mechanism**: with the vertical gradient nearly flattened the 3D noise dominates and terrain shoots to the raised ceiling. Doubled offset and jaggedness are secondary.
+
+**Large Biomes** changes **nothing numeric at all** — all 201 offset leaves, 86 factor leaves and 28 jaggedness leaves are bit-identical to the default. The splines simply key on noises at `firstOctave −11` instead of `−9`, i.e. **4× the horizontal wavelength**. Same terrain, drawn at four times the scale.
+
+## 15.5 Surface rules — which block goes on top
+
+`surface_rule` in `noise_settings/overworld.json`, lines 452–2748. **[D]**
+
+### Semantics
+
+`minecraft:sequence` is **first match wins** — evaluation stops at the first branch that yields a block, and a `condition` whose `then_run` produces nothing falls through to the next sibling. Rules run **top-down per column, after the density pass**; they only *replace* the default block and never create geometry.
+
+The top level is four entries:
+
+| # | Condition | Effect |
+|---|---|---|
+| 1 | `vertical_gradient` `bedrock_floor` | bedrock |
+| 2 | `above_preliminary_surface` | the entire surface / beach / ocean-floor tree (lines 475–2724) |
+| 3 | `biome = sulfur_caves` + 3D `sulfur_cave_gradient` bands | cinnabar / sulfur / cinnabar |
+| 4 | `vertical_gradient` `deepslate` | deepslate |
+
+### The conditions worth knowing
+
+| Condition | Meaning |
+|---|---|
+| `stone_depth {surface_type, offset, add_surface_depth, secondary_depth_range}` | `floor` counts solid blocks **downwards from the top** of the current run of stone (block 0 = the topmost solid block); `ceiling` counts **upwards from the bottom** of the run, which is how `sandstone`/`stone` get placed on the underside of `sand`/`gravel`. `offset` is how deep the test reaches |
+| **surface depth** | A per-column thickness sampled from the `minecraft:surface` noise (firstOctave −6, amplitudes `[1,1,1]`). Java computes `surfaceNoise × 2.75 + 3.0 + random × 0.25` **[code]** — roughly 0–6 blocks, and it is what makes the dirt layer under grass vary in thickness |
+| `secondary_depth_range` | Extends the allowance by a second noise (`surface_secondary`, firstOctave −6, `[1,1,0,1]`) scaled by this range — **6** for beach sandstone, **30** for desert sandstone |
+| `above_preliminary_surface` | Y ≥ the cave-free preliminary surface level (§15.4). **This is the gate that stops cave ceilings growing grass** |
+| `water {offset, surface_depth_multiplier, add_stone_depth}` | True when `blockY (+stoneDepth) ≥ fluidLevel + offset + surfaceDepth × multiplier`, or there is no fluid. `offset 0, mult 0` = "not underwater"; `offset −1` = "at most 1 below water"; `offset −6, mult −1, add_stone_depth` = the wide shallow-seabed band |
+| `y_above`, `not`, `hole`, `steep`, `temperature` | absolute Y test (optionally shifted by surface depth); negation, used to build Y *ranges* out of two `y_above` tests; surface depth ≤ 0; slope test (bare stone on cliffs); cold enough to freeze water |
+
+### The three passes inside branch 2
+
+| Pass | Gate | Produces |
+|---|---|---|
+| **top block** | `stone_depth(floor, 0)` + `water(offset −1)` | biome-specific top block; **fallback** `water(0,0)` → `grass_block{snowy:false}`, else `dirt` |
+| **under-surface** | `water(offset −6, mult −1, add_stone_depth)` | snow_block / powder_snow / mud under the top block; **fallback** `dirt`; then beach and desert sandstone |
+| **ocean floor** | `stone_depth(floor, 0)` | frozen/jagged peaks → `stone`; warm/lukewarm/deep-lukewarm ocean → `sand` (+`sandstone` ceiling); **everything else → `gravel`** (+`stone` ceiling) |
+
+Biome-gated placements are a fixed deterministic list: beaches and desert → sand + sandstone; mushroom_fields → mycelium; mangrove_swamp → mud; ice_spikes → snow_block; frozen oceans → ice/air/water via `hole` + `temperature`; dripstone_caves → stone; the snow family for frozen_peaks / snowy_slopes / jagged_peaks / grove; calcite/gravel/stone for stony_peaks and stony_shore.
+
+### Noise-threshold rules **[D]**
+
+| Rule | Noise | min | max |
+|---|---|---|---|
+| windswept_hills → stone | `surface` | 0.12121212 (4/33) | +MAX |
+| windswept_savanna → stone | `surface` | 0.21212121 (7/33) | +MAX |
+| windswept_savanna → coarse_dirt | `surface` | −0.06060606 (−2/33) | +MAX |
+| windswept_gravelly_hills → gravel | `surface` | 0.24242424 (8/33) | +MAX |
+| windswept_gravelly_hills → stone | `surface` | 0.12121212 | +MAX |
+| windswept_gravelly_hills → grass/dirt | `surface` | −0.12121212 | +MAX |
+| old_growth_*_taiga → coarse_dirt | `surface` | 0.21212121 | +MAX |
+| old_growth_*_taiga → podzol | `surface` | −0.11515151 | +MAX |
+| swamp → water at Y 62 only | `surface_swamp` | 0.0 | +MAX |
+| mangrove_swamp → water at Y 60–62 | `surface_swamp` | 0.0 | +MAX |
+| stony_shore → gravel | `gravel` | −0.05 | 0.05 |
+| stony_peaks → calcite | `calcite` | −0.0125 | 0.0125 |
+| frozen_peaks → ice (exposed / submerged) | `ice` | 0.0 / −0.0625 | 0.025 |
+| frozen_peaks → packed_ice (exposed / submerged) | `packed_ice` | 0.0 / −0.5 | 0.2 |
+| snowy_slopes, grove → powder_snow (exposed) | `powder_snow` | 0.35 | 0.6 |
+| snowy_slopes, grove → powder_snow (submerged) | `powder_snow` | 0.45 | 0.58 |
+| sulfur_caves → cinnabar / sulfur / cinnabar | `sulfur_cave_gradient` (3D) | −0.4 / 0.0 / 0.4 | −0.1 / 0.4 / +MAX |
+
+Backing noise parameters **[D]**: `surface` −6 `[1,1,1]` · `surface_secondary` −6 `[1,1,0,1]` · `surface_swamp` −2 `[1]` · `gravel` −8 `[1,1,1,1]` · `powder_snow` −6 `[1,1,1,1]` · `calcite` −9 `[1,1,1,1]` · `ice` −4 `[1,1,1,1]` · `packed_ice` −7 `[1,1,1,1]` · `jagged` −16 `[1×16]` · `clay_bands_offset` −8 `[1.0]`.
+
+Two details worth stealing. **The `surface` thresholds are all n/33** — 4/33, 7/33, 8/33, −2/33, and the badlands set 6/33, 18/33, 30/33. And **the powder-snow band is narrower one layer down (0.45…0.58) than at the surface (0.35…0.6)**, so a pocket is wider at the top than at the bottom — a bowl, which is exactly what makes it behave as a trap.
+
+### The two `vertical_gradient` bands
+
+```jsonc
+{ "type":"minecraft:vertical_gradient", "random_name":"minecraft:bedrock_floor",
+  "true_at_and_below": {"above_bottom": 0}, "false_at_and_above": {"above_bottom": 5} }
+{ "type":"minecraft:vertical_gradient", "random_name":"minecraft:deepslate",
+  "true_at_and_below": {"absolute": 0},    "false_at_and_above": {"absolute": 8} }
+```
+
+**This is a genuinely random per-block coin flip, not a smooth blend.** Inside the band the gradient value *is* the probability; a positional RNG seeded from `random_name` plus the block coordinate is rolled independently for every single block **[code]**. There is no interpolation of the *result*, only of the odds — which is why the bedrock floor is a speckled five-layer mess and the stone↔deepslate boundary is a dithered scatter rather than a plane.
+
+| Band | Y | P(rule fires) |
+|---|---|---|
+| bedrock | −64 / −63 / −62 / −61 / −60 / −59 | 1.0 / 0.8 / 0.6 / 0.4 / 0.2 / 0.0 |
+| deepslate | ≤0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / ≥8 | 1.0 / 0.875 / 0.75 / 0.625 / 0.5 / 0.375 / 0.25 / 0.125 / 0.0 |
+
+### Badlands banding
+
+Lines 706–950, gated on `biome ∈ {badlands, eroded_badlands, wooded_badlands}` **[D]**:
+
+```
+IF stone_depth(floor, 0):
+   IF y_above absolute 256                    → orange_terracotta
+   IF y_above absolute 74 (+stone_depth):
+        surface ∈ [-0.909,-0.5454] | [-0.1818,0.1818] | [0.5454,0.909]  → terracotta
+        else                                                            → minecraft:bandlands
+   IF water(offset -1)                        → red_sand (+ red_sandstone on ceiling)
+   IF not hole                                → orange_terracotta
+   IF water(-6, mult -1, +depth)              → white_terracotta
+   else                                       → stone / gravel
+IF y_above absolute 63 (+stone_depth, mult -1):
+   IF y_above 63 AND NOT y_above 74(+depth)   → orange_terracotta
+   else                                       → minecraft:bandlands
+```
+
+`minecraft:bandlands` is a **rule type, not a condition** — an opaque generator holding a **192-entry array of terracotta colours built once per world seed**, indexed by absolute Y, with the index shifted by the `clay_bands_offset` noise so the bands wobble ±4 blocks horizontally **[code]**. Only the rule's presence and its surrounding gates are in the data.
+
+### Random versus smooth
+
+| Decision | Mechanism | Continuous or per-block random |
+|---|---|---|
+| Terrain height | splines + `old_blended_noise`, interpolated over 4×8 cells | **continuous** |
+| Sea level fill | constant `sea_level: 63` + aquifer fluid picker | **deterministic**, no randomness |
+| Grass vs dirt | position in the column; thickness from `surface` noise ×2.75 + 3.0 **+ random × 0.25** | **continuous** field, small per-column random jitter on thickness only |
+| Coarse dirt / podzol patches | `noise_threshold` on `surface` | **continuous** — smooth blobs, not speckle |
+| Sand on beaches | **biome** membership | **deterministic** given the biome map |
+| Sandstone depth under sand | `secondary_depth_range` 6 / 30 on `surface_secondary` | **continuous** |
+| Gravel on the ocean floor | **fallback** — last sibling of the pass | **deterministic** |
+| Gravel on stony_shore | `noise_threshold` `gravel` ∈ [−0.05, 0.05] | **continuous** thin bands |
+| Calcite / ice / packed ice / powder snow | `noise_threshold` on the matching noise | **continuous** pockets |
+| **Bedrock layer, Y −64…−59** | `vertical_gradient` `bedrock_floor` | **per-block random roll**, probability interpolated |
+| **Deepslate transition, Y 0…8** | `vertical_gradient` `deepslate` | **per-block random roll**, probability interpolated |
+| Badlands bands | 192-entry seeded colour array indexed by Y | **per-seed random once**, then a deterministic function of Y; horizontal wobble continuous |
+| Cave carving (noise caves) | `range_choice` + cave density functions | **continuous** |
+| Ore veins (the big ones) | `vein_toggle` / `vein_ridged` / `vein_gap` noise | **continuous** |
+| Ore blobs, trees, grass, lakes | per-chunk sequential RNG draws | **genuinely random**, seeded per chunk (§15.7) |
+| Carver caves and ravines | per-chunk RNG, `probability` roll | **genuinely random**, seeded per chunk |
+
+**Only two decisions in the entire overworld surface system are true per-block coin flips: bedrock and deepslate.** Everything else on the terrain side is a continuous noise field or a hard biome/geometry test; everything genuinely random happens later, in carving and decoration.
+
+## 15.6 Caves and aquifers
+
+Three noise systems exist because one noise field cannot produce three topologies at once. A single 3D noise thresholded against a constant gives blobs and only blobs — it has no mechanism for long thin tubes and none for flat winding sheets. **Each system is a different way of *reading* noise, not a different noise.**
+
+| System | Read | Shape | Why it is needed |
+|---|---|---|---|
+| **Cheese** | plain 3D noise below a threshold | large irregular caverns | volume — the big open spaces |
+| **Spaghetti** | the *zero-crossing* of a noise (`abs(n)` near 0) | long thin winding tubes | connectivity — links the rooms |
+| **Noodle** | intersection of two ridged noises, gated by a third | 1–2 block-wide worms | detail and dead ends; carved last, over everything |
+
+### The density expressions **[D]**
+
+| System | Expression (blending collapsed) | The part that matters |
+|---|---|---|
+| **Cheese** — inlined in `final_density`, no file of its own | `4.0×square(cave_layer @xz1,y8)` + `clamp(0.27 + cave_cheese @xz1,y0.667, -1, 1)` + `clamp(1.5 - 0.64×sloped_cheese, 0, 0.5)` | Air needs `cave_cheese < −0.27`; that offset is what makes cheese a minority of volume rather than half of it. `4×cave_layer²` is squared so it only ever **adds solid**, and `y_scale 8` makes it band horizontally — which is what gives caves layered floors instead of one vertical smear. The third term suppresses cheese near the surface and contributes nothing in deep rock |
+| **Spaghetti 2D** | `clamp(max(A,B), -1, 1)` where `A = abs(interval_select(5 scales of spaghetti_2d)) + 0.083×thick` and `B = cube(abs(8×elevation + ycg(-64:8 → 320:-40)) + thick)` | `thick = cache_once(-0.95 - 0.35000000000000003×spaghetti_2d_thickness)` ∈ **[−1.30, −0.60]** — the negative number that sets tube width. Zeroing `B`'s inner sum gives **y ≈ 64 × elevation**, so the sheet is warped into roughly y −64…+64 and `cube()` makes its edges sharp. The `interval_select` is a **rarity/scale switch**: one modulator noise picks which of five scales of the *same* noise is read, so width and spacing vary regionally instead of uniformly |
+| **Spaghetti 3D**, inside `caves/entrances` = `min(opening, 3d)` | opening = `(0.37 + cave_entrance @xz0.75,y0.5) + ycg(-10:0.3 → 30:0.0)`; 3d = `roughness + clamp(max(abs A, abs B) - 0.0765 - 0.0115×thickness, -1, 1)` | The opening term adds +0.3 solid at y ≤ −10 falling to 0 at y ≥ 30, so **cave mouths exist near sea level and are suppressed deep down**. `max(abs A, abs B)` of two independent noises is the **ridged-intersection** trick: near zero only where *both* are, which in 3D is a curve rather than a surface — tubes, not sheets |
+| **Noodle** | thickness ∈ **[−0.10, −0.05]** plus `1.5 × max(|ridge_a|, |ridge_b|)` | Negative only where that max is under ~0.033–0.067 — an extremely narrow band, hence 1–2 block bores. The `noodle` noise itself is a **binary regional gate**: `< 0` disables noodles entirely in that region. Y hard-limited to −60…320 |
+| **Pillars**, which *add stone back* | `cache_once((2×pillar @xz25,y0.3 - 1 - pillar_rareness) × cube(0.55 + 0.55×pillar_thickness))` | The `xz_scale 25.0 / y_scale 0.3` ratio is the entire reason they come out as vertical columns |
+
+Backing noises **[D]** — `firstOctave`, amplitudes `[1.0]` unless shown: `cave_cheese` −8 `[0.5,1,2,1,2,1,0,2,0]` · `cave_layer` −8 · `cave_entrance` −7 `[0.4,0.5,1]` · `spaghetti_2d`, `spaghetti_3d_1`, `spaghetti_3d_2`, `noodle_ridge_a`, `noodle_ridge_b`, `pillar` (`[1,1]`) −7 · `spaghetti_2d_modulator`, `spaghetti_2d_thickness`, `spaghetti_3d_rarity` −11 · `spaghetti_2d_elevation`, `spaghetti_3d_thickness`, `noodle`, `noodle_thickness`, `pillar_rareness`, `pillar_thickness` −8 · `spaghetti_roughness` −5 · `aquifer_barrier` −3 · `aquifer_lava` −1.
+
+### How caves fold into terrain
+
+**Caves are not subtracted from finished terrain.** `sloped_cheese` is an *input* to the cave expression, and the caves are combined with `min`/`max` inside the same function that decides stone-vs-air. A block is air when `final_density ≤ 0`.
+
+| Step | Operation | Meaning |
+|---|---|---|
+| 1 | `range_choice` on `sloped_cheese` at **1.5625** | Where terrain density is low (thin rock, near surface) **only cave entrances apply, at 5× strength**. The full cave machinery runs only in solid rock — this is optimisation and design at once |
+| 2 | `min(CHEESE, entrances)` | either can open air |
+| 3 | `min(…, spaghetti_2d + roughness)` | spaghetti-2D can open air anywhere the above did not |
+| 4 | `max(…, pillars if ≥ 0.03)` | pillars **put stone back**; below 0.03 the branch yields −1000000 so `max` is a no-op |
+| 5 | slides, `×0.64`, `interpolated`, `squeeze` | world floor/ceiling forcing, cell interpolation, final curve |
+| 6 | `min(…, noodle)` | **noodles apply last and outside everything**, including the surface `range_choice` and the slides — a noodle can cut through anything within y −60…320 |
+
+`amplified` and `large_biomes` reference the **same five** `overworld/caves/*` functions; only the shaping functions are overridden. The `caves` world-type preset references none of them — it is a legacy generator (`legacy_random_source: true`, `aquifers_enabled: false`, sea level 32, height 192).
+
+### Carvers — every file in `configured_carver/` **[D]**
+
+| Field | `cave` | `cave_extra_underground` | `canyon` | `nether_cave` |
+|---|---|---|---|---|
+| **`probability`** | **0.15** | **0.07** | **0.01** | **0.2** |
+| `y.min_inclusive` | `above_bottom 8` = −56 | `above_bottom 8` = −56 | `absolute 10` | `absolute 0` |
+| `y.max_inclusive` | `absolute 180` | `absolute 47` | `absolute 67` | `below_top 1` |
+| `y` distribution | uniform | uniform | uniform | uniform |
+| `yScale` | uniform [0.1, 0.9) | uniform [0.1, 0.9) | 3.0 | 0.5 |
+| `lava_level` | `above_bottom 8` = −56 | `above_bottom 8` | `above_bottom 8` | `above_bottom 10` |
+| `horizontal_radius_multiplier` | uniform [0.7, 1.4) | same | via `shape` | 1.0 |
+| `vertical_radius_multiplier` | uniform [0.8, 1.3) | same | via `shape` | 1.0 |
+| `floor_level` | uniform [−1.0, −0.4) | same | — | −0.7 |
+| `replaceable` | `#overworld_carver_replaceables` | same | same | `#nether_carver_replaceables` |
+
+`canyon.shape`: `distance_factor` and `horizontal_radius_factor` uniform [0.75, 1.0); `thickness` **trapezoid** 0.0/6.0 plateau 2.0; `width_smoothness` 3; `vertical_rotation` uniform [−0.125, 0.125).
+
+`#overworld_carver_replaceables` **[D]** covers the stone, substrate, sand and terracotta tags plus `water`, `gravel`, `sandstone`, `calcite`, `packed_ice` and the iron and copper ores. Two consequences worth knowing: **water is replaceable**, which is why ravines and caves cut open under oceans; and gold, diamond, redstone, lapis and coal ores are **not** in the tag, so carvers leave them floating in mid-air.
+
+**Which biomes carry which carvers [D]** — and the answer is genuinely boring, which is itself the finding:
+
+| Carver set | Count | Biomes |
+|---|---|---|
+| `["cave", "cave_extra_underground", "canyon"]` | **55** | **every overworld biome without exception** — all oceans, all rivers, mushroom_fields, deep_dark, dripstone_caves, lush_caves, sulfur_caves |
+| `"nether_cave"` | 5 | the nether biomes |
+| `[]` | 6 | the end biomes and `the_void` |
+
+**Biome does not modulate carving at all in 26.2.** It modulates decoration only.
+
+`probability` is drawn **once per candidate chunk per carver** — `nextFloat() <= probability` **[code]**. A chunk that passes becomes a *start chunk* and then spawns a random number of tunnel systems.
+
+### Cave biomes change decoration, nothing else **[D]**
+
+All four use the identical carver list and identical noise settings.
+
+| Biome | Additions vs `plains` | Removals |
+|---|---|---|
+| `lush_caves` | `lush_caves_ceiling_vegetation`, `cave_vines`, `lush_caves_clay`, `lush_caves_vegetation`, `rooted_azalea_tree`, `spore_blossom`, `classic_vines_cave_feature`, `ore_clay` | surface plants and trees |
+| `dripstone_caves` | `large_dripstone` (step 2), `dripstone_cluster` + `pointed_dripstone` (step 7), `ore_copper_large` replaces `ore_copper` | — |
+| `deep_dark` | `sculk_vein`, `sculk_patch_deep_dark` (step 7) | **no `lake_lava_underground`, no `lake_lava_surface`, no `spring_water`, no `spring_lava`** — the biome is dry |
+| `sulfur_caves` | `rooted_sulfur_spring`, `sulfur_pool` (step 1), `sulfur_spike_cluster`, `sulfur_spike` (step 7) | most surface plants |
+
+### Aquifers
+
+An aquifer is a **local water table**. Instead of "everything below y 63 that is open is water", the world is divided into aquifer cells, each independently deciding its own fluid surface height and whether it holds water, lava or air. That is what produces an underwater cave lake at y −40 and a dry cave at y 20 in the same world.
+
+From data **[D]**, the `noise_router` slots: `barrier` = `aquifer_barrier @ xz 1.0, y 0.5`; `fluid_level_floodedness` = `aquifer_fluid_level_floodedness @ y 0.67`; `fluid_level_spread` = `aquifer_fluid_level_spread @ y 0.714…`; `lava` = `aquifer_lava @ 1.0, 1.0`; plus `preliminary_surface_level` (§15.4), which is a **column-only, cave-free** estimate of ground height so aquifers know how deep they are.
+
+From engine code **[code]**, so verify before relying on any of it:
+
+| Constant | Value | Confidence |
+|---|---|---|
+| Aquifer cell size | 16 × 12 × 16 blocks | high |
+| Global fluid picker | `y < min(-54, seaLevel)` → **lava at level −54**; otherwise water at **63** | high — matches observable lava-lake depth in both editions |
+| Aquifer skipped entirely | if `y − 12 > preliminarySurfaceLevel + 8` → use the global picker | medium |
+| Floodedness thresholds | −0.3…0.8 (fully flooded) and −0.8…0.4 (fully dry) against surface distance over a 64-block window | medium |
+| Fluid-level Y band | `floorDiv(y, 40) * 40 + 20`, then spread quantised into 3-block steps | **low — unverified** |
+| Deep dark forces the aquifer below world bottom ⇒ **deep dark caves are always dry** | — | high; corroborated by the data, which gives deep_dark no springs and no lava lakes |
+| `aquifer_barrier` decides whether the boundary between two cells at different levels is sealed stone or open | — | medium |
+
+### Every cave-related chance in one table
+
+| Thing | Value | Per what | Exactness |
+|---|---|---|---|
+| `cave` carver start | **0.15** | per chunk, per carver draw | **[D]** |
+| `cave_extra_underground` carver start | **0.07** | per chunk (y −56…47 only) | **[D]** |
+| `canyon` (ravine) carver start | **0.01** | per chunk — 1 in 100 | **[D]** |
+| `nether_cave` carver start | **0.2** | per chunk (Nether) | **[D]** |
+| Cheese threshold | `cave_cheese < −0.27` before the two modifier terms | per sample point | **[D]** |
+| Pillar gate | `pillars ≥ 0.03` places stone | per sample point | **[D]** |
+| Noodle regional gate | `noodle < 0` ⇒ noodles disabled | per region | **[D]** |
+| Carver neighbourhood scanned per generated chunk | ±8 chunks → **17 × 17 = 289** | per chunk generated | **[code]** |
+| Expected `cave` start chunks influencing one chunk | 289 × 0.15 ≈ **43** | per chunk | derived |
+| Tunnel clusters per successful start | `nextInt(nextInt(nextInt(15)+1)+1)` — **mean 1.75**, range 0–14 | per start chunk | **[code]** |
+| Chance a cluster also makes a wide "room" | `nextInt(4)==0` → **25%**, then +`nextInt(4)` extra tunnels | per cluster | **[code]** |
+| Cave tunnel max reach | ~**112 blocks** (range 4 chunks) | per tunnel | **[code]** |
+| `amethyst_geode` | rarity 1/24, y `above_bottom 6` … 30 | per chunk | **[D]** |
+| `lake_lava_underground` | rarity **1/9** | per chunk | **[D]** |
+| `fossil_lower` / `fossil_upper` | rarity 1/64 each | per chunk | **[D]** |
+| `monster_room` (dungeon) | `count: 10` attempts, y 0…top | per chunk | **[D]** |
+| `monster_room_deep` | `count: 4` attempts, y `above_bottom 6` … −1 | per chunk | **[D]** |
+| `spring_water` | `count: 25`, y `above_bottom 0` … 192 | per chunk | **[D]** |
+| `spring_lava` | `count: 20`, `very_biased_to_bottom` inner 8 | per chunk | **[D]** |
+
+## 15.7 Ores, features and the placement RNG
+
+### The placement-modifier vocabulary
+
+Every modifier is a **position transformer**: it takes a stream of positions and emits zero or more. They run in array order, and **the array order is not canonical** — `flower_plains` counts before it filters, `patch_grass_plain` filters before it counts. Census of all 264 files in `placed_feature/` **[D]**:
+
+| Modifier | Uses | What it does |
+|---|---|---|
+| `biome` | 208 | Drops the position if the biome **at that position** does not list this feature. This is the guard against a feature bleeding across a biome edge |
+| `in_square` | 195 | Adds `nextInt(16)` to X and to Z — spreads a chunk-origin position over the chunk |
+| `count` | 193 | Duplicates each position N times; N may be an int provider |
+| `block_predicate_filter` | 121 | Drops unless a block predicate passes (`would_survive`, `replaceable`, `solid`, `matching_blocks`, …) |
+| `heightmap` | 108 | Snaps Y to a heightmap column value |
+| `height_range` | 86 | Chooses Y from a vertical distribution |
+| `random_offset` | 75 | Jitters X/Z and Y independently |
+| `rarity_filter` | 54 | Keeps each position with probability **1/N** |
+| `surface_water_depth_filter` | 25 | Drops if the water column above the ocean floor exceeds N |
+| `environment_scan` | 11 | Walks up or down until a target predicate matches; drops if not found in `max_steps` |
+| `count_on_every_layer` | 8 | Nether-only — finds every open floor layer in the column and places N per layer |
+| `noise_threshold_count` | 6 | Count is a two-way switch on a low-frequency noise |
+| `noise_based_count` | 4 | Count scales continuously with noise |
+| `surface_relative_threshold_filter` | 3 | Drops unless `y − heightmap(x,z)` is within bounds |
+| `fixed_placement` | 1 | Ignores the incoming position; emits literal coordinates |
+
+Heightmap semantics **[code]**: `WORLD_SURFACE*` = highest non-air; `OCEAN_FLOOR*` = highest motion-blocking block, so water does **not** count → the sea bed; `MOTION_BLOCKING` = highest block that blocks motion **or is a fluid** → the water surface. `_WG` variants are the worldgen-time snapshot. The stored value is *one above* the top block, i.e. the first free cell.
+
+| Vertical distribution | Uses | Shape | Algorithm **[code]** |
+|---|---|---|---|
+| `uniform` | 92 | flat slab | `randomBetweenInclusive(min, max)` |
+| `trapezoid` (`plateau` absent ⇒ 0) | 137 | **triangle** peaking at the band midpoint, tapering to zero at both edges | `k = max−min; l = (k−plateau)/2; m = k−l; y = min + rand(0..m) + rand(0..l)` — a sum of two uniforms |
+| `very_biased_to_bottom` | 2 | strongly bottom-weighted | three nested draws |
+| `clamped_normal` | 4 | Gaussian, clipped | `mean`, `deviation`, `min`, `max` |
+| `weighted_list` | 23 (all trees) | discrete weighted pick | `{data:N, weight:9},{data:N+1, weight:1}` ≡ the old `count_extra(N, 0.1, 1)` |
+
+**The trapezoid is the single most important one for ores.** A trapezoid over `[−64, 320]` does not mean "uniform in that band" — density rises linearly to a peak at the midpoint and falls linearly away. Anchors: `absolute: N` → `y = N`; `above_bottom: N` → `y = minY + N`; `below_top: N` → `y = maxY − N`.
+
+### The complete ore table **[D]**
+
+Placement from `placed_feature/`, vein size and air-exposure discard from the matching `configured_feature/`.
+
+| Placed feature | Count / rarity | Height distribution | `size` | `discard_chance_on_air_exposure` |
+|---|---|---|---|---|
+| `ore_coal_upper` | 30 | uniform 136 → 319 | 17 | 0.0 |
+| `ore_coal_lower` | 20 | **trapezoid** 0 → 192 | 17 | **0.5** |
+| `ore_iron_upper` | 90 | **trapezoid** 80 → 384 | 9 | 0.0 |
+| `ore_iron_middle` | 10 | **trapezoid** −24 → 56 | 9 | 0.0 |
+| `ore_iron_small` | 10 | uniform −64 → 72 | 4 | 0.0 |
+| `ore_copper` | 16 | **trapezoid** −16 → 112 | 10 | 0.0 |
+| `ore_copper_large` *(dripstone_caves)* | 16 | **trapezoid** −16 → 112 | 20 | 0.0 |
+| `ore_gold` | 4 | **trapezoid** −64 → 32 | 9 | **0.5** |
+| `ore_gold_lower` | uniform 0..1 | uniform −64 → −48 | 9 | **0.5** |
+| `ore_gold_extra` *(3 badlands)* | 50 | uniform 32 → 256 | 9 | 0.0 |
+| `ore_redstone` | 4 | uniform −64 → 15 | 8 | 0.0 |
+| `ore_redstone_lower` | 8 | **trapezoid** −96 → −32 | 8 | 0.0 |
+| `ore_diamond` | 7 | **trapezoid** −144 → −16 | 4 | **0.5** |
+| `ore_diamond_medium` | 2 | uniform −64 → −4 | 8 | **0.5** |
+| `ore_diamond_large` | **rarity 1/9** | **trapezoid** −144 → −16 | 12 | **0.7** |
+| `ore_diamond_buried` | 4 | **trapezoid** −144 → −16 | 8 | **1.0** |
+| `ore_lapis` | 2 | **trapezoid** −32 → 32 | 7 | 0.0 |
+| `ore_lapis_buried` | 4 | uniform −64 → 64 | 7 | **1.0** |
+| `ore_emerald` *(10 mountain biomes)* | 100 | **trapezoid** −16 → 480 | **3** | 0.0 |
+| `ore_infested` *(same 10)* | 14 | uniform −64 → 63 | 9 | 0.0 |
+| `ore_dirt` | 7 | uniform 0 → 160 | 33 | 0.0 |
+| `ore_gravel` | 14 | uniform −64 → 319 | 33 | 0.0 |
+| `ore_granite/diorite/andesite_upper` | **rarity 1/6** | uniform 64 → 128 | 64 | 0.0 |
+| `ore_granite/diorite/andesite_lower` | 2 | uniform 0 → 60 | 64 | 0.0 |
+| `ore_tuff` | 2 | uniform −64 → 0 | 64 | 0.0 |
+| `ore_clay` *(lush_caves)* | 46 | uniform −64 → 256 | 33 | 0.0 |
+
+`discard_chance_on_air_exposure` **[code]**: for each block the vein would place, if any of the six neighbours is air, discard that block with this probability. **1.0 means the vein is only visible where fully buried** — which is exactly why `ore_diamond_buried` and `ore_lapis_buried` never appear in a cave wall, and it is a deliberate anti-strip-mining lever, not a cosmetic one.
+
+**Biome scoping is almost nil.** The standard 25-entry overworld ore list appears identically in **55 biomes**; only five ores are scoped at all — `ore_copper_large` → dripstone_caves; `ore_gold_extra` → the three badlands; `ore_emerald` and `ore_infested` → the ten mountain biomes; `ore_clay` → lush_caves.
+
+### Ore veins — a separate, noise-driven system
+
+The large copper and iron veins are **not** placed features. They are part of the noise router and run **during terrain shaping, before decoration** **[D]**:
+
+| Router slot | Definition |
+|---|---|
+| `vein_toggle` | `interpolated(range_choice(y, −60 ≤ y < 51, noise ore_veininess @ 1.5/1.5, else 0.0))` |
+| `vein_ridged` | `−0.07999999821186066 + max(abs(ore_vein_a @ 4.0/4.0), abs(ore_vein_b @ 4.0/4.0))` |
+| `vein_gap` | `noise ore_gap @ 1.0, 1.0` |
+
+Noises **[D]**: `ore_veininess` −8, `ore_vein_a`/`_b` −7, `ore_gap` −5, all amplitude `[1.0]`.
+
+Consumption **[code]** (`OreVeinifier`): the **sign** of `vein_toggle` picks the type — positive → **copper** in `granite` filler, y 0…50; negative → **iron** (`deepslate_iron_ore`) in `tuff` filler, y −60…−8. An edge roll-off maps distance-to-band-edge over 20 blocks from −0.2 to 0.0 and is added to `|toggle|`; reject below the **0.4** veininess threshold; reject **30%** of what remains; reject if `vein_gap ≥ −0.3`; otherwise ore probability is `clampedMap(|toggle|, 0.4→0.6, 0.1→0.3)` and additionally requires `vein_ridged > −0.3`; a **2%** sub-roll upgrades the ore to the raw-metal block. **Cells that pass the vein test but fail the ore roll become the filler stone** — that is why veins read as granite or tuff blobs streaked with metal rather than as solid ore.
+
+### Trees and vegetation **[D]**
+
+`w-list N/N+1` = `weighted_list [{N,9},{N+1,1}]`, mean `N + 0.1`.
+
+| Biome | Placed feature | Count | Mean attempts/chunk | Extra filters |
+|---|---|---|---|---|
+| plains | `trees_plains` | w-list 0/1 | **0.05** | water depth 0, `OCEAN_FLOOR`, `would_survive(oak_sapling)` |
+| forest | `trees_birch_and_oak_leaf_litter` | w-list 10/11 | **10.1** | water depth 0, `OCEAN_FLOOR` |
+| birch_forest | `trees_birch` | w-list 10/11 | **10.1** | + `would_survive(birch_sapling)` |
+| dark_forest | `dark_forest_vegetation` | `count 16` | **16** | water depth 0, `OCEAN_FLOOR` |
+| taiga | `trees_taiga` | w-list 10/11 | **10.1** | — |
+| savanna | `trees_savanna` | w-list 1/2 | **1.1** | — |
+| jungle | `trees_jungle` | w-list 50/51 | **50.1** | — |
+| sparse_jungle | `trees_sparse_jungle` | w-list 2/3 | **2.1** | — |
+| bamboo_jungle | `bamboo_vegetation` | w-list 30/31 | **30.1** | — |
+| swamp | `trees_swamp` | w-list 2/3 | **2.1** | water depth **2** |
+| mangrove_swamp | `trees_mangrove` | `count 25` | 25 | water depth **5** |
+| meadow | `trees_meadow` | rarity 1/100 | 0.01 | — |
+
+**"How many trees per chunk in plains" is 0.05 — one attempt per twenty chunks**, and that attempt can still fail the sapling-survival check. Jungle is a thousand times denser. This spread is the single biggest lever on how a biome reads.
+
+Species mix is a `random_selector`: entries are tried in order, first hit wins, otherwise the default. `trees_savanna` = `acacia` at **0.8** else `oak`; `trees_taiga` = `pine` 0.333 else `spruce`; `trees_plains` = `fancy_oak_bees_005` 0.333 else `oak_bees_005`; `trees_jungle` = `fancy_oak` 0.1, `jungle_bush` 0.5, `mega_jungle_tree` 0.333, else `jungle_tree`. Every list also carries a `fallen_*_tree` at **0.0125**.
+
+Ground cover: `origins/chunk` survive the outer count, then each origin spawns `inner` scatter attempts through `random_offset` plus a ground predicate. Worked example for plains — grass ≈ 10 origins × 32 = **320 short-grass attempts per chunk**; flowers ≈ 4 × 1/32 × 64 ≈ **8 per chunk**; tall grass ≈ 7/32 × 96 ≈ **21**; pumpkin 96/300 = **0.32**. Rarities worth knowing: `patch_pumpkin` 1/300, `brown_mushroom_normal` 1/256, `red_mushroom_normal` 1/512, `patch_sugar_cane` 1/6, `flower_default` 1/32, `bamboo_light` 1/4.
+
+**Sapling growth, which is a different system from tree *placement*.** Saplings have **2 growth stages**; the block **above** needs **light ≥ 9**. Bone meal bypasses the light requirement at **45% per use**. Space is checked before growth and failure means no growth: oak needs ≥5 vertical and 3×3; spruce ≥6 and 5×5; cherry ≥8 and 5×5; giant spruce ≥14 and 6×6. **If a block blocks an oak's growth space but is not directly above it, the oak is forced to grow the large variant instead of failing.**
+
+### Decoration step order **[D]**
+
+The biome `features` field is a fixed-length array of arrays; the index **is** the decoration step. 57 of 68 biomes carry exactly 11 slots.
+
+| # | Step | What actually occupies it |
+|---|---|---|
+| 0 | `RAW_GENERATION` | `end_island_decorated` |
+| 1 | `LAKES` | `lake_lava_surface`, `lake_lava_underground`, `sulfur_pool`, `rooted_sulfur_spring` |
+| 2 | `LOCAL_MODIFICATIONS` | `amethyst_geode`, `forest_rock`, `iceberg_*`, `large_dripstone`, `basalt_pillar` |
+| 3 | `UNDERGROUND_STRUCTURES` | `monster_room`, `monster_room_deep`, `fossil_upper`, `fossil_lower` |
+| 4 | `SURFACE_STRUCTURES` | `desert_well`, `ice_spike`, `ice_patch`, `blue_ice`, `delta`, basalt columns, end spikes |
+| 5 | `STRONGHOLDS` | **empty in every biome** — strongholds are a structure, not a feature |
+| 6 | `UNDERGROUND_ORES` | 34 entries — every `ore_*` plus `disk_sand`/`disk_clay`/`disk_gravel`/`disk_grass` |
+| 7 | `UNDERGROUND_DECORATION` | 30 entries — nether ores, `dripstone_cluster`, `glowstone`, `sculk_*` |
+| 8 | `FLUID_SPRINGS` | `spring_water`, `spring_lava`, `spring_lava_frozen` |
+| 9 | `VEGETAL_DECORATION` | 115 entries — trees, grass, flowers, mushrooms, kelp, vines |
+| 10 | `TOP_LAYER_MODIFICATION` | `freeze_top_layer`, `end_platform`, `void_start_platform` |
+
+### The placement RNG, and the trap in it **[code]**
+
+```
+setDecorationSeed(levelSeed, blockX, blockZ):
+    setSeed(levelSeed)
+    a = nextLong() | 1
+    b = nextLong() | 1
+    populationSeed = (blockX * a + blockZ * b) XOR levelSeed
+    setSeed(populationSeed)
+
+setFeatureSeed(populationSeed, featureIndex, decorationStep):
+    setSeed(populationSeed + featureIndex + 10000 * decorationStep)
+```
+
+`blockX`/`blockZ` are the chunk's origin block coordinates. The `| 1` forces both multipliers odd so the chunk → population-seed mapping is a bijection. The `10000 × step` gap is what stops feature indices colliding across decoration stages. **`featureIndex` is a global running counter across the whole decoration pass for that chunk, not an index within the step.**
+
+**The consequence is a hard design constraint.** Because the index is a plain running counter added to the population seed, **inserting a feature, deleting one, or reordering two within a step shifts the index of every feature after it in that chunk's pass.** Every downstream feature then draws from a different seed — the trees move, the flowers move, the ore veins move. So a biome's feature list is effectively a **versioned, append-mostly schema**: adding a decoration at the end of `VEGETAL_DECORATION` is cheap; inserting one in the middle silently invalidates every saved world.
+
+## 15.8 What else a biome carries
+
+**26.2 has changed the schema versus 1.21, and it matters if this dump is used as the source of truth.** A census of all 68 biome files returns **zero hits** for `fog_color`, `sky_color`, `water_fog_color`, `mood_sound`, `music`, `ambient_sound` and `additions_sound` — they are gone from every file. `random_patch` is also gone: grass and flower patches are now a bare `simple_block` configured feature with the scatter expressed entirely as placement modifiers. **If per-biome sky and fog colours are ever wanted, they must come from a 1.21 dump; they are not here.**
+
+| Biome | `temperature` | `downfall` | `has_precipitation` | notes |
+|---|---|---|---|---|
+| plains | 0.8 | 0.4 | true | water `#3f76e4` |
+| forest | 0.7 | 0.8 | true | |
+| birch_forest | 0.6 | 0.6 | true | |
+| dark_forest | 0.7 | 0.8 | true | `grass_color_modifier: dark_forest`, `dry_foliage_color #7b5334` |
+| taiga | 0.25 | 0.8 | true | |
+| snowy_taiga | **−0.5** | 0.4 | true | water `#3d57d6` |
+| snowy_plains | 0.0 | 0.5 | true | `creature_spawn_probability 0.07` |
+| jungle | 0.95 | 0.9 | true | |
+| swamp | 0.8 | 0.9 | true | water `#617b64`, foliage `#6a7039`, `grass_color_modifier: swamp` |
+| cherry_grove | 0.5 | 0.8 | true | foliage/grass `#b6db61`, water `#5db7ef` |
+| pale_garden | 0.7 | 0.8 | true | water `#76889d`, foliage `#878d76`, grass `#778272` |
+| mushroom_fields | 0.9 | 1.0 | true | |
+| jagged_peaks | **−0.7** | 0.9 | true | |
+| frozen_ocean | 0.0 | 0.5 | true | `temperature_modifier: frozen`, water `#3938c9` |
+| warm_ocean | 0.5 | 0.5 | true | water `#43d5ee` |
+| desert | 2.0 | 0.0 | **false** | |
+| savanna | 2.0 | 0.0 | **false** | |
+| badlands | 2.0 | 0.0 | **false** | `creature_spawn_probability 0.03`, foliage `#9e814d`, grass `#90814d` |
+
+Full census **[D]**: `creature_spawn_probability` appears in only **5** biomes (badlands 0.03, eroded_badlands 0.03, wooded_badlands 0.04, snowy_plains 0.07, ice_spikes 0.07; the default is 0.1 **[code]**). `temperature_modifier` appears in only **2**, both `frozen`. `grass_color_modifier` in 4; `foliage_color` in 8; `grass_color` in 7; `dry_foliage_color` in 5.
+
+**Snow vs rain vs nothing [code]:**
+
+```
+if !has_precipitation                          -> no weather at all
+else if heightAdjustedTemperature(pos) >= 0.15 -> rain
+else                                           -> snow
+```
+
+`0.15` is also the ice and snow-layer threshold, and `freeze_top_layer` (step 10, present in every overworld biome) is what actually lays snow and surface ice at generation time using the same test.
+
+**Altitude temperature falloff [code]:**
+
+```
+threshold = seaLevel + 17            // 63 + 17 = 80
+if y > threshold:
+    n = TEMPERATURE_NOISE(x/8, z/8) * 8.0
+    T = baseTemperature - (n + y - threshold) * 0.05 / 40.0
+```
+
+That is **0.00125 per block above y = 80**, plus a ±0.01 wobble from the noise term. A plains biome at 0.8 does not drop below 0.15 until roughly **y = 600** — so the falloff matters only for biomes that already start near freezing, never for lowland ones. `temperature_modifier: frozen` overrides all of it with a two-noise test that snaps temperature to 0.2 in patches, which is what gives frozen oceans their irregular unfrozen holes.
+
+**Spawners.** Eight categories **[D]**: `monster`, `creature`, `ambient`, `axolotls`, `underground_water_creature`, `water_creature`, `water_ambient`, `misc`. Each entry is `{type, weight, minCount, maxCount}` and **weight is relative within its category** — the category is picked first by the spawn tick's per-category cap, then one entry is drawn weighted, then `minCount..maxCount` mobs are packed at the site **[code]**. §4 covers the spawning mechanics themselves; what the biome adds is only the table.
+
+The common overworld `monster` set is spider w100, zombie w95, zombie_villager w5 1–1, skeleton w100, creeper w100, slime w100, enderman w10 1–4, witch w5 1–1, and biomes override it rather than replace it — desert swaps in husk w80 and parched w50 while dropping zombie to w19 and skeleton to w50; swamp adds bogged w30 and drops skeleton to w70; ocean adds drowned w5. `creature` is the four farm animals (sheep w12, pig w10, chicken w10, cow w8, all 4–4) plus biome specials: plains horse w5 2–6 and donkey w1 1–3; taiga wolf w8, rabbit w4, fox w8; jungle parrot w40 and panda w1; swamp frog w10 2–5; desert replaces the lot with rabbit w12 and camel w1. `ambient` is bat w10 8–8 everywhere and `underground_water_creature` glow_squid w10 4–6. **Two data quirks worth copying deliberately or not at all:** jungle lists **chicken twice** (effective weight 20) and swamp lists **slime twice**.
+
+**`spawn_costs`** is used by exactly two biomes in the whole dump **[D]**: `soul_sand_valley` (enderman, ghast, skeleton, strider — each `energy_budget 0.15`, `charge 0.7`) and `warped_forest` (enderman, `energy_budget 0.12`, `charge 1.0`). The mechanic **[code]** is a *potential-field density limiter* separate from the mob cap: every spawned mob deposits a point charge, and before a new spawn the game sums the field from nearby charges, multiplies by the candidate's own `charge`, and refuses if the result exceeds `energy_budget`. Net effect: fewer but evenly spread mobs instead of dense clumps. **Bedrock does not have this system** — it uses per-entity `spawn_rules` with `minecraft:density_limit` as an integer per-chunk cap, which is considerably simpler and is the correct model if we follow Bedrock.
+
+**Colour, in resolution order [code]:**
+
+1. **Explicit override** — if the biome sets `grass_color` or `foliage_color`, that literal RGB wins and the colormap is skipped entirely. Only 7 and 8 biomes respectively do this **[D]**.
+2. **Colormap lookup** — otherwise sample a 256×256 texture. All three exist in this dump **[D]**: `assets/minecraft/textures/colormap/grass.png` (5,930 bytes), `foliage.png` (14,154), `dry_foliage.png` (8,979). The lookup is `t = clamp(temperature,0,1)`, `h = clamp(downfall,0,1)`, `x = (1−t)×255`, `y = (1−h·t)×255`. **Because `h` is multiplied by `t`, a cold biome is pulled toward the dry corner regardless of its rainfall** — which is why taiga (0.25 / 0.8) reads olive rather than lush green.
+3. **`grass_color_modifier`**, applied after the lookup. `dark_forest` → `((colour & 0xFEFEFE) + 0x28340A) >> 1`, i.e. average with a fixed dark olive; `swamp` → discard the lookup and return the constant `0x6A7039`.
+4. `dry_foliage_color` is a separate literal for leaf litter and dried vegetation, independent of the colormap. Water is never colormapped — `water_color` is always a literal.
+
+**Stated as fact, with no recommendation attached:** this project shipped biome-tinted foliage at M19a and reverted it — a mid-grey source texture multiplied by a mid-green tint read as pale sage. Nothing in this data changes that, because **the colormap assumes source textures authored as near-white greyscale masks**, not as finished mid-tone art. That is a fact about our textures, not about the mechanism.
+
+## 15.9 ▶ Where we stand
+
+> ⛔ **Superseded on 2026-08-07, the same day it was written.** The generator was
+> then rebuilt on this section's architecture, so everything below describes the
+> world **as it was before that**. It is kept because the comparison is the
+> argument for the rebuild, not because it is current.
 >
-> Our cave system is one 3D noise field. The lesson we already paid for — **cave cost tracks surface area, not hollow volume**, so fewer bigger caves are cheaper *and* more open — is exactly why the reference separates cheese from spaghetti from noodle: three different surface-area budgets.
+> **What the world does now**, in one paragraph: five climate fields on the
+> reference's octave weights at our own wavelengths; `offset` / `factor` /
+> `jaggedness` splines with linear extrapolation; **height computed directly per
+> column**, since terrain is single-valued and an interpolation lattice would buy
+> nothing but its own banding; surface rules as a top-down
+> walk over the **uncarved** column with a noise-driven depth, with bed materials
+> gated on the waterline rather than on the biome; three cave systems
+> carved at full resolution with 2D cave mouths; ores on trapezoid bands with
+> air-exposure discard on the deepest three; and **twenty-seven** biomes each
+> claiming a box in the five-dimensional space, resolved first-match-then-nearest,
+> with a `BiomeTag` bitmask so the creature rules ask for a property rather than
+> naming biomes. Rivers fall out of the ridge field's zero contour. Water fills
+> only what the uncarved terrain left empty, so caves under the waterline stay
+> dry — which is what aquifers buy the reference and costs us nothing.
+>
+> Every field gain and every ore threshold in that list was **measured by a
+> temporary startup probe**, not derived. `SYSTEM_MEMORY.md` → "World Generation"
+> is the current truth and **M20p–M20r** in `TIMELINE.md` are the milestones.
+
+> **▶ Where we stand.** Every claim here was checked against the source, not the docs.
+>
+> **Biomes.** Seven, in [game/src/world/Biome.cpp](game/src/world/Biome.cpp), chosen by proximity in a **2D** temperature/humidity space against a fixed table of centres. Both axes are `fbm2D` value noise, 2 octaves, frequency 0.0022, each stretched by `spread()` because value noise clusters around the middle and the hot-dry and cold-wet corners would otherwise never be reached. Weight is `max(0, 1 − distance/0.55)³`, cubed so influence dies sharply — a linear falloff leaves every biome faintly present everywhere and averages all seven into the same middling terrain. Same *structure* as the reference's 7D nearest-box search, at a third of the dimensionality and with soft weights instead of a hard winner.
+>
+> **Height** is a weighted blend of each biome's `baseHeight` and `amplitude`, shaped by **one global noise field** (`fbm2D`, frequency 0.010, 5 octaves) raised to the power 1.6 — so biomes scale a shared landscape rather than each having their own. Blending is not optional: unblended, neighbouring regions meet at a cliff. **Surface blocks come from the single strongest biome** instead, because a blend of two block types is not a thing; the boundary still reads naturally because the selection noise makes it a wandering contour rather than a straight line. Altitude and the waterline override the biome's own top block afterwards.
+>
+> **World geometry.** `kWorldHeightChunks = 3` × `Chunk::kSize = 32` → **y 0–95**, sea level **24**, bedrock a hard slab at y ≤ 2, deepslate a **hard** cutoff at y ≤ 12. Against the reference's −64…319 with sea level 63, depths below sea level compress by about **0.17** and heights above it by **0.28**.
+>
+> **Caves** are one 3D field, `|fbm3D − 0.5| < 0.038 × fade` at frequency 0.018 with Y stretched 1.6× — and it is worth naming what that is: **thresholding a band around the mid-value is the spaghetti trick, not the cheese trick.** Taking the zero-crossing shell gives connected winding tunnels; thresholding the field directly would give disconnected blobs that read as holes. `fade` ramps in over 10 blocks below a 6-block surface margin, so the surface stays intact and deep rock opens up. The lesson we already paid for — **cave cost tracks surface area, not hollow volume**, so halving the width barely moved the triangle count while halving the frequency did — is exactly why the reference separates cheese from spaghetti from noodle: three different surface-area budgets.
+>
+> **Ores.** **Nine** generate (the eight metals plus ancient debris), from `kOreVeins` in [game/src/world/TerrainGenerator.cpp](game/src/world/TerrainGenerator.cpp) ordered **rarest first**, so the first match wins and a common ore can never overwrite a scarce one where their bands overlap. *(§15.2 of this file previously said eight; the code says nine. The code wins.)* Two deliberate simplifications. Ours are **thresholded 3D value noise** rather than trapezoid-distributed vein placement — same mechanism as the caves at a much higher frequency, which gives connected blobs for free where a per-cell roll would read as speckle. And the bands are compressed onto our world by the 0.17/0.28 factors above. Each threshold comes from the reference's share of rock via `t = 1 − sqrt(share)`, which holds because one octave of value noise is near enough triangular. Ancient debris is **not** kept away from air the way the reference's buried ores are — that rule exists to stop it being spotted from a lava lake, and we have no lava.
+>
+> **Trees** are rebuilt per chunk on an **8-block candidate grid** ([game/src/world/Structures.cpp](game/src/world/Structures.cpp)): each chunk works out every cell within `kReach = 3` that could reach it, regenerates each tree from the cell coordinates alone, and keeps only the blocks landing inside its own bounds. Two chunks building the same tree independently reach the same answer. One hash rejects most cells before any biome or height sampling happens.
+
+**What is worth taking, in priority order.**
+
+| # | Take | Why, and what it costs |
+|---|---|---|
+| 1 | **Continentalness** as a third selection axis | The largest single upgrade available. Coastlines stop being "wherever the height noise dips below sea level" and become structural — oceans, coast and inland become a decision rather than an accident. It is one more noise field and one more column in the biome table |
+| 2 | **Erosion**, as a *factor* multiplying the height response | The reference's real insight is not that erosion picks biomes but that it controls **how hard the target height is enforced** (§15.4). Low erosion ⇒ factor ≈ 6.3, terrain pinned to the spline; high erosion ⇒ factor ≈ 0.6, the 3D noise runs wild. That is what lets flat plains and jagged mountains coexist at the same temperature and humidity, and it is a multiply, not a new system |
+| 3 | **Split the top block from the filler depth using a noise-driven `surface depth`** | Ours is a constant `fillerDepth` per biome. The reference varies it 0–6 blocks from one noise, which is most of why its ground does not look extruded |
+| 4 | **A second cave read** — cheese blobs on top of the spaghetti we already have | Two thresholded fields, different frequencies, `min`ned together. Cheap, and it is what makes caves feel like a system rather than a tunnel |
+| 5 | **The trapezoid ore distribution** | Replaces a hard band with a triangle peaking at a target depth. Genuinely better than what we have and costs one function |
+| 6 | **`discard_chance_on_air_exposure`** | A one-line anti-strip-mining lever with a real effect on how mining feels |
+
+**What is not worth taking.**
+
+- **The 7D box search with an R-tree.** At seven biomes, a linear scan of seven centres is already the right algorithm. Revisit at ~40 biomes, not before.
+- **Amplified and Large Biomes.** Both are `[JE]` world types and Large Biomes changes nothing but a wavelength.
+- **The badlands 192-entry clay-band table.** A lot of machinery for one biome we do not have.
+- **Aquifers.** They exist to give underground water a *local* level. We have one sea level, no lava, and caves that flood correctly for free by filling after the solid pass.
+- **`preliminary_surface_level`.** A cave-free second density evaluation of the whole column, purely so the surface system cannot be fooled by a cave. Our surface comes from a heightmap function directly, so the problem does not exist.
+
+**Where the reference would break our purity rule.** Our hard rule is that generation is a pure function of `(seed, chunkCoord)` — no neighbour reads, no global mutable state, no clock. Most of the reference already satisfies it; two stages do not, and for different reasons.
+
+| Stage | Neighbour radius | Pure for us? |
+|---|---|---|
+| Biome selection, terrain density, surface rules | 0 | **Yes**, exactly as implemented. `flat_cache`, `cache_2d`, `cache_once` and `interpolated` are **memoisation, not state** — removing them changes speed, not output |
+| `preliminary_surface_level` | 0 chunks, but samples noise at other columns | **Yes** — a read of noise at another *position* is not a read of another chunk's *data*. Costs extra noise evaluations |
+| **Carvers** | **8 chunks** | **No, as Mojang implements it** |
+| **Features** | **1 chunk, and it writes** | **No** |
+
+**Carvers.** `ChunkGenerator.applyCarvers` loops `(dx, dz)` over −8…+8 and calls `region.getChunk(...)` on all **289** neighbours — purely to ask *which biome that chunk is*, so it knows which carver list to run **[code]**. That single line is the violation. Everything else is already pure: the seed is `setLargeFeatureSeed(worldSeed + carverIndex, chunkX, chunkZ)`, which depends only on the seed, the carver index and the chunk's own coordinates, and `carve()` clips every block write to the centre chunk. **The fix is one substitution** — replace the neighbour fetch with a biome computed from the climate noise at that chunk's centre, which we can do because our biome lookup is already a pure function of position. The real cost is not purity but work: 289 chunks × 3 carvers = **867 seeded draws per chunk**, of which ~43 pass and then walk full tunnel paths whose blocks are ~99% discarded. Shrinking the neighbourhood to the actual tunnel reach (~112 blocks = 7 chunks) removes about a quarter of the draws for no visible change. **Or skip carvers entirely** and ship only noise caves — which is what we already do, and it costs us ravines and the characteristic wide winding tunnels, nothing else.
+
+## 15.10 The rules that keep a generated world sane
+
+Researched 2026-08-07 after a playtest found floating land, rings of bare stone and peaks that were solid white. Four agents against the same local dump. **All three symptoms were port bugs with the same shape: a mechanism the reference has and we had dropped.**
+
+### 15.10a Why the reference's terrain does not detach
+
+A floating island needs the density above the surface to go negative and then positive again, which is purely **noise vertical slope against ramp vertical slope**.
+
+| | Value | Source |
+|---|---|---|
+| Ramp slope below the target height | `factor / 32` per block | derived from `depth`'s `y_clamped_gradient(-64:1.5 → 320:-1.5)` = 1/128, times the `4.0 ×` in `sloped_cheese` |
+| Ramp slope **above** the target height | `factor / 128` | `quarter_negative` — air fills in **four times more reluctantly** than rock builds up |
+| `base_3d_noise` per-octave vertical slope | **0.00261 / block, identical for every octave** | amplitude ∝ wavelength, i.e. red noise |
+| 16 octaves, incoherent | RMS ≈ **0.010 / block** | |
+| **Crossover** | **factor ≈ 1.33** | |
+
+Vanilla's `factor` spline has exactly two leaves below that — 0.625 and 1.37 — and both are in the mountain-peak branch. **Everywhere else `factor ≥ 1.56` and the ramp wins by 1.5×–5×, so detachment is arithmetically impossible rather than merely rare.**
+
+Three more things bound it: `smear_scale_multiplier: 8.0` quantises the noise's y coordinate to 8-block steps, the 4×8×4 `interpolated` lattice means nothing thinner than a cell can exist, and `jaggedness` is **2D** (`flat_cache`, `y_scale 0`) so it moves the target height rather than adding 3D wobble.
+
+**`base_3d_noise`'s practical range is ±0.7, not ±1** — σ ≈ 0.15. Mojang's own evidence: `preliminary_surface_level` substitutes the constant **−0.703125** in its place.
+
+> **▶ This is exactly what we got wrong.** Our first cut used amplitudes `{1, 1, 0.5, 0.25}` at a 52-block vertical wavelength — a measured slope near **0.10 per block** against ramps of 0.02–0.08. The noise beat the ramp everywhere, so islands were not an edge case, they were the norm. Fixed three ways: halving amplitudes per octave (the reference's red-noise shape), a 210-block vertical wavelength, and dropping `quarter_negative` — see §15.10e for why the last one goes further here than there.
+
+**Mojang does produce floating islands, in three bounded places:** vanilla peaks at `factor 0.625`; the Amplified preset, whose `factor` bottoms at 0.1389 with double jaggedness; and `noise_settings/floating_islands.json`, which **removes `depth`, `factor` and `sloped_cheese` entirely** and doubles the vertical noise rate. Deleting the ramp is literally how they generate floating terrain.
+
+### 15.10b The "no else" pattern, and where bare stone is deliberate
+
+`windswept_hills` is **grass with stone patches, not a slab of stone.** The branch places stone only where the `surface` noise is above 4/33 ≈ 0.1212 and then simply **ends** — control leaves the biome branch and falls through to the generic grass/dirt rule.
+
+| Biome | Noise | Threshold | Places | Else |
+|---|---|---|---|---|
+| `windswept_hills` | `surface` | ≥ 0.1212 | stone | **falls through to grass** |
+| `windswept_gravelly_hills` | `surface` | ≥ 0.2424 / ≥ 0.1212 / ≥ −0.1212 | gravel / stone / grass | gravel |
+| `windswept_savanna` | `surface` | ≥ 0.2121 / ≥ −0.0606 | stone / coarse dirt | falls through to grass |
+| `stony_shore` | `gravel` | ∈ [−0.05, 0.05] | gravel | stone |
+| `stony_peaks` | `calcite` | ∈ [−0.0125, 0.0125] | calcite | stone |
+
+Every `surface` threshold is *n*/33.
+
+**Bare stone never appears on an ordinary grassy hillside in vanilla.** The guarantee is structural, not statistical: `stoneDepthAbove ≤ 1` is true for the topmost block of every run, full stop. There is no noise gate and no slope gate on the generic path. `plains`, `meadow`, `snowy_plains`, `forest` are not named anywhere in the rule tree at all — they are pure fallback.
+
+> **▶ Ours was `top = Stone` on a biome occupying the reference's own narrow erosion band `[0.45, 0.55]`.** A narrow interval of a smooth 2D field is an annulus, so it came out as contour rings. `else stone` is how you manufacture that bug.
+
+### 15.10c `steep`, and why a peak is not a white blob
+
+`minecraft:steep` compares the `WORLD_SURFACE_WG` heights of the z−1 and z+1 neighbours (then x±1) and is true when they differ by **≥ 4**. It is vanilla's **only** slope-driven bare stone.
+
+| Biome | Top block rule | Bare rock? |
+|---|---|---|
+| `jagged_peaks` | `steep` → **stone**; else `snow_block` | **yes, every steep face** |
+| `snowy_slopes` | `steep` → **stone**; `powder_snow` ∈ [0.35, 0.6] → powder snow; else `snow_block` | yes |
+| `frozen_peaks` | `steep` → packed ice; `packed_ice` ∈ [0, 0.2]; `ice` ∈ [0, 0.025]; else `snow_block` | no, but ice blotches break the white |
+| `grove` | no `steep` clause at all | no |
+| `stony_peaks` | `calcite` blotches; else stone | entirely rock |
+
+**A port that omits `steep` gets a peak that is a solid white blob.** Do not apply it to ordinary ground — it is the artefact, there.
+
+### 15.10d Support, gravity, and snow
+
+**Snow block does not fall, in either edition.** What falls: sand, red sand, gravel, suspicious sand/gravel, concrete powder, dragon egg, anvils, pointed dripstone, scaffolding (at distance ≥ 7). The trigger is the block below being **replaceable**, not merely non-solid.
+
+`minecraft:snow` the *layer* is a different block from `minecraft:snow_block`: 1–8 layers, needs support, is itself replaceable, and falls **in Bedrock only**. Its `canSurvive` is a three-step test and the order matters — a deny list (`ice`, `packed_ice`, `barrier`) is checked **before** the geometric full-face test, which is the only reason frozen peaks read as ice rather than white.
+
+**Two independent mechanisms put white on a mountain.** Surface rules place `snow_block` as *terrain material* during generation, with no support test. `minecraft:freeze_top_layer` then runs as the **last** decoration step in all 55 overworld biomes and adds one snow *layer* plus ice on water, wherever the local temperature is < 0.15 and block light < 10.
+
+**Temperature falls with altitude**: above y 80 it drops **0.00125 per block**, jittered by a noise worth ±8 blocks of height, which is why a snow line is ragged rather than a contour. `y ≈ 81 + (T − 0.15)/0.00125` reproduces the wiki's published snow lines exactly.
+
+Peak base temperatures: jagged −0.7, frozen −0.7, snowy slopes −0.3, grove −0.2, **stony peaks +1.0** — so stony peaks never whiten at any altitude.
+
+**Worldgen expresses support constraints through `block_predicate_filter`**, and the important form is `would_survive`, which reuses the block's own `canSurvive` so the rule lives in one place. 56 placed features use it — the whole `*_checked` tree family.
+
+### 15.10e Is there any post-generation validation? No.
+
+Stated plainly, because it is worth knowing before designing one: **Minecraft never goes back.** Surface rules do not re-run after features. Nothing removes unsupported blocks or deletes floating geometry. Floating trees, ore and gravel left over a carver cut simply stay; sand falls only when a block update happens to reach it, which is why fresh worlds contain suspended gravel until a player disturbs it. The only thing resembling a fix-up is `freeze_top_layer`, and it strictly *adds*.
+
+> **▶ Where we stand (2026-08-07, second pass).** All three reported symptoms are closed, and two of the fixes go further than the reference rather than matching it.
+>
+> - **Floating land: impossible by construction.** Terrain is **single-valued** — everything at or below the highest solid sample in a column is ground. The reference does not need this because its ramp beats its noise by 1.5×–5×; our world is a quarter as tall, so that margin is not available and an island is a much larger fraction of our sky. It costs overhangs and arches; it buys an exact depth counter for the surface rules and an ore air-exposure test that is a height comparison. `quarter_negative` came out with it: with single-valued terrain it produces towers rather than overhangs. **⚠ The guarantee reshapes a would-be island into a sheer pillar rather than preventing one — see §15.10f, where that came back as the next bug report.**
+> - **Stone rings: gone.** `Biome::patch` + `patchThreshold` implement the no-else pattern, so windswept hills is grass with 40% stone patches instead of solid stone. Measured top blocks: plains 99% grass, savanna 100%, meadow 97%.
+> - **White peaks: gone.** `steep` is implemented at a 2-block threshold (the reference's 4, scaled to our quarter-height world) off a per-chunk height array with a one-column border, and jaggedness moved to a 16-block wavelength because at 44 it left summits too smooth for the rule to ever fire. Jagged peaks measure **38% stone, 60% snow**.
+> - **The snow line is now one rule**, `freezesAt`, with the reference's altitude lapse rescaled — not a number on 27 biome rows.
+> - **Not taken:** falling blocks. Sand and gravel over a carved cave stay put, which is the reference's behaviour too until a block update reaches them.
+>
+> All of it is measured by `worldgen_probe=1` in `settings.cfg`, which censuses the world and exits.
+
+### 15.10f Rivers, and why a dry one is invisible
+
+Researched 2026-08-07 after a playtest found **long curved ribbons of gravel and sand across dry grassland** — river biomes whose channel never reached the waterline.
+
+**`river` and `frozen_river` are not named anywhere in the reference's surface rules.** `Select-String 'river'` over `noise_settings/overworld.json` returns zero matches. A river column therefore falls through the whole tree to the generic terminal rule and comes out **`grass_block`**.
+
+The three water bands, in order, and what a river column hits:
+
+| Band | Condition | Places | Dry river column |
+|---|---|---|---|
+| Top | `stone_depth(floor)` + `water(offset -1)` | per-biome tops, else grass/dirt | **grass_block** |
+| Subsoil | `water(offset -6, mult -1, add_stone_depth)` | per-biome unders, else dirt | — |
+| Sea floor | `stone_depth(floor)` | sand for warm oceans, else **gravel** | — |
+
+`minecraft:water` **[engine]** is `waterHeight == MIN_VALUE || blockY + … >= waterHeight + offset + surfaceDepth × multiplier` — it means "at or above the local waterline" and is **true by default on dry land**. So gravel is reachable *only* after both water tests have failed, which cannot happen with no water overhead. **Sand never appears on a riverbed at all** — the only sand branches are `warm_ocean`/`beach`/`snowy_beach` and `desert`.
+
+**Sand and gravel near water are a decoration pass, not a surface rule.** `disk_sand` (radius 2–6, half-height 2, count 3), `disk_gravel` (2–5, 2) and `disk_clay` (2–3, 1) all target `dirt`/`grass_block`, and every one carries the identical placement: `heightmap OCEAN_FLOOR_WG` → `block_predicate_filter { matching_fluids: water }`. The heightmap puts the position on the first block **above** the ground and the filter then demands that block be water. **That is the waterline test a port is likely to be missing.**
+
+**Terrain is not guaranteed below sea level inside the band.** There is no river branch in `offset.json`; every erosion leaf simply has its lowest control point at `ridges_folded = -1`. At low erosion inland that point is y 89–108 — far *above* sea level 63. **The reference ships dry, grass-covered river strips through its mountains**, and they are invisible precisely because of the fallthrough.
+
+What makes it reliable where it does work is `factor`: **5.1–6.3 across the river band**, so the 3D noise cannot lift the bed back above the waterline. The band edge is engineered too — the PV = −1 control points carry derivative 0.5 toward PV = −0.4, which regains sea level almost exactly where the biome band ends, so the dry edge strip is one or two blocks wide.
+
+**Rivers are emergent, not routed.** A river is the |weirdness| ≤ 0.05 level set of a continuous 2D noise, so it never terminates in a stub — level sets are closed loops or run to infinity — but nothing routes it anywhere. It becomes ocean only where continentalness independently drops below −0.19. There is no flow, no downhill constraint and no connectivity pass anywhere in the data.
+
+> **▶ Where we stand (2026-08-07, third pass).** All fixed, all measured.
+>
+> - **Bed materials are gated on the waterline.** Above it a bed material is unreachable, exactly as in the reference; the ocean and river rows now carry **grass and dirt** as their top block, which is only ever consulted on dry ground. Probe: `DRY-BED 0`.
+> - **`factor` was the spire cause.** Ours ran down to 1.15 across the entire low-erosion third of the erosion axis — ±19 blocks of noise displacement — where the reference holds 5.1–6.3 and only drops to 0.625 inside a narrow high-PV window. Raised to 4.6–6.2 with `kRuggedFactor` 1.4 confined to that window. Probe: `PILLARS 0`.
+> - **The density lattice is gone.** With single-valued terrain it was buying nothing but its own artefact: an interpolated density is piecewise-linear across a cell, so its contours cluster on cell boundaries and a gentle slope came out banded every four blocks. Height is now computed directly per column, which is *also* 8x faster.
+> - **Not taken:** the disk features. They are the reference's legitimate source of patchy sand near water, but the report was that there was already too much random patchiness, so adding more would be answering the wrong complaint.
 
 ---
-
-# 16. Priority list
 
 Ordered by value per unit of work against what we already have. Input to `TIMELINE.md`, not a replacement for it.
 
@@ -1553,7 +2516,7 @@ Ordered by value per unit of work against what we already have. Input to `TIMELI
 | 9 | ~~Soft horizontal entity separation~~ | **Done.** Runs after world collision, horizontal only | 1.7 |
 | 10 | ~~Item despawn timer~~ | **Done**, at five minutes on wall time | 1.8 |
 | 11 | **Ingredient tags in recipes** | Cheap now, expensive after a second wood type exists | 11.1 |
-| 12 | **Continentalness, then erosion** | Coastlines become structural instead of incidental | 15.1 |
+| 12 | **Continentalness, then erosion** | Coastlines become structural instead of incidental | 15.2, 15.4, 15.9 |
 | 13 | **The water weight/shortest-path-down search** | What makes water look like water rather than a spreading stain | 9.1 |
 | 14 | **Flying + swimming in one milestone** | They are two-thirds the same purchase; doing them a year apart pays twice | 7.2, 7.3 |
 
@@ -1561,9 +2524,113 @@ Ordered by value per unit of work against what we already have. Input to `TIMELI
 
 ---
 
+# 17 · Projectiles, the bow and the arrow
+
+Researched 2026-08-08 by two agents against `Mojang/bedrock-samples`, learn.microsoft's entity/item component reference and the wiki. **The arrow is fully data-driven and those numbers are exact; there is no `behavior_pack/items/bow.json`** — the bow is still hardcoded in the engine, so every bow figure comes from the wiki or from Microsoft's own documented reconstruction of it. Built the same day; `SYSTEM_MEMORY.md` → "Projectiles" is the implementation.
+
+## 17.1 The numbers, and their units
+
+**Everything below is per *tick*, at twenty ticks a second.** Mixing that with a per-second step is the single easiest way to get this wrong: `velocity *= 0.99` once a frame at 120 fps is six times the intended drag, and it silently breaks the closed form the whole thing can be checked against.
+
+| | Value | Where from |
+|---|---|---|
+| `power`, player bow at full draw | **3.0 blocks/tick** = 60 m/s | `arrow.json`, group `minecraft:player_arrow` |
+| `power`, player crossbow | 3.15 | same file |
+| `power`, **mob** bow | **1.6** | group `minecraft:mob_arrow` |
+| `power`, dispenser | 1.1 | base component |
+| `gravity` | **0.05 blocks/tick²** = 20 m/s² | `arrow.json` |
+| `inertia` (air drag) | **×0.99 per tick** | `minecraft:projectile` default |
+| `liquid_inertia` | **×0.6 per tick** | same |
+| Terminal speed | **5.0 b/t** in air, **0.125 b/t** in water | `gravity / (1 − inertia)` |
+| Collision box | **0.25 × 0.25** | `arrow.json`. The wiki's 0.5 is Java-checked and says so |
+| Spawn point | **eye height − 0.1** | `anchor: 1`, `offset: [0, −0.1, 0]` |
+| Owner immunity | **5 ticks**, then it *can* hit you | `owner_launch_immunity_ticks` |
+| Landing wobble | 0.35 s | `on_hit.stick_in_ground.shake_time` |
+| Despawn once landed | 1200 ticks = 60 s | wiki |
+| Bow durability | **385** (Java 384), one per arrow **fired** | wiki |
+| Draw to full | **20 ticks = 1 s** | wiki |
+| Spread, player | `uncertainty_base` 1, multiplier **0** — difficulty-independent | `arrow.json` |
+| Spread, mob | base 16, multiplier 4 → Easy 12, Normal 8, **Hard 4** | same |
+
+**A skeleton gets more accurate as difficulty rises.** That is the opposite of the obvious guess and is easy to implement backwards.
+
+## 17.2 The five things that are not obvious
+
+1. **The charge curve is quadratic.** `p = clamp((f² + 2f)/3, 0, 1)` where `f = ticks/20`. Held half a second it is at **0.42**, not 0.5. Below `p = 0.1` (about 3 ticks) nothing is fired at all — no arrow spent, no durability taken. The reference's own published damage table falls straight out of this: `ceil(2 × 3p)` gives 1, 5, 6, 6 at 0.1 s, 0.8 s, 0.9 s and 1.0 s, and all four rows match.
+
+2. **The visual pull and the physics charge finish at different times.** Bedrock's `bow_pulling_2` is showing by about tick 10; critical charge is tick 20. Drive the launch speed off the texture stage and you ship a bow that fires full power at half draw.
+
+3. **Damage is a function of the speed it is doing now.** `impact_damage.damage` is **0** and `power_multiplier` is 2.0, so there is no stored damage anywhere: `D = ceil(2 × ‖v‖)`, and an arrow that has slowed does less. In water it drops to nearly nothing within a few blocks. Storing "6 damage" at launch is the most common wrong implementation.
+
+4. **Round up before the critical roll.** `ceil_pre_critical_damage: true`, added in 1.26.40 specifically to make the order explicit. `ceil(2.61) + crit ≠ ceil(2.61 + crit)`. A fully charged bow always crits; the bonus is `randInt[0, D/2 + 1]`.
+
+5. **The update order is position, drag, gravity** — and it is *provable* from the published terminal speeds. Drag before acceleration gives `g/(1−k)` = 5.00; the other order gives `k·g/(1−k)` = 4.95. The wiki lists arrows at 5.00 and thrown potions at 4.95, and the maximum-travel column says 100 v₀ against 99 v₀. Two independent fingerprints.
+
+## 17.3 Collision
+
+Both blocks and entities are answered by a **swept segment**, never by the endpoint cell — which is why nothing tunnels at three blocks a tick and why no substepping or speed cap is needed anywhere. The order is: sweep blocks first, clamp the segment to the hit, *then* look for entities inside what is left. The other order lets an arrow hit something standing behind a wall.
+
+Blocks are tested against their **collision** geometry, with one documented oddity: the part of a fence or wall that pokes above its own cell is invisible to a projectile, so an arrow flies through the top of a fence.
+
+Entity collision splits by family. **Throwables** (snowball, egg, pearl, potion) inflate each candidate by **0.3** before testing, which is what makes them forgiving. **Arrows do not inflate anything** — the wiki marks that `[verify]`, and no Bedrock-specific figure exists.
+
+## 17.4 The model
+
+`arrow.geo.json` is three cubes, and two of them have a zero dimension — they are **flat quads**, not boxes:
+
+| | origin | size | rotation | uv |
+|---|---|---|---|---|
+| shaft A | `[0, −2.5, −3]` | `[0, 5, 16]` | roll +45° | `(0, 0)` |
+| shaft B | `[0, −2.5, −3]` | `[0, 5, 16]` | roll −45° | `(0, 0)` |
+| nock | `[−2.5, −2.5, 12]` | `[5, 5, 0]` | roll 45° | `(0, 5)` |
+
+**The fletching is painted into the texture, not modelled** — both shaft quads sample the same 16×5 strip, and the crossed pair *is* the whole arrow. Texture is 32×32, but every rect the model uses sits in its top-left 16×16, so a crop keeps it at native size. `animation.arrow.move` scales it `[0.7, 0.7, 0.9]` and hard-codes **roll to zero**: an arrow points along its velocity and does not spin. The landing wobble is `−sin(shake × 200) × shake`, on pitch alone, decaying to nothing over 7 ticks — cheap, and most of what makes a hit feel like an impact.
+
+## 17.5 What we deliberately do not have
+
+Enchantments (Power, Punch, Flame, Infinity), tipped arrows, the crossbow, the bounce on a zero-damage hit (`should_bounce: "if_no_damage_dealt"` — that is what a shield does, and there are no shields), arrows lighting TNT or powering wooden buttons and the target block (no redstone), and the first-person bow pose. The arrow entity also has health in the reference and can be destroyed by lava; ours cannot.
+
+---
+
+# 18. Thrown items: the pearl and the egg
+
+Read from Mojang's `behavior_pack/entities/ender_pearl.json`, `snowball.json` and `egg.json`, plus the wiki's Projectile page.
+
+## 18.1 The table, and what is shared
+
+| `minecraft:projectile` | ender_pearl | snowball | egg |
+|---|---|---|---|
+| `power` | 1.5 | 1.5 | 1.5 |
+| `gravity` | **0.025** | 0.03 | 0.03 |
+| `inertia` | **1** | absent → 0.99 | absent → 0.99 |
+| `liquid_inertia` | **1** | absent → 0.6 | absent → 0.6 |
+| `on_hit.impact_damage` | `null` | `{damage: 3, filter: "blaze"}` | `{damage: 0}` |
+| `on_hit.teleport_owner` | `{}` | — | — |
+| `on_hit.spawn_chance` | 5 % endermite | — | chicken, `first_spawn_chance: 8`, `second_spawn_chance: 32`, `second_spawn_count: 4` |
+| collision box | 0.25 × 0.25 | same | same |
+
+Everything else — `uncertainty_base`, `should_bounce`, `reflect_on_hurt`, `is_dangerous` — is **absent from all three files**, so the component defaults apply, including `owner_launch_immunity_ticks: 5`.
+
+> ⛔ **The pearl overrides both inertias to exactly 1, so it has no drag and therefore no terminal speed.** That is the arithmetic behind the wiki's "about 45 blocks straight up [BE only]" against Java's 27.7 — `v²/2g = 1.5² / 0.05 = 45`. Taking the thrown-item family's 0.99 for it, which is the obvious thing to do, gets the flight visibly wrong. A `static_assert` on that height is what pins it.
+
+## 18.2 What is genuinely undocumented
+
+- **No in-air lifetime exists in the data.** `ender_pearl.json` carries no `minecraft:despawn`, no timer and no lifetime field, and the component has no such property. It ends on impact, in the void, or with its owner. The wiki's "despawns after some time" is unquantified — treat it as absent rather than inventing a number.
+- **No placement rule for the teleport.** `teleport_owner` takes no fields, and no push-out or nudge behaviour is published. The one hard data point is the wiki's note that a pearl moves you through non-solid blocks *without* suffocating, which implies the landing point is used more or less as-is.
+
+## 18.3 The rest
+
+Fall damage on arrival is **5** in both editions, cooldown **20 ticks** in both, stack of 16, consumed on use. Entities are inflated by 0.3 blocks for the hit test, and the thrower cannot be hit for the first 5 ticks. Bedrock's throw sound is `random.bow` at volume 0.5 and pitch 0.33–0.5, which is engine-side rather than in the JSON. There is no `enderPearlsVanishOnDeath` gamerule in Bedrock.
+
+**Ours diverges in three named places**: no fall damage (there is no health yet), no endermite or its 5 % roll (no such creature and the name is coined anyway), and **thrown items pass through creatures** rather than stopping on them — `damagePerSpeed` of zero skips the sweep entirely, which is a simplification and not the reference's behaviour.
+
+---
+
 ## Sources
 
-All from `minecraft.wiki` (Bedrock 26.35 / Java 26.2 era pages, fetched 2026-08-02/03), plus Microsoft Learn's Bedrock Creator Documentation for §8 — the wiki does **not** document the `minecraft:behavior.*` family, and its `Entity components` page is a red link.
+**§15 is the exception to everything below.** Its primary source is the **local data dump** at `reference/minecraft-assets-26.2/minecraft-assets-26.2/data/minecraft/worldgen/` (Java 26.2, `version.json` release 2026-06-16) — read directly out of the JSON, not from the wiki. Within §15, values tagged **[D]** came from those files; **[code]** from decompiled `net.minecraft.world.level.levelgen` and is *not* verifiable from the dump; **[wiki]** from the pages below. The biome→climate-parameter table in particular is **hardcoded in the engine and not shipped as data** — `multi_noise_biome_source_parameter_list/overworld.json` contains only `{"preset": "minecraft:overworld"}`, 37 bytes — so §15.2's cutoffs and grid come from the wiki and from `Cubitect/cubiomes`, a reimplementation that matches Java bit-for-bit.
+
+Everything else is from `minecraft.wiki` (Bedrock 26.35 / Java 26.2 era pages, fetched 2026-08-02/03), plus Microsoft Learn's Bedrock Creator Documentation for §8 — the wiki does **not** document the `minecraft:behavior.*` family, and its `Entity components` page is a red link.
 
 [Tick](https://minecraft.wiki/w/Tick) ·
 [Entity](https://minecraft.wiki/w/Entity) ·
@@ -1593,6 +2660,10 @@ All from `minecraft.wiki` (Bedrock 26.35 / Java 26.2 era pages, fetched 2026-08-
 [Breaking](https://minecraft.wiki/w/Breaking) ·
 [Crafting](https://minecraft.wiki/w/Crafting) ·
 [Biome](https://minecraft.wiki/w/Biome) ·
+[World generation](https://minecraft.wiki/w/World_generation) ·
+[World seed](https://minecraft.wiki/w/World_seed) ·
+[Custom world generation](https://minecraft.wiki/w/Custom_world_generation) ·
+[cubiomes (`biomenoise.c`)](https://github.com/Cubitect/cubiomes) ·
 [Creeper](https://minecraft.wiki/w/Creeper) ·
 [Wolf](https://minecraft.wiki/w/Wolf) ·
 [Frog](https://minecraft.wiki/w/Frog) ·

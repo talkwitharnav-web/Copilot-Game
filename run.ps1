@@ -79,6 +79,24 @@ if ((-not (Test-Path (Join-Path $blockPlaceholder "stone.png")) -or
     Write-Host "Restored placeholder block and item textures." -ForegroundColor DarkGray
 }
 
+# And again for the text font. `ascii.png` is a straight copy rather than a
+# composite, so there is no staleness to chase - it is either staged or the game
+# falls back to our own assets/textures/font.png, which is the same layout.
+$fontPlaceholder = Join-Path (Split-Path -Parent $exe) "font-reference.png"
+if (-not (Test-Path $fontPlaceholder) -and (Test-Path $referenceRoot)) {
+    & (Join-Path $root "tools\make-reference-font.ps1") | Out-Null
+    Write-Host "Restored placeholder text font." -ForegroundColor DarkGray
+}
+
+# And the sound bank. Copied verbatim rather than composited, so like the font
+# there is nothing to go stale - the folder is either there or the game runs
+# silently, which it is written to tolerate.
+$soundPlaceholder = Join-Path (Split-Path -Parent $exe) "sounds-reference"
+if (-not (Test-Path (Join-Path $soundPlaceholder "dig_stone1.ogg")) -and (Test-Path $referenceRoot)) {
+    & (Join-Path $root "tools\make-reference-sounds.ps1") | Out-Null
+    Write-Host "Restored placeholder sounds." -ForegroundColor DarkGray
+}
+
 # Started from its own directory because the game resolves assets and saves
 # relative to the executable.
 Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe)

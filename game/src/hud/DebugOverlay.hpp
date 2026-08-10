@@ -22,6 +22,13 @@ struct OverlayStats {
     unsigned workerThreads = 0;
     int renderDistance = 0;
     const char* biome = "";
+    /// Which of the four tone curves F10 is currently on, and which shadow
+    /// quality G is on. Both are here because the only way to choose between
+    /// them is to look at the screen, and the screen has to say which one it is
+    /// showing.
+    const char* toneMapper = "";
+    const char* shadows = "";
+    const char* clouds = "";
     /// Seconds of breath left. The bubble bar arrives with player health at
     /// M21; until then this is the only place the timer is visible.
     float air = 0.0f;

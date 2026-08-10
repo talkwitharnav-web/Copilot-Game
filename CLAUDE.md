@@ -10,16 +10,35 @@ Narrative decisions, rejected approaches, debugging lessons, and machine-specifi
 
 ## If you are a new session, read this box first
 
-Five things that will otherwise cost the user time they have already paid once.
+Seven things that will otherwise cost the user time they have already paid once.
 
 1. **Bedrock Edition is the reference, not Java.** Direct instruction 2026-08-03. Where they differ — attack cooldown, hitboxes, creeper damage, entity cramming, mob caps, despawning — Bedrock wins. `RESEARCH.md` marks Java values `[JE]` throughout.
 2. **Never commit to Git.** Not once, not "to be tidy", not while wrapping up a milestone. Write files and leave them uncommitted.
 3. **The user is a testing tool and has said so three times, the last in capitals.** Anything needing aim, a held button, or a judgement about feel goes to them. **Two failed screenshot-harness attempts is the signal to stop**, restore `settings.cfg` and `saves/*/player.dat`, hand over the build, and say what to look at.
 4. **Building a creature model has a written procedure and skipping it is why the last three looked wrong.** `TEXTURING.md` "Reading a net you have never seen before" — alpha runs before island detection, missing rects as placement clues, colour where arithmetic ties, a **shared-extent scan before rendering**, then two renders and the eye. Budget is two renders; a third means the *pose* is wrong, not the numbers.
 5. **Subagents must be launched with `model: "Claude Opus 5 (copilot)"`.** Omitting the parameter silently gets a small default and the research comes back thin.
+6. **"Both presets clean, zero validation errors" proves almost nothing.** It proves the thing does not crash. It says nothing about per-block tables, icons, screen state or item conservation — a bug sweep on 2026-08-06 found five real bugs, including two-keystroke item duplication, in code that had already passed exactly that bar. **`constexpr` per-block functions can be logged at startup by a temporary probe and checked in one run**; that is the cheapest real verification available here, and deleting the probe afterwards is part of it.
+7. **A worldgen fix that tests clean can still be plainly broken on screen, because the world you are looking at was loaded rather than generated.** Water flow calls `setBlock`, which flags a chunk modified, so merely standing near an ocean writes chunks to disk. **Check `saves/`, and bump `kChunkFormatVersion` — that is what it is for.**
 
 **The single most common shape of bug in this codebase:** a value derived somewhere other than the one table that owns it. Block shapes, creature nets, sheet dimensions, knockback — each has one home, and every bug where "it compiled and looked plausible but was subtly wrong" traces back to a second copy. When widening what something can be, grep for the old literals; the compiler cannot help because nothing changed type.
 
+**Its close cousin, and the one that bit hardest:** widening a *predicate* silently kills every early-out already sitting behind it. `isFurnace` was widened to cover smokers — which is exactly what made the smoker free — and that turned eight `case` labels in `blockName` into dead code the compiler was perfectly happy with. **When you widen a family test, grep for everything that already asks it.**
+
+**And the third, which no tool here can catch:** a number ported from the reference into a field measured in a *different unit*. It compiles, it validates, and the system around it works perfectly. `panicSpeedScale` multiplies our `runSpeed`; Bedrock's `panic.speed_multiplier` is measured against its single `movement` speed. Two humanoids carried the reference's value while every animal carried one authored natively — one column, two units — and a struck trader fled at a margin too small to see. **Write down what a ported number is measured against.**
+
+**The fourth, found 2026-08-08:** a predicate written as **"equals the empty case"** where a general test already exists. A fluid drew its face where `ahead == BlockId::Air`. True while nothing but air ever sat beside water, and silently wrong for every non-cube added since — a lily pad, torch, fence or pane of glass next to water *deleted the water's surface there*. The right question, `occludesFace`, was one line away in the same expression's other branch. This shape does not announce itself when it breaks, because the code that introduces the second case is somewhere else entirely; **the symptom names the newest arrival, never the old rule.** The same session found `harvestTier` returning a real value from a `default:` for two hundred blocks, which is the same thing wearing a different hat.
+
+**The fifth, also 2026-08-08, and the cheapest to prevent:** a derivation **applied to one of a pair and not the other**. The mesher's shape pass read `flipV` off the face tables and then wrote U as the raw cell coordinate — so the +X and −Z faces of *every shaped block in the game* were mirrored, and had been since shapes existed. Nothing showed it, because no shaped block carried an asymmetric texture until lit TNT did, and the user reported it as "the n is reversed". Ordinary TNT is a full cube and goes through the merged pass, which was always right, so the same block was correct in one state and backwards in the other. **When you derive one of a pair from a table, derive the other from the same table and write the `constexpr` assert** — `shapeUvsMatchFaceTables()` is four lines and would have caught it the day it was written.
+
+**The sixth, which cost three separate bugs in two days:** **a blended fragment still writes depth.** The HUD shares the world pipeline, the depth test is `LESS`, and there is no alpha discard on the HUD or font layers — so anything transparent still stamps its distance and rejects whatever is drawn *later* behind it. It took the stack on the cursor punching a rectangular hole through the catalogue, a stair icon's two boxes fighting so the slab's lit top face won over the step standing on it, and every letter after the first losing its left two columns, before the pattern was named. **Ask it of any HUD geometry that overlaps**: ordering fixes the first, a per-box depth key the second, and not overlapping at all the third.
+
+**The seventh, and the one to reach for whenever something looks choppy:** **a fixed simulation step needs render interpolation.** Projectiles tick at the reference's twenty a second because every number it publishes is per tick and four `static_assert`s depend on it — and drawing them *at* that tick showed each position six frames running on a 120 fps screen. The instinct to raise the tick rate would have quietly falsified the whole table. Keep the previous tick's state and blend by the accumulator's remainder; the fix belongs in the renderer, never in the simulation.
+
+**And the counterweight to all of them, which is what six hundred and forty blocks in one afternoon actually bought:** when forty rows would differ only by *material*, the material is the table and everything else is one forwarding function. There was one stair type in the game for twenty milestones because a second one meant seven edits in seven files. `ShapedFamily` carries a **parent block**; `shapedParent` answers the texture, the tool, the hardness, the blast resistance and whether it burns. **Before writing the third near-identical row, ask what the rows actually differ by** — and if the answer is "one field", that field is the table.
+
+**The eighth, and the reason a bug can be genuinely unreachable:** **a format-version migration is a promise that old data stays, which is also a promise that old *damage* stays.** Water was found hanging in mid-air; a probe put it at a sheet of water sources left in one chunk by a long-deleted test harness, and generating that chunk from the same seed produced none of it. Bumping `kChunkFormatVersion` — the mechanism that exists for exactly this — **did nothing**, because the bad file was two versions old and the loader carried an upgrade path that read and widened it rather than rejecting it. **When a version bump changes nothing, read the bytes on disk before doubting the fix.**
+
+**The ninth, 2026-08-10, and the cheapest of all to have avoided:** **a standard formula written from memory can come out inverted, and consuming it as a *ratio* hides that.** The air-mass term in the new sky reported less air toward the horizon than straight up — the exact opposite of the truth — and divided by zero below the horizon, painting a black band precisely where the loaded chunks end, in the one place the fog exists to hide. It survived a build, a soak and a doc pass because the model is consumed as a ratio of two evaluations, and a ratio still looks plausible when both halves are wrong. **Print a curve you did not derive on the spot at three known points before trusting it** — air mass is 1 at the zenith and about 40 at the horizon, and three printed rows would have caught it in ten seconds.
 
 ---
 
@@ -133,6 +152,40 @@ Vulkan can technically be used with just the Khronos headers plus the driver-pro
 
 The CMake project is currently named `VoxelGame` with targets `engine` and `game`. **This is a deliberate placeholder, not a decision.** It was chosen to avoid blocking Milestone 1 on a naming conversation. Renaming later costs one line in the root `CMakeLists.txt` and a folder rename — do not treat it as load-bearing, and do not scatter the name through source files.
 
+### Terrain is single-valued, and that is a rule rather than a tuning
+
+Everything at or below the highest solid sample in a column is ground. **Do not reintroduce `quarter_negative` or any other mechanism that lets the density go negative and then positive again up a column** — that is the definition of a floating island, and the user found them by playing.
+
+**The guarantee alone is not enough, and that cost a second bug report.** Single-valued terrain does not stop a would-be island being *produced*; it converts it into a column attached to the ground, and where the footprint is small that is a sheer-sided pillar with a tree on it. The underlying condition still has to hold: **the terrain ramp must beat the noise's vertical slope**. The reference does that by holding `factor` at 5.1–6.3 across ordinary land and dropping to 0.625 only inside a narrow window of high peaks-and-valleys. Ours ran 1.15 across the whole low-erosion third of the map, which is ±19 blocks of displacement, and that produced the pillars. Ruggedness belongs to the same window as jaggedness; they are one decision.
+
+**There is no density lattice any more, and it should not come back.** With single-valued terrain it bought nothing but its own artefact: an interpolated density is piecewise-linear across a cell, so its contour lines cluster on the cell boundaries and a gentle slope reads as regular banding every four blocks. Height is computed directly per column, which is exact and eight times faster.
+
+What this costs: no overhangs, no arches. What it buys beyond the bug: the surface rules get an exact depth counter for free, and the ore air-exposure test is a height comparison instead of six density evaluations.
+
+### Bare stone on ordinary ground is always a bug, and `else stone` is how you cause it
+
+The reference names what a biome *scatters* and lets everything that does not match **fall through** to the generic grass-and-dirt rule. `windswept_hills` is grass with stone patches; `plains`, `meadow` and `forest` are not named in its surface-rule tree at all. Bare stone never appears on an ordinary grassy hillside there, and the guarantee is structural rather than statistical.
+
+Writing a biome's top block as solid stone instead produced **rings of bare stone** across the landscape, because that biome occupies a narrow band of the erosion field and a narrow interval of a smooth 2D field is an annulus. `Biome::patch` exists so the no-else pattern is the only way to express it.
+
+**A bed material is unreachable above the waterline, and that is the whole of why a dry river is not a scar.** `river` is not named anywhere in the reference's surface rules: a river column falls through to grass, gravel is only reachable after both water tests have already failed, and **sand never appears on a riverbed at all**. The reference does not guarantee its rivers hold water either — at low erosion its river band sits well above sea level, and it ships dry grass-covered river strips through its mountains that are invisible purely because of that fallthrough. Ours painted the biome's own top block regardless of the waterline and drew ribbons of gravel and sand across dry grassland.
+
+The one legitimate exception is `steep`, the reference's own slope test — and it belongs only on peaks and slopes. **Applying it to ordinary ground creates exactly the artefact it is there to avoid.**
+
+### Terrain and biome are outputs of the same fields; neither decides the other
+
+Up to 2026-08-07 a biome carried `baseHeight` and `amplitude` and terrain height was looked up from it, so the land was a **consequence of the label**. The reference abandoned that in its 1.18 rewrite — its biome files carry no `depth`, no `scale` and no `height` at all — and M20p followed it.
+
+**Do not put a height back on a biome row.** It will look like a convenience and it reintroduces the failure that made the old world read as bands: with the biome dictating, a boundary is a step in the terrain, and blending the step is a second mechanism papering over the first.
+
+The three pieces that carry the replacement, in order of how much they buy:
+
+- **`factor`, not height.** How *hard* the target height is enforced, rather than what it is. It is the only reason a plain and broken ground can exist at the same temperature, humidity and altitude, and it is a multiply rather than a system.
+- **Boxes, not centres.** A biome claims a range on each axis and the first containing row wins. A centre with a falloff cannot say "only ever cold"; every biome bleeds a little way into every other, which is what made seven biomes average into the same middling terrain.
+- **Tags, not names.** Anything asking a question about a place asks for a property. Fifty creature spawn rules named biomes outright, and going from seven to twenty-seven would have meant editing all fifty with a silent failure for any one missed.
+
+**Rivers are not a system and must not become one.** They fall out of `ridges` reaching −1 on the zero contour of the weirdness field. The biome and the channel are the same fact.
+
 ### A user-adjustable frame cap, not vsync, and not uncapped
 
 Uncapped, Milestone 1 ran at 400–1600 fps — rendering hundreds of frames per second that no monitor displays, on a laptop, burning battery and spinning fans for nothing. The user asked for this directly (2026-07-30): _"i don't want it eating all my resources all the time right?"_
@@ -180,13 +233,17 @@ A mesh job gets a copy of the chunk and its six border layers, and captures `sha
 
 **Do not "optimise" this into borrowing a pointer to the live chunk.** It will appear to work, because the race window is small and the failure is silent corruption rather than a crash.
 
-### A placeholder sun at M14c, not the real one at M24
+### A placeholder sun at M14c, and the real one at M24
 
 User reaction to M14, 2026-07-31: _"this looks very flat... there isn't a clear light source... your idea of 'shippable' was like no shadows whatsoever."_ They were right, and the diagnosis matters: **Minecraft's lighting model has no direction at all.** Sky light answers "can this cell see the sky?", which is a visibility question, not a lighting one. Ambient occlusion darkens crevices but is subtle by nature. Neither produces the sense of a light source, so the world read as flat — correctly.
 
-The real fix is M24 (sun, moon, cascaded shadow maps), which depends on the M23 renderer restructure and is a whole phase away. Rather than pull that forward, M14c adds a **cheap placeholder**: a visible sun on an arc, a Lambert term, and a sky colour that follows it. It cost one shader change and no vertex format change.
+M14c added a **cheap placeholder**: a visible sun on an arc, a Lambert term, and a sky colour that follows it. It cost one shader change and no vertex format change, and it was explicitly not shadows — nothing occluded the sun.
 
-**Do not call this shadows.** Nothing occludes the sun. When M24 arrives it replaces this wholesale; the placeholder exists so the intervening milestones are not built against a world that looks wrong.
+**M24 replaced it, and the three decisions inside it should not be re-litigated:**
+
+- **The shadow pass culls nothing.** Front-face culling is the textbook cure for shadow acne, and here it would leave flat ground casting no shadow at all: a voxel mesh is a hollow shell, so a hill has no far side to store.
+- **Each cascade is fitted to a bounding sphere and snapped to whole texels**, because a box changes size as the camera turns and every shadow edge in the world crawls with it.
+- **One directional light, not two.** Whichever of the sun and moon is up owns it. Moonlight therefore goes through the same cascades for free, and the handover at dawn has no step in it because both fade on the same ramp.
 
 **Lesson for tuning any visual effect:** the first ambient occlusion strength was tuned in isolation and shipped as "subtle", which to the user was indistinguishable from broken. Show the exaggerated version alongside the tuned one and let them pick, rather than deciding what "shippable" means alone.
 
@@ -198,13 +255,108 @@ The costs of that choice are real and worth knowing. Alpha blending is enabled f
 
 **If the HUD ever needs its own blend mode, or depth testing becomes a problem, split the pipeline rather than adding more special cases to the shared one.**
 
+### Block-entity contents are derived state on the screen, never owned by it
+
+A furnace and a smithing table both borrow the crafting grid's first two slots, which is why neither cost a single line of new click, drag or shift-click handling. That is a good trade and should be reached for again. But it has one rule attached, and breaking it produced the worst bug this project has had: **whoever borrows the shared buffer must empty it when the screen closes.**
+
+The furnace correctly refused to hand its slots back to the player on close — they were only a view onto a block that keeps its own copy. It did not clear them either, so the copies survived into the next screen, appeared in its crafting grid, and were handed over when that one closed. Free items, in two keystrokes, with any item.
+
+A chest could not borrow the buffer at all: twenty-seven slots against a maximum grid of nine, and its contents outlive the screen. **The test is not how many slots a thing has, but who owns what is in them.** If the answer is not the screen, the screen may display it but must not store it.
+
+### Chests pair by derivation, not by stored state
+
+Two chests side by side form one 54-slot container. The obvious implementation remembers which is joined to which — and then that has to go into the save file, survive a reload, and be repaired every time a neighbour is placed or broken.
+
+Instead the pairing is recomputed from world state on every open: walk back to the start of the run of matching chests and pair off in twos. It costs a few lines, needs no saved state, and **cannot disagree with itself**, because both halves run the same calculation. The price is one named divergence — a long row re-pairs when a chest in the middle is removed, where the reference would keep its original pairs.
+
+**Prefer this shape generally.** Derived relationships cannot go stale, cannot be corrupted by a partial save, and do not need a migration when the rule changes.
+
+### Where water goes and what water is are two questions
+
+The slope weights decide which **empty** cells a flow spreads into. They must never re-decide a cell that already holds water — the reference's `getNewLiquid` recomputes a level from the neighbours with no slope test in it at all.
+
+Folding the two together let a settled cell be starved by a weight that changed *because of its own outflow*: water reaches a ledge, the column below fills, that direction stops scoring as a drop, a rival wins, the cell empties, the column drains, the weight flips back. Air, water, air, water, once per tick, for ever — and only ever within four blocks of a drop, which is why it read as "water goes mad near an edge" and why flat ground never showed it.
+
+It cannot recur while `arriving` gates the test, because the level away from a source strictly increases and a mutual pair therefore drains. **Do not merge them back for tidiness.**
+
+### Waterlogging is a bit beside the block array, not a second block id
+
+A cell can be a plant *and* water. The alternative — a `KelpSubmerged` twin for every waterloggable block — doubles those rows in the id space and forces every predicate that already asks a question about a block to learn about the twin. One bit per cell costs `kBlockCount / 8` bytes, and `setBlock` is the single place that maintains it.
+
+**The rule that makes it safe: `canWaterlog` is a shape test, not a list. Cross only — plants.** Slabs and stairs were briefly included and were taken back out: a block placed into a water source has to *cut the supply off*, which is what the player expects and what a waterlogged stair silently refused to do. A new plant is waterloggable the moment it is given the right shape, with nothing to remember.
+
+### Chunk saves and the player file carry separate version numbers
+
+`kChunkFormatVersion` versions chunk files; `kFormatVersion` versions `player.dat`. **Bumping the chunk version is the intended mechanism for making a worldgen fix reach a world that has already been played** — stale chunks fail their header check and regenerate — and it must not cost the player their inventory, which is the entire reason the two numbers are not one.
+
+Do not merge them for tidiness. And do not forget the mechanism exists: water flow calls `setBlock`, which flags a chunk modified, so **merely standing near an ocean writes chunks to disk**. A correct generator fix can look completely broken because the world being tested is loaded rather than generated.
+
+### An ore vein is a placed feature with a stated size, not a noise threshold
+
+A threshold has no notion of size — it paints every cell above the bar, so wherever the field sits high across a region you get one connected mass, and there is no number to turn down because the shape was never asked for. A playtest found a "humongous" coal seam and the table had nothing to answer with.
+
+`placeVein` is the reference's `OreFeature`: a spindle of `size` overlapping spheres. **The maximum is now stated rather than emergent**, and measured largest vein matches the table's own arithmetic.
+
+The constraint this buys and must keep: a vein straddles chunk borders, so **every vein rolls its randoms in the same order regardless of which chunk is asking** — a 3×3 column neighbourhood, a `noise::Stream` per vein, and the air-discard roll taken for every sphere cell *before* any chunk-bounds test. Skipping a roll because the cell landed outside the current chunk makes two chunks disagree about one vein and leaves a seam on the border.
+
+### A ported tuning value is only as good as the unit it was measured against
+
+`panicSpeedScale` multiplies our `runSpeed`. Bedrock has one `movement` speed per mob and scales that, so its `panic.speed_multiplier` is a different unit. The two humanoids were given the reference's 0.6 verbatim while every animal was given a value authored in ours — one column holding two units — and a struck trader fled at a 17% margin over walking, which reads as not fleeing at all.
+
+**When taking a number from the reference, write down what it is measured against**, and check it against a neighbouring row that was authored natively. Nothing else in the toolchain can catch this: it compiles, it validates, and the behaviour tree around it works perfectly.
+
+**The same shape, without any porting involved:** a *comparison* can be measured against the wrong body. The blow's vertical gate read `abs(toPlayer.y) < species.height` — the player's offset judged against **the attacker's** height. For two things standing on the same ground that is roughly the box overlap, and for a half-block-tall flier it is a demand it can never meet, so a bee chased, arrived, faced the player and never once stung. The honest test is asymmetric, because the player is 1.8 m tall and the creature is not — **and it was already computed three lines above under a different name.** Before deriving a geometric test, check whether the function already contains the correct one.
+
+### A flier owns its own velocity, so nothing may push it
+
+`flies` is the airborne mirror of `swims`, and the thing that makes it different from every other species is that its locomotion branch writes **all three axes** every frame from its heading. Gravity must be skipped rather than applied-and-overwritten, and knockback must be **skipped rather than reduced** — an impulse assigned to something that rewrites velocity next frame is either erased or, on the vertical, reads as the animal being thrown across the sky.
+
+Do not reach for a `knockbackResistance` float to solve this. The question is not how hard to push; it is who owns the value.
+
+### Damage overwrites inside its window; it is not a cooldown
+
+Half a second of invulnerability after a hit sounds like a cooldown and is not. The reference lets a **bigger** blow inside that window land for the difference between it and the one already taken, which is the entire reason a creeper is dangerous rather than absorbed by whatever punched you a moment earlier.
+
+`damagePlayer` owns that rule and it must not be simplified. "Ignore anything inside the window" is one line shorter, looks obviously equivalent, and quietly makes every large hit survivable. RESEARCH §2.4 has a worked example precisely so the next person can check rather than reason.
+
+The same shape applies to hunger: **it drains by exhaustion, not by time.** A bar that ticks down on a timer punishes standing still, which is not a cost anyone incurred. Every action names its own price and four points spends one leg.
+
+### `world/Survival.hpp` is header-only on purpose
+
+Twenty hearts, three free blocks of fall, every exhaustion rate and the whole food table live in one header with no `.cpp`. That is not laziness — it means adding it required **no edit to any CMakeLists**, and it means every constant is `constexpr` and visible to whatever wants to check one.
+
+The rule it enforces is the one this project keeps relearning: **a value derived somewhere other than the table that owns it is the most common bug here.** Twelve foods were edible and worth nothing because edibility and value were answered in two places. They are answered in one now — `isEdible` asks `foodValue`.
+
+### miniaudio, not SDL_mixer, OpenAL or FMOD
+
+Sound needed the operating system's audio device opened and a callback asking for samples. Nothing more.
+
+- **FMOD and Wwise** are what a studio uses and both carry licensing that has to be read; neither is justifiable for a project whose entire audio requirement is "play this sample over there".
+- **OpenAL Soft** does positional audio properly and would mean adopting its whole listener/source/buffer model, which is more concepts than we need and less control over the mix.
+- **SDL_mixer** drags in SDL, which was already rejected for windowing at M1.
+- **miniaudio** is one public-domain header, opens WASAPI/CoreAudio/ALSA, and does *not* mix, position or decode anything for us. That last part is the reason it was chosen: the mixing is thirty lines, we understand all of it, and the distance rolloff and pan are ours to tune.
+
+`stb_vorbis` decodes the `.ogg` files, and **it lives alone in `engine/src/audio/StbVorbis.cpp`**. It is C, it warns freely at `/W4`, and the first attempt to silence it with `/W0` produced `D9025` — one warning traded for another, because the global `/W4` is still on the command line. Disable by number.
+
+> ⛔ **The audio mixer holds a mutex, and that is the one legitimate lock in this project.** `CLAUDE.md`'s "if you find yourself wanting a mutex, the design is probably wrong" is about *our* threads, where a copy is always available. The audio callback runs on a thread the operating system owns and hands us no choice. Do not generalise from it.
+
+### A sound is named by material and by voice family, never by block or species
+
+Ten materials cover eleven hundred blocks, and thirty-four voice families cover fifty-seven creatures. Both are the same decision and it is the one that made the milestone small: `soundMaterialFor` asks a dozen family questions and falls through to stone, and a cut shape asks `shapedParent`, so **six hundred stairs and slabs arrived with no rows at all**.
+
+A baby is the adult's recording pitched up, which is what the reference does. Do not add a second set.
+
+The cost, and it is real: **`kStems` in `Sounds.cpp` and the `$events` table in the staging script must agree, name for name and in order.** A mismatch does not fail — it produces an event that silently never sounds. `has()` and `hasVoice()` exist so a probe can check all 159 rows in a single run, which is the only honest verification available here.
+
 ---
 
 ## Architecture Rules
 
 - **This is openly a game in Minecraft's tradition, and following it closely is the point.** Direct user correction, 2026-07-31: _"do you know how difficult that is? i would have to spend weeks coming up with an entire new mechanic... this game is impossible to make without referencing to the original one, and truthfully, i don't want anything different. the only difference i wanted was control, which i now have cuz i'm developing it."_ An earlier version of this file demanded original mechanics, recipe trees, creatures and biomes. **That was wrong and was actively harmful** — it put weeks of unwanted design work in front of a solo developer who wanted to build the game, not redesign the genre.
 
-  The real boundary is narrower and legal rather than creative: **mechanics are free, assets are not.** Rules and systems — crafting grids, tool tiers, hunger, mob behaviour — are functional designs and reimplementing them is normal and lawful. Textures, models, sounds, music and names are expressive work and must be ours. See `TIMELINE.md` "The End Product" for the table.
+  The real boundary is narrower and legal rather than creative: **mechanics are free, assets are not.** Rules and systems — crafting grids, tool tiers, hunger, mob behaviour — are functional designs and reimplementing them is normal and lawful. Textures, models, sounds, music and names are expressive work and must be ours *in what ships*. See `TIMELINE.md` "The End Product" for the table.
+
+  **But do not author art yourself.** Development runs on Mojang's real textures, staged into `blocks-reference/` beside each exe by `tools/make-reference-blocks.ps1` — gitignored, never under `assets/`, never shipped — and the game prefers them whenever they exist. **The user's friend is authoring the original art.** So adding anything visible means adding one row to that script; `assets/` needs a file per layer or the load fails, so give it the cheapest flat-colour placeholder and nothing more. A session was spent hand-drawing food sprites in ignorance of this. `ASSETS-REFERENCE.md` is the full map.
 
   **Names split in two, and the split matters.** Ordinary words for real things — *sheep*, *cow*, *pig*, *wolf*, *spider*, *stone*, *bread* — are plain English and nobody owns them; use them, and do not invent a synonym to feel safe. Only **coined** names are protectable: *Creeper*, *Enderman*, *Ghast*, *Shulker*, *Blaze*, *Wither*, *Piglin*, *Redstone*. Those need ours. Direct user correction, 2026-08-01: _"sheep will still be called sheep right? i'm not compromising there thats not copy-rightable you can't copyright a sheep."_ An earlier version of this rule said only "names must be ours", which would have forced renaming the sheep for nothing.
 
@@ -217,7 +369,7 @@ The costs of that choice are real and worth knowing. Alpha blending is enabled f
   3. **Exactly one owner mutates the world**, on the main thread. Workers get copies and return results.
 
   Threads are the easy part; untangling shared mutable state afterwards is the rewrite. This is also the specific weakness the user wants this engine to beat.
-- **The renderer is deliberately NOT future-proofed, and will be rewritten at `TIMELINE.md` M23.** That is planned, not a failure. Do not add an `IRenderBackend`, a material abstraction, or "PBR-ready" hooks before then — building a deferred HDR pipeline before a single block is on screen means carrying huge complexity, blind, with nothing real to measure against. What must survive untouched is the world data, generation, meshing inputs, persistence, physics, and gameplay. Vertex formats will churn at M14 and M23; that churn is localized inside meshing and is accepted.
+- **The renderer was rewritten at M23, as planned, and is now concrete rather than throwaway.** That was never a failure of the first one — building a deferred HDR pipeline before a single block was on screen would have meant carrying huge complexity, blind, with nothing real to measure against. What survived the rewrite untouched was exactly what was meant to: world data, generation, meshing inputs, persistence, physics and gameplay. Only the vertex format churned, and that churn stayed inside meshing. **Do not now add an `IRenderBackend`, a material abstraction or a render-graph layer.** There is still one backend, the seven passes are concrete on purpose, and the same rule applies as before: no abstraction without a second implementation in sight.
 - **Rendering resources are owned by RAII types.** Vulkan requires explicit destruction of nearly everything, in the right order. Tying each Vulkan handle to a C++ object that destroys it in its destructor is what prevents this from becoming a leak-hunting nightmare at scale.
 - **No abstraction without a second implementation in sight.** Do not write a `IRenderBackend` interface "in case we add DirectX." One backend, concrete, until a second one is actually being written.
 - **One milestone, one working build.** Never leave the repository in a state that does not compile and run.
@@ -243,7 +395,7 @@ User instruction, 2026-07-30: _"coding with multi-threading and graphics and stu
 - **Think in batches, not individual draws.** Even while drawing one thing, do not bake in assumptions like one-texture-per-draw or one-draw-per-chunk that a batched or indirect renderer would have to unpick.
 - **RAII for every GPU resource**, destroyed in reverse creation order.
 
-**And the counterweight \u2014 what "thinking ahead" must NOT become:**
+**And the counterweight — what "thinking ahead" must NOT become:**
 
 Do not add interfaces, virtual base classes, "manager" objects, template generality, event buses, or configuration hooks for systems that do not exist yet. Speculative structure is not foresight; it is weight that every later milestone has to carry, and it is the single most common way ambitious engine projects die. The habits above are free because they are about *shape*. Abstractions are not free, and they wait until there is a second real case.
 

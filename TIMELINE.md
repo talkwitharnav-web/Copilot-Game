@@ -690,7 +690,7 @@ Recipes are settled facts — see `CRAFTABLE.md`, verified against the reference
 
 **Drops are no longer mode-dependent.** Creative used to suppress them; on the user's instruction (2026-07-31) breaking yields its drop in every mode, and creative now means only that placing and digging cost nothing.
 
-**Deliberately not done:** wall torches (need a tilted shape and orientation ids) and the chest (needs a non-cube model). Both are recorded in `CRAFTABLE.md`. Glass followed at M20e, once a transparent full cube existed.
+**Deliberately not done:** wall torches (need a tilted shape and orientation ids). The chest was deferred here too, on the grounds that it "needs a non-cube model" — **that turned out to be wrong** and it shipped as an ordinary cube at M20o, because its 64×64 reference texture is a box net you can crop three faces out of. Both are recorded in `CRAFTABLE.md`. Glass followed at M20e, once a transparent full cube existed.
 
 ### ✅ M20a — Entity foundation and first creature · **Core**
 
@@ -708,11 +708,9 @@ Release build, render distance 12: **121 fps, 14 creatures, 144 triangles each**
 
 **Deliberately not done:** drops or loot (there is no food item yet, and hunger is M21), pathfinding beyond obstacle avoidance, and any second creature.
 
-### 🟨 M20b — Creature roster and behaviour · **Core** · *in progress*
+### ✅ M20b — Creature roster and behaviour · **Core**
 
-**Slice done so far:** fifty-six species exist, are told apart by where and when they appear, sixteen are hostile and two are neutral. This is now a broad land roster on working machinery, **plus the water archetype from M20i**, but **not the finished milestone** — see "Still owed" below.
-
-**Result:** thirty-six species. Ordinary animal names remain ordinary English; the coined ones are ours.
+**Result:** fifty-seven species, told apart by where and when they appear — sixteen hostile, two neutral, nine aquatic and one that flies. Ordinary animal names remain ordinary English; the coined ones are ours. The roster table below was written when there were thirty-six.
 
 **Two movement archetypes rather than one.** Most of the roster walks with a leg swing whose rate and amplitude are per-species, because one hardcoded gait makes a camel mince and a chicken plod. The rabbit, the frog and the slimes instead **hop for real** — a launch velocity into the existing gravity and collision, so the arc height, the airtime and the hop length all fall out of the physics rather than a sine wave. Their legs read their pose back out of `velocity.y`, and a slime squashes on landing from the same number.
 
@@ -771,12 +769,12 @@ Release build, render distance 12: **121 fps, 14 creatures, 144 triangles each**
 
 Release build: **120 fps**, no measurable cost.
 
-**Still owed before M20b can be called done.** The original M20 was "entity system, animation, pathfinding, spawning, and creature behaviours", and what exists is the thin end of most of those:
+**Closed 2026-08-08.** Everything on that list is now done:
 
-- **Nothing flies**, so the world still lacks one whole movement archetype. **Water landed at M20i** — nine aquatic species on a real swimming controller. The land roster is broad — sixteen hostiles, two neutrals — and bipeds now exist as models, though not as behaviour. **M20j made the hostiles actually fight**: they close, stop when they arrive, and swing.
-- **Animation.** Limbs **rotate about a joint** rather than sliding, on an eased amplitude, and every biped but the folded-arm three has the reference's idle sway. Heads turn **about the neck** and now **pitch** as well as yaw, so a creature looks at you rather than merely facing you. Climbing a step rises to the real surface and the drawn body eases up — and the **player's camera** does the same since 2026-08-05. Still owed: a grazing or eating pose, and a death animation — a struck creature still simply vanishes. `ANIMATION.md` is the reference for the rest.
-- **Flee is a straight line away.** It does not run *toward* anything safer, and it gives up on a fixed timer rather than when it is actually clear.
-- **Pathfinding is a local planner.** It can now jump a block and get out of a one-deep pit, but it still cannot route around a wall longer than its probe or find its way off a ledge it stepped down.
+- **Every movement archetype exists.** Water landed at M20i, **flying at M20t with the bee**, and the land roster is broad — sixteen hostiles, two neutrals, bipeds as models and as behaviour. **M20j made the hostiles fight**: they close, stop when they arrive, and swing.
+- **Animation.** Limbs **rotate about a joint** on an eased amplitude, and every biped but the folded-arm three has the reference's idle sway. Heads turn **about the neck** and **pitch** as well as yaw. Climbing a step eases the drawn body, for creatures and for the **player's camera**. A killed creature **tips onto its side** and lies there. And the last of it: **a sheep grazes** — Bedrock's `eat_block`, 1.8 s with the muzzle on the ground, at the reference's own odds, taking the turf down to dirt when it finishes.
+- **Flight ends when it is clear**, not on a timer. `max_flee` is ten blocks, and an animal runs from **whatever actually hurt it** rather than always from the player.
+- **Pathfinding is a real search.** A\* over foot cells since M20k, falling back to the steering fan when it has no route.
 
 **Landed since the roster was written:** babies as a share of every natural spawn, herd alerting (one mechanism serving both pack anger and group flight), soft entity separation, spawning at chunk generation, creature persistence across a restart, **the AI restructure (M20c)**, **the Bramble's explosion and charged variant**, **line of sight**, **per-species step height and jumping**, **the chicken's slow fall and wing beat**, **thirty-six spawn eggs**, and **real limb joints, head pitch and smoothed step-ups**. See `SYSTEM_MEMORY.md`.
 
@@ -837,7 +835,7 @@ Release build: **120 fps**, no measurable cost.
 
 **Startup warnings were removed.** Three lines announcing that placeholder reference art was in use. The distinction now written down: **warn about faults, never about a state the user chose.**
 
-### 🟡 M20f — Aggression · **Core**
+### ✅ M20f — Aggression · **Core**
 
 **Asked for directly on 2026-08-05**: *"our mob behaviours are still pretty broken — aggression especially."* Six Opus-5 subagents read the shipped Bedrock behaviour pack for all thirty-six species plus the goal-component reference, and the answers went into the species table rather than into new code. **Slice 1 is built; slices 2 and 3 are named below and not started.**
 
@@ -855,12 +853,21 @@ Release build: **120 fps**, no measurable cost.
 
 **The species table was converted to named fields** in the same pass, because it had to be. It was positional, which meant every new field went on the end with a default and setting one on an older row meant restating a dozen tuned numbers. Nothing about the tuning changed; the wall of bare values became rows that say only what makes them different, and a mis-ordered value is now a compile error instead of a silently wrong animal.
 
-**Still owed, and deliberately not started:**
+**Closed 2026-08-08.** Both remaining slices landed together, because they turned out to be one change: the target slot learning to name something other than the player.
 
-- **Slice 2 — creatures fighting each other.** `CreatureTarget` is `{None, Player}`; it needs to name another creature. That is the whole of a wolf hunting sheep and rabbits, a cat hunting rabbits, an ocelot hunting chickens, a polar bear hunting foxes, and a llama spitting at wolves.
-- **Slice 3 — avoidance and flight that ends properly.** Fleeing is a straight line away on a fixed timer; the reference stops when it is 10 m clear. And `AvoidFeline` should be a general `Avoid` — a rabbit runs from players at 8 m, a skeleton from wolves at 6, a villager from zombies at 8, a fox from wolves and bears at 10.
+- **Slice 2 — creatures fight each other.** `CreatureTarget` gained a `Creature` case and creatures gained a **stable id**, because the population retires by swapping the last element down and an index goes stale the moment anything dies. A wolf hunts sheep, rabbits, foxes and the skeleton family; a cat hunts rabbits; an ocelot hunts chickens; a polar bear hunts foxes; a fox hunts chickens, rabbits and fish. Who hunts what is a **`CreatureTag` bitmask** rather than a list of names — the same reasoning as `BiomeTag`, and it means a new species inherits every rule it qualifies for the moment it declares what it is.
+- **Slice 3 — a general `Avoid`.** `AvoidFeline` is gone; a species names the families it runs from and the range it runs at. A rabbit flees wolves at 8 m and the player at 4, the skeleton family flee wolves at 6, villagers and traders flee the undead at 8, foxes flee wolves and bears at 10, and the Bramble still flees cats at 6. It **sprints inside 7 m and walks beyond**, and it **stops once 10 blocks clear** rather than on a timer — the reference's `sprint_distance` and `max_flee`.
+- **`retaliates` fell out of it.** "Can it bite" and "will it bite *you*" had been one question answered by `attackDamage > 0`. A cat is the case that separates them: it kills rabbits and runs from a player, which the reference says by simply not giving it a `hurt_by_target` goal.
 
-Also still open from M20b: the **flying** archetype and a death animation. Water closed at M20i, M20j closed the melee behaviour — arriving, striking and the arm swing that goes with it — and **M20k closed pathfinding**.
+> ⛔ **Two bugs the probe found and a clean build never would.** Ids were assigned in `place` and `restore` — and there are **five** places a creature enters the population, so everything the world spawned for itself carried id 0 and could never be named as anything's threat. `Creatures::add` is the single owner now. And grazing missed the block every time: `floor(position.y)` on a body resting exactly on a surface names the block it is standing *on*, not the cell it occupies, which is the ground-probe trap already in `LESSONS.md`.
+
+**Named divergence:** the llama does not spit. It is a ranged attack needing a projectile kind of its own, and the llama has no hostile targeting to hang it on; recorded rather than quietly dropped.
+
+**Verified:** both presets clean at `/W4`, a 40 s debug soak with **zero** validation errors, and a temporary probe measuring each new behaviour before it came out — turf eaten and turned to dirt, the grazing head pitched to its full 0.70 rad, creatures holding creature targets, threat tracking live, and predator kills reducing the prey count. Probe removed; settings and saves restored in the same command.
+
+---
+
+**The original slice-1 record follows.**
 
 ### ✅ M20g — The bucket, the catalogue's scrolling, and four bugs found by playing · **Core**
 
@@ -958,13 +965,313 @@ Bounded three ways so one boxed-in animal cannot cost a frame: 24 m of range, 38
 
 Names follow the standing rule — ordinary words are free, coined ones need ours. *Mushroom*, *cow*, *magma*, *cube*, *horse*, *trader* and *llama* all stay; the endermite becomes the **Voidmite**, and the two piglins join the Princepin family.
 
-### ⬜ M21 — Survival systems · **Core**
+### ✅ M20m — The death fall, and `INTERFACE.md` slice 5 · **Core**
 
+**2026-08-06.** Closes the second of M20b's three remaining items; only the **flying** archetype is left.
+
+**A killed creature used to simply disappear on the frame its health hit zero**, which made a kill read as the animal being deleted rather than dying. It now keeps the damage tint, tips a quarter turn onto its side, and lies there until the reference's own twenty-tick life runs out.
+
+**It is one rule for all fifty-seven species, and that is the whole design.** Every box, limb and head group in `buildMesh` is placed along three local axes; rolling *those* about the creature's own forward axis rotates the entire model rigidly, so there is no per-species table and a mob added tomorrow inherits it without knowing. `worldUp` was renamed `modelUp` in the same change, because it is no longer world up once a body is falling and a name that lies is exactly how this codebase produces its worst bugs.
+
+**The easing is smoothstep, not the reference's `sqrt`, at the user's request.** Java's curve is fastest at its very first tick — a quarter of the whole turn inside a fiftieth of a second — which reads as the body being swatted flat. Theirs accelerates over and decelerates into the ground, so it lands. The *timings* stay the reference's: 0.625 s to fall, retired at 1.0 s.
+
+**The body is raised as it goes**, by the collision half-width times the sine of the angle, because the fall pivots at the feet and everything a half-width to one side would otherwise end up that far below the floor. `halfWidth` is deliberately narrower than the model here, so a broad animal still settles slightly *into* the ground rather than floating over it — which is the right way round.
+
+**Three things had to stop and one had to keep going.** A corpse stops deciding, and its intent is cleared rather than left alone, because `walking` is sticky and a dead animal keeps its last one. It stops answering the aim ray, or it shields whatever is behind it for a second after it is already dead. It is not written to the save. But **it keeps falling**, so it settles onto whatever it was standing over. Two locomotion paths are not driven by `walking` at all — a stranded fish flops and a slime hops on their own timers — so the corpse case had to go *first* in that chain, not rely on the flag.
+
+**And it stops where it died.** The killing blow assigns knockback like any other blow, so the first cut slid the body along the ground for the whole fall — reported immediately as *"the mob needs to stop moving when it dies"*. Horizontal velocity is now dropped outright rather than decayed, the shove-overrides-intent rule that runs while `hurtTimer` lasts is gated on being alive (or it simply put the knockback back), and **a flowing cell no longer carries a corpse** either — the one place something in water is not pushed by it. Downward motion is kept, because something killed in mid-air still has to reach the floor; upward is clamped away, or the same blow's lift tosses the corpse.
+
+**A related bug surfaced in the same playtest and was not part of either job.** Striking a creature tested a **0.6 m sphere at the body's middle**, which is not a shape any animal has: it covers most of a chicken and a fraction of a camel, so a camel's legs could not be hit at all — only a band around its belly. It is now a ray against the creature's own collision box, padded by 0.15 m because `halfWidth` here is deliberately narrower than the model. Same root cause as most bugs in this project: a shape derived somewhere other than the table that owns it.
+
+**Slimes and magma cubes now split when the fall finishes rather than the instant they are hit.** That fell out of the retirement moving; it is also better.
+
+**Slice 5 of `INTERFACE.md` shipped alongside it.** Every catalogue cell now carries a background saying whether you can make that thing right now, read from the recipe table rather than the item list, and answered against the grid the open screen actually has — so a 3×3 recipe is red at the inventory and pale at a crafting table. **In creative nothing is red**, because the card there is the item catalogue rather than the recipe book and every entry is one click away. Four states rather than the reference's six: three of vanilla's are expandable groups, which are slice 9, and the fourth — a **selected recipe** — was built and taken straight back out. The user's objection settled it: *"why should that even happen in survival? minecraft doesn't do that"*, and *"if i hover and it temporarily brightens then THAT is fine, persistent brightness isn't"*. Nothing set it either, since §4.5's click-to-fill acts on the click rather than remembering it — a highlight that meant nothing and stayed lit behind an item already taken. The check is **greedy, and the bipartite counter-example is written at the call site** — it is correct only while every ingredient is one concrete item, and the day a second wood type arrives it becomes silently wrong for the players holding the awkward combination.
+
+### ✅ M20n — Three more tool tiers, and the material the top one is made of · **Core**
+
+**2026-08-06.** Asked for directly: *"add more weapons, like iron tier and diamond tier, and netherite."* Takes the catalogue from 126 items to **145** and the recipe table from 20 to **38**.
+
+**Fifteen tools, two resources and two blocks**, all appended rather than inserted. Iron and diamond needed no new material — the ingots and gems have been mineable since the ore pass — so they are a table row and a recipe each. The top tier is the work.
+
+**`isTool` is now two runs of item ids, and it had to be.** The natural place for iron and diamond is beside the wood and stone tools; putting them there would have shifted every spawn egg, resource and bucket behind them, and **an item id is written into the player's saved inventory**. So they go at the very end, exactly as the second spawn egg run does, and the predicate spans both. Getting that wrong does not fail — it makes fifteen tools stack, never wear out and mine like a fist.
+
+**The sprite run goes at the very end too, block textures included.** A block's texture does not have to live among the first sixty-seven layers: `blockTextureLayer` returns a layer index and nothing cares where it points. Putting the two new blocks there would have slid every egg, resource, bucket and water frame behind them for no gain.
+
+**Emberite is our name for the reference's dark alloy.** *Nether* and *netherite* are coined and need ours under the standing rule; *ancient*, *debris*, *scrap* and *ingot* are ordinary English and stay. The reference hides its ore in another dimension, which we do not have, so ancient debris is simply the deepest thing in the ground — rarer than diamond by about five to one, in the same band. That keeps what the material *means* while changing where it comes from.
+
+**It is the one tier you cannot make from raw material, and that survives the port.** The reference upgrades a diamond tool at a smithing table with an ingot and a template; at this milestone we had neither table nor templates, so the upgrade shipped as a **shapeless pair** — the diamond tool goes in and comes back better. *Retired one milestone later:* M20o built the table, and the five shapeless recipes were deleted the day it landed.
+
+**Speeds and durabilities were looked up, not derived** — 2/4/6/8/9 and 59/131/250/1561/2031 by rising tier. A sword's number is deliberately below its tier's mining speed, because a sword is not a mining tool: the reference gives it a flat 1.5× on blocks and scales the *blow* with the material, and `strike` reads that same field.
+
+**A four-milestone-old divergence closed itself.** Gold, redstone, diamond and emerald ore demanded a *stone* pickaxe purely because stone was the highest tier that existed, and the code said so. They demand iron now, and obsidian and ancient debris demand diamond — the reference's own gating, finally reachable.
+
+### ✅ M20o — Three utility blocks: smoker, smithing table, chest · **Core**
+
+**2026-08-06.** Asked for directly: *"get a smithing table in the game, also a smoker"*, then *"also a chest"* and, when I proposed deferring it, *"no, do chest as well."* Takes the catalogue to **148 items** and the recipe table to **36**.
+
+**The smoker cost no new screen at all**, which is the whole reason it went first. `isFurnace` was widened by one line to answer true for both families, and the block entity, the screen, opening it, breaking it and spilling its contents all worked untouched — none of them ever needed to know which kind of furnace it was. Its speed is **one multiplier on the whole tick** rather than two rates, so cooking twice as fast and burning fuel twice as fast stay in step by construction.
+
+**The smithing table borrows the furnace's slot regions** and computes its result as a *preview*, like a crafting grid rather than something the block is slowly making. That meant replacing two hard-coded calls to the grid matcher with `pendingResult` and `spendIngredients`, so the take path stopped assuming which screen it was serving. It is also where the Emberite upgrade moved to, retiring the shapeless-pair divergence M20n had shipped one milestone earlier — the five shapeless recipes were deleted the day the table landed.
+
+**The chest is the first screen with a slot region of its own**, and that is the interesting part. Every other screen reuses `craftSlots`; the furnace and the smithing table both borrow its first two. A chest cannot — twenty-seven against a maximum grid of nine, and its contents outlive the screen being closed. So it gets `Region::Chest`, resolved straight into the block's own storage. **Shift-click had to change meaning too**: everywhere else it moves between hotbar and storage, but with a chest open the only useful move is between the two containers.
+
+**Persistence is the furnace's, twice.** `chests.dat` beside `furnaces.dat`, same header, same atomic temp-then-rename, same rule that an empty table deletes its file rather than leaving a stale one that would restore a chest the player has already broken.
+
+**Double chests came a day later, and the interesting decision was to store nothing.** Two chests sharing a facing and standing shoulder to shoulder open as one fifty-four slot container. A remembered pairing would have to survive a reload, be written into the save, and be repaired whenever a neighbour was broken — so instead it is derived from position every time it is asked: walk back to the start of the run of matching chests and pair off in twos. Both halves always agree because they compute the same answer, a run of three leaves the third single, and breaking one half just leaves the other an ordinary chest.
+
+**It is also the first screen taller than the standard card**, which turned two layout constants into functions of the screen kind. `kPixel` stayed pinned to the ordinary panel deliberately: a taller screen grows downward at the same slot size rather than shrinking everything to fit.
+
+### ✅ M20p — World generation rebuilt on the reference's architecture · **Core**
+
+> ⚠ **Two things in this entry were undone by M20q and M20r.** The density lattice was deleted, and the `factor` range was wrong. Read those two entries before trusting any number here.
+
+**2026-08-07.** Asked for directly, after five Opus-5 agents read the local worldgen data dump into `RESEARCH.md` §15: *"i'd rather have something done right than done quick and cheap... go for it to the fullest extent possible."*
+
+**The research changed what the job was.** The plan had been "add continentalness, then erosion" as two more selection axes. Reading the reference's own data said that is not what they are for: **in the 1.18 rewrite the biome stopped deciding the landscape**. A biome there carries no `depth`, no `scale` and no `height` — terrain and biome are both outputs of the same fields. Ours carried `baseHeight` and `amplitude`, so the land was a consequence of the label, and adding two axes to that would have made a bigger version of the wrong shape.
+
+**Five fields, three splines, one lattice.** `world/Climate.hpp` is new and owns temperature, humidity, continentalness, erosion and weirdness on the reference's own octave weights — arrays with meaningful zeros, which is why `noise` gained `octaves2D`/`octaves3D` that take an amplitude per octave rather than always halving. They feed `offset` / `factor` / `jaggedness` splines, and density is evaluated on the reference's **4 × 8 × 4 cell lattice** and trilinearly interpolated: about 1,500 noise samples per chunk against 32,768.
+
+**`factor` is the idea that pays.** It is not a height; it is how hard the target height is enforced. `kReliefBlocks / factor` is the wobble the 3D noise is allowed, so 5.2 is a plain and 1.2 is broken ground **at the same temperature, humidity and altitude** — which is the thing two noise fields could never express.
+
+**Rivers cost nothing.** `ridges = 1 - |3|w| - 2|` reaches −1 exactly where weirdness crosses zero, and the zero contour of a smooth 2D field is a network of curves. So the river biome and the channel that fills with water are the same fact, and there is no river system.
+
+**Twenty-seven biomes, each claiming a box** rather than a centre with a falloff — first match wins, and a point outside every box falls to the nearest. A box can say *this biome is only ever cold*, which centres and distances cannot. Ocean, deep and warm and frozen; beach, snowy beach and stony shore; river and frozen river; six uplands from meadow to frozen peaks; windswept and gravelly hills; and eleven lowlands including a real **swamp**, **badlands** in terracotta and a **taiga** — so the wolf finally lives where the reference puts it and the slimes, the frog and the bogged stop standing in for a swamp they now have.
+
+**`BiomeTag` is why that was affordable.** Fifty creature spawn rules named biomes outright; going from seven to twenty-seven would have meant editing all fifty and forgetting one would have been silent. They ask for a property now — the reference's `has_biome_tag`.
+
+**Surface rules replaced the inline chain**: a top-down walk with a depth counter over the **uncarved** column, which is the reference's `preliminary_surface_level` and the reason a cave roof is not turfed. Depth is noise-driven rather than constant. Bedrock and deepslate became per-block rolls fading across a band, which is the one place the reference uses a dice roll rather than a noise field.
+
+**Three cave systems** — spaghetti, cheese and noodle — with cave mouths as a 2D field, so an entrance is a place rather than an accident. Carved at full resolution rather than on the lattice, which is a named divergence: at four-block resolution a tunnel rounds into a four-block blob.
+
+**Everything numeric was measured by a temporary startup probe and then deleted.** It found four things the acceptance bar could not: caves below sea level were being **flooded wholesale** (deep-rock hollow space measured exactly 0%), a single field gain left **humidity clamped** at an extreme almost all the time so forests came to under 7% of the world against badlands' 6.5%, **iron generated more often than coal**, and coal's band was centred at y 40 — *above* the mean surface of 30 — so most of it was in open air. Final measurements: surface 9 / 30.3 / 80, 24.7% of columns below sea level, 18.0% of deep rock hollow, all twenty-seven biomes present, and nine ores within about 20% of the reference's per-chunk figures.
+
+**Water fills what the uncarved terrain left empty**, not what is empty now. One word, and it is the difference between a sea and a drowned world — it is what aquifers buy the reference and it costs us nothing.
+
+**A resumed save is lifted out of terrain if the new rules buried it.** A creature can climb out and the player cannot, so a changed generator would otherwise read as a broken game.
+
+### ✅ M20q — The rules that keep a generated world sane · **Core**
+
+**2026-08-07.** Three bugs found by playing M20p, reported in one message: *"no random chunks of land floating mid-air, no random stone rings at surface, no peaks that are only snow"*. Four more Opus-5 agents against the same local dump. **All three were the same shape — a mechanism the reference has that the port had dropped.**
+
+**Floating land was arithmetic, not a glitch.** A floating island needs the density above the surface to go negative and then positive again, so it is purely the 3D noise's vertical slope against the terrain ramp's. The reference's noise carries amplitude proportional to wavelength, giving every octave the *same* slope and an RMS near 0.010 per block; its ramp is `factor/128` above the surface and its `factor` sits at 1.56 or above everywhere but two spline leaves. **Detachment there is impossible rather than rare.** Ours ran `{1, 1, 0.5, 0.25}` at a 52-block vertical wavelength — slope near 0.10 — against ramps of 0.02 to 0.08. The noise beat the ramp everywhere.
+
+**The fix goes further than the reference, deliberately.** Terrain is now **single-valued**: everything at or below the highest solid sample in a column is ground. The reference does not need that, because it has the margin; our world is a quarter as tall and an island is a much larger fraction of our sky. It costs overhangs and arches. It buys a would-be island becoming a **spire attached to the ground**, an exact depth counter for the surface rules, and an ore air-exposure test that is a height comparison. `quarter_negative` came out with it — with single-valued terrain it makes towers, not overhangs. The noise was reshaped to the reference's red-noise spectrum at a 210-block vertical wavelength anyway, because the shape is right even when it is no longer load-bearing.
+
+**The stone rings were one word.** `windswept_hills` is **grass with stone patches**, not a slab of stone: the reference places stone only above its own noise threshold and then the branch simply *ends*, falling through to the generic grass rule. Ours had `top = Stone` on a biome occupying the reference's own narrow erosion band `[0.45, 0.55]` — and a narrow interval of a smooth 2D field is an annulus, so it came out as contour rings on the landscape. `Biome::patch` and `patchThreshold` implement the no-else pattern. Measured after: plains 99% grass, savanna 100%, meadow 97%.
+
+**The white peaks were a missing rule called `steep`.** It compares a neighbouring column's height and is true at a 4-block difference; it is the reference's *only* slope-driven bare stone, and `jagged_peaks` is literally "steep → stone, else snow block". A port without it gets a solid white blob. Implemented off a per-chunk height array with a one-column border. It fired on 4% of peak columns at first — because our summits were too smooth — so jaggedness moved from a 44-block wavelength to 16, which is the reference's point in sampling its jagged noise far finer than anything else in its router. Jagged peaks now measure **31% stone, 68% snow**.
+
+**The snow line became one rule.** `freezesAt` carries the reference's altitude temperature lapse, rescaled: 0.00125 per block above y 80 of a 384-block world becomes 0.0173 above y 29 of a 96-block one. Twenty-seven `snowLine` numbers deleted.
+
+**Two things the research settled that are worth knowing.** **Snow blocks do not fall** in either edition — the player's guess was wrong, but the symptom was real and had a different cause. And **Minecraft has no post-generation validation of any kind**: nothing removes unsupported blocks or deletes floating geometry, which is why fresh worlds contain suspended gravel until someone disturbs it.
+
+**The probe stayed, as a setting.** `worldgen_probe=1` censuses the world and exits: surface range, sea share, every biome's share and top block, cave volume, ore counts, and the count of solid cells above the terrain — which must read zero. Deleting it was the plan; it is a better tool than a one-off, for the same reason `tools/simulate-swim.ps1` is. Its own sanity check is printed beside the answer: 22,097 tree cells above the surface, proving it can see up there while floating terrain reads 0.
+
+### ✅ M20r — Rivers, spires and the last of the banding · **Core**
+
+**2026-08-07.** Three more playtest reports against M20q, with a screenshot: *"a curved line of stone with patches of sand"*, *"random dirt peaks hovering over the water — i js saw a sheep walk off the edge into the water"*, and terrain that *"looks random but at the same time, not random"*. Four agents launched at once this time rather than one after another.
+
+**The ribbon was a dry riverbed, and the reference's answer is startling: `river` is not named in its surface rules at all.** A river column falls through the entire tree to the generic terminal rule and comes out **grass**. Gravel is reachable only after both of its water tests have failed, which cannot happen with no water overhead — and **sand never appears on a riverbed there in any circumstance**. Ours painted the biome's own top block regardless of the waterline, so a channel that never reached the sea drew a long ribbon of gravel and sand across dry grassland. The ocean and river rows now carry grass and dirt, and bed material is chosen by depth below the waterline instead.
+
+Worth knowing: **the reference does not guarantee a river holds water either.** There is no river branch in its offset spline, and at low erosion inland its river band sits at y 89–108 — it ships dry, grass-covered river strips through its mountains, and they are invisible purely because of that fallthrough.
+
+**The dirt platforms were the spires M20q had knowingly created, and the cause was one number.** Single-valued terrain converts a would-be floating island into a column attached to the ground; where the island's footprint is small that is a sheer-sided pillar, which is what the sheep walked off. The would-be islands were still being produced because **`factor` ran down to 1.15 across the entire low-erosion third of the erosion axis** — ±19 blocks of noise displacement. The reference holds **5.1–6.3** there and drops to 0.625 only inside a narrow window of high peaks-and-valleys. Ours now runs 4.6–6.2 with the rugged value confined to the same window, which is also where jaggedness already lived — ruggedness and cragginess turn out to be one decision, and splitting them is how a third of the world ended up rugged.
+
+**The banding was the density lattice, and the fix was to delete it.** An interpolated density is piecewise-linear across a cell, so its contour lines cluster on the cell boundaries and a gentle slope comes out banded every four blocks — regular enough to read as a pattern rather than as landscape. The reference needs a lattice because its terrain is genuinely 3D and it cannot afford a density evaluation per block; we gave up overhangs when we made terrain single-valued, so it was buying nothing but its own artefact. Height is now computed directly per column, exact for every block. It is also **8x faster** — a column costs one noise evaluation instead of four climate samples and fifty-two density samples.
+
+**Measured after**: floating terrain 0, pillars 0, dry beds 0, jagged peaks 38% stone against 60% snow, plains 99% grass, savanna 100%, meadow 98%.
+
+**Deliberately not taken:** the reference's `disk_sand` / `disk_gravel` / `disk_clay` decoration pass, which is its legitimate source of patchy sand near water. The complaint was that there was already too much random patchiness, so adding more would have been answering the wrong question.
+
+### ✅ M20s — Depth: blocks, water, weight, and the last of the playtest bugs · **Core**
+
+**2026-08-07.** A long single session driven almost entirely by playtest reports, plus one open-ended instruction — *"no being stingy on adding stuff"*, *"i don't care how long it takes or how big it is"*. Everything below shipped with both presets clean and zero validation errors.
+
+**Forty-eight block types in one go, as a table rather than as rows.** `kExtraBlocks` is indexed by `id - kFirstExtraBlock` and carries name and texture layers, so a new block is one entry instead of eight `case` labels spread across as many switches. Deepslate and cobbled deepslate, the polished and brick stone families, sandstone variants, prismarine, sea lantern, coarse dirt, more flowers, kelp and seagrass. Sixty recipes and every texture staged from the reference dump — no hand-authored art, which is the rule I had broken earlier the same session.
+
+**Waterlogging, as one bit per cell beside the block array.** Kelp and seagrass were being written *over* the water they grow in, leaving plant-shaped holes in the ocean. A `KelpSubmerged` twin per block was rejected: it doubles those ids and forces every existing predicate to learn about the twin. `canWaterlog` is a **shape** test — Cross, Slab, Stairs — so a new plant inherits it with nothing to remember. This is what forced `kChunkFormatVersion` to 2, and that in turn is what made the fix reach worlds already on disk.
+
+**Falling blocks became an entity.** Sand and gravel detach on a 60 ms scheduled check and fall under `kGravity = 16.0f`, deliberately **half** the player's, because a block falling at player gravity reads as a dropped frame rather than as weight. It tests every cell it passes through, so a long fall cannot tunnel a one-block ledge.
+
+**Ore veins were rewritten as placed features.** A playtest found a "humongous" coal seam, and a noise threshold had no number to answer with because it has no notion of size at all. `placeVein` is the reference's `OreFeature` — a spindle of overlapping spheres — so the maximum is stated rather than emergent. Density held within 3% of the previous measurement.
+
+**Eleven foods and creature loot**, sharing the furnace's existing raw→cooked chain. **Four tree species** with per-tree shape variation. **Creature range now follows render distance**, with population scaled by *area* and clamped, which put 44 creatures at 9 chunks with GPU time at 1.55 ms.
+
+**Fog became radial.** It had been measuring `gl_Position.w`, which is depth along the view axis rather than distance from the eye, so the world curved. Fixing it needed the eye position in a push constant (144 bytes against this GPU's 256-byte limit, now asserted at startup) and then paid for itself: culling beyond the fog took draws 308 → 235 and triangles 1.30 M → 1.04 M.
+
+**Four smaller playtest fixes**: the chest texture used the lid's underside because Minecraft's box UV puts DOWN at `u+d` and UP at `u+d+w`; ice physics were dead because `slipperiness` named `PackedIce` alone and three other rules asked the same narrow question; blue flowers dominated because a smooth field mapped across an array concentrates on its middle indices; and a struck **wandering trader ambled away instead of fleeing** — `panicSpeedScale` multiplies our `runSpeed`, but the two humanoids carried the reference's 0.6, which is measured against Bedrock's *single* `movement` speed. One column, two units. Both are now 1.0.
+
+**Measured after**: SNOW-ON-WARM 0, PILLARS 0, FLOATING-DECOR 0, all eight flower species present, 1246/1246 seabed plants waterlogged, largest coal vein 23 against a theoretical cap of 23.
+
+### ✅ M20t — The double chest, a wider id space, and the first thing that flies · **Core**
+
+**2026-08-07.** One instruction covering three requests — *"fix the chests… then we could add more blocks and items? like A LOT MORE, then we could introduce the bees"* — followed by *"go for widening"* once the id space ran out mid-way. Both presets clean, zero validation errors throughout.
+
+**A double chest is textured as one wide chest**, latch in the middle of a single long lid. It cost **six** texture layers and **zero** block ids, because the half is derived rather than stored: `chestHalfFor(facing, dx, dz)` answers Left or Right, `gatherVolume` packs it into two spare bits of the flags array the waterlogged bit already occupies, and the mesher passes it through. The same "derive it, never remember it" rule the pairing itself follows. The outer side face was measured against the single chest's and is **pixel-identical**, so it is reused rather than duplicated.
+
+> Mojang's `normal_left.png` is the viewer's **right** half. Settled by per-column luminance, not by reading the filename — `normal` carries a border at both ends, each half at one end only, and the buried face is the transparent one. Trusting the name puts the latch on the outside corners.
+
+**109 blocks and 49 items**, taking the catalogue from 148 to 370. Deepslate ore forms that generate in place of their stone twins, sixteen dyes, ten foods, twenty-three materials. All 390 textures staged from the reference dump by one script; none hand-authored.
+
+**`BlockId` was widened to `uint16_t` and `kFirstToolItem` moved 256 → 4096.** Three free ids were left. Reclaiming the water levels and stair orientations into a side array would have bought back about thirty — a year's worth — in exchange for unpicking three predicates, adding a second per-cell array to save, and having the same conversation again later. Widening costs one byte per cell **once**: +34 MB at render distance 8, against 328 MB total.
+
+**The save migration is the first that converts rather than discards.** A version-2 chunk is good data with a narrower field, so `load` reads its 32,768 single-byte ids into a scratch buffer and widens them, instead of regenerating over the player's building. Old inventories are shifted by `upgradeLegacyItemId`. Proven with four fixtures forming two positive/negative pairs — a valid legacy chunk accepted, a wrong-seed one rejected, a correct v3 accepted, and a v3 carrying only 32,768 body bytes reported truncated, which could only happen if the reader had genuinely moved to 65,536.
+
+**The bee, and with it the flying archetype** — the last of M20b. `flies` is the airborne mirror of `swims`: no gravity, a heading in three dimensions, no pathfinder, and `steerInAir` is `steerInWater` with the water test deleted. Three things a flier needs that a swimmer does not: a **2–6 block height band** (a flier has no surface to hold it down, so without it a bee climbs on its first upward roll and never returns), a **dive angle while chasing** (the band belongs to `FlyWander`, which is not running while `MeleeAttack` holds the movement controller), and **no knockback** (its own locomotion owns every axis of its velocity, so an impulse is fought rather than applied). Neutral, stings for 2, alerts its hive at 20 m, seeks flowers on the wander timer, and turns red-eyed when angry — a second skin row chosen from `target`, differing in exactly 22 measured texels.
+
+**Three bugs the user found by playing, all in code that had already passed a clean build.** Eight beehive ids each got their own catalogue row, because `isCanonicalBlockItem` names the families that spend ids on state and the hive was not among them. The blow's vertical gate read `abs(toPlayer.y) < species.height` — a symmetric test measured against the *attacker's* height, so a half-block-tall flier could chase, arrive, face you and never sting; the correct asymmetric overlap was already computed three lines above. And the worldgen probe's floating-terrain counter named tree blocks by id, so every spruce and birch added since counted as floating land: **8031 phantom failures against a world that was fine.**
+
+### ✅ M20u — A large bug sweep across the new blocks and items · **Core**
+
+**2026-08-08.** *"go do more bug sweeps and checks. make sure the scale is as large as possible."* Two batches had added ~160 blocks and ~90 items, and the tables that describe them had never been checked against each other or against the art. **Ten real faults, all in code that had passed "both presets clean, zero validation errors" many times.**
+
+**The method is the deliverable.** A temporary startup pass walks every block, item, recipe and species and cross-checks the tables **against the loaded texture array** — cutout blocks whose art has no holes, opaque blocks whose art is see-through, layer indices out of range, duplicate names, round trips through every family accessor, blocks that mine into nothing, recipes wanting items outside the catalogue. Beside it: scripted world scenarios on six separated platforms, a slot-operation fuzz (500 benches × 40 operations, asserting the item multiset after *every* operation), and a **"the world must be byte-identical six seconds later"** snapshot over 442,368 cells, which is the general form of the water-flicker hunt that once took most of a session. All of it removed afterwards; what it checked is recorded in `LESSONS.md`.
+
+**The two worst were invisible.** **The axe, shovel, sword and hoe could not be crafted at any tier** — sixteen recipes. A pattern is stored trimmed to the cells it fills, because the matcher compares it against the bounding box of what is in the grid; the `tool()` helper padded its 3×3 picture instead, so only the pickaxe — the one shape that fills all three columns — ever matched. And **about two hundred appended blocks dropped nothing when broken by hand**, because `harvestTier`'s second-run `default:` returned the wood tier for every one of them, against the rule its own comment states two lines above. Both are the same shape: a rule written down once and re-implemented somewhere else.
+
+**"Holes in the water", reported mid-sweep, was not the bug it looked like.** Waterlogging already let a plant share a cell with water, so the obvious reading was that lily pads had missed that fix. They had not — a pad genuinely sits in the air cell above the surface. **A fluid drew its face only where the neighbour was literally `BlockId::Air`**, so any non-cube standing beside or above it — lily pad, torch, fence, glass, plant — erased the surface there, because the neighbour does not supply the fluid's own face either. `occludesFace` was the question all along. Measured before the fix: **204 erased faces in the loaded region, every one a lily pad**; kelp and seagrass were already correct. The pad also stopped being a plant *standing in* a cell and became **`BlockShape::Flat`**, resting on the water — `restsOnWater` is the one block whose support is not solid, so `needsSupportBelow` became a question with two answers.
+
+**The rest.** A roof left the whole column under it at full sky light, because removal used "dimmer than its source" and sky light falls straight down at *equal* strength — a flood fill and its inverse are one algorithm written twice, and every shortcut in the forward direction needs its mirror. Two falling blocks in one shaft crushed each other into a dropped item, because the resting scan asked only what was *under* a cell and never whether the cell itself was free. The cactus rendered as an opaque cube over art carrying the reference model's inset as transparency. Coarse dirt and TNT sat in the Items tab. The three slimes and three magma cubes all answered to one name, so six spawn eggs were indistinguishable. And `lootFor` had six rules for sixty species — **the salmon dropped cod** — which is why most of the food and mob materials in the catalogue had no source at all; it now covers about thirty species and carries two drops each.
+
+**Verified:** both presets clean at `/W4`, zero validation errors, every runtime scenario green, 20,000 slot operations conserving every item, 121 fps, catalogue **538 items / 60 recipes / 23 without a table**, saves and settings restored in the same command.
+
+> **Known and deliberate:** about thirty-two catalogue entries still cannot be obtained, and every one waits on a *system* rather than a recipe — farming, bee harvesting, a few interaction drops, and the nether/end. A further nineteen (grass, the ores, deepslate, bedrock) are creative-only on purpose, because they drop a resource rather than themselves exactly as the reference does. Recorded in `CRAFTABLE.md`.
+
+### ✅ M20v — Making the craftable things craftable · **Core**
+
+**2026-08-08.** *"go check crafting recipes and make sure crafteable items are crafteable. if there are items that should be crafteable but are unable to craft that's a bug that needs fixing."* The recipe table went from **60 to 340**, and the entries with no way to obtain them from **88 to 32**.
+
+**Only oak did anything.** Every wood makes its own planks now (log *or* stripped log → 4), and from those planks sticks, a crafting table, a chest, a note block, a jukebox, a fence, a bowl, a bookshelf, a smithing table, a smoker and all five wooden tools. Before this, spruce and birch had a wrong-rate four-logs-to-four-planks recipe and the other eight woods had **nothing at all** — a spruce forest was scenery. **Stairs and slabs had no recipe of any kind** and were creative-only.
+
+**The colour chain did not exist.** Twelve flowers each give their dye, bone becomes bone meal becomes white, ink sac gives black, lapis gives blue, cactus smelts to green, and the reference's nine mixes make the rest — which then feed wool (from string), terracotta (from smelted clay) and concrete powder, with a dyed terracotta firing into its glazed form. That is sixty-four blocks that had no source between them.
+
+**Most of the table is generated in loops**, because the families repeat: eleven woods × eleven shapes, sixteen colours × three families, five tool shapes × fourteen materials. Hand-written that is three hundred rows and three hundred chances to paste the wrong ingredient into one cell. **The guard is the same one that caught the tool bug**: feed every recipe's own pattern back through `craftResult` and assert it makes itself, and key every pattern to catch two recipes claiming the same shape. Measured across all 340 — **0 broken, 0 shadowed**.
+
+**Four blocks now drop what the reference says they drop**: clay gives four clay balls (which feeds brick and the bricks block), glowstone gives dust, an amethyst cluster gives shards, and a berry bush gives berries.
+
+> **Named divergence: a recipe cannot mix two woods.** The reference matches an item *tag*; `Recipe::pattern` holds concrete ids, and the craftable check relies on no ingredient naming a set. Four oak planks make a crafting table; two oak and two spruce do not.
+
+**Verified:** both presets clean, zero validation errors, **538 items / 340 recipes / 125 without a table**, 120 fps with the larger table, saves and settings restored in the same command.
+
+### ✅ M20w — Six hundred and ninety-nine blocks, and the bow · **Core**
+
+Two halves. *"add more blocks and items ... filling in recipe gaps or further progressing the game ... make sure the scale is enormous"*, then *"i think it's time to add the bow and arrow and projectile physics"*.
+
+**Every material now has stairs, slabs, walls, fences and gates — and not one of them needed a texture.** There was exactly one stair family in the game (cobblestone), one slab (stone) and one fence (oak planks); the reference has these for about fifty materials, and their absence was the largest single hole in what you could build. `ShapedFamily` is the whole mechanism: a row carries a **parent block** and a name, and `shapedParent` forwards the texture, the tool, the hardness, the blast resistance and whether it burns. So **640 blocks arrived without a single new image and without a single new row in any of those four tables**. 52 stair families, 55 slabs, 25 walls, 12 fences, 11 gates. A gate swings on right-click; walls connect to walls and gates but never to fences, which falls out of asking about the *shape* rather than the material.
+
+The three shapes that already existed are **family 0 of their own kind**, because their ids are in saved worlds. That is the one branch in `stairsAt`, `slabAt` and `fenceAt`, and it is why the run lengths subtract a family.
+
+**Then the bow.** A real projectile system, on the reference's own numbers and its own unit: `Projectiles` runs a **fixed twenty-hertz accumulator**, because every figure the reference publishes is per *tick* and multiplying by an inertia of 0.99 once a frame at 120 fps is six times the drag it is meant to be. That fixed step also buys the cheapest real verification available here — the closed form `v(t) = 0.99^t (v₀ + 5) − 5` holds exactly, and a temporary probe measured the drift at **one part in a million** over forty ticks.
+
+What the research changed about the obvious implementation, all of it recorded in `RESEARCH.md` §17:
+- **The draw is quadratic, not linear.** `p = (f² + 2f)/3`, and below `p = 0.1` nothing fires at all — no arrow spent, no wear taken. Four `static_assert`s pin the curve to the reference's own published damage table.
+- **The visual pull and the physics charge finish at different times** — the picture is done in half a second, the charge takes a full one. Driving the shot off the texture stage would ship a bow that fires full power at half draw.
+- **Damage is a function of the speed it is doing *now***, never of how fast it was launched. `impact_damage.damage` is zero in the shipped data and `power_multiplier` is the whole of it, so a long shot lands softer and an arrow through water lands for almost nothing.
+- Rounded up **before** the critical roll, which Mojang added an explicit flag for.
+- Spawned at **eye height less a tenth**, not at the eye.
+- The shooter's momentum carries into the shot, but the vertical part only while airborne.
+- Blocks are swept before entities, so an arrow cannot hit something standing behind a wall. The sweep is the whole segment, so at three blocks a tick nothing tunnels — and it reads `collisionBoxes`, in a **new function beside `raycast` rather than a flag on it**, because that one reads `selectionBoxes` and answers a different question.
+
+**The skeleton family finally have something to shoot.** `swingsArms` already recorded that they are archers and deliberately do not mime a sword blow; `shootsArrows` is the other half of that split, and `RangedAttack` is a real behaviour row — it backs off inside four metres, closes outside nine, and looses once a second at Bedrock's own `mob_arrow` power of 1.6 blocks a tick with the Normal-difficulty spread. `Creatures` hands the launch over rather than firing it, exactly as it hands over loot.
+
+**And a second batch of blocks came with it**: sixteen stained glass, seventeen glass panes and iron bars on a new thin `Pane` shape, sixteen carpets (a carpet is its wool laid flat — another `ShapedFamily`, another zero textures), a **ladder you can actually climb**, and five light sources — lantern, soul lantern, soul torch, redstone torch and end rod. Flint now drops from gravel one time in ten, rolled off the block's own position so it stays a pure function of what was broken, because without it an arrow cannot be made at all.
+
+**Verified:** both presets clean at `/W4`, zero validation errors, **1094 blocks, 748 catalogue items, 592 recipes — 0 broken, 0 shadowed**, 121 fps, saves and settings restored in the same command. **Not verified by eye — the user must playtest**: hold right-click with a bow and watch the icon change through three stages, loose it and watch the arrow arc and stick, climb a ladder, and stand a skeleton on a hill after dark.
+
+### ✅ M20x — The jungle, and vines · **Core**
+
+*"add in vines as well ... research the jungle biome and apply jungle biome into the game, in order of first jungle biome, then vines on trees, then jungle biome blocks."* Built in that order.
+
+**Three biomes, and the table needed a new axis to hold them.** The reference splits `jungle` from `sparse_jungle` and `bamboo_jungle` on the **sign of weirdness** — and `ridges`, the field our biome rows already had, folds that sign away: it reaches −1 wherever weirdness crosses zero from *either* side. So a biome that exists only on one side of the crossing could not be written at all until `Biome::weirdness` was added. The crossing is at **−0.05, not zero**, because vanilla slices weirdness into thirteen bands and tests whether a band's *maximum* is below zero.
+
+The jungle does nothing to terrain shape — its biome JSON has no `depth`, no `scale`, no height of any kind — which is exactly the architecture M20p moved to, and it is not named anywhere in the surface-rule tree either. So it falls through to grass and dirt, and the podzol in a bamboo jungle comes from the bamboo feature rather than from a rule. **That is the `no else` pattern holding.**
+
+**Trees.** `TreeShape::Jungle` is one shape carrying three trees in the reference's own proportions: bushes 45 %, the two-by-two giant 15 %, a fancy oak 10 %, and the small jungle tree taking the rest. A bush is one jungle log under a ball of **oak** leaves — the reference's own choice, and what stops a jungle floor being one flat green. The giant's trunk is genuinely 2×2, capped with a single block, with branches off its top half.
+
+**Vines are sixteen ids and no more.** One per combination of the four sides a vine clings to, which is Bedrock's own `vine_direction_bits`; Java spends a fifth bit on the sheet under a ceiling, and Bedrock derives that from whether anything is above — so we do too, and it costs nothing. They are climbable, flammable, washed away by water, and **collected only by shears**, which needed a `ToolKind::Shears` and a `yieldsDrop` that asks what *kind* of tool you hold rather than how good it is. Shears are deliberately no faster than a bare hand; the axe is the quick tool.
+
+On a tree they follow the reference's two decorators exactly: `trunk_vine` puts a vine on **each side of each trunk log at 75 %**, and `leave_vine` hangs one off a quarter of the canopy's outer positions and **extends it up to four blocks down**. That second number is the whole reason a jungle has curtains rather than fringes. Measured across forty jungle chunks: **9,995 vines**.
+
+**Cocoa** is twelve ids — four facings times three ages — hanging off the lowest three logs of a *small* jungle tree only, at the reference's 20 % per tree and 25 % per face. A ripe pod gives three beans, anything younger gives one, and **cocoa beans are the reference's own brown dye**, which ours had been standing a brown mushroom in for. Measured: 32 pods across those same forty chunks.
+
+> ⛔ **Two bugs found by measuring rather than by looking.** Cocoa generated **zero** at first: the trunk vines went on before it, and a cell already holding a vine refuses a pod — so nothing in the world carried one. And the worldgen probe **crashed the process outright** with `0xC00000FD`, silently, because a chunk is a hundred kilobytes and three of them beside the per-biome block table overran the thread's stack. It read as "the probe does nothing", not as a crash.
+
+> ⚠️ **The probe's own window was too small to trust.** At a 2048-block span it reported 176 jungle columns with *every one* on the same side of the weirdness crossing, which looks exactly like a broken axis. It was one noise cell: humidity and weirdness have wavelengths near a thousand blocks, so the sample held about four of them. Widened to 16,384 blocks the split is 1184 of 2064 — and the biome shares are **Jungle 1.34 %, Sparse Jungle 0.81 %, Bamboo Jungle 0.65 %**.
+
+**Verified:** both presets clean at `/W4`, zero validation errors, **751 items / 596 recipes**, 120 fps, all thirty biomes present in the census, probes removed, saves and settings restored in the same command.
+
+### ✅ M20y — Shapes told the truth · **Core**
+
+A playtest round with no new blocks in it. Everything here was already in the game and quietly wrong, and every item on the list came from someone looking at it.
+
+- **Models grew face rectangles.** `ModelBox` carried one `uv` for all six faces, so a lantern wore its glass on its lid and its cap's 4×4 plate was squashed into a 4×2 sliver. The reference's `template_lantern` and `end_rod` are transcribed face by face now, the handle is there as two crossed cutout quads, and the end rod's slot picture is the model rather than a two-texel crop of its sheet.
+- **A derivation applied to one axis and not its twin.** The shape pass read `flipV` off the face tables and wrote U raw, mirroring the **+X and −Z faces of every shaped block in the game**. Nothing had ever shown it, because no shaped block carried an asymmetric texture until lit TNT — "the n is reversed". A `constexpr` proof now pins both flips to the tables.
+- **A connecting shape cannot be answered from an id.** `collisionBoxes(pane)` had to assume every arm, so a lone pane drawn as a two-texel post was collided with and aimed at as a full cross. `connectionBits` owns the reaching rule, and `worldCollisionBoxes`/`worldSelectionBoxes` ask it. Two joined panes also each drew the end cap at the shared cell wall — coplanar quads fighting over one depth, which is the border line that ran down the middle of what should be one sheet of glass.
+- **A face is buried only when all of it is.** The centre probe deleted the ring of lantern lid showing round the cap, so you could see through the top of every lantern.
+- **A blended fragment still writes depth.** The stack on the cursor punched a hole through the catalogue behind it, because the catalogue is a later draw. A third screen layer fixed it.
+- **Thrown items.** The void pearl is a real arcing projectile with the reference's own numbers — no drag at all, which is why it reaches 45 blocks thrown straight up — and lands the player where it stopped or nowhere. The egg, which did nothing at all before, throws on the family's own drag and hatches one throw in eight.
+- **Two numbers.** Blast knockback 20 → 7 blocks a second, because a per-tick reference velocity is not a sustained one; lit TNT derived as pure white rather than 65 % toward it.
+- **The catalogue got its search field** (INTERFACE slice 7), because 640 new cut shapes had buried everything else: TNT sits at row 16 of 58 in a card that shows seven. Matching is case-insensitive at the **start of any word**, so `st` finds Stone and Stone Stairs and not Sandstone.
+- **A first-person held-item view was built here and removed the same day**, on sight — *"the hell is this grass block in the bottom right corner??"*. The choppy-bow request it answered is served inside the hotbar slot instead.
+
+**Verified:** both presets clean at `/W4`, zero validation errors on a 24 s debug soak, 120 fps in release, a probe over all 769 shaped blocks reporting no bad model rectangle and no wrong pane arm count, probe removed, saves and settings restored in the same command.
+
+### ✅ M20z — Text, focus and motion · **Core**
+
+The round after it, and the same shape: nothing new, everything already there and quietly wrong. Four of the seven were the *same* bug wearing different clothes — something drawn once and never drawn again, or drawn on the tick rather than on the frame.
+
+- **The text is Mojang's.** `ascii.png` staged beside the exe, and **our own placeholder regenerated in the reference's exact layout** — 128×128, a 16×16 grid of 8×8 cells indexed by codepoint — so either is a drop-in for the other. It is proportional, and the advances are **measured off whichever atlas loaded** rather than written down: rightmost opaque column plus one texel, which reproduces the reference's published widths exactly. `appendText` gained the reference's drop shadow.
+- **A blended fragment still writes depth, for the third time in two days.** Glyph quads were drawn at full cell width while the pen advanced by the glyph's own width, so every character after the first lost its left two columns — `h` rendered as `n`. Cropping each quad to its advance puts them edge to edge, which is what the old monospace atlas got for free.
+- **The search field became readable.** A pale border round a near-black recess with white shadowed text, a blinking one-texel caret, and **focus that follows the mouse click** — until it is clicked into, the hint shows, the caret is hidden and the keyboard belongs to the game.
+- **Projectiles are drawn between ticks.** The physics stays at the reference's twenty a second, which is load-bearing; a 120 fps screen was showing each of those positions six frames running. Every shot keeps its previous tick state and the mesh blends by the accumulator's remainder.
+- **A thrown item is the same solid object it would be on the floor.** The sprite extrusion moved out of `ItemEntity` into `item/SpriteModel.hpp`, shared by both callers; a pearl was two crossed flat quads and is now 54, billboarded, with real thickness.
+- **The bow's draw shows.** `hudDirty` was set only when the draw started and ended, so the hotbar was built once and not again until the arrow left — the same bug as the dig bar. The animation itself is the icon **shrinking dead centre in its slot**; sliding it back read as the bow falling into a corner.
+- **A precision trackpad could not scroll the catalogue at all**, because the scroll delta was truncated to a whole number every frame.
+
+**Verified:** both presets clean at `/W4`, zero validation errors, and each change measured before its probe came out — glyph advances against the reference's table, the drawn projectile x changing every frame, 54 quads at one texel of thickness, and the bow icon centred to 1e-5 while shrinking at every step.
+
+### ✅ M21 — Survival systems · **Core**
 Health, damage, hazards, and resource pressure. **Blasts and blows already compute damage and apply knockback; the damage is discarded** until there is a player to apply it to, which is the first thing this milestone changes.
 
-### ⬜ M22 — Audio · **Core**
+> **▶ Built 2026-08-08.** `world/Survival.hpp` is the single owner of every number in it — twenty hearts, twenty hunger, half a second of invulnerability, three free blocks of fall, the exhaustion rates, the two regeneration speeds and the food table — and it is header-only, so nothing had to be registered anywhere to add it.
+>
+> Damage follows RESEARCH §2.4's **overwrite rule** rather than a plain cooldown: a bigger blow inside the half-second window still lands, but only for the difference. That is the difference between a creeper being survivable and being trivial, and the worked example in the research (7, then 12, lands 5 more) reproduces exactly.
+>
+> Hunger drains by **exhaustion**, not by time — four points of it spend one leg of the bar. Sprinting is refused below 6, regeneration needs 18, and a full bar with saturation left heals every half second instead of every four. Below 18 the food bar is the only thing keeping you alive; at zero it starves you down to half a heart and stops.
+>
+> Hazards: fall damage above three blocks, drowning, suffocation, fire, lava, burning after leaving it, cactus, and the void. Dying drops the inventory where you stood and respawns you after 1.6 seconds.
+>
+> Eating is **held, not clicked** — 1.6 seconds with the right button down, and a full bar refuses. Thirty-three foods carry a hunger and a saturation value.
+>
+> The three bars are `hud/StatusBars.hpp`, drawn from the same sheet as everything else; the strip grew to 1355 px to hold eight new 9×9 icons. `SavedPlayer` gained four fields and **`kFormatVersion` went 1 → 2**, so an older save loads with full health rather than dead.
+>
+> **Verified:** the §2.4 example exact; a hundred blows in one window land once; falls of 3, 4 and 23 blocks cost 0, 1 and 20; a 30-block drop killed and respawned on time; the bars measured 160 and 124 vertices, which is exactly 40 and 31 icons.
+>
+> **Found while testing:** twelve foods were edible and worth nothing — including rotten flesh, cooked rabbit and cooked salmon, all three of which RESEARCH §3.3 actually lists.
+
+### ✅ M22 — Audio · **Core**
 
 First audio dependency. Positional sound, ambience, music. Deliberately late — it is genuinely independent of everything above.
+
+> **▶ Built 2026-08-08**, brought forward from after M21 at the user's request: _"just use whatever sound has been placed inside reference, use mojang's noises and music and all. i'll download some kind of music editor later and make custom tracks later."_ Then, on seeing the first pass: _"add more sounds and noises."_
+>
+> **miniaudio** is the dependency — one header, public domain, and it opens the operating system's own audio device on every platform we care about. `stb_vorbis` decodes the `.ogg` files and lives in a translation unit of its own, because it is C and warns like it.
+>
+> `engine::AudioEngine` mixes 48 voices at 48 kHz stereo and knows nothing about the game: a voice is a sample, a position, a volume and a pitch. Distance rolloff and a shallow left-right pan happen in the mixer; **the one mutex in the project lives here**, because the audio callback genuinely does run on someone else's thread and that is the case the no-locks rule was always going to have.
+>
+> `game::Sounds` owns the mapping. **Fifty-seven events and thirty-four creature voice families**, each with up to eight recordings picked at random and pitched slightly differently every time, which is most of what stops a repeated noise reading as a loop. Blocks are grouped into ten **materials** rather than listed, so eleven hundred blocks are covered by a dozen tests and a new one inherits the right footstep the day it is added — and a cut shape asks `shapedParent`, so all six hundred stairs and slabs came free.
+>
+> A creature's voice is a **family, not a species**, for the same reason: fifty-seven creatures share thirty-four voices, and a baby is pitched up from the adult's own recording rather than needing its own. Creatures report what they said on the same hand-off `takeLoot` already used, so `Creatures` still has no idea audio exists.
+>
+> Hooked up: footsteps, digging, placing, being hurt, the two fall sounds, breaking the water's surface, cave ambience when the sky cannot see you, eating and the burp at the end, the bow (pitched by how far it was drawn), an arrow biting wood versus a snowball bursting, explosions, a lit fuse, flint and steel, four bucket sounds, chest lids, gates, picking things up, and every creature's idle, hurt and death.
+>
+> **The recordings are staged, not shipped** — `tools/make-reference-sounds.ps1` writes 497 files into `sounds-reference/` beside the executable, which is gitignored and never under `assets/`, exactly like the block and creature art. A missing folder is not an error; the game simply runs silently.
+>
+> **Verified:** all 497 staged files decoded, all 57 events and all 102 voice banks found recordings, and the only silent species is the frog, on purpose.
+>
+> **Found while testing:** a stale instant-eat branch had survived M21 — food was swallowed whole on the first frame, so the 1.6-second timer above it could never finish. Both halves compiled, and the survival tests had called `feedPlayer` directly rather than through a click.
+>
+> **Not done:** no volume sliders yet (the two numbers are in `settings.cfg`; the screen is M34), no footsteps for creatures, and no custom music — the user is writing that themselves.
 
 ---
 
@@ -974,35 +1281,204 @@ First audio dependency. Positional sound, ambience, music. Deliberately late —
 
 > **Every effect in this phase and the next needs an off switch.** The target is a game that scales from "one core while multitasking" to "everything on", which means quality levels are part of each feature's definition of done, not a pass at M34. See "The End Product".
 
-### ⬜ M23 — Renderer restructure: PBR and deferred/hybrid · **Core**
+### ✅ M23 — Renderer restructure: PBR and deferred/hybrid · **Core**
 
-Physically based materials (albedo, normal, roughness, metallic, emissive), a G-buffer or visibility-buffer architecture, HDR rendering and tone mapping.
+Physically based materials (albedo, normal, roughness, metallic, emissive), a G-buffer architecture, HDR rendering and tone mapping.
 
 **Why first in this phase:** every subsequent effect assumes this structure. Retrofitting PBR after shadows, GI, and water exist means rewriting all of them.
 
-### ⬜ M24 — Sun, moon, and dynamic shadows · **Core**
+**Result**, shipped as six slices (`m23planning.md` has the full plan):
+
+- **M23a — the frame's data.** `FrameUniforms` moved everything constant across a frame out of push constants and into a uniform buffer, one per frame in flight, mapped once. `MeshPushConstants` fell from 144 bytes to **80**, which is well inside the 128 Vulkan guarantees — the device-rejection check that existed because we were over it is gone.
+- **M23d — the UI on its own pass** (deliberately before M23b, so bloom cannot bleed off the HUD). `hud.frag` and a pipeline with **no depth attachment at all**; screen geometry is sorted farthest-first by triangle instead. `GraphicsPipeline` took a `PipelineDesc` struct, because there are now seven pipelines and they disagree about nearly everything.
+- **M23b — HDR and tone mapping.** The world is lit into a 16-bit floating-point image, blurred into an eight-level bloom pyramid, and squashed back to the screen by one of four curves. **Khronos PBR Neutral is the default** rather than ACES, because ACES hue-shifts saturated primaries and a blocky palette is nothing but saturated primaries. F10 cycles, F11 toggles bloom.
+- **M23c — the material table.** One packed word per *texture layer* saying roughness, metallic and emissive, in a storage buffer. Keyed by layer rather than by block, so six hundred stairs and slabs inherit their parent's answer for free. A storage buffer rather than a texture, which sidesteps the trap that every texture here is `_SRGB` and a roughness of 0.5 gamma-decoded is 0.214.
+- **M23e — the vertex.** 40 bytes to **32**: colour packed to four bytes, and a new `surface` word carrying an exact face normal in three bits and ambient occlusion in eight. Face shade and ambient occlusion had been multiplied into one unrecoverable float; they are separate facts and are separate now.
+- **M23f — the deferred pass.** Opaque geometry writes what a surface *is* into three screen-sized images; one full-screen draw then lights every pixel at once with Cook-Torrance GGX. Sky, water and the block outline stay forward, because a blended normal is not a normal.
+
+**F12 cycles nine surface debug views** — albedo, normal, roughness, metallic, occlusion, emissive, light, distance. That is how a deferred renderer is debugged, and it is what found the material table's two faults.
+
+> ⛔ **The bug worth remembering: the whole world went purple.** The G-buffer shader kept a line multiplying the texture by the vertex colour. For world geometry those three channels are **sky light, block light and face shade**, not a tint — so green was scaled by block light, which is zero away from a torch. The old forward shader had the identical line and then overwrote the result further down, so it had never mattered. **When you move a line into a new shader, check whether the old one later overwrote it.**
+
+### ✅ M24 — Sun, moon, and dynamic shadows · **Core**
 
 Day/night cycle, directional lighting, cascaded shadow maps.
 
-### ⬜ M25 — Sky and atmosphere · **Core**
+**Result:** the sun casts real shadows, and so does the moon.
+
+**Cascaded shadow maps.** The world is rendered from the sun's point of view into a depth-only image, split into two to four **cascades** — slices of the distance in front of the camera, the nearest small and sharp, the furthest large and coarse. They are layers of one image, so the lighting pass picks between them with an index. `G` cycles quality (off / 1024×2 / 1536×3 / 2048×4, reaching 64 / 128 / 192 metres); `shadows` in `settings.cfg` is the same number.
+
+Three decisions that are not obvious and should not be undone:
+
+- **The shadow pass culls nothing.** Front-face culling is the textbook cure for shadow acne and it is *wrong here*: a voxel mesh is a hollow shell — the mesher never emits the face between two solid blocks — so the far side of a hill does not exist, and front-culling would leave flat ground casting no shadow at all. A slope-scaled depth bias and a normal offset do that job instead.
+- **Each cascade is fitted to a sphere, then snapped to whole texels.** A box fitted to the slice changes size as the camera turns, so the map's scale changes with it and every shadow edge in the world crawls. A sphere is the same whichever way you look.
+- **One directional light, not two.** Whichever body is above the horizon owns it, so moonlight goes through the same cascades and the night has a lit side and a dark side instead of being a flat wash. The handover at dawn has no step in it because both fade on the same ramp.
+
+**The moon**, eight phases, one texture layer each, advancing a phase per day. The reference draws its sun and moon *additively* against black, and we have no additive pass — so the staging tool derives alpha from brightness, which is what an additive blend does and what gives the crescents their shape for free. Both bodies also switched from our own art to the reference's.
+
+> ⛔⛔ **The sky bodies were reworked on 2026-08-09 and their orientation is NOT settled.** Three fixed and verified: a faint square halo around them (the derived alpha never reached zero — it bottomed out at 14 against a snap threshold of 10, so every texel of the tile stayed slightly opaque); they now sit just inside the far plane instead of at 320 blocks, so they set at the true horizon rather than appearing to sink into nearby ground; and they are exempt from distance fog, which was dissolving them as they set.
+>
+> **The orientation is the open one.** The player reported them "rotating" and asked for a square that never turns. Four bases were tried, three were rejected, and the fourth is unverified — see the table in `SYSTEM_MEMORY.md` → "Sun, moon and sky". **The two requirements are in genuine tension: "never appears to turn" is only satisfiable by a camera-spanned quad, which is exactly the swivelling-in-world they also rejected. Ask before changing it again.**
+
+**A point light on the camera** was built during M23f and is **off by default**, which is a decision rather than a default value: its light direction *is* the view direction, so every surface faced head-on sits at the peak of its own specular highlight, and it reads as a bright spot glued to the middle of the screen. `handheld_light` turns it on for anyone who wants it.
+
+Release build, render distance 12, shadows on medium:
+
+| | Draws | Triangles | GPU | FPS |
+|---|---|---|---|---|
+| M23 (no shadows) | 121 | 551,289 | 0.46 ms | 121 (capped) |
+| **M24 (3 cascades)** | **568** | **3,282,811** | **2.24 ms** | **121 (capped)** |
+
+The extra draws and triangles are the world drawn once more per cascade. GPU time is 2.24 ms against an 8.3 ms budget at 120 fps.
+
+**Also fixed here, from a playtest:** water hanging in mid-air. A probe put it at a 32×2 sheet of water *sources* at y=64 in the chunk at the origin, left behind by a long-deleted test harness that wrote into the real world; generating the same chunk from the same seed produces none of it. **Bumping the chunk format version did nothing, because the file was two versions old and the loader had an upgrade path that accepted it.** Retiring that path is the fix — see `LESSONS.md`.
+
+### ✅ M25 — Sky and atmosphere · **Core**
 
 Atmospheric scattering, sunrise/sunset behaviour, fog and haze, altitude effects.
 
-### ⬜ M26 — Water as a system · **Core**
+**First slice shipped 2026-08-09: clouds, a gradient sky, and the lighting round the player asked for after M24.**
+
+**Clouds are raymarched, and their shapes are the reference's.** No geometry at all — a full-screen march through a slab, which is what makes flying through the layer work: no near plane to slice a quad against, nothing to sort, no inside face to vanish. The coverage field is **quantised to the reference's own 12-block cell grid and thresholded hard**, so a cloud is built out of square pieces exactly as the original's is; the volumetric part is only the *shading*, not the shape. Beer's law, a three-tap light march spaced against the cell size, and a Henyey-Greenstein phase with a floor. `C` cycles off / fast / fancy.
+
+**The deck sits at y 140 in a world 96 blocks tall**, and that is not a mistake — a cloud field is a field, not geometry, so it is not bound by the build ceiling. The first attempt put it at 74, where the entire visible sky spanned less than one cloud and the whole thing rendered as a flat white veil.
+
+**Cloud shadows on the ground are six lines and are most of what sells it** — one coverage sample walked from the surface along the sun. A cloud passing over open ground is visible from anywhere; the deck itself needs you to look up.
+
+**The sky is a gradient now, not one flat colour.** It is written by the lighting pass wherever nothing was drawn, so it cost no pass and no geometry. The **horizon is exactly the fog colour** terrain fades to, which is what keeps the join invisible; the zenith is that colour pushed toward blue and darkened; and two glow lobes around whichever body is up give the sun its halo and the sunset its spread.
+
+**Three lighting corrections from the playtest, and the first is the interesting one:**
+
+- **A normal recovered from the triangle always faces the camera**, so every leaf on every tree was lit as though turned toward you and the sun's highlight followed you round the trunk. Cutout faces now carry their real normal and the shader flips it toward the eye.
+- **Ambient and direct light are gated differently.** Ambient scales off baked sky light, so a cave is dark. The directional half is gated by the **shadow map**, which can see a hole in a leaf where baked sky light cannot — so sun reaches inside a canopy instead of lighting only its outer shell.
+- **Water reflects.** The forward pass carries every surface the deferred one cannot, and water is the whole reason it exists, so the one genuinely reflective thing in the game was the only one never catching the sun. It has a GGX specular and a Fresnel term that takes it opaque edge-on.
+
+**Night is dark now.** Ambient fell from 0.22 to 0.09 and the floor from 0.06 to 0.03; what makes a night navigable is the moon having a *direction*, not the ambient being raised until everything is visible.
+
+**ACES is the default tone curve**, by the player's own choice after comparing all four on screen.
+
+**Closed 2026-08-10 — real atmospheric scattering.** `skyRadiance` was a fog-coloured horizon, a hardcoded blue multiply for the zenith and two glow lobes. It is now single-scattered sunlight: Rayleigh coefficients in the reference's own one-over-wavelength-to-the-fourth proportions, a Mie term for haze, both phase functions written out, and an air-mass approximation that grows toward the horizon. **The sunset is no longer painted on** — light arriving from a low sun has crossed enough air that its blue has been scattered out of it before it gets here, and that is a term in the expression rather than a colour anyone chose.
+
+> ⛔ **The model is applied as a ratio against its own value at the horizon**, never as an absolute radiance. The horizon must stay *exactly* the fog colour or the join with fogged terrain becomes a visible line, and that constraint outranks physical accuracy. Dividing by the model's own horizon value at the same azimuth keeps the join exact and lets everything above it be real.
+
+**Altitude, and it had to be exaggerated to exist at all.** Air thins with height on a 70-block scale, against a real atmosphere's 8,500 m and a world 96 blocks tall — at any honest scale, climbing a mountain here would change nothing. Rain takes the shaping out, because overcast air scatters so many times that the gradient washes into flat grey. **Cloud colour follows the body** rather than a fixed white, so a deck at sunset catches the sunset.
+
+**Night was too blue, and the player said so plainly** — it "gives a false feeling that it's day". Two changes: the night sky colour is a third of what it was and much less blue, and the scattering shaping now fades out with the strength of the light doing the scattering. The moon is a fifth of the sun, so at midnight the sky is very nearly its own flat dark colour and the moon's halo is what lifts it.
+
+Still owed: nothing.
+
+### ✅ M26 — Water as a system · **Core**
 
 Reflection, refraction, depth-based absorption, underwater scattering, waves, foam, shoreline effects. Water is a headline visual feature, not a transparent block.
 
-### ⬜ M27 — Volumetric clouds and weather · **Optional**
+**First slice shipped 2026-08-09**, from a playtest note that water only ever looked reflective from one particular angle.
+
+**A copy of the lit scene is taken between the lighting pass and the forward pass, and water reflects out of it.** It cannot read the image it is being drawn into, and it must not see itself — so the copy is made after the world is lit and before anything translucent goes in. **Alpha in that image is the pixel's distance from the eye, not opacity**, which is what turns one image into both a colour source and a depth source; nothing downstream reads alpha, and the forward pass overwrites it afterwards. That one decision is what buys reflection *and* absorption for a single full-screen copy — about 0.1 ms — instead of a second depth image and a second set of barriers.
+
+The reflected ray is marched through it in twenty-four lengthening steps and a step counts as a hit when it has travelled further than the surface standing at that pixel. Two limits are real and are faded rather than hidden: **anything off the edge of the screen was never drawn**, so the reflection fades out toward the border and into the sky gradient; and the copy predates the sun, moon and clouds, so those come from the gradient too.
+
+**Reflections are pixelated on purpose** (player instruction). Everything water reflects is worked out from a position snapped to the block texture's own grid — one block face is one texture, so dividing a block by that texture's width gives exactly the grid the rest of the world is drawn on. A smooth mirror in a game made of squares looks borrowed from a different game.
+
+**Fresnel is the physical fifth power and is not a style choice.** Looking straight down a surface returns 2% and you see the bed; a few degrees off the horizon it returns nearly all of it and the lake becomes a mirror. That asymmetry *is* what water looks like, and its absence was the original complaint.
+
+**Depth-based absorption is what stopped the lake reading as tinted glass.** The thickness of water the view ray crosses comes from the same copy, and opacity follows Beer's law through it — clear at the edge where it is an inch deep, solid a few metres out. One flat opacity made ten metres of water exactly as legible as one.
+
+**Ripples, and a surface that moves.** Three crossing sine trains, each shorter, shallower and slower than the last — which is what deep water does, since a gravity wave's speed falls with its wavelength. The **vertex stage displaces the surface and the fragment stage shades it from the same field**, which is why `waves.glsl` exists and has no dependency on anything else: two stages disagreeing about the shape would run the light down the wrong side of every swell. Only vertices the mesher marks as a fluid's top move, so a waterfall's foot and the sides below the waterline stay put and no column can open a seam. `water_waves` and `water_reflection` in `settings.cfg` are the dials.
+
+Also here, from the same playtest: **shadows darken the ambient sky as well as the sun**, `shadow_darkness`, default 0.55. Cutting the directional half is all a shadow map can do on its own and it left shadows reading as pale patches; a point the sun cannot see is also cut off from much of the sky, so this is both the honest answer and the only dial with real range in it.
+
+**Closed 2026-08-10.** **Underwater light shafts**, marched twelve steps along the view ray inside the lighting pass — no new pass, no new target. Each step is sampled against **the same caustic field** that already draws the net on the seabed, taken where a vertical ray from that step would leave the water, so the shafts line up with the pattern on the floor instead of being a second unrelated effect. They taper with depth and are jittered by the interleaved gradient the contact shadows already use, so twelve steps read as grain rather than as twelve bands. This is the one thing that needed a new uniform: being submerged was one bit, which is enough to fog and not enough to know where the light is coming from.
+
+**Ice forms**, on the same pass that settles snow — a water *source* only, under an open sky, with nothing above it and no torch nearby. Freezing a flowing cell would be undone by the next fluid tick and leave the shoreline flickering.
+
+Still owed: nothing.
+### ✅ M27 — Volumetric clouds and weather · **Optional**
 
 Volumetric clouds, rain and snow rendering, wind, storms, lightning.
 
-### ⬜ M28 — Particles and foliage · **Optional**
+**Shipped 2026-08-09, end to end, after four parallel research passes** — the findings are in `RESEARCH.md` and the reference's own numbers are used throughout.
+
+**Weather is two independent boolean flags with their own countdowns, not a three-way state.** Rain on for 12,000–24,000 ticks and off for 12,000–180,000; thunder on for 3,600–15,600 and off for 12,000–180,000. A thunderstorm is simply both at once, and the thunder flag keeps cycling while it is dry — which is exactly why storms are rare, why one can begin partway through a rainstorm, and why writing it as an enum with transitions would need a probability table that does not exist in the reference.
+
+**Rain and snow are one vertical quad per world column**, built on the CPU in a disc around the camera and rebuilt only when the camera changes column. That single choice answers the hardest question for free: **the quad starts at the top of whatever blocks that column**, so a roof, a cave and an overhang all work with no shelter test anywhere. A screen-space version would have needed the whole heightmap on the GPU to answer the same thing, and would have fought the art direction as well.
+
+The streaks themselves are **procedural rather than a texture**, so they land on the same pixel grid the blocks do. Rain is a short translucent blue streak; snow is a single fully opaque white texel that wanders on two frequencies and is forced bright so a blizzard does not turn grey at dusk. That pair of differences — measured off the reference's own art — carries most of the signal.
+
+**The wind leans the rain, and where it falls.** The lean is a shear of the pattern rather than a tilt of the geometry: a 44-block quad physically leaned over for a gale would swing eight blocks sideways and part company with the column it belongs to.
+
+> ⛔ **The lean has to be a direction in the *world*, not in the quad.** Every quad is turned to face the camera's own column, so a flat slant applied in quad-local space leans a different way for each one — and looking straight up at that reads as the rain spiralling around you, which is exactly how it was reported. The mesh carries the wind's component along each quad, and the shear uses that. The along-quad coordinate is in world units for the same reason.
+
+**Rain lands on water.** Expanding rings, four tiles around the point, each firing on its own offset and dying as it spreads — added to the wave gradient rather than being a normal of its own, so it costs nothing but a few sines and a lake stops being glassy in a downpour.
+
+**What falls is decided by biome**, not globally: a dry or badlands biome gets nothing, and below the reference's own 0.15 temperature it snows, with the temperature falling 0.00125 per block above y 81. Lightning re-checks the same rule, which is why it never strikes a cold or dry biome.
+
+**Lightning is random midpoint displacement**, five generations, three strands, each segment a cross of two quads so it reads the same from every angle without knowing where the camera is. It is drawn white and emissive so bloom gives it a halo — which is what the reference gets from four nested shells blended additively. The flash is **two to four return strokes, not one ramp**: a single fade reads as a camera going off. Thunder follows at `distance / 343`, which the reference does *not* do — it plays thunder to the whole world at once — and is a deliberate divergence.
+
+**The sky, the fog, the sun and the cloud deck all respond, on staggered ramps.** Rain flattens the sky toward grey rather than tinting each biome's own colour, thunder blends three quarters of the way again, the view closes in by about a third, and the sun drops to roughly the reference's 15 → 12 → 10. **Cloud darkness is derived from the deck's own coverage** rather than passed in as a second uniform, because an overcast sky is exactly what a dark deck means and two numbers saying the same thing can only disagree. Coverage runs on a thirty-second ramp against the rain's five, so the sky gathers before the first drop.
+
+`V` cycles rain / storm / clear / back to the cycle; `weather=0` freezes it; `start_weather` opens a world already in one, which is the only reliable way to test it.
+
+**Closed 2026-08-10.** **Wet surfaces darken and shine**: water fills the pores of a surface so less light escapes back out of it, and leaves a smooth film on top, so albedo drops and roughness drops together. Gated on sky light, so the inside of a house stays dry, and snow is exempt because snow does the opposite. **Splash particles land on water** — the rain scatter used to find the highest *solid* block, which is the seabed, so the one splash worth having was the one it could not make. (The ripple rings it was also listed as owing turned out to have shipped with the water work already.)
+
+**Snow accumulates as real blocks.** Seven depths, two texels each, with the eighth being the solid snow cube that already existed — and every one of them draws the snow texture that was already loaded, so the family cost no art, no layer constant and no staging row. Columns near the player are picked on a timer, which is the reference's random tick in everything but name; a torch keeps its own patch clear.
+
+**A bolt does something.** It damages everything in the reference's own box, lights a fire where it lands, and **charges a Bramble** — which is where a charged one is supposed to come from, and which the code had been apologising for in a comment since M20d. The fire is only safe to light because the same storm now puts it out: anything burning under an open sky is extinguished on its next fire tick, which is exactly the pairing the reference has.
+
+Still owed: nothing.
+
+### ✅ M28 — Particles and foliage · **Optional**
 
 GPU-driven particles; dense, animated, wind-affected vegetation.
 
-### ⬜ M29 — Post-processing and image quality · **Optional**
+**Shipped 2026-08-09.**
+
+**Particles are simulated on the CPU, and that is a decision rather than a shortcut.** "GPU-driven" came from a vision document rather than from the player, and a compute-driven system means a storage buffer, an indirect draw, a compaction pass and a second way of getting work onto the GPU — for a few hundred quads that cost microseconds to build. Everything is plain data in one contiguous array with a hard ceiling of three thousand, because the one thing a particle system must never do is spike a frame when something dramatic happens. Revisit it when something needs a hundred thousand at once.
+
+**They need no pipeline of their own.** A particle is a camera-facing quad carrying a quarter of a block's texture, with sky light, block light and a face shade in the same three vertex channels world geometry uses — so it goes down the existing lit, cutout path with no case for particles anywhere in the shader. The quads are built facing the camera on the CPU, which costs two cross products for the whole set rather than a matrix multiply per vertex, and the mesh is rebuilt each frame through the same upload path the HUD has always used.
+
+> ⛔ **They shrink as they die rather than fading.** The cutout path throws a fragment away below half alpha, so an alpha ramp does nothing at all until it crosses the threshold and then blinks the whole particle out at once.
+
+Three things spawn them so far: **breaking a block** throws off a shower of chips of its own texture, **rain landing** makes a fleck of water where the sky can actually reach the ground, and **a hard landing** kicks up a puff of whatever you hit. Collision is a point test against the block grid, one axis at a time, so a chip that hits a wall slides along it rather than stopping in mid-air. A chip rests where it lands rather than bouncing — a bouncing one reads as a dropped item, and there is already a system that looks like that.
+
+**Grass and leaves bend with the wind.** One wind vector drives the cloud deck's drift, the rain's slant and the foliage together, so they cannot disagree about which way the weather is going — something neither the reference nor the well-known shader packs do. The displacement is always *along* the wind and never through zero, because grass bends, it does not wag; a per-position phase stops a field moving in unison and a shared gust makes it occasionally do exactly that. Only the top half of a plant blade moves, so it stays rooted where it was planted.
+
+> ⛔ **The sway flag was tested against the fractional part of a world height that is always integral**, so grass stood perfectly still while leaves moved. A plant blade's corners sit on whole block boundaries; the test has to be against the quad's own extent. Same family as every other bug here where a predicate asked a question whose answer could never be yes.
+
+> ⛔ **The sway flag was tested against the fractional part of a world height that is always integral**, so for two rounds grass stood perfectly still while leaves moved. A plant blade's corners sit at whole block boundaries; the test has to be against the quad's own extent. Same family as every other bug in this project where a predicate asked a question whose answer could never be yes.
+
+> ⛔ **Wind gusts rather than blowing steadily.** Two slow waves multiplied, so the product spends real time at nothing — on a clear day the world stands still and then a gust crosses it. A constant breeze reads as an animation somebody left running, which is exactly how the first version was reported.
+
+> ⛔ **The sway phase must turn slowly across space.** At better than a radian per block, two corners of the same blade land on opposite parts of the cycle and move in opposite directions, shearing the plant apart instead of bending it.
+
+> ⛔ **A leaf block moves every one of its vertices, not just its top.** The displacement is a pure function of world position, so two blocks sharing an edge move identically and the canopy stays watertight. Moving only the tops would tear it open.
+
+`particles` and `foliage_sway` in `settings.cfg`. Measured on release: 120 fps, no change in GPU time.
+
+**Closed 2026-08-10.** A particle gained three fields and the system gained five emitters. **Shade, self-lit and wind drift**: the three vertex channels are sky light, block light and face shade, so a particle has no colour of its own — which means smoke is the white sprite darkened, and a flame is the fire block's own texture lighting itself so it still reads at night, a block away from the torch that made it.
+
+**Torches, fire, lit furnaces and lava smoke.** The emitters near the player are found on a half-second timer and cached, because a torch is a rare block and finding one costs far more than drawing its smoke — a full scan every frame or a random stab that almost always lands on air are both worse. **Eating throws crumbs of the food's own sprite**, on a fixed spacing so the same handful appears whatever the frame rate. **A blast leaves a ball of smoke** scaled by its own power, thrown through the volume rather than off its shell, since a hollow ball reads as a ring the moment it thins.
+
+**Ground cover comes in patches now, not an even speckle.** A flat per-column probability spreads the same plant every N columns across a continent, which reads as noise; one low-frequency field multiplying the density gives thick stands with clearings between them at the same average. Eleven biomes had their density raised, and **the three snowy biomes stop being barren** — their `grassDensity` rows were unreachable, because the branch asked for a grass top and their top block is snow.
+
+> **Potions were on this list and there are none in the game** — no potion item, no brewing, no effect system. That is a milestone of its own, not a particle.
+
+Still owed: nothing.
+
+### ✅ M29 — Post-processing and image quality · **Optional**
 
 Anti-aliasing, bloom, motion blur, depth of field, ambient occlusion passes, resolution scaling, high-refresh-rate support.
+
+**Shipped 2026-08-09.** Bloom and the four tone curves arrived at M23; this milestone added the two that were missing and deliberately declined three.
+
+**Contact shadows, with no pass of their own.** Eight taps in a small screen-space disc off the depth buffer the lighting pass is *already reading*, each rotated by an interleaved-gradient offset so the pattern differs per pixel and banding becomes grain. A proper SSAO pass with a bilateral blur would be better and costs two more images, a second descriptor set and two layout transitions; this is a tenth of the work for most of the effect, and it measured 0.2 ms. It only adds what the mesher's baked occlusion **cannot** know — where a creature's feet meet the ground, where a dropped item rests, where two surfaces meet at a distance no vertex knows about — and it fades out past twenty-four metres, where a screen-space radius covers whole blocks and the result is a smear rather than a corner. `contact_shadows` is the radius in screen pixels.
+
+**Anti-aliasing, run after the tone curve and off by default.** Both halves of that are decisions. It has to run after the curve because a bright pixel next to a dark one is a 40:1 ratio in HDR and about 2:1 once graded, so blending beforehand is dominated by whichever neighbour is brightest and barely moves the edge — which is why the whole grade moved into a `graded()` function the anti-aliaser can run over its neighbours. And it is off because **everything in this game is a hard-edged square**: an anti-aliaser strong enough to soften a diagonal also softens every texel boundary in the world, which is the look rather than an artefact. `anti_alias` from 0 to 1 for anyone who wants it.
+
+**Declined, with reasons.** *Motion blur* and *depth of field* both fight pixel art directly — they exist to hide the sharpness this art style is made of.
+
+**Resolution scaling closed 2026-08-10.** `render_scale`, from 0.5 to 1. **The world shrinks and the interface does not**: every pass up to and including lighting, water and bloom runs at the scaled extent, and the tone map is what stretches it back to the window — so the HUD, the text and the inventory are drawn afterwards at full resolution and stay sharp. That split is the whole reason it is worth having. The extent is rounded to an even number on each axis, because the bloom pyramid halves it and an odd width leaves the first mip half a texel out of step. Changing it does the same work a window resize already does, so it is live rather than restart-only.
+
+> **Measured, and the honest number is small: 2.42 ms at full resolution, 2.14 at 0.75, 2.11 at 0.5.** Verified by probe that the extent really is changing (1280x720 window, 640x360 world at 0.5). The frame here is bound by the shadow pass, which is a fixed size and does not scale at all, and by 2.6 M triangles of geometry — not by pixels. **Scaling pixels only helps a frame that is pixel-bound**, and this one is not yet. It will matter much more once ray tracing lands at M30, which is exactly the kind of work it exists to make affordable.
 
 ---
 
@@ -1038,7 +1514,7 @@ Shader and asset hot reload, world-generation debug views, chunk and collision v
 
 A real settings screen. **This is where the whole graphics-as-settings promise is delivered**, so it is not cosmetic: a `Video` tab exposing quality levels, clouds, ray tracing, resolution, render distance and frame cap (retiring the temporary `F1`–`F7` bindings), plus key rebinding, audio and accessibility options.
 
-The backing file already exists — `settings.cfg` has carried worker count, render distance, frame cap and day length since M12–M14c. This milestone builds the screen, not the system.
+The backing file already exists — `settings.cfg` has carried worker count, render distance, frame cap and day length since M12–M14c, and gained sound and music volume at M22. This milestone builds the screen, not the system.
 
 ### ⬜ M35 — Packaging and distribution · **Core**
 
@@ -1074,9 +1550,9 @@ Listed so future sessions know roughly when each becomes justifiable — **not**
 | M9 | stb_image — **added** | Decoding PNG block textures |
 | M11 | Dear ImGui | Debug overlay and tools |
 | M13b | meshoptimizer | Mesh optimization, LOD |
-| M22 | An audio library | Sound |
+| M22 | miniaudio + stb_vorbis — **added** | Sound. One public-domain header opens the OS audio device; `stb_vorbis` decodes the `.ogg` files and lives in a translation unit of its own. |
 
-If the dependency count approaches ~5, revisit the vcpkg-versus-FetchContent decision recorded in `CLAUDE.md`.
+That is four dependencies. **If the count approaches ~5, revisit the vcpkg-versus-FetchContent decision recorded in `CLAUDE.md`.**
 
 ---
 

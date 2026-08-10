@@ -10,13 +10,18 @@ Companion documents: `SYSTEM_MEMORY.md` (what the HUD actually is today), `CRAFT
 
 **Two cautions about this particular capture.** It is a **console** screenshot — the `ZL`/`ZR` strip, the `L`/`R` bumper hints beside the tabs and the `A Show Craftable` / `B Exit` prompt bar are controller chrome and are **not** part of the PC layout. The two layout buttons themselves *are*; only their shoulder-button bindings are console-specific.
 
-> **▶ Where we stand (2026-08-05).** **Slices 1–4 are built.** `engine::Window` has a character callback and a `consumeTypedText()` queue; `allItems()`, `categoryFor` and per-recipe `category` / `fitsInTwoByTwo` exist and report **126 items and 20 recipes, 8 of which fit a 2×2**; and the catalogue card is on screen beside the inventory with five clickable tabs, a scrolling 7-wide grid and hover tooltips. Clicking an entry gives you the item, and the empty space around the entries destroys what you are carrying — both creative-only, per §4.5b. The signed-off click/drag/shift-click/double-click model is untouched: the inventory card only *translated*, through the one function every position comes from.
+> **▶ Where we stand (2026-08-08).** **Slices 1–5 and 7 are built; 6, 8 and 9 are not.** `engine::Window` has a character callback and a `consumeTypedText()` queue; `allItems()`, `categoryFor` and per-recipe `category` / `fitsInTwoByTwo` exist and report **748 items and 592 recipes, 145 of which fit a 2×2**; and the catalogue card is on screen beside the inventory with five clickable tabs, a scrolling 7-wide grid, hover tooltips, the four craftable cell states and a working search field. Clicking an entry gives you the item, and the empty space around the entries destroys what you are carrying — both creative-only, per §4.5b. The signed-off click/drag/shift-click/double-click model is untouched: the inventory card only *translated*, through the one function every position comes from.
 >
+> **Outside the inventory, M21 added the three status bars** — hearts, drumsticks and bubbles, above the hotbar. They are not part of any slice above, but they share everything: the same sheet, the same primitives, the same depth ordering. Icons are 9 × 9 on a 10-pixel pitch in a strip at the bottom of the sheet, which grew to 1355 px to hold them. **A half heart is its own sprite rather than a clipped full one**, because the reference sheet already contains both and clipping would have needed a second code path for the one case. Bubbles only appear underwater and empty right to left.
+>
+> The hotbar gained one piece of state on 2026-08-08: `makeHotbar` takes the seconds a **bow** has been drawn and swaps its icon for one of the three drawn-bow pictures. That is the only feedback the charge has, and it deliberately runs on its own clock — the picture finishes in half the time the charge does, which is the reference's own split.
 > **The tabs are Mojang's crops staged beside the exe**, not art of ours — `tools/make-reference-hud.ps1`, same arrangement as the creature skins. Prove the layout first; author afterwards.
 >
-> **`allItems()` decides display order and it is not id order.** The fifty-six spawn eggs live in **two runs** of item ids — widening the first would have shifted every resource and bucket id, and those are written into the player's saved inventory. `allItems()` emits both runs together in species order, so the catalogue shows one unbroken block of eggs. Walking the id range instead, which is what it used to do, scattered ten of them behind the ingots.
+> **`allItems()` decides display order and it is not id order.** The fifty-seven spawn eggs live in **two runs** of item ids — widening the first would have shifted every resource and bucket id, and those are written into the player's saved inventory. `allItems()` emits both runs together in species order, so the catalogue shows one unbroken block of eggs. Walking the id range instead, which is what it used to do, scattered ten of them behind the ingots.
 >
-> What still does not exist: the craftable colouring, the filter toggle, the search field, click-to-fill and groups — slices 5 to 9. **Slice 4 is built**: the catalogue scrolls a row at a time on the wheel, the tab resets it, and the wheel no longer drives the hotbar while a screen is open. The clipped last row now shows its entries, cut off exactly at the card's inner edge by a **real scissor rectangle** — the renderer gained `setClippedScreenMesh`, so §6.2's "no clip rectangle anywhere" no longer holds.
+> **The screen now serves six kinds, not three** — inventory, crafting table, furnace, smoker (the furnace's screen, unchanged), smithing table, chest and double chest. See §1.5.
+>
+> What still does not exist: the filter toggle, the search field, click-to-fill and groups — slices 6 to 9. **Slice 4 is built**: the catalogue scrolls a row at a time on the wheel, the tab resets it, and the wheel no longer drives the hotbar while a screen is open. The clipped last row now shows its entries, cut off exactly at the card's inner edge by a **real scissor rectangle** — the renderer gained `setClippedScreenMesh`, so §6.2's "no clip rectangle anywhere" no longer holds. **Slice 5 is built** too, with **four states rather than six** — see §3.1.
 
 ---
 
@@ -90,6 +95,27 @@ The recipe book is present and **open by default** on Bedrock (collapsed by defa
 
 The recipe book is **replaced** by the item catalogue, not extended. Same card, same tab strip, same grid, no craft semantics, **no craftable filter**, and a hotbar strip drawn under the catalogue so you can drag straight to it. The 2 × 2 crafting grid stays — Bedrock briefly made it 3 × 3 in beta and changed it back to match survival.
 
+## 1.5 The screens we actually ship, and how they differ *(2026-08-06)*
+
+Seven blocks open a screen and there are six `Kind`s, because a smoker is a furnace as far as the UI is concerned.
+
+| Kind | Catalogue? | Extra slots | Panel height |
+|---|---|---|---|
+| `Inventory` | yes | 2 × 2 grid + result | 166 |
+| `CraftingTable` | yes | 3 × 3 grid + result | 166 |
+| `Furnace` *(and smoker)* | no | input, fuel, output | 166 |
+| `SmithingTable` | no | two inputs, side by side, + result | 166 |
+| `Chest` | no | 27, its own region | 166 |
+| `DoubleChest` | no | 54, its own region | **220** |
+
+**Three of these borrow the crafting grid's storage and one cannot.** The furnace and the smithing table both use `craftSlots[0..1]` and the result slot, which is why they needed no new click, drag or shift-click code at all. A chest cannot: twenty-seven against a maximum grid of nine, and — the real reason — **its contents outlive the screen closing**, so they are not the screen's to hold. It gets `Region::Chest`, resolved straight into the block's own storage.
+
+**A borrowed buffer must be emptied by whoever borrowed it.** The furnace deliberately does not hand `craftSlots` back on close, because they were only a view onto the block. For one milestone it did not *clear* them either, and that was an item-duplication bug: the copies showed up in the next screen's crafting grid and were handed to the player when *that* screen closed. "Not mine to give back" and "safe to leave lying there" are different claims.
+
+**Shift-click means something different with a chest open.** Everywhere else it moves a stack between the hotbar and the storage rows; with a chest open the only useful move is between the two *containers*. `quickMoveTargets` takes an earlier branch.
+
+**The double chest is the only screen taller than the standard card**, and making that possible turned two constants into functions of the kind: `panelPixelHeight(kind)` and `storageShiftY(kind)`, the latter added to both the storage rows and the hotbar row. **`kPixel` stays pinned to the 166-tall panel deliberately** — a taller screen grows downward at the same slot size rather than shrinking everything to fit, which is what dividing a fixed screen height by a variable pixel height would have done.
+
 ---
 
 # 2. Tabs
@@ -135,6 +161,14 @@ Two corrections to the common understanding, both worth writing down:
 
 - The "red" is **its own texture**, not a red tint laid over the normal slot. Authoring it as a tint will not look right.
 - There is a **selected** state that is neither of the two obvious ones, and two greys for expandable groups. A design that only has "white" and "red" has nowhere to put "this is the one you clicked".
+
+> **✅ Built at slice 5 (2026-08-06), with four states, not six.** Three of vanilla's six are expandable groups — slice 9, and they do not exist. The fourth is the **selected recipe**, and that one was built and then **taken back out**: the user's objection was immediate and correct, *"why should that even happen in survival? minecraft doesn't do that"*, followed by *"if i hover and it temporarily brightens then THAT is fine, persistent brightness isn't"*. Nothing set it either — §4.5's click-to-fill acts on the click rather than remembering it — so it was a highlight that meant nothing and stayed lit behind an item already taken. What is left is the affordability, plus the cell under the pointer.
+>
+> **In creative there are no reds at all**, which is §1.4's point restated: the card there is the item catalogue rather than the recipe book, so everything in it is one click away and "can you make this" is not a question. The check is skipped rather than run and discarded.
+>
+> All four are stamped by `tools/make-hud-sheet.ps1` from the panel's own 18×18 storage tile with the interior repainted, so every state carries the identical bevel. Neither base colour is invented: the accessible one is **the slot interior's own `139,139,139` recess**, unchanged — an entry you can have should look like any other slot, and §3.1's "pale neutral" read as white against the card, which the user also rejected on sight. Red is the `243,74,63` measured in §3.1b. Hover mixes toward white by 0.45 rather than multiplying, because red is already at 243 and scaling only clamps the channel carrying the hue. They sit at the end of the sheet on a 20-pixel pitch, in `CellState` order, and **nothing may reorder that enum**.
+>
+> **The count label is not built**, and the question below is still open.
 
 Each cell also carries a **count label**. Whether that is "how many you could make" or "the recipe's output quantity" is unresolved — the binding is named `recipe_craftable_count`, which suggests the former, but every other stack label in the game says the latter. **Decide deliberately; do not inherit by accident.**
 
@@ -399,6 +433,9 @@ The layout block is centred horizontally, which is why it starts at x ≈ 151 on
 ## 6.3 Two traps specific to us
 
 - **Depth.** Two overlapping cards, tabs that sit *above* a card's edge, a scroll shadow, cell backgrounds under icons under count labels. The hotbar-highlight incident is exactly this failure. **Assign every layer an explicit band up front** rather than interleaving. *(Done at slice 3: dim, unselected tab, panels, selected tab, cell, label, catalogue icon and count, inventory icon and count, held stack, tooltip — with `.0034` held in reserve for the scrollbar.)*
+
+  > ⛔ **A depth band is not enough, because a *blended* fragment still writes depth.** The held stack is nearest of everything in the panel mesh, and the catalogue icons are a **separate draw that comes after it** — they need a scissor for the cut last row. So wherever the held item's own artwork was transparent it had already stamped its depth, and the icons behind it were rejected: a rectangular hole through the list, only ever on the left card, because the right card's icons are in the same mesh and drawn earlier. **Once two draws are involved, order beats depth.** The carried stack and its tooltip moved to `setTopScreenMesh`, a third screen layer drawn after the clipped one.
+
 - **The HUD rebuilds every frame while a screen is open** (the held stack follows the cursor), so a caret, hover highlighting and live filtering are free. But `hudDirty` doubles as a console-log trigger — typing in a search box would spam the log until that is separated.
 
 ---
@@ -412,10 +449,14 @@ Each slice ends in something runnable, per rule 1.
 | **1** ✅ | **Typed text in `Window`** — a GLFW char callback, Backspace, and a `consumeTypedText()` queue. No UI yet. | Everything else can be designed around it; nothing else can start without it. Smallest possible platform change. |
 | **2** ✅ | **Enumerate items and recipes** — `allItems()`, make `recipes()` public, add `category` and `fitsInTwoByTwo` per recipe. Still no UI. | Pure data. Provable by logging counts. |
 | **3** ✅ | **The second card, static** — draw a 146 × 166 panel beside the inventory, with the five tabs and a fixed, unscrolling grid of every item in the selected category. No search, no craftable colouring. | This is the layout risk. Get the two cards, the fold and the tab strip right while there is nothing else to blame. |
-| **4** ▶ | **Scrolling** — route the wheel to the panel when a screen is open (**fixing the live hotbar bug**), per-item culling, a scrollbar. Depth `.0034` is already reserved for it. | Makes slice 3 actually usable, and a tab with more entries than fit is currently unreachable past the last visible row. |
-| **5** | **Craftable colouring** — the six-state background, the greedy check with the bipartite counter-example written at the call site. | The first thing that needs the recipe data rather than the item list. |
+| **4** ✅ | **Scrolling** — route the wheel to the panel when a screen is open (**fixing the live hotbar bug**), per-item culling, a scrollbar. Depth `.0034` is already reserved for it. | Makes slice 3 actually usable, and a tab with more entries than fit is currently unreachable past the last visible row. |
+| **5** ✅ | **Craftable colouring** — the six-state background, the greedy check with the bipartite counter-example written at the call site. | The first thing that needs the recipe data rather than the item list. |
 | **6** | **The filter toggle** — hide non-craftable entries, with the "All recipes" / "Craftable recipes" label. | Trivial once 5 exists. Deliberately separate, because they are separate features. |
-| **7** | **The search tab** — the field, the caret, beginning-of-word matching, and the clear button. It consumes `consumeTypedText()` and replaces the temporary `"Typed: "` log that currently proves slice 1 works. | Needs slice 1 and nothing else. |
+| **7** ✅ | **The search tab** — the field, the caret, beginning-of-word matching, and the clear button. It consumes `consumeTypedText()` and replaces the temporary `"Typed: "` log that currently proves slice 1 works. | Needs slice 1 and nothing else. |
+
+> **The field, as built.** The tab-name row becomes it: a 126 × 13 box across the seven columns, drawn as a **pale border round a near-black recess** with **white shadowed text** on it — the reference's own text box, and the contrast is the whole point. The first cut was grey text on a mid-grey slab and the user's verdict was that its visibility "sucks". The caret is a **one-texel solid bar** blinking on the reference's six-tick cadence (0.3 s on, 0.3 s off), and it is positioned from the **query alone**, so with the field empty it sits at the start rather than after the grey `Search` hint standing in for it. `CatalogueState::caretVisible` is set by the caller from its own clock, which is what keeps `build` a pure function.
+>
+> **Focus follows the mouse click, and nothing else.** Until the field is clicked into it shows the hint, hides the caret and **leaves the keyboard to the game**; clicking it brightens the border to white, drops the hint and starts the caret; any click that is not on it lets go again, as does changing tab or closing the screen. The first cut took the keyboard for as long as the Search tab was selected, which silently stopped `E` closing the inventory with nothing on screen saying why.
 | **8** | **Click to fill the grid** — left fills, right crafts one, shift crafts all, with the empty-the-grid-first rule. | The payoff. Needs 2 and 5. |
 | **9** | **Groups** — collapse recipes sharing a result, expand/collapse glyph, the two grey backgrounds. | Only worth it once there are enough recipes to need it. |
 

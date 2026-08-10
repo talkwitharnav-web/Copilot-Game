@@ -910,7 +910,10 @@ function New-GlowstoneTexture {
 function New-SunTexture {
     $bitmap = New-Object System.Drawing.Bitmap $size, $size
     $centre = ($size - 1) / 2.0
-    $radius = $size * 0.44
+    # A quarter of the cell, matching the proportion the reference's own sun
+    # occupies - the quad is sized for that, so a disc filling the tile here
+    # would come out twice as big as the real one.
+    $radius = $size * 0.25
 
     for ($y = 0; $y -lt $size; $y++) {
         for ($x = 0; $x -lt $size; $x++) {
@@ -935,6 +938,37 @@ function New-SunTexture {
         }
     }
     Save-Bitmap -Bitmap $bitmap -Name 'sun'
+}
+
+# Eight layers, one per phase, and **deliberately all the same pale disc**.
+#
+# These exist only so `assets/` has a file for every texture layer - without one
+# the load fails outright. Development runs on the reference art staged beside
+# the executable, which has the real phases, and the original art is somebody
+# else's job. Shaping eight crescents here would be work thrown away twice.
+function New-MoonTextures {
+    foreach ($name in 'moon_full', 'moon_waning_gibbous', 'moon_third_quarter',
+                      'moon_waning_crescent', 'moon_new', 'moon_waxing_crescent',
+                      'moon_first_quarter', 'moon_waxing_gibbous') {
+        $bitmap = New-Object System.Drawing.Bitmap $size, $size
+        $centre = ($size - 1) / 2.0
+        $radius = $size * 0.22
+
+        for ($y = 0; $y -lt $size; $y++) {
+            for ($x = 0; $x -lt $size; $x++) {
+                $dx = $x - $centre
+                $dy = $y - $centre
+                $distance = [Math]::Sqrt(($dx * $dx) + ($dy * $dy))
+                $alpha = 1.0 - [Math]::Max(0.0, [Math]::Min(1.0, ($distance - ($radius - 1.2)) / 1.6))
+                if ($alpha -le 0.0) {
+                    $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(0, 220, 224, 232))
+                } else {
+                    $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb([int](255 * $alpha), 222, 226, 234))
+                }
+            }
+        }
+        Save-Bitmap -Bitmap $bitmap -Name $name
+    }
 }
 
 # Bark is a dense field of short vertical dashes, not stripes. Measured from
@@ -1143,6 +1177,7 @@ New-PlanksTexture
 New-BricksTexture
 New-GlowstoneTexture
 New-SunTexture
+New-MoonTextures
 New-FlatTexture -Name 'water' -Palette $waterPalette -Weights $waterWeights -Salt 137
 New-BarkTexture
 New-LogTopTexture
@@ -1204,3 +1239,169 @@ for ($y = 0; $y -lt $size; $y++) {
 Save-Bitmap -Bitmap $white -Name 'white'
 
 New-ToolTextures
+
+# --- Food ------------------------------------------------------------------
+# Raw and cooked share one silhouette and differ only in palette, which is what
+# the reference does too: cooking browns the meat, it does not reshape it.
+function New-FoodSprite {
+    param([string]$Name, [string[]]$Rows, [hashtable]$Key)
+
+    $bitmap = New-Object System.Drawing.Bitmap $size, $size
+    $top = [int](($size - $Rows.Count) / 2)
+    for ($r = 0; $r -lt $Rows.Count; $r++) {
+        $left = [int](($size - $Rows[$r].Length) / 2)
+        for ($c = 0; $c -lt $Rows[$r].Length; $c++) {
+            $glyph = [string]$Rows[$r][$c]
+            if ($glyph -eq '.') { continue }
+            $bitmap.SetPixel($left + $c, $top + $r, (ConvertTo-Color $Key[$glyph]))
+        }
+    }
+    Save-Bitmap -Bitmap $bitmap -Name $Name
+}
+
+$appleKey = @{ 'a' = 'C2261B'; 'b' = '8C1710'; 'c' = 'E8574A'; 'g' = '4C8A2B'; 's' = '6B4823' }
+$apple = @(
+    '....s...',
+    '...s.g..',
+    '.aaasgg.',
+    'caaaaag.',
+    'caaaaaa.',
+    'caaaaaa.',
+    '.baaaab.',
+    '..bbbb..')
+
+# Pink flesh, pale fat. Cooked drops the pink and warms the fat to crust.
+$porkRaw    = @{ 'a' = 'D96B72'; 'b' = 'A8474F'; 'c' = 'ECA0A4'; 'f' = 'F0DCC8' }
+$porkCooked = @{ 'a' = 'A05A2C'; 'b' = '6E3A18'; 'c' = 'C4834A'; 'f' = 'E0C69C' }
+$porkchop = @(
+    '..ffff..',
+    '.faaaaf.',
+    'faaacaaf',
+    'aaaaaaab',
+    'aaacaaab',
+    'baaaaabb',
+    '.baaabb.',
+    '..bbbb..')
+
+$beefRaw    = @{ 'a' = 'B4353C'; 'b' = '7E2026'; 'c' = 'D4636A'; 'f' = 'EBD9C4' }
+$beefCooked = @{ 'a' = '8A4A24'; 'b' = '5C2E12'; 'c' = 'AE7040'; 'f' = 'D8BE94' }
+$steak = @(
+    '.aaaaaa.',
+    'aaffaaaa',
+    'aafaaaca',
+    'aaaaacaa',
+    'baaacaab',
+    'baacaabb',
+    '.baaabb.',
+    '..bbbb..')
+
+$muttonRaw    = @{ 'a' = 'C9505A'; 'b' = '92313A'; 'c' = 'E28189'; 'f' = 'F2E4D2' }
+$muttonCooked = @{ 'a' = '96522A'; 'b' = '653516'; 'c' = 'BC7C46'; 'f' = 'DFC59B' }
+$muttonChop = @(
+    '...ff...',
+    '..ffff..',
+    '.faaaaf.',
+    'faaacaaf',
+    'aaaacaab',
+    'baaaaabb',
+    '.baaabb.',
+    '..bbbb..')
+
+# A drumstick: meat on top, bone below.
+$chickenRaw    = @{ 'a' = 'E8B0A8'; 'b' = 'B77E78'; 'c' = 'F6D6CE'; 'f' = 'F4EEE0' }
+$chickenCooked = @{ 'a' = 'B87A38'; 'b' = '82501F'; 'c' = 'D9A45E'; 'f' = 'F0E6D2' }
+$drumstick = @(
+    '..caaa..',
+    '.caaaaa.',
+    'caaaaaab',
+    'caaaaaab',
+    '.baaaab.',
+    '..bffb..',
+    '...ff...',
+    '..f..f..')
+
+$codRaw    = @{ 'a' = 'B9AE97'; 'b' = '857C68'; 'c' = 'D9D0BC'; 'f' = '4A5A66' }
+$codCooked = @{ 'a' = 'C08D4E'; 'b' = '8A6130'; 'c' = 'DDB37A'; 'f' = '5A4530' }
+$cod = @(
+    '..........',
+    '...ccaa...',
+    '..caaaaab.',
+    'faaaaaaaab',
+    'faaafaaaab',
+    '.baaaaaab.',
+    '..bbaabb..',
+    '....bb....')
+
+New-FoodSprite -Name 'apple' -Rows $apple -Key $appleKey
+New-FoodSprite -Name 'porkchop_raw' -Rows $porkchop -Key $porkRaw
+New-FoodSprite -Name 'porkchop_cooked' -Rows $porkchop -Key $porkCooked
+New-FoodSprite -Name 'beef_raw' -Rows $steak -Key $beefRaw
+New-FoodSprite -Name 'beef_cooked' -Rows $steak -Key $beefCooked
+New-FoodSprite -Name 'chicken_raw' -Rows $drumstick -Key $chickenRaw
+New-FoodSprite -Name 'chicken_cooked' -Rows $drumstick -Key $chickenCooked
+New-FoodSprite -Name 'mutton_raw' -Rows $muttonChop -Key $muttonRaw
+New-FoodSprite -Name 'mutton_cooked' -Rows $muttonChop -Key $muttonCooked
+New-FoodSprite -Name 'cod_raw' -Rows $cod -Key $codRaw
+New-FoodSprite -Name 'cod_cooked' -Rows $cod -Key $codCooked
+
+# Placeholders only. The reference staging in tools\make-reference-blocks.ps1 is
+# what the game actually shows during development, and the original art is being
+# authored elsewhere - these exist because assets/ needs a file per layer or the
+# texture array fails to load.
+New-FlatTexture -Name 'prismarine'  -Palette @('5E8C82','6B9C90','75A89C','547F76') -Weights @(30,30,20,20) -Salt 8801
+New-FlatTexture -Name 'sea_lantern' -Palette @('B8D6C8','CFE6DA','A5C4B6','E2F0E8') -Weights @(30,30,20,20) -Salt 8802
+New-FlatTexture -Name 'coarse_dirt' -Palette @('7A5636','6B4A2E','8A6440','5E4028') -Weights @(30,28,22,20) -Salt 8803
+
+# Table-driven block placeholders. Flat colour only - the reference staging in
+# tools\make-reference-blocks.ps1 is what the game shows, and the original art
+# is authored elsewhere. These exist because assets/ needs a file per layer.
+New-FlatTexture -Name 'cobbled_deepslate' -Palette @('6B6B6B','6B6B6B','6B6B6B','6B6B6B') -Weights @(1,1,1,1) -Salt 9000
+New-FlatTexture -Name 'ice' -Palette @('A8C8E8','A8C8E8','A8C8E8','A8C8E8') -Weights @(1,1,1,1) -Salt 9001
+New-FlatTexture -Name 'blue_ice' -Palette @('6E9CD8','6E9CD8','6E9CD8','6E9CD8') -Weights @(1,1,1,1) -Salt 9002
+New-FlatTexture -Name 'coal_block' -Palette @('2A2A2A','2A2A2A','2A2A2A','2A2A2A') -Weights @(1,1,1,1) -Salt 9003
+New-FlatTexture -Name 'iron_block' -Palette @('D8D8D8','D8D8D8','D8D8D8','D8D8D8') -Weights @(1,1,1,1) -Salt 9004
+New-FlatTexture -Name 'gold_block' -Palette @('F0D050','F0D050','F0D050','F0D050') -Weights @(1,1,1,1) -Salt 9005
+New-FlatTexture -Name 'diamond_block' -Palette @('5CE0D8','5CE0D8','5CE0D8','5CE0D8') -Weights @(1,1,1,1) -Salt 9006
+New-FlatTexture -Name 'emerald_block' -Palette @('40D060','40D060','40D060','40D060') -Weights @(1,1,1,1) -Salt 9007
+New-FlatTexture -Name 'lapis_block' -Palette @('2848C0','2848C0','2848C0','2848C0') -Weights @(1,1,1,1) -Salt 9008
+New-FlatTexture -Name 'redstone_block' -Palette @('C02020','C02020','C02020','C02020') -Weights @(1,1,1,1) -Salt 9009
+New-FlatTexture -Name 'copper_block' -Palette @('C07840','C07840','C07840','C07840') -Weights @(1,1,1,1) -Salt 9010
+New-FlatTexture -Name 'polished_andesite' -Palette @('9A9A9A','9A9A9A','9A9A9A','9A9A9A') -Weights @(1,1,1,1) -Salt 9011
+New-FlatTexture -Name 'polished_diorite' -Palette @('D8D8D8','D8D8D8','D8D8D8','D8D8D8') -Weights @(1,1,1,1) -Salt 9012
+New-FlatTexture -Name 'polished_granite' -Palette @('A87868','A87868','A87868','A87868') -Weights @(1,1,1,1) -Salt 9013
+New-FlatTexture -Name 'chiseled_stone_bricks' -Palette @('8A8A8A','8A8A8A','8A8A8A','8A8A8A') -Weights @(1,1,1,1) -Salt 9014
+New-FlatTexture -Name 'mossy_stone_bricks' -Palette @('7A8A6A','7A8A6A','7A8A6A','7A8A6A') -Weights @(1,1,1,1) -Salt 9015
+New-FlatTexture -Name 'cracked_stone_bricks' -Palette @('8A8A8A','8A8A8A','8A8A8A','8A8A8A') -Weights @(1,1,1,1) -Salt 9016
+New-FlatTexture -Name 'polished_deepslate' -Palette @('4A4A4A','4A4A4A','4A4A4A','4A4A4A') -Weights @(1,1,1,1) -Salt 9017
+New-FlatTexture -Name 'deepslate_bricks' -Palette @('5A5A5A','5A5A5A','5A5A5A','5A5A5A') -Weights @(1,1,1,1) -Salt 9018
+New-FlatTexture -Name 'deepslate_tiles' -Palette @('555555','555555','555555','555555') -Weights @(1,1,1,1) -Salt 9019
+New-FlatTexture -Name 'smooth_sandstone' -Palette @('D8CFA0','D8CFA0','D8CFA0','D8CFA0') -Weights @(1,1,1,1) -Salt 9020
+New-FlatTexture -Name 'cut_sandstone' -Palette @('D8CFA0','D8CFA0','D8CFA0','D8CFA0') -Weights @(1,1,1,1) -Salt 9021
+New-FlatTexture -Name 'chiseled_sandstone' -Palette @('D0C79A','D0C79A','D0C79A','D0C79A') -Weights @(1,1,1,1) -Salt 9022
+New-FlatTexture -Name 'tube_coral_block' -Palette @('2A6AC0','2A6AC0','2A6AC0','2A6AC0') -Weights @(1,1,1,1) -Salt 9023
+New-FlatTexture -Name 'brain_coral_block' -Palette @('C05090','C05090','C05090','C05090') -Weights @(1,1,1,1) -Salt 9024
+New-FlatTexture -Name 'bubble_coral_block' -Palette @('7048C0','7048C0','7048C0','7048C0') -Weights @(1,1,1,1) -Salt 9025
+New-FlatTexture -Name 'fire_coral_block' -Palette @('C04040','C04040','C04040','C04040') -Weights @(1,1,1,1) -Salt 9026
+New-FlatTexture -Name 'horn_coral_block' -Palette @('E8C040','E8C040','E8C040','E8C040') -Weights @(1,1,1,1) -Salt 9027
+New-FlatTexture -Name 'sponge' -Palette @('D8D850','D8D850','D8D850','D8D850') -Weights @(1,1,1,1) -Salt 9028
+New-FlatTexture -Name 'wet_sponge' -Palette @('B8B850','B8B850','B8B850','B8B850') -Weights @(1,1,1,1) -Salt 9029
+New-FlatTexture -Name 'dark_prismarine' -Palette @('2A4A46','2A4A46','2A4A46','2A4A46') -Weights @(1,1,1,1) -Salt 9030
+New-FlatTexture -Name 'prismarine_bricks' -Palette @('4A8A80','4A8A80','4A8A80','4A8A80') -Weights @(1,1,1,1) -Salt 9031
+New-FlatTexture -Name 'spruce_log' -Palette @('3A2A18','3A2A18','3A2A18','3A2A18') -Weights @(1,1,1,1) -Salt 9032
+New-FlatTexture -Name 'spruce_log_top' -Palette @('6A5238','6A5238','6A5238','6A5238') -Weights @(1,1,1,1) -Salt 9033
+New-FlatTexture -Name 'spruce_leaves' -Palette @('3A6A3A','3A6A3A','3A6A3A','3A6A3A') -Weights @(1,1,1,1) -Salt 9034
+New-FlatTexture -Name 'spruce_planks' -Palette @('C8A878','C8A878','C8A878','C8A878') -Weights @(1,1,1,1) -Salt 9035
+New-FlatTexture -Name 'birch_log' -Palette @('D8D8D0','D8D8D0','D8D8D0','D8D8D0') -Weights @(1,1,1,1) -Salt 9036
+New-FlatTexture -Name 'birch_log_top' -Palette @('C8C0A0','C8C0A0','C8C0A0','C8C0A0') -Weights @(1,1,1,1) -Salt 9037
+New-FlatTexture -Name 'birch_leaves' -Palette @('80A755','80A755','80A755','80A755') -Weights @(1,1,1,1) -Salt 9038
+New-FlatTexture -Name 'birch_planks' -Palette @('E0D8C0','E0D8C0','E0D8C0','E0D8C0') -Weights @(1,1,1,1) -Salt 9039
+New-FlatTexture -Name 'cornflower' -Palette @('4060C0','4060C0','4060C0','4060C0') -Weights @(1,1,1,1) -Salt 9040
+New-FlatTexture -Name 'oxeye_daisy' -Palette @('E8E8E8','E8E8E8','E8E8E8','E8E8E8') -Weights @(1,1,1,1) -Salt 9041
+New-FlatTexture -Name 'azure_bluet' -Palette @('A0C0E0','A0C0E0','A0C0E0','A0C0E0') -Weights @(1,1,1,1) -Salt 9042
+New-FlatTexture -Name 'allium' -Palette @('C090E0','C090E0','C090E0','C090E0') -Weights @(1,1,1,1) -Salt 9043
+New-FlatTexture -Name 'red_tulip' -Palette @('C02020','C02020','C02020','C02020') -Weights @(1,1,1,1) -Salt 9044
+New-FlatTexture -Name 'orange_tulip' -Palette @('E07820','E07820','E07820','E07820') -Weights @(1,1,1,1) -Salt 9045
+New-FlatTexture -Name 'brown_mushroom' -Palette @('9A7A5A','9A7A5A','9A7A5A','9A7A5A') -Weights @(1,1,1,1) -Salt 9046
+New-FlatTexture -Name 'red_mushroom' -Palette @('C03030','C03030','C03030','C03030') -Weights @(1,1,1,1) -Salt 9047
+New-FlatTexture -Name 'kelp' -Palette @('3A7A3A','3A7A3A','3A7A3A','3A7A3A') -Weights @(1,1,1,1) -Salt 9048
+New-FlatTexture -Name 'seagrass' -Palette @('4A9A5A','4A9A5A','4A9A5A','4A9A5A') -Weights @(1,1,1,1) -Salt 9049

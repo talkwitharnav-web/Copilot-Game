@@ -43,7 +43,11 @@ Regenerate with `powershell -File tools\extract-ui-icons.ps1`. Every region is w
 
 `tools/make-reference-hud.ps1` composites the five tab crops over a copy of our own `assets/textures/hud.png` and writes **`hud-reference.png` beside each `game.exe`**, which the game prefers whenever it exists. It carries the same `assets/` guard, never resizes a crop (the 22 × 25 check *is* the proof that the capture is a clean 3×), and `run.ps1` rebuilds it whenever the sheet it was composited from is newer.
 
-`tools/make-reference-blocks.ps1` does the same for the world: **110 block and item textures into `blocks-reference/`**, again beside the exe and never under `assets/`. It **never rescales** — anything not 16 × 16 after frame extraction throws, because a texture array needs one size and a silent resize would blur exactly one layer. Two details it has to handle: `water_still.png` is a 16 × 512 strip of **32 animation frames**, cropped to frame 0 for the plain water layer and extracted whole as `water00.png` … `water31.png` for the animated surface; and five textures ship **greyscale** because the original tints them at runtime (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`, `short_grass`, `water_still`) — so the tool applies our plains tints on the way through. `grass_side` is two reference images composited into one of ours. Textures with no counterpart, like `white.png` and `sun.png`, keep ours.
+`tools/make-reference-blocks.ps1` does the same for the world: **657 block and item textures into `blocks-reference/`**, again beside the exe and never under `assets/`. It **never rescales** — anything not 16 × 16 after frame extraction throws, because a texture array needs one size and a silent resize would blur exactly one layer. Three details it has to handle: `water_still.png` is a 16 × 512 strip of **32 animation frames**, cropped to frame 0 for the plain water layer and extracted whole as `water00.png` … `water31.png` for the animated surface; five textures ship **greyscale** because the original tints them at runtime (`grass_block_top`, `grass_block_side_overlay`, `oak_leaves`, `short_grass`, `water_still`) — so the tool applies our plains tints on the way through; and a **`Corner`** option crops the top-left 16 × 16 out of a larger sheet, which is how `entity/projectiles/arrow.png` (32 × 32) and `block/lantern.png` (16 × 48) come across without being resized. `grass_side` is two reference images composited into one of ours. Textures with no counterpart, like `white.png` and `sun.png`, keep ours.
+
+> **A cut shape needs no texture at all.** Stairs, slabs, walls, fences, gates, carpets and panes are drawn with the block they were cut from — six hundred and forty blocks, nothing staged for any of them. Before adding a row here, check whether the thing is a shape of something that already exists.
+
+`tools/make-reference-sounds.ps1` is the same arrangement for audio, added at M22 on the user's direction to _"use mojang's noises and music and all"_ until they write their own. It copies **497 recordings across 159 events** into **`sounds-reference/` beside each exe**, carries the same `assets/` guard, and warns if any event resolves to no files. The C++ side treats a missing folder as "run silently" rather than as an error. **The same rule that applies to a texture applies to a recording: measure from it, never ship it.**
 
 Both exist so a layout or a world can be judged against pixels known to be right. **Author our own art after the layout is settled, not while it is being settled** — otherwise a tab that looks wrong could equally be bad geometry or bad art, which is the same two-unknowns trap as debugging a box net alongside its skin.
 
@@ -78,8 +82,27 @@ data/       recipes, loot tables, tags, worldgen, structures
 | `models/block` | **2659** | **Geometry as JSON — exact box dimensions** |
 | `models/item` | 1273 | How each item renders in hand and inventory |
 | `blockstates` | 1200 | Which model to use for which block state |
-| `font` | 9 | Font definitions |
+| `font` | 9 | Font definitions. **`textures/font/ascii.png` is the one we use** — 128×128, a 16×16 grid of 8×8 cells where the cell index *is* the codepoint, and `font/include/default.json` is what says so |
 | `lang` | 146 | Translations — useful for naming conventions |
+| `sounds/` | **4871 `.ogg`** | **Every recording in the game.** Foldered by subject: `mob/<name>/`, `dig/`, `step/`, `random/`, `liquid/`, `fire/`, `ambient/cave/`, `music/`, `item/<tool>/`, `block/<block>/`, `note/`, `records/` |
+| `sounds.json` | — | Names each *event* and lists the files that satisfy it, with per-file volume and pitch. Useful for checking which recordings belong together; we do not read it at runtime. |
+
+### `sounds/` — how the naming actually works, because it is not uniform
+
+Worth writing down, because it cost a scan to find out. **A mob's folder does not use one convention.** Most carry `say1..4`, `hurt1..N` and `death`; some use `idle1..N` instead of `say`; a few use `ambient`. Fish use `flop`; the squid uses `ambient`; the bee uses `loop` and `sting`.
+
+The generic world sounds are where you would not look for them:
+
+| What | Where |
+|---|---|
+| Breaking a block | `dig/<material>1..4.ogg` — stone, wood, grass, gravel, sand, cloth, snow, glass, coral, wet_grass |
+| Footsteps | `step/<material>1..6.ogg`, same material names |
+| Hurt, fall, breath, burp, eat, pop, orb, click, bow, explode, fuse, splash, drink, levelup, chest lids, doors, buckets, fizz | all in `random/` |
+| Cave ambience | `ambient/cave/cave1..13.ogg` |
+| Fire, ignite, lava | `fire/`, `liquid/` |
+| Music | `music/game/*.ogg` and `music/menu/*.ogg` |
+
+`tools/make-reference-sounds.ps1` is the map made executable: it names 159 events, resolves each to its files, and copies **497** of them into `sounds-reference/` beside each executable. It warns loudly if an event resolves to nothing, which is the only way a typo in a folder name would ever surface.
 
 ### `models/block` is the most valuable folder here
 
@@ -158,15 +181,21 @@ Smelting is simpler:
 | **Ingots and gems** | ✅ **in use** | `textures/item/{raw_iron,iron_ingot,raw_gold,gold_ingot,raw_copper,copper_ingot,diamond,emerald,lapis_lazuli,redstone}.png` |
 | Wooden tools ×5 | ✅ | `textures/item/wooden_{pickaxe,axe,shovel,sword,hoe}.png` |
 | Stone tools ×5 | ✅ | `textures/item/stone_{...}.png` |
-| **Chest** | ✅ | `textures/entity/chest/normal.png` — **64×64 UV sheet**, not four faces |
+| **Chest** | ✅ **in use** | `textures/entity/chest/normal.png` — **64×64 box net**; `New-ChestFace` crops top, front and side out of it |
+| **Emberite / ancient debris** | ✅ **in use** | `textures/block/{ancient_debris_side,ancient_debris_top,netherite_block}.png`, `textures/item/{netherite_scrap,netherite_ingot}.png` |
+| **Smoker + smithing table** | ✅ **in use** | `textures/block/{smoker_front,smoker_front_on,smoker_side,smoker_top,smithing_table_*}.png` |
+| Iron / diamond / netherite tools ×15 | ✅ **in use** | `textures/item/{iron,diamond,netherite}_{pickaxe,axe,shovel,sword,hoe}.png` |
 | **Spawn eggs ×46** | ✅ **in use as placeholders** | `textures/item/<mob>_spawn_egg.png`, 16×16 each |
 | **Creature skins ×42** | ✅ **in use as placeholders** | `textures/entity/<family>/<mob>.png` |
 | **Charged creeper shell** | ✅ **in use** | `textures/entity/creeper/creeper_armor.png` — the same net as the creeper, mostly transparent |
 | **Catalogue tabs ×5** | ✅ **in use as placeholders** | cropped from `crafting-ui.avif` into `ui-icons/`, 22×25 each |
+| **The text font** | ✅ **in use as a placeholder** | `textures/font/ascii.png` — copied verbatim, no compositing. Our own `assets/textures/font.png` is generated in **the same layout** so either drops into the other's place |
 
-**Four sets are staged beside the executable rather than copied into `assets/`**, which is the rule for reference art: `make-spawn-egg-sprites.ps1` writes `spawn-eggs/`, `make-reference-creature-atlas.ps1` writes `creatures-reference.png`, `make-reference-hud.ps1` writes `hud-reference.png`, and `make-reference-blocks.ps1` writes `blocks-reference/`. All four refuse to write under `assets/`. See `START-HERE.md` §5.
+**Five sets are staged beside the executable rather than copied into `assets/`**, which is the rule for reference art: `make-spawn-egg-sprites.ps1` writes `spawn-eggs/`, `make-reference-creature-atlas.ps1` writes `creatures-reference.png`, `make-reference-hud.ps1` writes `hud-reference.png`, `make-reference-blocks.ps1` writes `blocks-reference/`, and `make-reference-font.ps1` writes `font-reference.png`. All five refuse to write under `assets/`. See `START-HERE.md` §5.
 
-The chest remains the awkward one: it is a single 64×64 unwrapped sheet for a non-cube model, so it needs a real model pipeline rather than a per-face texture. That is a bigger job than the texture.
+> **A glyph's width is not in the dump and does not need to be.** The font is proportional, and the reference derives each advance from the artwork — rightmost opaque column plus a texel of spacing. Measuring it at load time off whatever atlas is present reproduces the published widths exactly (`i` 2, `l` 3, `I` 4, `a` 6, `@` 7) and means a redrawn font needs no table maintained beside it.
+
+**The chest was written off here for months and should not have been.** It was called "a single 64×64 unwrapped sheet for a non-cube model, needing a real model pipeline" — but an unwrapped sheet for a box *is a box net*, and cropping three 14-pixel bands out of it and padding them to 16 is arithmetic. **Before recording an asset as blocked on a pipeline, check whether it is really just a net.** The same reading procedure `TEXTURING.md` uses for creatures applies.
 
 ### Recipes — all verified against source
 
@@ -174,7 +203,7 @@ Every recipe in `CRAFTABLE.md` was confirmed by reading its JSON directly, which
 
 ### Still genuinely missing
 
-Nothing on any current path. The chest is the one asset that is *present* but unusable, because it needs a model pipeline before its texture means anything.
+Nothing on any current path.
 
 **Three folders have earned their keep and are worth knowing about:** `models/entity/` and the Bedrock `.geo.json` equivalents behind `ANIMATION.md`'s pivot tables; `data/minecraft/loot_table/entities/` for what a creature drops, which is the first thing M21 will want; and `data/minecraft/worldgen/` — `configured_feature/ore_*.json` carries the exact vein sizes and counts that our own ore table currently approximates from wiki depth bands.
 
@@ -207,6 +236,10 @@ a bug report and a re-measure.
 **Read the model JSON before inventing dimensions.** Every non-cube shape we add — stairs, panes, doors, buttons — has its exact extents recorded in `models/block/`. Guessing costs a rebuild cycle; reading costs one command.
 
 **Read the recipe JSON before writing a recipe.** Pattern, key and yield are unambiguous there.
+
+**A texture only makes sense with the model that samples it.** `bamboo_stalk.png` is an opaque 16×16 because the reference draws a 2/16-wide post from uv 13–16 of it; our cross blades span the whole cell, so the file straight through came out as a solid square of bamboo colour. Anything we draw as a `Cross` needs its silhouette cropped onto a transparent field — `StalkColumns` in the staging script does that.
+
+**Check the alpha before assuming a texture is opaque.** Ice, honey and slime are the reference's `translucent` render type and carry a flat alpha around 190 over every texel. We have one blended pass and water owns it, so the staging script flattens exactly that shape of alpha — no fully clear texel, most texels partly clear — which leaves glass, leaves and every plant untouched.
 
 **Never copy pixels.** Derive statistics, generate originals. The whole premise of the project depends on this boundary being mechanical rather than remembered — which is why `reference/` sits outside `assets/` and is gitignored.
 

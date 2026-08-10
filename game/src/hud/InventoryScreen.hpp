@@ -1,6 +1,7 @@
 #pragma once
 
 #include "item/Inventory.hpp"
+#include "world/Chest.hpp"
 
 #include <engine/render/MeshData.hpp>
 
@@ -9,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -31,17 +34,33 @@ enum class Kind {
     Inventory,
     CraftingTable,
     Furnace,
+    /// Two inputs and a result, like a furnace, but the result is a **preview**
+    /// computed from what is in front of it rather than something the block is
+    /// slowly making. It borrows the furnace's slot regions so the whole click,
+    /// drag and shift-click path works unchanged.
+    SmithingTable,
+    /// Twenty-seven slots of storage above the player's own. The one screen
+    /// with a region of its own rather than borrowing the crafting slots,
+    /// because its contents are neither ingredients nor a result.
+    Chest,
+    /// Two chests standing shoulder to shoulder, shown as one fifty-four slot
+    /// container. They stay two separate blocks holding twenty-seven each -
+    /// only the screen joins them.
+    DoubleChest,
 };
 
 /// Width and height of a screen's crafting grid.
 ///
 /// A furnace has no grid: its three slots are input, fuel and output, which the
-/// recipe matcher never sees.
+/// recipe matcher never sees. Nor has a smithing table.
 constexpr int craftSize(Kind kind) {
     switch (kind) {
     case Kind::CraftingTable:
         return 3;
     case Kind::Furnace:
+    case Kind::SmithingTable:
+    case Kind::Chest:
+    case Kind::DoubleChest:
         return 0;
     default:
         return 2;
@@ -70,6 +89,8 @@ enum class Region {
     /// the shared click handling needs no furnace-specific branch.
     FurnaceInput,
     FurnaceFuel,
+    /// A chest's own twenty-seven, indexed 0 to 26 across then down.
+    Chest,
 };
 
 struct SlotHit {
@@ -99,23 +120,34 @@ static_assert(static_cast<int>(CatalogueTab::Search) == static_cast<int>(ItemCat
 /// `build` is otherwise a pure function of its arguments, and keeping it that
 /// way is the most reusable fact about this module - so the screen's state
 /// lives in one struct the caller owns rather than in file-scope statics.
-/// The search text joins it in a later slice.
 struct CatalogueState {
     CatalogueTab tab = CatalogueTab::Construction;
     /// How many whole rows have been scrolled past. Rows rather than pixels,
     /// because the grid has no sub-row states and a fractional offset would
     /// only make the clipped last row ambiguous.
     int scrollRow = 0;
+    /// What has been typed into the search field. **Only the Search tab reads
+    /// it**, which is the reference's arrangement: the four category tabs are
+    /// a browse, and searching is its own place.
+    std::string query;
+    /// Whether the caret is on this frame. Driven by the caller's clock rather
+    /// than by a static in here, so `build` stays a pure function of what it is
+    /// given - the same reason the scroll row lives here.
+    bool caretVisible = true;
+    /// Whether the field has been clicked into. Until it has, the caret is
+    /// hidden, the hint is shown, and **the keyboard belongs to the game** - so
+    /// selecting the Search tab does not silently stop `E` closing the screen.
+    bool searchFocused = false;
 };
 
 /// Whether this screen shows the catalogue card beside the inventory.
 ///
 /// A furnace does not: its own recipe list is a separate design and is
-/// deliberately deferred.
+/// deliberately deferred. Nor does a smithing table - its one operation is in
+/// front of you.
 constexpr bool showsCatalogue(Kind kind) {
-    return kind != Kind::Furnace;
+    return kind == Kind::Inventory || kind == Kind::CraftingTable;
 }
-
 /// Which tab, if any, sits under a point in screen space.
 std::optional<CatalogueTab> tabAt(Kind kind, float x, float y);
 
@@ -145,23 +177,56 @@ bool insideCatalogueList(Kind kind, float x, float y);
 std::pair<glm::vec2, glm::vec2> catalogueListBounds();
 
 /// The items a tab lists, in declaration order.
-std::vector<ItemId> catalogueItems(CatalogueTab tab);
+///
+/// `query` is only read by the Search tab, and matches at the **start of any
+/// word** of an item's name rather than anywhere in it - so "st" finds Stone
+/// and Stone Stairs but not Sandstone, which is what makes a short query
+/// useful in a list of seven hundred.
+std::vector<ItemId> catalogueItems(CatalogueTab tab, std::string_view query = {});
 
 /// Which slot, if any, sits under a point in screen space.
 std::optional<SlotHit> slotAt(Kind kind, float x, float y);
+
+/// Whether a point is over the search field. Clicking it is what focuses it,
+/// and clicking anywhere else is what lets it go.
+bool insideSearchField(Kind kind, float x, float y);
 
 /// True when the point is anywhere over either card, so clicks outside them can
 /// be told apart from clicks that missed a slot.
 bool insidePanel(Kind kind, float x, float y);
 
+/// How many storage slots the open container offers. A double chest is two
+/// blocks' worth shown as one list.
+constexpr std::size_t chestSlotCount(Kind kind) {
+    if (kind == Kind::DoubleChest) {
+        return kChestSlots * 2;
+    }
+    return kind == Kind::Chest ? kChestSlots : 0;
+}
+
 /// `heldStack` is what the cursor is carrying, drawn at (cursorX, cursorY).
+///
+/// In `creative` no entry is ever red: the catalogue is a source there, so
+/// everything in it is one click away and "can you make this" is not a question
+/// worth asking.
+///
+/// `chest` is only read by `Kind::Chest` and is null for every other screen.
+///
+/// `partner` is the second half of a double chest and supplies slots 27-53. It
+/// is null everywhere else.
 ///
 /// Catalogue entry icons go into `clipped` rather than the returned mesh,
 /// because they are the one part of the screen that has to stop at an edge.
+///
+/// What the cursor carries, and the label under it, go into `top`, which is
+/// drawn after `clipped`. A blended fragment still writes depth, so a stack
+/// held over the catalogue was stamping a hole through the icons behind it
+/// wherever its own artwork was transparent.
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
                        const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
                        float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
-                       engine::MeshData& clipped);
+                       bool creative, const Chest* chest, const Chest* partner, engine::MeshData& clipped,
+                       engine::MeshData& top);
 
 } // namespace inventoryScreen
 } // namespace game

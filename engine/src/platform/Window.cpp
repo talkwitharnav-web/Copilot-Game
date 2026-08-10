@@ -34,6 +34,12 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_E;
     case Key::F:
         return GLFW_KEY_F;
+    case Key::G:
+        return GLFW_KEY_G;
+    case Key::C:
+        return GLFW_KEY_C;
+    case Key::V:
+        return GLFW_KEY_V;
     case Key::Q:
         return GLFW_KEY_Q;
     case Key::Space:
@@ -82,6 +88,10 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_F9;
     case Key::F10:
         return GLFW_KEY_F10;
+    case Key::F11:
+        return GLFW_KEY_F11;
+    case Key::F12:
+        return GLFW_KEY_F12;
     case Key::Backspace:
         return GLFW_KEY_BACKSPACE;
     case Key::Enter:
@@ -109,6 +119,15 @@ bool fromGlfwKey(int glfwKey, Key& out) {
         return true;
     case GLFW_KEY_F:
         out = Key::F;
+        return true;
+    case GLFW_KEY_G:
+        out = Key::G;
+        return true;
+    case GLFW_KEY_C:
+        out = Key::C;
+        return true;
+    case GLFW_KEY_V:
+        out = Key::V;
         return true;
     case GLFW_KEY_Q:
         out = Key::Q;
@@ -181,6 +200,12 @@ bool fromGlfwKey(int glfwKey, Key& out) {
         return true;
     case GLFW_KEY_F10:
         out = Key::F10;
+        return true;
+    case GLFW_KEY_F11:
+        out = Key::F11;
+        return true;
+    case GLFW_KEY_F12:
+        out = Key::F12;
         return true;
     case GLFW_KEY_BACKSPACE:
         out = Key::Backspace;

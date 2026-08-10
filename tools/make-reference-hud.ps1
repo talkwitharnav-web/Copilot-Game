@@ -196,6 +196,45 @@ if ($crops.Count -eq $tabs.Count) {
 }
 foreach ($crop in $crops.Values) { $crop.Dispose() }
 
+# The eight survival status icons, straight out of the reference's own 9x9 HUD
+# sprites. Unlike the tabs these need no state recovery - each one ships as its
+# own file, at exactly the size we draw it, so this is a copy rather than a
+# derivation. Must match `New-StatusStrip` in make-hud-sheet.ps1 and the
+# `hud::StatusIcon` order in code.
+$statusTop = 1345
+$statusPitch = 10
+$statusSize = 9
+$hudSprites = Join-Path $root "reference\minecraft-assets-26.2\minecraft-assets-26.2\assets\minecraft\textures\gui\sprites\hud"
+$statusFiles = @(
+    'heart\container.png', 'heart\full.png', 'heart\half.png',
+    'food_empty.png', 'food_full.png', 'food_half.png',
+    'air.png', 'air_bursting.png'
+)
+
+$statusReplaced = 0
+for ($i = 0; $i -lt $statusFiles.Count; $i++) {
+    $path = Join-Path $hudSprites $statusFiles[$i]
+    if (-not (Test-Path $path)) {
+        Write-Warning "Missing status sprite $($statusFiles[$i]) - keeping ours."
+        continue
+    }
+    $icon = [System.Drawing.Image]::FromFile($path)
+    # Never resize a reference crop. The size *is* the evidence the layout is
+    # right, and a silent rescale hides a drifted extraction behind a plausible
+    # result - the same rule the tab crops are held to.
+    if ($icon.Width -ne $statusSize -or $icon.Height -ne $statusSize) {
+        $icon.Dispose()
+        throw "$($statusFiles[$i]) is $($icon.Width)x$($icon.Height), expected ${statusSize}x${statusSize}"
+    }
+    $destX = $i * $statusPitch
+    $graphics.SetClip((New-Object System.Drawing.Rectangle $destX, $statusTop, $statusSize, $statusSize))
+    $graphics.Clear([System.Drawing.Color]::FromArgb(0, 0, 0, 0))
+    $graphics.DrawImage($icon, $destX, $statusTop, $statusSize, $statusSize)
+    $graphics.ResetClip()
+    $icon.Dispose()
+    $statusReplaced++
+}
+
 $graphics.Dispose()
 $sheet.Dispose()
 
@@ -206,6 +245,6 @@ foreach ($output in $resolvedOutputs) {
         continue
     }
     $atlas.Save($output, [System.Drawing.Imaging.ImageFormat]::Png)
-    Write-Host "wrote $output ($($atlas.Width) x $($atlas.Height), $replaced tabs from reference)"
+    Write-Host "wrote $output ($($atlas.Width) x $($atlas.Height), $replaced tabs and $statusReplaced status icons from reference)"
 }
 $atlas.Dispose()

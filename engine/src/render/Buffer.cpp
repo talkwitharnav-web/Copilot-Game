@@ -65,7 +65,7 @@ Buffer::Buffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFla
     allocInfo.memoryTypeIndex =
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, memoryProperties);
 
-    if (vkAllocateMemory(context.device(), &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
+    if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
         // The buffer already exists; without this it would leak on a failed allocation.
         vkDestroyBuffer(context.device(), m_buffer, nullptr);
         m_buffer = VK_NULL_HANDLE;
@@ -82,9 +82,7 @@ Buffer::~Buffer() {
     if (m_buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(m_context.device(), m_buffer, nullptr);
     }
-    if (m_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context.device(), m_memory, nullptr);
-    }
+    freeDeviceMemory(m_context.device(), m_memory);
 }
 
 void* Buffer::persistentMap() {

@@ -1,5 +1,6 @@
 #include "world/Raycast.hpp"
 
+#include "world/Collision.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
@@ -17,8 +18,9 @@ namespace {
 /// its top from a distance crosses the empty upper half first and would be
 /// reported as entering through the side.
 bool hitsBlockGeometry(const World& world, const glm::vec3& origin, const glm::vec3& dir, const glm::ivec3& cell,
-                       float maxDistance, float& tHit, glm::ivec3& normal) {
-    const BlockBoxes shape = selectionBoxes(world.blockAt(cell.x, cell.y, cell.z));
+                       float maxDistance, float& tHit, glm::ivec3& normal, bool collision = false) {
+    const BlockBoxes shape = collision ? worldCollisionBoxes(world, cell.x, cell.y, cell.z)
+                                       : worldSelectionBoxes(world, cell.x, cell.y, cell.z);
     bool found = false;
     tHit = maxDistance;
 
@@ -69,7 +71,7 @@ bool hitsBlockGeometry(const World& world, const glm::vec3& origin, const glm::v
 } // namespace
 
 RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3& direction,
-                   float maxDistance, bool stopAtWater) {
+                   float maxDistance, bool stopAtFluid) {
     RaycastHit result;
 
     const float length = glm::length(direction);
@@ -105,7 +107,7 @@ RaycastHit raycast(const World& world, const glm::vec3& origin, const glm::vec3&
         // A source only, never a flowing cell: scooping a stream would leave a
         // gap its own source refills a moment later, which reads as the bucket
         // having done nothing.
-        if (stopAtWater && isWaterSource(world.blockAt(cell.x, cell.y, cell.z))) {
+        if (stopAtFluid && isFluidSource(world.blockAt(cell.x, cell.y, cell.z))) {
             result.hit = true;
             result.block = cell;
             result.adjacent = previous;
@@ -188,6 +190,65 @@ bool hasLineOfSight(const World& world, const glm::vec3& from, const glm::vec3& 
         if (isOpaque(world.blockAt(cell.x, cell.y, cell.z))) {
             return false;
         }
+    }
+}
+
+SweepHit sweepBlocks(const World& world, const glm::vec3& from, const glm::vec3& to) {
+    SweepHit result;
+    result.point = to;
+
+    const glm::vec3 delta = to - from;
+    const float length = glm::length(delta);
+    if (length < 1e-6f) {
+        return result;
+    }
+    const glm::vec3 dir = delta / length;
+
+    glm::ivec3 cell{static_cast<int>(std::floor(from.x)), static_cast<int>(std::floor(from.y)),
+                    static_cast<int>(std::floor(from.z))};
+
+    constexpr float infinity = std::numeric_limits<float>::infinity();
+    glm::ivec3 step{0};
+    glm::vec3 tMax{infinity};
+    glm::vec3 tDelta{infinity};
+
+    for (int axis = 0; axis < 3; ++axis) {
+        if (dir[axis] > 0.0f) {
+            step[axis] = 1;
+            tMax[axis] = (static_cast<float>(cell[axis] + 1) - from[axis]) / dir[axis];
+            tDelta[axis] = 1.0f / dir[axis];
+        } else if (dir[axis] < 0.0f) {
+            step[axis] = -1;
+            tMax[axis] = (static_cast<float>(cell[axis]) - from[axis]) / dir[axis];
+            tDelta[axis] = -1.0f / dir[axis];
+        }
+    }
+
+    while (true) {
+        float tHit = 0.0f;
+        glm::ivec3 normal{0};
+        if (hitsBlockGeometry(world, from, dir, cell, length, tHit, normal, true) && tHit <= length) {
+            result.hit = true;
+            result.block = cell;
+            result.normal = normal;
+            result.distance = tHit;
+            result.point = from + dir * tHit;
+            return result;
+        }
+
+        int axis = 0;
+        if (tMax.y < tMax[axis]) {
+            axis = 1;
+        }
+        if (tMax.z < tMax[axis]) {
+            axis = 2;
+        }
+        if (tMax[axis] > length) {
+            return result;
+        }
+
+        cell[axis] += step[axis];
+        tMax[axis] += tDelta[axis];
     }
 }
 

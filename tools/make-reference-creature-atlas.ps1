@@ -129,6 +129,8 @@ $targets = @(
     # rather than in the block texture array is what avoids moving
     # `TextureLayer::SpawnEggFirst` and sliding every spawn egg sprite.
     @{ Row = 3072; X = 32; Y = 48; Path = "..\block\red_mushroom.png" }
+    @{ Row = 3552; Path = "bee\bee.png" }
+    @{ Row = 3616; Path = "bee\bee_angry.png" }
 )
 
 $ours = Join-Path $PSScriptRoot "..\assets\textures\creatures.png"

@@ -57,6 +57,24 @@ FetchContent_MakeAvailable(stb)
 add_library(stb_image INTERFACE)
 target_include_directories(stb_image INTERFACE ${stb_SOURCE_DIR})
 
+# miniaudio: opens the sound card. M22 needs to actually play audio, and this is
+# a single public-domain header that talks to WASAPI, CoreAudio and ALSA and
+# does nothing else - the alternative is several hundred lines of COM that would
+# only ever work on Windows, and this project intends to keep Linux open.
+#
+# **Decoding is not its job here.** The reference's audio is Ogg Vorbis and
+# `stb_vorbis.c` already came with stb, so miniaudio is compiled with its own
+# decoders off and fed raw PCM.
+FetchContent_Declare(miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG        0.11.21
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+
+add_library(miniaudio INTERFACE)
+target_include_directories(miniaudio INTERFACE ${miniaudio_SOURCE_DIR})
+
 # Vulkan is installed system-wide via the LunarG SDK, so it is found, not fetched.
 find_package(Vulkan REQUIRED)
 

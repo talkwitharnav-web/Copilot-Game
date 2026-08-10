@@ -11,6 +11,10 @@
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
 #include "hud/Hotbar.hpp"
+#include "hud/StatusBars.hpp"
+#include "core/Sounds.hpp"
+
+#include <engine/audio/AudioEngine.hpp>
 #include "hud/HudPrimitives.hpp"
 #include "hud/InventoryScreen.hpp"
 #include "hud/LoadingScreen.hpp"
@@ -21,15 +25,21 @@
 #include "item/Tool.hpp"
 #include "world/Furnace.hpp"
 #include "world/ItemEntity.hpp"
+#include "world/Projectile.hpp"
 #include "world/Biome.hpp"
 #include "world/BlockOutline.hpp"
 #include "world/Chunk.hpp"
+#include "world/Collision.hpp"
 #include "world/Creature.hpp"
 #include "world/Explosion.hpp"
+#include "world/FallingBlock.hpp"
+#include "world/Material.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
 #include "world/Sky.hpp"
 #include "world/TerrainGenerator.hpp"
+#include "world/Particles.hpp"
+#include "world/Weather.hpp"
 #include "world/World.hpp"
 
 #include <glm/glm.hpp>
@@ -46,6 +56,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -70,6 +81,28 @@ constexpr float kCreativeEntityReach = 5.0f;
 // Holding the button keeps editing at this rate, so dragging across terrain
 // does not need one click per block.
 constexpr float kPlaceRepeatSeconds = 0.18f;
+
+// A charge's blast strength. The same scale the creeper's uses, so the two go
+// through one explosion path.
+constexpr float kTntPower = 4.0f;
+
+/// Blocks per second of shove at full impact.
+///
+/// The reference's knockback is one block per **tick** at point blank, which is
+/// twenty a second - and that is what this was. It reads as a rocket rather
+/// than a blast, because the reference's velocity decays by 9% every tick and
+/// ours does not: a player thrown off the ground keeps whatever horizontal
+/// speed the blast gave until they land. This is the sustained-speed equivalent
+/// of that impulse, tuned to just under a jump's worth of lift at point blank.
+constexpr float kBlastKnockback = 7.0f;
+
+/// A pearl may be thrown once a second, the reference's own cooldown.
+constexpr float kPearlCooldownSeconds = 1.0f;
+
+/// How far above the impact the teleport will search for room to stand, in
+/// whole blocks. Two is enough to clear a slab or a stair underfoot; more than
+/// that and you are being moved somewhere you did not aim.
+constexpr int kPearlLandingLift = 3;
 
 // Rate a held button lands blows on a creature, distinct from digging: a swing
 // connects once and then has to be wound up again.
@@ -136,6 +169,38 @@ constexpr std::uint32_t kWorldSeed = 1337u;
 constexpr std::array<double, 8> kFpsCapOptions{30.0, 60.0, 90.0, 120.0, 144.0, 165.0, 240.0, 0.0};
 constexpr std::size_t kDefaultFpsCapIndex = 3;
 
+// In the order `tonemap.frag` tests for them, which is also the order
+// `Settings::toneMapper` counts in. Short on purpose: these are shown on the F5
+// overlay as well as logged, and the overlay has one column to fit them in.
+constexpr std::array<const char*, 4> kToneMapperNames{"PBR neutral", "Hable", "Reinhard", "ACES"};
+static_assert(kToneMapperNames.size() == game::Settings::kToneMapperCount);
+
+// What F12 cycles through, in the order `deferred.frag` tests for them. These
+// are how a deferred renderer is debugged: when the picture is wrong, one of
+// them says which input is wrong.
+constexpr std::array<const char*, 10> kDebugViewNames{
+    "off",      "albedo",   "normal",   "roughness",   "metallic",
+    "occlusion", "emissive", "sky/block light", "distance", "cast shadow"};
+static_assert(kDebugViewNames.size() == engine::Renderer::kDebugViewCount);
+
+// What G cycles through. Each step raises the shadow map's resolution, how many
+// slices of the view it is split across, and how far shadows are drawn.
+constexpr std::array<const char*, 4> kShadowQualityNames{"off", "low", "medium", "high"};
+static_assert(kShadowQualityNames.size() == game::Settings::kShadowQualityCount);
+static_assert(game::Settings::kShadowQualityCount ==
+              static_cast<unsigned>(engine::Renderer::kShadowQualityCount));
+
+// What C cycles through: how many steps each ray takes through the cloud deck.
+constexpr std::array<const char*, 3> kCloudQualityNames{"off", "fast", "fancy"};
+static_assert(kCloudQualityNames.size() == game::Settings::kCloudQualityCount);
+static_assert(game::Settings::kCloudQualityCount ==
+              static_cast<unsigned>(engine::Renderer::kCloudQualityCount));
+
+// Blocks a second the deck drifts west. The reference's own figure is not
+// published anywhere; this is ours, chosen so a cloud crosses the view in about
+// a minute rather than the several the reference's estimated 0.6 would take.
+constexpr float kCloudDriftPerSecond = 1.1f;
+
 std::string describeCap(double fps) {
     return fps > 0.0 ? std::to_string(static_cast<int>(fps)) + " fps" : "uncapped";
 }
@@ -154,14 +219,405 @@ struct BlockPositionHash {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// The worldgen census, behind `worldgen_probe` in settings.cfg.
+//
+// Terrain is the one system here with a *distribution*, and a distribution can
+// be printed. Everything this reports has been wrong at least once in a build
+// that compiled clean and produced no validation errors.
+// ---------------------------------------------------------------------------
+namespace {
+
+void probeWorldgen() {
+    constexpr int kSpan = 8192;
+    constexpr int kStride = 48;
+
+    std::array<int, static_cast<std::size_t>(game::BiomeId::Count)> biomeCounts{};
+    int columns = 0;
+    int surfaceMin = 999;
+    int surfaceMax = -999;
+    long long surfaceSum = 0;
+    int belowSea = 0;
+
+    // How heavy each climate field's tails are. The band edges were taken from
+    // the reference, which draws them across a bell-shaped Perlin sum; if ours
+    // is flatter then every biome at an end of an axis is over-represented, and
+    // that one fact shows up as too many peaks *and* as deserts appearing where
+    // a temperate region should be.
+    struct FieldStat {
+        const char* name;
+        double absSum = 0.0;
+        double signedSum = 0.0;
+        long long positive = 0;
+        long long tail = 0;
+    };
+    std::array<FieldStat, 5> fields{{{"temperature"}, {"humidity"}, {"continental"}, {"erosion"},
+                                     {"weirdness"}}};
+
+    for (int z = -kSpan; z <= kSpan; z += kStride) {
+        for (int x = -kSpan; x <= kSpan; x += kStride) {
+            const game::Climate climate = game::climateAt(kWorldSeed, x, z);
+            ++biomeCounts[static_cast<std::size_t>(game::biomeFor(climate))];
+
+            const std::array<float, 5> sample{climate.temperature, climate.humidity,
+                                              climate.continentalness, climate.erosion,
+                                              climate.weirdness};
+            for (std::size_t f = 0; f < fields.size(); ++f) {
+                fields[f].absSum += std::abs(sample[f]);
+                fields[f].signedSum += sample[f];
+                if (sample[f] > 0.0f) {
+                    ++fields[f].positive;
+                }
+                if (std::abs(sample[f]) > 0.55f) {
+                    ++fields[f].tail;
+                }
+            }
+            const int surface = game::surfaceHeightAt(kWorldSeed, x, z);
+            surfaceMin = std::min(surfaceMin, surface);
+            surfaceMax = std::max(surfaceMax, surface);
+            surfaceSum += surface;
+            if (surface < game::kSeaLevel) {
+                ++belowSea;
+            }
+            ++columns;
+        }
+    }
+
+    engine::logInfo("PROBE columns " + std::to_string(columns) + " surface min/mean/max " +
+                    std::to_string(surfaceMin) + "/" +
+                    std::to_string(static_cast<double>(surfaceSum) / columns) + "/" +
+                    std::to_string(surfaceMax) + "  below sea " +
+                    std::to_string(100.0 * belowSea / columns) + "%");
+
+    for (const FieldStat& stat : fields) {
+        engine::logInfo(std::string("PROBE field ") + stat.name + " mean|v| " +
+                        std::to_string(stat.absSum / columns) + "  beyond +/-0.55 " +
+                        std::to_string(100.0 * static_cast<double>(stat.tail) / columns) +
+                        "%  mean " + std::to_string(stat.signedSum / columns) + "  above 0 " +
+                        std::to_string(100.0 * static_cast<double>(stat.positive) / columns) + "%");
+    }
+
+    for (std::size_t i = 0; i < biomeCounts.size(); ++i) {
+        if (biomeCounts[i] == 0) {
+            engine::logWarn(std::string("PROBE biome MISSING ") +
+                            game::biomeInfo(static_cast<game::BiomeId>(i)).name);
+        } else {
+            engine::logInfo(std::string("PROBE share ") +
+                            game::biomeInfo(static_cast<game::BiomeId>(i)).name + " " +
+                            std::to_string(100.0 * biomeCounts[i] / columns) + "%");
+        }
+    }
+
+    // Per-biome top block, which is the whole of the "stone rings" and
+    // "peaks that are only snow" question.
+    //
+    // **On the heap, not the stack.** One `long long` per block per biome is a
+    // quarter of a megabyte now that there are eleven hundred blocks, and a
+    // chunk stack sits beside it in the same frame - together they overran the
+    // thread's stack and the game exited before it could log a single line.
+    using TopBlockCounts = std::array<std::array<long long, game::kBlockIdCount>,
+                                      static_cast<std::size_t>(game::BiomeId::Count)>;
+    const auto owned = std::make_unique<TopBlockCounts>();
+    TopBlockCounts& topBlocks = *owned;
+    // Solid cells sitting above the terrain top. Terrain is single-valued, so
+    // anything here that is not a tree is floating land.
+    long long floatingTerrain = 0;
+    long long treeCellsAbove = 0;
+    long long pillars = 0;
+    long long dryBed = 0;
+    long long snowOnWarm = 0;
+    long long caveMouths = 0;
+    long long nearSurfaceAir = 0;
+    long long floatingDecor = 0;
+    long long deepAir = 0;
+    long long deepSolid = 0;
+    std::array<long long, game::kBlockIdCount> blockCounts{};
+    int chunkCount = 0;
+
+    // **Every chunk buffer here is on the heap.** A chunk is a hundred
+    // kilobytes and MSVC reserves the whole frame up front, so three of them
+    // beside the per-biome table overran the thread's stack outright - the
+    // process died with 0xC00000FD before it could log a line, which reads as
+    // "the probe does nothing" rather than as a crash.
+    using ChunkStack = std::array<game::Chunk, 3>;
+    const auto columnOwner = std::make_unique<ChunkStack>();
+    ChunkStack& stack = *columnOwner;
+
+    for (int cz = -5; cz <= 5; ++cz) {
+        for (int cx = -5; cx <= 5; ++cx) {
+            for (int cy = 0; cy < game::kWorldHeightChunks; ++cy) {
+                stack[static_cast<std::size_t>(cy)] = game::generateChunk(kWorldSeed, {cx, cy, cz});
+                ++chunkCount;
+            }
+
+            // Heights for this chunk plus a one-column border, so a pillar can
+            // be told from a hillside without paying for it per neighbour.
+            constexpr int kHSpan = game::Chunk::kSize + 2;
+            std::array<int, static_cast<std::size_t>(kHSpan) * kHSpan> heights{};
+            for (int hz = -1; hz <= game::Chunk::kSize; ++hz) {
+                for (int hx = -1; hx <= game::Chunk::kSize; ++hx) {
+                    heights[static_cast<std::size_t>(hz + 1) * kHSpan + static_cast<std::size_t>(hx + 1)] =
+                        game::surfaceHeightAt(kWorldSeed, cx * game::Chunk::kSize + hx,
+                                              cz * game::Chunk::kSize + hz);
+                }
+            }
+            const auto heightAt = [&](int hx, int hz) {
+                return heights[static_cast<std::size_t>(hz + 1) * kHSpan + static_cast<std::size_t>(hx + 1)];
+            };
+
+            for (int lz = 0; lz < game::Chunk::kSize; ++lz) {
+                for (int lx = 0; lx < game::Chunk::kSize; ++lx) {
+                    const int worldX = cx * game::Chunk::kSize + lx;
+                    const int worldZ = cz * game::Chunk::kSize + lz;
+                    const int surface = heightAt(lx, lz);
+                    const auto biome = game::biomeFor(game::climateAt(kWorldSeed, worldX, worldZ));
+
+                    // A column standing well clear of every neighbour is the
+                    // sheer-sided pillar a would-be island turns into.
+                    const int highest = std::max(std::max(heightAt(lx - 1, lz), heightAt(lx + 1, lz)),
+                                                 std::max(heightAt(lx, lz - 1), heightAt(lx, lz + 1)));
+                    if (surface - highest >= 5) {
+                        ++pillars;
+                    }
+
+                    const game::BlockId topBlock =
+                        stack[static_cast<std::size_t>(surface / game::Chunk::kSize)].at(
+                            lx, surface % game::Chunk::kSize, lz);
+
+                    // A bed material on dry ground: the ribbon of gravel and
+                    // sand a river leaves when it never reaches the waterline.
+                    if (surface >= game::kSeaLevel &&
+                        (topBlock == game::BlockId::Gravel || topBlock == game::BlockId::Sand) &&
+                        game::biomeHasAny(biome, game::BiomeTag::Ocean | game::BiomeTag::River)) {
+                        ++dryBed;
+                    }
+
+                    // The terrain top carved away, which is a cave open to the
+                    // sky rather than a tunnel that merely comes close to one.
+                    if (topBlock == game::BlockId::Air) {
+                        ++caveMouths;
+
+                        // ...and something still sitting on top of that hole.
+                        // FLOATING-TERRAIN cannot see this: it files logs,
+                        // leaves and dirt as tree cells and looks no further,
+                        // which is exactly the blind spot that let trees be
+                        // built over cave mouths.
+                        const int above = surface + 1;
+                        if (above < game::kWorldHeightChunks * game::Chunk::kSize &&
+                            stack[static_cast<std::size_t>(above / game::Chunk::kSize)].at(
+                                lx, above % game::Chunk::kSize, lz) != game::BlockId::Air) {
+                            ++floatingDecor;
+                        }
+                    }
+                    for (int d = 0; d < 8; ++d) {
+                        const int y = surface - d;
+                        if (y >= 0 && stack[static_cast<std::size_t>(y / game::Chunk::kSize)].at(
+                                          lx, y % game::Chunk::kSize, lz) == game::BlockId::Air) {
+                            ++nearSurfaceAir;
+                            break;
+                        }
+                    }
+
+                    // Snow standing where the freeze rule says it cannot. Asks
+                    // the rule itself rather than naming biomes, so it stays
+                    // true whatever the table says tomorrow.
+                    if (topBlock == game::BlockId::Snow &&
+                        !game::freezesAt(kWorldSeed, game::biomeInfo(biome).warmth, worldX, surface,
+                                         worldZ)) {
+                        ++snowOnWarm;
+                    }
+
+                    for (int y = 0; y < game::kWorldHeightChunks * game::Chunk::kSize; ++y) {
+                        const game::BlockId id =
+                            stack[static_cast<std::size_t>(y / game::Chunk::kSize)].at(
+                                lx, y % game::Chunk::kSize, lz);
+                        ++blockCounts[static_cast<std::size_t>(id)];
+
+                        if (y == surface) {
+                            ++topBlocks[static_cast<std::size_t>(biome)][static_cast<std::size_t>(id)];
+                        }
+                        if (y > surface && id != game::BlockId::Air && !game::isWater(id) &&
+                            !game::isIce(id)) {
+                            // **A family test, not a list of ids.** This named
+                            // oak's log and leaves and five plants outright, so
+                            // every spruce, birch and new flower placed above
+                            // the surface counted as floating land - 8031 of
+                            // them, which is the counter being wrong rather than
+                            // the world. The dirt is the block a trunk forces
+                            // under itself, and the lily pad grows on a water
+                            // surface, which is above the terrain top by
+                            // definition - it was the whole of a later 1472.
+                            if (game::isLogBlock(id) || game::isLeafBlock(id) ||
+                                game::isCrossBlock(id) || id == game::BlockId::Dirt ||
+                                id == game::BlockId::LilyPad) {
+                                ++treeCellsAbove;
+                            } else {
+                                ++floatingTerrain;
+                            }
+                        }
+                        if (y < 20) {
+                            if (id == game::BlockId::Air) {
+                                ++deepAir;
+                            } else {
+                                ++deepSolid;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    engine::logInfo("PROBE chunks " + std::to_string(chunkCount) + " FLOATING-TERRAIN " +
+                    std::to_string(floatingTerrain) + "  (tree cells above surface " +
+                    std::to_string(treeCellsAbove) + ", so the probe can see up there)");
+    engine::logInfo("PROBE PILLARS " + std::to_string(pillars) + " (columns 5+ above every neighbour)  " +
+                    "DRY-BED " + std::to_string(dryBed) + " (gravel or sand on dry river/ocean ground)  " +
+                    "SNOW-ON-WARM " + std::to_string(snowOnWarm) + " (snow where the freeze rule says no)");
+    engine::logInfo("PROBE CAVE-MOUTHS " + std::to_string(caveMouths) + " of " +
+                    std::to_string(363 / game::kWorldHeightChunks * game::Chunk::kSize *
+                                   game::Chunk::kSize) +
+                    " columns open to the sky, air within 8 of surface " +
+                    std::to_string(nearSurfaceAir) + "  FLOATING-DECOR " +
+                    std::to_string(floatingDecor) + " (tree, dirt or water over a hole)");
+    engine::logInfo("PROBE deep-rock hollow " +
+                    std::to_string(100.0 * static_cast<double>(deepAir) /
+                                   static_cast<double>(std::max<long long>(1, deepAir + deepSolid))) +
+                    "%");
+
+    // Largest connected run of one ore, which is the whole of the "why is there
+    // a coal seam the size of a room" question. A thresholded noise field has no
+    // cap on this; a placed vein does, and that difference is only visible as a
+    // number.
+    {
+        constexpr int kStack = game::kWorldHeightChunks * game::Chunk::kSize;
+        const auto veinOwner = std::make_unique<ChunkStack>();
+        ChunkStack& column = *veinOwner;
+        for (int cy = 0; cy < game::kWorldHeightChunks; ++cy) {
+            column[static_cast<std::size_t>(cy)] = game::generateChunk(kWorldSeed, {0, cy, 0});
+        }
+        const auto at = [&](int x, int y, int z) {
+            return column[static_cast<std::size_t>(y / game::Chunk::kSize)].at(
+                x, y % game::Chunk::kSize, z);
+        };
+
+        std::vector<bool> seen(static_cast<std::size_t>(game::Chunk::kSize) * kStack *
+                                   game::Chunk::kSize,
+                               false);
+        const auto index = [&](int x, int y, int z) {
+            return (static_cast<std::size_t>(y) * game::Chunk::kSize + static_cast<std::size_t>(z)) *
+                       game::Chunk::kSize +
+                   static_cast<std::size_t>(x);
+        };
+
+        std::array<int, game::kBlockIdCount> largest{};
+        std::vector<glm::ivec3> open;
+        for (int y = 0; y < kStack; ++y) {
+            for (int z = 0; z < game::Chunk::kSize; ++z) {
+                for (int x = 0; x < game::Chunk::kSize; ++x) {
+                    const game::BlockId id = at(x, y, z);
+                    if (!game::isOre(id) || seen[index(x, y, z)]) {
+                        continue;
+                    }
+                    int size = 0;
+                    open.clear();
+                    open.push_back({x, y, z});
+                    seen[index(x, y, z)] = true;
+                    while (!open.empty()) {
+                        const glm::ivec3 p = open.back();
+                        open.pop_back();
+                        ++size;
+                        constexpr std::array<glm::ivec3, 6> steps{
+                            glm::ivec3{1, 0, 0},  glm::ivec3{-1, 0, 0}, glm::ivec3{0, 1, 0},
+                            glm::ivec3{0, -1, 0}, glm::ivec3{0, 0, 1},  glm::ivec3{0, 0, -1}};
+                        for (const glm::ivec3& step : steps) {
+                            const glm::ivec3 n = p + step;
+                            if (n.x < 0 || n.x >= game::Chunk::kSize || n.z < 0 ||
+                                n.z >= game::Chunk::kSize || n.y < 0 || n.y >= kStack) {
+                                continue;
+                            }
+                            if (at(n.x, n.y, n.z) != id || seen[index(n.x, n.y, n.z)]) {
+                                continue;
+                            }
+                            seen[index(n.x, n.y, n.z)] = true;
+                            open.push_back(n);
+                        }
+                    }
+                    int& best = largest[static_cast<std::size_t>(id)];
+                    best = std::max(best, size);
+                }
+            }
+        }
+
+        std::string line = "PROBE largest vein (one column):";
+        for (std::size_t i = 0; i < largest.size(); ++i) {
+            if (largest[i] > 0) {
+                line += std::string(" ") + game::blockName(static_cast<game::BlockId>(i)) + " " +
+                        std::to_string(largest[i]);
+            }
+        }
+        engine::logInfo(line);
+    }
+
+    for (std::size_t b = 0; b < topBlocks.size(); ++b) {
+        long long total = 0;
+        for (long long n : topBlocks[b]) {
+            total += n;
+        }
+        if (total < 400) {
+            continue;
+        }
+        std::string line = std::string("PROBE top ") + game::biomeInfo(static_cast<game::BiomeId>(b)).name +
+                           " (" + std::to_string(total) + "):";
+        for (std::size_t i = 0; i < topBlocks[b].size(); ++i) {
+            if (topBlocks[b][i] * 100 < total * 3) {
+                continue;
+            }
+            line += std::string(" ") + game::blockName(static_cast<game::BlockId>(i)) + " " +
+                    std::to_string(100 * topBlocks[b][i] / total) + "%";
+        }
+        engine::logInfo(line);
+    }
+
+    const long long total = static_cast<long long>(chunkCount) * game::Chunk::kSize * game::Chunk::kSize *
+                            game::Chunk::kSize;
+    for (std::size_t i = 0; i < blockCounts.size(); ++i) {
+        if (blockCounts[i] == 0) {
+            continue;
+        }
+        engine::logInfo(std::string("PROBE block ") + game::blockName(static_cast<game::BlockId>(i)) + " " +
+                        std::to_string(blockCounts[i]) + " (" +
+                        std::to_string(100.0 * static_cast<double>(blockCounts[i]) /
+                                       static_cast<double>(total)) +
+                        "%)");
+    }
+}
+// PROBE-END
+
+} // namespace
+
 int main() {
     try {
         const std::filesystem::path settingsPath = engine::executableDirectory() / "settings.cfg";
         game::Settings settings = game::loadSettings(settingsPath);
 
+        if (settings.worldgenProbe) {
+            probeWorldgen();
+            return 0;
+        }
+
         // Declared before the world, and therefore destroyed after it: the world
         // submits jobs to this pool and must not outlive it.
         engine::JobSystem jobs(settings.workerThreads);
+
+        // Audio comes up before the window on purpose: a machine with no sound
+        // card logs one line and carries on silently, and finding that out
+        // before anything is on screen keeps the failure legible.
+        engine::AudioEngine audio;
+        game::Sounds sounds;
+        sounds.load(audio, engine::executableDirectory() / "sounds-reference");
+        audio.setMasterVolume(settings.soundVolume);
+        audio.setMusicVolume(settings.musicVolume);
 
         engine::Window window(kWindowWidth, kWindowHeight, "Voxel Game");
         engine::VulkanContext context(window);
@@ -335,6 +791,239 @@ int main() {
                                  " spawn egg sprites are missing and will draw blank -"
                                  " run tools\\make-spawn-egg-sprites.ps1");
             }
+
+            // The three upper tool tiers and what they are made of, right at the
+            // very end. Block textures included: `blockTextureLayer` returns a
+            // layer index and nothing cares where it points, so putting the two
+            // new blocks here rather than among the first sixty-seven means not
+            // one existing layer moves.
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kUpgradeToolSpritesFirst)) {
+                engine::logError("kUpgradeToolSpritesFirst is " +
+                                 std::to_string(game::kUpgradeToolSpritesFirst) + " but " +
+                                 std::to_string(spriteLayers.size()) +
+                                 " layers are loaded - every new tool icon will be wrong");
+            }
+            for (const char* name :
+                 {"iron_pickaxe.png", "iron_axe.png", "iron_shovel.png", "iron_sword.png", "iron_hoe.png",
+                  "diamond_pickaxe.png", "diamond_axe.png", "diamond_shovel.png", "diamond_sword.png",
+                  "diamond_hoe.png", "emberite_pickaxe.png", "emberite_axe.png", "emberite_shovel.png",
+                  "emberite_sword.png", "emberite_hoe.png", "emberite_scrap.png", "emberite_ingot.png",
+                  "ancient_debris_side.png", "ancient_debris_top.png", "emberite_block.png",
+                  "smoker_front.png", "smoker_front_on.png", "smoker_side.png", "smoker_top.png",
+                  "smithing_top.png", "smithing_front.png", "smithing_side.png",
+                  "smithing_bottom.png", "chest_top.png", "chest_front.png", "chest_side.png",
+                  // Food, in `ItemId` order, because `itemTextureLayer` maps
+                  // the run across by arithmetic rather than by name.
+                  "apple.png", "porkchop_raw.png", "porkchop_cooked.png", "beef_raw.png",
+                  "beef_cooked.png", "chicken_raw.png", "chicken_cooked.png", "mutton_raw.png",
+                  "mutton_cooked.png", "cod_raw.png", "cod_cooked.png",
+                  // Three appended blocks, same image on every face.
+                  "prismarine.png", "sea_lantern.png", "coarse_dirt.png",
+                  // The table-driven run, in `kExtraBlocks` layer order. A name
+                  // out of order here gives a block someone else's texture and
+                  // nothing catches it but your eyes.
+                  "cobbled_deepslate.png", "ice.png", "blue_ice.png", "coal_block.png",
+                  "iron_block.png", "gold_block.png", "diamond_block.png", "emerald_block.png",
+                  "lapis_block.png", "redstone_block.png", "copper_block.png",
+                  "polished_andesite.png", "polished_diorite.png", "polished_granite.png",
+                  "chiseled_stone_bricks.png", "mossy_stone_bricks.png", "cracked_stone_bricks.png",
+                  "polished_deepslate.png", "deepslate_bricks.png", "deepslate_tiles.png",
+                  "smooth_sandstone.png", "cut_sandstone.png", "chiseled_sandstone.png",
+                  "tube_coral_block.png", "brain_coral_block.png", "bubble_coral_block.png",
+                  "fire_coral_block.png", "horn_coral_block.png", "sponge.png", "wet_sponge.png",
+                  "dark_prismarine.png", "prismarine_bricks.png", "spruce_log.png",
+                  "spruce_log_top.png", "spruce_leaves.png", "spruce_planks.png", "birch_log.png",
+                  "birch_log_top.png", "birch_leaves.png", "birch_planks.png", "cornflower.png",
+                  "oxeye_daisy.png", "azure_bluet.png", "allium.png", "red_tulip.png",
+                  "orange_tulip.png", "brown_mushroom.png", "red_mushroom.png", "kelp.png",
+                  "seagrass.png",
+                  // Appended 2026-08-07, still in `kExtraBlocks` layer order.
+                  // Colour families run white through black, matching the dyes.
+                  "white_wool.png", "orange_wool.png", "magenta_wool.png", "light_blue_wool.png",
+                  "yellow_wool.png", "lime_wool.png", "pink_wool.png", "gray_wool.png",
+                  "light_gray_wool.png", "cyan_wool.png", "purple_wool.png", "blue_wool.png",
+                  "brown_wool.png", "green_wool.png", "red_wool.png", "black_wool.png",
+                  "white_concrete.png", "orange_concrete.png", "magenta_concrete.png",
+                  "light_blue_concrete.png", "yellow_concrete.png", "lime_concrete.png",
+                  "pink_concrete.png", "gray_concrete.png", "light_gray_concrete.png",
+                  "cyan_concrete.png", "purple_concrete.png", "blue_concrete.png",
+                  "brown_concrete.png", "green_concrete.png", "red_concrete.png",
+                  "black_concrete.png",
+                  "white_terracotta.png", "orange_terracotta.png", "magenta_terracotta.png",
+                  "light_blue_terracotta.png", "yellow_terracotta.png", "lime_terracotta.png",
+                  "pink_terracotta.png", "gray_terracotta.png", "light_gray_terracotta.png",
+                  "cyan_terracotta.png", "purple_terracotta.png", "blue_terracotta.png",
+                  "brown_terracotta.png", "green_terracotta.png", "red_terracotta.png",
+                  "black_terracotta.png",
+                  "deepslate_coal_ore.png", "deepslate_iron_ore.png", "deepslate_copper_ore.png",
+                  "deepslate_gold_ore.png", "deepslate_redstone_ore.png", "deepslate_lapis_ore.png",
+                  "deepslate_diamond_ore.png", "deepslate_emerald_ore.png",
+                  "jungle_log.png", "jungle_log_top.png", "jungle_leaves.png", "jungle_planks.png",
+                  "acacia_log.png", "acacia_log_top.png", "acacia_leaves.png", "acacia_planks.png",
+                  "dark_oak_log.png", "dark_oak_log_top.png", "dark_oak_leaves.png",
+                  "dark_oak_planks.png", "cherry_log.png", "cherry_log_top.png",
+                  "cherry_leaves.png", "cherry_planks.png",
+                  "stripped_oak_log.png", "stripped_oak_log_top.png", "stripped_spruce_log.png",
+                  "stripped_spruce_log_top.png", "stripped_birch_log.png",
+                  "stripped_birch_log_top.png", "stripped_jungle_log.png",
+                  "stripped_jungle_log_top.png", "stripped_acacia_log.png",
+                  "stripped_acacia_log_top.png", "stripped_dark_oak_log.png",
+                  "stripped_dark_oak_log_top.png",
+                  "tuff.png", "calcite.png", "dripstone_block.png", "moss_block.png", "mud.png",
+                  "packed_mud.png", "mud_bricks.png", "rooted_dirt.png", "amethyst_block.png",
+                  "smooth_basalt.png", "basalt_side.png", "basalt_top.png", "magma.png",
+                  "honeycomb_block.png", "honey_block_side.png", "honey_block_top.png",
+                  "red_sandstone.png", "red_sandstone_top.png", "cut_red_sandstone.png",
+                  "chiseled_red_sandstone.png",
+                  "pumpkin_side.png", "pumpkin_top.png", "melon_side.png", "melon_top.png",
+                  "hay_block_side.png", "hay_block_top.png", "note_block.png", "jukebox_side.png",
+                  "jukebox_top.png",
+                  "blue_orchid.png", "pink_tulip.png", "white_tulip.png", "lily_of_the_valley.png",
+                  "oak_sapling.png", "spruce_sapling.png", "birch_sapling.png",
+                  "jungle_sapling.png", "acacia_sapling.png", "dark_oak_sapling.png", "fern.png",
+                  "sugar_cane.png", "cobweb.png",
+                  // The second table-driven run, layers 176-248. Appended to
+                  // the table's own sprites rather than given a run of their
+                  // own, because `ExtraBlockInfo::layer` is an offset from
+                  // `kTableSpritesFirst` and one origin is easier to keep true
+                  // than two.
+                  "netherrack.png", "soul_sand.png", "soul_soil.png", "blackstone.png",
+                  "blackstone_top.png", "polished_blackstone.png",
+                  "polished_blackstone_bricks.png", "chiseled_polished_blackstone.png",
+                  "cracked_polished_blackstone_bricks.png", "gilded_blackstone.png",
+                  "nether_bricks.png", "red_nether_bricks.png", "cracked_nether_bricks.png",
+                  "chiseled_nether_bricks.png", "nether_gold_ore.png", "nether_quartz_ore.png",
+                  "quartz_block_side.png", "quartz_block_top.png", "smooth_quartz.png",
+                  "chiseled_quartz_block.png", "chiseled_quartz_block_top.png",
+                  "quartz_bricks.png", "end_stone.png", "end_stone_bricks.png",
+                  "purpur_block.png", "podzol_side.png", "podzol_top.png", "mycelium_side.png",
+                  "mycelium_top.png", "dried_kelp_side.png", "dried_kelp_top.png",
+                  "slime_block.png", "sculk.png", "budding_amethyst.png", "polished_tuff.png",
+                  "tuff_bricks.png", "chiseled_tuff.png", "polished_basalt_side.png",
+                  "polished_basalt_top.png", "raw_iron_block.png", "raw_gold_block.png",
+                  "raw_copper_block.png", "exposed_copper.png", "weathered_copper.png",
+                  "oxidized_copper.png", "cut_copper.png", "exposed_cut_copper.png",
+                  "weathered_cut_copper.png", "oxidized_cut_copper.png", "chiseled_copper.png",
+                  "reinforced_deepslate_side.png", "reinforced_deepslate_top.png",
+                  "chiseled_deepslate.png", "cracked_deepslate_bricks.png",
+                  "cracked_deepslate_tiles.png", "smooth_red_sandstone.png",
+                  "nether_wart_block.png", "white_concrete_powder.png",
+                  "orange_concrete_powder.png", "magenta_concrete_powder.png",
+                  "light_blue_concrete_powder.png", "yellow_concrete_powder.png",
+                  "lime_concrete_powder.png", "pink_concrete_powder.png",
+                  "gray_concrete_powder.png", "light_gray_concrete_powder.png",
+                  "cyan_concrete_powder.png", "purple_concrete_powder.png",
+                  "blue_concrete_powder.png", "brown_concrete_powder.png",
+                  "green_concrete_powder.png", "red_concrete_powder.png",
+                  "black_concrete_powder.png",
+                  // The third batch, layers 249-326.
+                  "cactus_side.png", "cactus_top.png", "bamboo.png", "sweet_berry_bush.png",
+                  "glow_lichen.png", "pointed_dripstone.png", "sea_pickle.png",
+                  "nether_sprouts.png", "crimson_roots.png", "warped_roots.png",
+                  "crimson_fungus.png", "warped_fungus.png", "twisting_vines.png",
+                  "weeping_vines.png", "hanging_roots.png", "spore_blossom.png",
+                  "amethyst_cluster.png", "large_fern.png", "lily_pad.png",
+                  "white_glazed_terracotta.png", "orange_glazed_terracotta.png",
+                  "magenta_glazed_terracotta.png", "light_blue_glazed_terracotta.png",
+                  "yellow_glazed_terracotta.png", "lime_glazed_terracotta.png",
+                  "pink_glazed_terracotta.png", "gray_glazed_terracotta.png",
+                  "light_gray_glazed_terracotta.png", "cyan_glazed_terracotta.png",
+                  "purple_glazed_terracotta.png", "blue_glazed_terracotta.png",
+                  "brown_glazed_terracotta.png", "green_glazed_terracotta.png",
+                  "red_glazed_terracotta.png", "black_glazed_terracotta.png",
+                  "shroomlight.png", "ochre_froglight_side.png", "ochre_froglight_top.png",
+                  "verdant_froglight_side.png", "verdant_froglight_top.png",
+                  "pearlescent_froglight_side.png", "pearlescent_froglight_top.png",
+                  "crimson_nylium_side.png", "crimson_nylium_top.png", "warped_nylium_side.png",
+                  "warped_nylium_top.png", "crimson_stem_side.png", "crimson_stem_top.png",
+                  "warped_stem_side.png", "warped_stem_top.png", "crimson_planks.png",
+                  "warped_planks.png", "warped_wart_block.png", "mangrove_log_side.png",
+                  "mangrove_log_top.png", "mangrove_planks.png", "mangrove_leaves.png",
+                  "muddy_mangrove_roots_side.png", "muddy_mangrove_roots_top.png",
+                  "bamboo_block_side.png", "bamboo_block_top.png", "bamboo_planks.png",
+                  "bamboo_mosaic.png", "bone_block_side.png", "bone_block_top.png",
+                  "quartz_pillar_side.png", "quartz_pillar_top.png", "purpur_pillar_side.png",
+                  "purpur_pillar_top.png", "target_side.png", "target_top.png", "snow_block.png",
+                  "sculk_catalyst_side.png", "sculk_catalyst_top.png", "azalea_side.png",
+                  "azalea_top.png", "flowering_azalea_side.png", "flowering_azalea_top.png",
+                  "stripped_cherry_log.png", "stripped_cherry_log_top.png",
+                  "stripped_mangrove_log.png", "stripped_mangrove_log_top.png",
+                  "stripped_crimson_stem.png", "stripped_crimson_stem_top.png",
+                  "stripped_warped_stem.png", "stripped_warped_stem_top.png",
+                  "stripped_bamboo_block.png", "stripped_bamboo_block_top.png",
+                  // The third table run: coloured glass, bars and the lights.
+                  "white_stained_glass.png", "orange_stained_glass.png",
+                  "magenta_stained_glass.png", "light_blue_stained_glass.png",
+                  "yellow_stained_glass.png", "lime_stained_glass.png",
+                  "pink_stained_glass.png", "gray_stained_glass.png",
+                  "light_gray_stained_glass.png", "cyan_stained_glass.png",
+                  "purple_stained_glass.png", "blue_stained_glass.png",
+                  "brown_stained_glass.png", "green_stained_glass.png",
+                  "red_stained_glass.png", "black_stained_glass.png", "iron_bars.png",
+                  "lantern.png", "soul_lantern.png", "soul_torch.png", "redstone_torch.png",
+                  "end_rod.png",
+                  // The double chest's two halves, named for the viewer's left
+                  // and right - which is the opposite way round from Mojang's
+                  // own file names. Right at the end, so nothing above moves.
+                  "chest_left_top.png", "chest_left_front.png", "chest_left_back.png",
+                  "chest_right_top.png", "chest_right_front.png", "chest_right_back.png",
+                  // The forty-nine appended items, in `ItemId` order.
+                  "bread.png", "cookie.png", "melon_slice.png", "carrot.png", "potato.png",
+                  "baked_potato.png", "beetroot.png", "sweet_berries.png", "golden_apple.png",
+                  "pumpkin_pie.png", "string.png", "feather.png", "leather.png", "bone.png",
+                  "gunpowder.png", "slimeball.png", "ink_sac.png", "glow_ink_sac.png",
+                  "clay_ball.png", "brick.png", "flint.png", "wheat.png", "wheat_seeds.png",
+                  "sugar.png", "paper.png", "book.png", "glass_bottle.png", "bowl.png", "egg.png",
+                  "rotten_flesh.png", "spider_eye.png", "honeycomb.png", "honey_bottle.png",
+                  "white_dye.png", "orange_dye.png", "magenta_dye.png", "light_blue_dye.png",
+                  "yellow_dye.png", "lime_dye.png", "pink_dye.png", "gray_dye.png",
+                  "light_gray_dye.png", "cyan_dye.png", "purple_dye.png", "blue_dye.png",
+                  "brown_dye.png", "green_dye.png", "red_dye.png", "black_dye.png",
+                  // The nine appended items.
+                  "lava_bucket.png", "milk_bucket.png", "flint_and_steel.png",
+                  "amethyst_shard.png", "quartz.png", "nether_brick_item.png",
+                  "glowstone_dust.png", "dried_kelp.png", "magma_cream.png",
+                  // The twenty-seven appended items.
+                  "glow_berries.png", "rabbit_raw.png", "rabbit_cooked.png", "salmon_raw.png",
+                  "salmon_cooked.png", "tropical_fish.png", "pufferfish.png",
+                  "beetroot_seeds.png", "melon_seeds.png", "pumpkin_seeds.png", "bone_meal.png",
+                  "prismarine_shard.png", "prismarine_crystals.png", "nautilus_shell.png",
+                  "heart_of_the_sea.png", "scute.png", "phantom_membrane.png", "cinder_rod.png",
+                  "cinder_powder.png", "drifter_tear.png", "void_pearl.png", "void_eye.png",
+                  "chorus_fruit.png", "popped_chorus_fruit.png", "rabbit_hide.png",
+                  "rabbit_foot.png", "echo_shard.png", "water_bottle.png", "bow.png", "arrow.png",
+                  "shears.png", "cocoa_beans.png",
+                  // The beehive. Its front changes when it fills, which is the
+                  // only visible difference between an empty hive and a full one.
+                  "beehive_front.png", "beehive_front_honey.png", "beehive_side.png",
+                  "beehive_end.png",
+                  // Lava, fire and TNT.
+                  "lava.png", "fire.png", "tnt_top.png", "tnt_bottom.png", "tnt_side.png",
+                  "tnt_primed_top.png", "tnt_primed_bottom.png", "tnt_primed_side.png",
+                  // Fire's 32 animation frames, swapped in at run time.
+                  "fire00.png", "fire01.png", "fire02.png", "fire03.png", "fire04.png",
+                  "fire05.png", "fire06.png", "fire07.png", "fire08.png", "fire09.png",
+                  "fire10.png", "fire11.png", "fire12.png", "fire13.png", "fire14.png",
+                  "fire15.png", "fire16.png", "fire17.png", "fire18.png", "fire19.png",
+                  "fire20.png", "fire21.png", "fire22.png", "fire23.png", "fire24.png",
+                  "fire25.png", "fire26.png", "fire27.png", "fire28.png", "fire29.png",
+                  "fire30.png", "fire31.png",
+                  // The bow being drawn, and the arrow's own sheet in flight.
+                  "bow_pulling_0.png", "bow_pulling_1.png", "bow_pulling_2.png",
+                  "arrow_entity.png", "ladder.png", "vine.png", "cocoa_stage0.png",
+                  "cocoa_stage1.png", "cocoa_stage2.png",
+                  // The moon, in the order it runs through its phases.
+                  "moon_full.png", "moon_waning_gibbous.png", "moon_third_quarter.png",
+                  "moon_waning_crescent.png", "moon_new.png", "moon_waxing_crescent.png",
+                  "moon_first_quarter.png", "moon_waxing_gibbous.png"}) {
+                spriteLayers.push_back(blockTexture(name));
+            }
+            if (spriteLayers.size() !=
+                static_cast<std::size_t>(game::kMoonPhaseFirst) + game::kMoonPhases) {
+                engine::logError("appended sprites end at " + std::to_string(spriteLayers.size()) +
+                                 " but the layer constants say " +
+                                 std::to_string(game::kMoonPhaseFirst + game::kMoonPhases));
+            }
         }
 
         // Slice 2 proof: the catalogue's two lists exist and are the right
@@ -420,8 +1109,90 @@ int main() {
             }
         }
 
-        engine::Renderer renderer(context, window, spriteLayers, hudTexture,
-                                  textureDir.parent_path() / "font.png", skinTexture);
+        // The font, on the same arrangement: the reference's own `ascii.png`
+        // beside the exe, ours under assets/ as the fallback. Both are 128x128
+        // grids of 8x8 cells indexed by codepoint, so either one drops into the
+        // other's place.
+        std::filesystem::path fontTexture = textureDir.parent_path() / "font.png";
+        const std::filesystem::path referenceFont = engine::executableDirectory() / "font-reference.png";
+        if (std::filesystem::exists(referenceFont)) {
+            fontTexture = referenceFont;
+        }
+        {
+            const auto [width, height] = pngSize(fontTexture);
+            const auto expected = static_cast<int>(game::hud::kFontSheetSize.x);
+            if (width != 0 && (width != expected || height != expected)) {
+                engine::logError("Font atlas " + fontTexture.filename().string() + " is " +
+                                 std::to_string(width) + "x" + std::to_string(height) + ", expected " +
+                                 std::to_string(expected) + "x" + std::to_string(expected) +
+                                 " - every glyph will be wrong. Re-run tools\\make-font.ps1");
+            }
+        }
+
+        engine::Renderer renderer(context, window, spriteLayers, hudTexture, fontTexture, skinTexture);
+
+        // What each texture layer is made of. Built by walking every block, face
+        // and facing rather than being authored per layer, so a new block gets a
+        // material the day it is added.
+        {
+            const game::MaterialTable materials = game::buildMaterialTable(renderer.textureLayerCount());
+            renderer.setMaterialTable(materials.rows);
+            if (materials.conflicts != 0) {
+                engine::logWarn("Material table: " + std::to_string(materials.conflicts) +
+                                " texture layers are claimed by two different material families; one of them "
+                                "is being ignored.");
+            }
+        }
+
+        // How wide each glyph actually is, measured off the atlas that loaded
+        // rather than written down: the rightmost opaque column of a cell, plus
+        // one texel of spacing. That is the reference's own rule, and it
+        // reproduces its published widths exactly - 'i' 2, 'l' 3, 'I' 4, 'a' 6,
+        // '@' 7. A blank cell has no column to measure, so the space is the one
+        // advance that has to be a number.
+        {
+            const std::uint32_t cell = static_cast<std::uint32_t>(game::hud::kFontCell);
+            const std::uint32_t columns = static_cast<std::uint32_t>(game::hud::kFontColumns);
+            std::array<std::uint8_t, 128> advances{};
+            advances.fill(6);
+            if (renderer.fontWidth() >= cell * columns) {
+                for (std::size_t code = 0; code < advances.size(); ++code) {
+                    const auto cellX = static_cast<std::uint32_t>(code % columns) * cell;
+                    const auto cellY = static_cast<std::uint32_t>(code / columns) * cell;
+                    int rightmost = -1;
+                    for (std::uint32_t x = 0; x < cell; ++x) {
+                        for (std::uint32_t y = 0; y < cell; ++y) {
+                            if (renderer.fontAlphaAt(cellX + x, cellY + y) != 0) {
+                                rightmost = static_cast<int>(x);
+                                break;
+                            }
+                        }
+                    }
+                    advances[code] = static_cast<std::uint8_t>(rightmost < 0 ? 4 : rightmost + 2);
+                }
+            }
+            advances[' '] = 4;
+            game::hud::setFontAdvances(advances);
+        }
+
+        // The silhouette of every sprite, taken once from what the renderer just
+        // loaded. A dropped tool is extruded from this rather than drawn flat,
+        // so it needs the shape the art cuts out, not the art itself.
+        const game::SpriteMask spriteMask = [&renderer] {
+            const std::uint32_t width = renderer.textureWidth();
+            const std::uint32_t height = renderer.textureHeight();
+            const std::uint32_t layers = renderer.textureLayerCount();
+            std::vector<std::uint8_t> alpha(static_cast<std::size_t>(width) * height * layers);
+            std::size_t index = 0;
+            for (std::uint32_t layer = 0; layer < layers; ++layer) {
+                for (std::uint32_t y = 0; y < height; ++y) {
+                    for (std::uint32_t x = 0; x < width; ++x) {
+                        alpha[index++] = renderer.textureAlphaAt(layer, x, y);
+                    }
+                }
+            }
+            return game::SpriteMask{static_cast<int>(width), static_cast<int>(height), std::move(alpha)};
+        }();
 
         std::size_t capIndex = kDefaultFpsCapIndex;
         for (std::size_t i = 0; i < kFpsCapOptions.size(); ++i) {
@@ -447,8 +1218,44 @@ int main() {
 
         // Spawn is chosen before any chunk exists, so the surface height comes
         // straight from the generator rather than from loaded blocks.
-        const int spawnX = settings.spawnX;
-        const int spawnZ = settings.spawnZ;
+        //
+        // **The requested column may be seabed, and ours was.** The player
+        // started with their eyes below the waterline, drowning before the world
+        // had finished loading. The reference searches outward for somewhere to
+        // stand rather than trusting the coordinate it was handed, and a cave
+        // mouth is no good either - that is a hole, not ground.
+        int spawnX = settings.spawnX;
+        int spawnZ = settings.spawnZ;
+        {
+            constexpr int kStep = 8;
+            constexpr int kMaxSearch = 512;
+            const auto standable = [](int x, int z) {
+                return game::surfaceHeightAt(kWorldSeed, x, z) > game::kSeaLevel + 1 &&
+                       !game::surfaceCarvedAt(kWorldSeed, x, z);
+            };
+            for (int radius = 0; radius <= kMaxSearch && !standable(spawnX, spawnZ);
+                 radius += kStep) {
+                for (int dz = -radius; dz <= radius; dz += kStep) {
+                    for (int dx = -radius; dx <= radius; dx += kStep) {
+                        // Ring only; the inside was covered by a smaller radius.
+                        if (radius > 0 && std::abs(dx) != radius && std::abs(dz) != radius) {
+                            continue;
+                        }
+                        if (standable(settings.spawnX + dx, settings.spawnZ + dz)) {
+                            spawnX = settings.spawnX + dx;
+                            spawnZ = settings.spawnZ + dz;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (spawnX != static_cast<int>(settings.spawnX) ||
+                spawnZ != static_cast<int>(settings.spawnZ)) {
+                engine::logInfo("Spawn moved to dry ground at " + std::to_string(spawnX) + ", " +
+                                std::to_string(spawnZ));
+            }
+        }
+
         const glm::vec3 spawn{static_cast<float>(spawnX) + 0.5f,
                               static_cast<float>(game::surfaceHeightAt(kWorldSeed, spawnX, spawnZ) + 1),
                               static_cast<float>(spawnZ) + 0.5f};
@@ -515,6 +1322,15 @@ int main() {
             player.position = savedPlayer->position;
             camera.yaw = savedPlayer->yaw;
             camera.pitch = savedPlayer->pitch;
+            // Clamped on the way in rather than trusted: this is the one place
+            // the game reads bytes it did not write this run, and a health of
+            // zero out of a corrupt file would kill you on the first frame.
+            player.health = std::clamp(savedPlayer->health, 1, game::survival::kMaxHealth);
+            player.food = std::clamp(savedPlayer->food, 0, game::survival::kMaxFood);
+            player.saturation =
+                game::survival::clampSaturation(std::max(0.0f, savedPlayer->saturation), player.food);
+            player.exhaustion = std::clamp(savedPlayer->exhaustion, 0.0f,
+                                           game::survival::kExhaustionPerLevel);
         } else {
             player.position = spawn;
         }
@@ -596,16 +1412,81 @@ int main() {
         }
 
         renderer.setOverlayMesh(game::makeBlockOutline());
-        float outlineHeight = 1.0f;
-        renderer.setSkyMesh(game::sky::makeSunQuad());
+        glm::vec3 outlineSize{1.0f};
+        renderer.setSkyMesh(game::sky::makeSunQuad(), 0);
+        int moonPhase = 0;
+        renderer.setSkyMesh(game::sky::makeMoonQuad(moonPhase), 1);
+
+        renderer.setToneMapper(static_cast<engine::ToneMapper>(settings.toneMapper));
+        renderer.setExposure(settings.exposure);
+        renderer.setBloom(settings.bloom, settings.bloomStrength);
+        renderer.setShadowQuality(static_cast<int>(settings.shadows));
+        renderer.setShadowDarkness(settings.shadowDarkness);
+        renderer.setHandheldLight(settings.handheldLight);
+        renderer.setClouds(static_cast<int>(settings.clouds), settings.cloudCoverage, settings.cloudShadow);
+        renderer.setWater(settings.waterWaves, settings.waterReflection);
+        renderer.setWaterDetail(settings.waterFoam, settings.waterCaustics, settings.waterRefraction);
+        renderer.setImageQuality(settings.antiAlias, settings.contactShadows);
+        renderer.setRenderScale(settings.renderScale);
+        float cloudDrift = 0.0f;
+        // The sun is the one surface in the game that is genuinely a light
+        // rather than a lit thing, so it is written brighter than white and
+        // bloom picks it up. Everything else waits for the material table.
+        renderer.setSkyEmission(3.0f);
 
         // Starts mid-morning rather than at sunrise, so the first thing seen is
         // a lit world with the sun clearly off to one side.
         float timeOfDay = 0.18f;
         float waterAnimationSeconds = 0.0f;
+        // The ripples run on their own clock, because the sprite animation's
+        // wraps every 3.2 seconds and a wave train that jumped that often would
+        // be a visible tick rather than a swell.
+        float waveSeconds = 0.0f;
+
+        game::weather::Weather weather{kWorldSeed};
+        weather.force(static_cast<int>(settings.startWeather));
+        // The curtain is rebuilt only when the camera changes column, which is a
+        // few times a second while walking rather than every frame.
+        glm::ivec2 precipitationColumn{INT_MIN, INT_MIN};
+        float precipitationLevel = -1.0f;
+        float precipitationFallen = 0.0f;
+        auto precipitationKind = game::weather::Precipitation::None;
+        float precipitationWind = 0.0f;
+        struct PendingThunder {
+            float delay;
+            float distance;
+        };
+        std::vector<PendingThunder> thunderQueue;
+        float rainSoundTimer = 0.0f;
+
+        game::Particles particles;
+        float splashTimer = 0.0f;
+        // How often a column near the player is picked for snow to settle on or
+        // water to freeze in.
+        float settleTimer = 0.0f;
+        float windClock = 0.0f;
+        // Turned slowly rather than held due west, so a cloud still roughly
+        // tells you which way is west but the weather is not on rails.
+        float windAngle = 0.0f;
         renderer.setVerticalFov(kDefaultFov);
 
         if (savedPlayer.has_value()) {
+            // A saved position can end up inside rock if the terrain rules have
+            // changed under it, and unlike a creature the player has no way to
+            // climb out - every move it tries overlaps something. Lifting to the
+            // surface costs one test on a resumed load and is the difference
+            // between "the world changed" and "the game is broken".
+            constexpr float halfWidth = game::player_constants::kWidth * 0.5f;
+            const game::Aabb body{
+                player.position - glm::vec3{halfWidth, 0.0f, halfWidth},
+                player.position + glm::vec3{halfWidth, game::player_constants::kHeight, halfWidth}};
+            if (game::overlapsSolid(world, body)) {
+                player.position.y = static_cast<float>(
+                    world.highestSolid(static_cast<int>(std::floor(player.position.x)),
+                                       static_cast<int>(std::floor(player.position.z))) +
+                    1);
+                engine::logWarn("Saved position was inside terrain; lifted to the surface.");
+            }
             engine::logInfo("Resumed from the last saved position.");
         } else {
             // Only the fresh-world placement is left here: it reads blocks, so
@@ -693,6 +1574,11 @@ int main() {
         engine::logInfo("Escape releases the mouse; click to recapture.");
         engine::logInfo("F5 toggles the diagnostics overlay.");
         engine::logInfo("F6/F7 change render distance.");
+        engine::logInfo(std::string("F10 cycles tone mapping (now: ") + kToneMapperNames[settings.toneMapper] +
+                        "), F11 toggles bloom.");
+        engine::logInfo(std::string("G cycles shadow quality (now: ") + kShadowQualityNames[settings.shadows] +
+                        "). F12 cycles the surface debug views.");
+        engine::logInfo(std::string("C cycles clouds (now: ") + kCloudQualityNames[settings.clouds] + ").");
         engine::logInfo("F8 spawns a Bramble ahead of you, F9 a charged one.");
         engine::logInfo("Right click a spawn egg to place that creature; the inventory's left card has them all.");
         engine::logInfo("Entering main loop. Close the window to exit.");
@@ -721,6 +1607,27 @@ int main() {
         // The HUD only rebuilds when something asks it to, so the frame digging
         // *stops* has to ask - otherwise the last drawn bar stays on screen.
         float lastBreakProgress = 0.0f;
+        // Where the last footstep was taken, and whether the last frame was
+        // already showing a hurt flash - both exist so an event fires on the
+        // edge rather than every frame the condition holds.
+        glm::vec3 lastStepAt{0.0f};
+        bool wasHurt = false;
+        bool wasInWater = false;
+        float lastFallDistance = 0.0f;
+        float caveTimer = 0.0f;
+        constexpr float kStepDistance = 2.1f;
+        constexpr float kBigFallDistance = 7.0f;
+        // Rolled rarely rather than every frame; the reference's own cave
+        // ambience is sparse enough that a check a few times a minute is
+        // indistinguishable from one every tick.
+        constexpr float kCaveCheckSeconds = 22.0f;
+        // What the status bars last drew. Compared rather than flagged, because
+        // health, food and air all change from inside the physics and nothing
+        // there knows the HUD exists.
+        int lastShownHealth = -1;
+        int lastShownFood = -1;
+        int lastShownAir = -1;
+        bool lastShownHurt = false;
 
         // Creative starts with one of everything placeable; survival starts with
         // nothing and fills up from what you break.
@@ -756,11 +1663,22 @@ int main() {
         }
 
         game::ItemEntities drops;
+        game::Projectiles projectiles;
+        // How long the bow has been drawn, and whether it was drawn last frame
+        // - releasing is what fires, so the shot needs the falling edge.
+        float bowDraw = 0.0f;
+        bool bowHeld = false;
+        // A pearl may only be thrown once a second.
+        float pearlCooldown = 0.0f;
+        game::FallingBlocks fallingBlocks;
         engine::MeshHandle dropMesh = engine::kInvalidMesh;
+        engine::MeshHandle fallingMesh = engine::kInvalidMesh;
+        engine::MeshHandle projectileMesh = engine::kInvalidMesh;
 
         // Creatures live beside the drops: few of them, main thread, and they
         // only ever read the world.
         game::Creatures creatures(kWorldSeed ^ 0x9E3779B9u);
+        creatures.setActiveRadius(static_cast<float>(world.visibleRadius() * game::Chunk::kSize));
         engine::MeshHandle creatureMesh = engine::kInvalidMesh;
         // A slime's gel shell is the only see-through creature geometry, and it
         // has to ride in the translucent pass or it blends against whatever was
@@ -830,6 +1748,16 @@ int main() {
         // The catalogue card's own state. Kept out here rather than inside the
         // screen module, so `build` stays a pure function of what it is given.
         game::inventoryScreen::CatalogueState catalogue;
+        // Free-running clock for anything on screen that pulses. The caret is
+        // the only user so far, on the reference's own six-tick cadence: three
+        // tenths of a second on, three off.
+        float uiSeconds = 0.0f;
+        constexpr float kCaretBlinkSeconds = 0.6f;
+        // Leftover fraction of a wheel notch. A mouse reports whole detents and
+        // a precision trackpad reports fractions, and truncating each frame's
+        // delta on its own throws every one of the latter away - the list simply
+        // never moves.
+        float scrollCarry = 0.0f;
         game::ItemStack heldStack;
         // Sized for the largest grid any screen offers, so moving between the
         // inventory's 2x2 and a table's 3x3 is a change of extent, not of storage.
@@ -849,6 +1777,25 @@ int main() {
         if (!furnaces.empty()) {
             engine::logInfo("Restored " + std::to_string(furnaces.size()) + " furnaces.");
         }
+
+        // Chests, on the same arrangement and for the same reasons.
+        std::unordered_map<glm::ivec3, game::Chest, BlockPositionHash> chests;
+        for (const game::PlacedChest& placed : world.store().loadChests()) {
+            chests.emplace(placed.position, placed.chest);
+        }
+        if (!chests.empty()) {
+            engine::logInfo("Restored " + std::to_string(chests.size()) + " chests.");
+        }
+
+        // Two chests shoulder to shoulder open as one. **Which of a row pairs
+        // with which is worked out from position alone, never remembered** - so
+        // it survives a reload, costs no saved state, and cannot disagree with
+        // itself depending on who asked. `World` owns that walk, because the
+        // mesher needs the same answer to pick each half's texture and a second
+        // copy of the rule is exactly how the two would drift apart.
+        const auto chestPartnerAt = [&world](glm::ivec3 at) {
+            return world.chestPartnerAt(at);
+        };
 
         // The population survives a restart rather than being rebuilt from
         // scratch. Anything the player has walked away from since is retired by
@@ -876,6 +1823,10 @@ int main() {
 
         // Which furnace the open screen is looking at, if any.
         glm::ivec3 openFurnacePosition{0};
+        glm::ivec3 openChestPosition{0};
+        // The second half of an open double chest, and equal to the first when
+        // there is only one, so nothing has to ask which case it is.
+        glm::ivec3 openChestPartner{0};
         game::ItemStack furnaceOutput;
 
         // A sweep with the button held spreads the cursor's stack over every
@@ -903,6 +1854,7 @@ int main() {
         /// different question from `Player::inWater` - that one asks about the
         /// whole body, and being waist deep does not change what you see.
         bool eyeUnderwater = false;
+        bool eyeInLava = false;
 
         // Hands back everything the screen was holding: the cursor stack, then
         // the crafting grid. **Every** way of closing has to do this, which is
@@ -923,12 +1875,26 @@ int main() {
 
             giveBack(heldStack);
             // A furnace keeps what is inside it - the slots were only ever a
-            // view onto the block. A crafting grid does not, because its
-            // contents exist only while it is on screen.
-            if (openScreen != game::inventoryScreen::Kind::Furnace) {
+            // view onto the block, so they are DISCARDED here rather than
+            // handed back. Leaving them populated would show the furnace's
+            // contents in the next screen's crafting grid, and hand the player
+            // a free copy when *that* screen closed. A crafting grid's own
+            // contents do come back, because they exist only while it is up.
+            if (openScreen == game::inventoryScreen::Kind::Furnace) {
+                craftSlots.fill(game::ItemStack{});
+                furnaceOutput = game::ItemStack{};
+            } else {
                 for (game::ItemStack& slot : craftSlots) {
                     giveBack(slot);
                 }
+            }
+            catalogue.searchFocused = false;
+            // A lid closing is placed at the chest, not at the ear: you hear it
+            // from wherever you walked off to.
+            if (openScreen == game::inventoryScreen::Kind::Chest ||
+                openScreen == game::inventoryScreen::Kind::DoubleChest) {
+                sounds.play(audio, game::SoundEvent::ChestClose,
+                            glm::vec3{openChestPosition} + glm::vec3{0.5f}, 0.6f);
             }
             openScreen.reset();
             window.setCursorCaptured(true);
@@ -973,6 +1939,8 @@ int main() {
             // Catalogue entries, which are the one part of the HUD that has to
             // stop at an edge rather than simply being drawn or not.
             engine::MeshData clipped;
+            // And what the cursor carries, which has to be drawn after them.
+            engine::MeshData topLayer;
 
             const auto append = [&](const engine::MeshData& part) {
                 const auto base = static_cast<std::uint32_t>(hud.vertices.size());
@@ -997,6 +1965,8 @@ int main() {
                         progress.burn = found->second.burnFraction();
                         progress.cook = found->second.cookFraction();
                     }
+                } else if (*openScreen == game::inventoryScreen::Kind::SmithingTable) {
+                    shownResult = game::smithingResult(craftSlots[0], craftSlots[1]);
                 } else {
                     shownResult = game::craftResult(craftSlots.data(),
                                                     game::inventoryScreen::craftSize(*openScreen));
@@ -1006,9 +1976,25 @@ int main() {
                     *openScreen, inventory, craftSlots.data(), shownResult, heldStack,
                     (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight,
                     (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight, renderer.aspectRatio(),
-                    catalogue, progress, clipped));
+                    catalogue, progress, creative,
+                    chests.count(openChestPosition) != 0 ? &chests.at(openChestPosition) : nullptr,
+                    chests.count(openChestPartner) != 0 ? &chests.at(openChestPartner) : nullptr, clipped,
+                    topLayer));
             } else {
-                append(game::makeHotbar(inventory, selectedSlot));
+                append(game::makeHotbar(inventory, selectedSlot, bowHeld ? bowDraw : -1.0f));
+
+                // The survival bars sit above it. **Creative shows nothing**,
+                // the same way the reference hides them there: nothing can hurt
+                // you and nothing can starve you, so a full row of hearts is a
+                // permanent lie taking up screen.
+                if (!creative) {
+                    game::hud::StatusValues status;
+                    status.health = player.health;
+                    status.food = player.food;
+                    status.airFraction = player.air / game::fluid::kAirSeconds;
+                    status.hurtFlash = player.hurtFlash;
+                    append(game::hud::makeStatusBars(status));
+                }
 
                 // Digging takes time now, so it needs to show that it is
                 // happening - without this a slow block looks like a dead click.
@@ -1031,12 +2017,31 @@ int main() {
                 }
             }
             if (overlayVisible) {
-                append(game::makeDebugOverlay(stats, frameHistory, renderer.aspectRatio()));
+                // The top layer, not the main one. Its own depths put its
+                // backdrops behind the world dim quad, so with a screen open the
+                // panel was covered and only the text survived; drawn last it
+                // sits over everything, which is what a diagnostic wants.
+                const auto base = static_cast<std::uint32_t>(topLayer.vertices.size());
+                const engine::MeshData overlay =
+                    game::makeDebugOverlay(stats, frameHistory, renderer.aspectRatio());
+                topLayer.vertices.insert(topLayer.vertices.end(), overlay.vertices.begin(),
+                                         overlay.vertices.end());
+                for (const std::uint32_t index : overlay.indices) {
+                    topLayer.indices.push_back(base + index);
+                }
             }
 
             renderer.setScreenMesh(hud);
             const auto [clipMin, clipMax] = game::inventoryScreen::catalogueListBounds();
             renderer.setClippedScreenMesh(clipped, clipMin, clipMax);
+            renderer.setTopScreenMesh(topLayer);
+        };
+
+        // A lily pad floats, so the water under it is what holds it up where
+        // every other plant needs something solid.
+        const auto hasSupportUnder = [&world](game::BlockId block, int x, int y, int z) {
+            return game::restsOnWater(block) ? game::isWaterSource(world.blockAt(x, y - 1, z))
+                                             : world.isSolid(x, y - 1, z);
         };
 
         while (!window.shouldClose()) {
@@ -1056,11 +2061,31 @@ int main() {
             // keystroke can never be delivered late. Read before the key loop,
             // so the `E` that opens a screen is discarded with the frame it
             // belonged to rather than arriving as the first typed character.
+            //
+            // **The search field takes the keyboard only once it has been
+            // clicked into.** `E` would otherwise close the screen and `Q`
+            // throw the cursor's stack away, and neither can be typed into a
+            // box that does not have focus - but a field that grabs the
+            // keyboard merely because its tab is selected is worse, because
+            // nothing on screen says it has. Escape still closes, which is the
+            // one key a text field must not eat.
+            const bool typingSearch = openScreen.has_value() &&
+                                      game::inventoryScreen::showsCatalogue(*openScreen) &&
+                                      catalogue.tab == game::inventoryScreen::CatalogueTab::Search &&
+                                      catalogue.searchFocused;
             {
                 const std::string typed = window.consumeTypedText();
-                // Slice 1 proof, replaced by the search field in slice 7.
-                if (!typed.empty() && openScreen.has_value()) {
-                    engine::logInfo("Typed: " + typed);
+                if (typingSearch && !typed.empty()) {
+                    // Capped at what the field can show; a longer query would
+                    // scroll out of the box with no way to see it.
+                    constexpr std::size_t kMaxQuery = 22;
+                    for (const char c : typed) {
+                        if (catalogue.query.size() < kMaxQuery) {
+                            catalogue.query.push_back(c);
+                        }
+                    }
+                    catalogue.scrollRow = 0;
+                    hudDirty = true;
                 }
             }
 
@@ -1072,6 +2097,14 @@ int main() {
                         closeScreen();
                     } else {
                         window.setCursorCaptured(false);
+                    }
+                    continue;
+                }
+                if (typingSearch) {
+                    if (key == engine::Key::Backspace && !catalogue.query.empty()) {
+                        catalogue.query.pop_back();
+                        catalogue.scrollRow = 0;
+                        hudDirty = true;
                     }
                     continue;
                 }
@@ -1121,6 +2154,8 @@ int main() {
                     const int step = (key == engine::Key::F7) ? 1 : -1;
                     const int wanted = world.visibleRadius() + step;
                     world.setVisibleRadius(wanted);
+                    creatures.setActiveRadius(
+                        static_cast<float>(world.visibleRadius() * game::Chunk::kSize));
 
                     if (world.visibleRadius() != static_cast<int>(settings.renderDistance)) {
                         settings.renderDistance = static_cast<unsigned>(world.visibleRadius());
@@ -1172,6 +2207,50 @@ int main() {
                     engine::logInfo("Field of view: " + std::to_string(static_cast<int>(renderer.verticalFov())));
                     continue;
                 }
+                if (key == engine::Key::F10) {
+                    settings.toneMapper = (settings.toneMapper + 1) % game::Settings::kToneMapperCount;
+                    renderer.setToneMapper(static_cast<engine::ToneMapper>(settings.toneMapper));
+                    game::saveSettings(settingsPath, settings);
+                    engine::logInfo(std::string("Tone mapping: ") + kToneMapperNames[settings.toneMapper]);
+                    continue;
+                }
+                if (key == engine::Key::F11) {
+                    settings.bloom = !settings.bloom;
+                    renderer.setBloom(settings.bloom, settings.bloomStrength);
+                    game::saveSettings(settingsPath, settings);
+                    engine::logInfo(settings.bloom ? "Bloom ON" : "Bloom OFF");
+                    continue;
+                }
+                if (key == engine::Key::G) {
+                    settings.shadows = (settings.shadows + 1) % game::Settings::kShadowQualityCount;
+                    renderer.setShadowQuality(static_cast<int>(settings.shadows));
+                    game::saveSettings(settingsPath, settings);
+                    engine::logInfo(std::string("Shadows: ") + kShadowQualityNames[settings.shadows]);
+                    continue;
+                }
+                if (key == engine::Key::C) {
+                    settings.clouds = (settings.clouds + 1) % game::Settings::kCloudQualityCount;
+                    renderer.setClouds(static_cast<int>(settings.clouds), settings.cloudCoverage,
+                                       settings.cloudShadow);
+                    game::saveSettings(settingsPath, settings);
+                    engine::logInfo(std::string("Clouds: ") + kCloudQualityNames[settings.clouds]);
+                    continue;
+                }
+                if (key == engine::Key::V) {
+                    // Cycles the override rather than the weather itself: a
+                    // storm you asked for has to stay until you ask for
+                    // something else, or the countdown ends it mid-look.
+                    weather.force(weather.forced() + 1);
+                    static constexpr std::array<const char*, 4> kForcedNames{"cycling", "rain",
+                                                                            "storm", "clear"};
+                    engine::logInfo(std::string("Weather: ") + kForcedNames[weather.forced()]);
+                    continue;
+                }
+                if (key == engine::Key::F12) {
+                    renderer.setDebugView((renderer.debugView() + 1) % engine::Renderer::kDebugViewCount);
+                    engine::logInfo(std::string("Surface view: ") + kDebugViewNames[renderer.debugView()]);
+                    continue;
+                }
                 if (key == engine::Key::F1 && capIndex > 0) {
                     --capIndex;
                 } else if (key == engine::Key::F2 && capIndex + 1 < kFpsCapOptions.size()) {
@@ -1205,6 +2284,26 @@ int main() {
                 const float cursorY = (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight;
                 const int craftExtent = game::inventoryScreen::craftSize(*openScreen);
                 const bool furnaceOpen = *openScreen == game::inventoryScreen::Kind::Furnace;
+                const bool smithingOpen = *openScreen == game::inventoryScreen::Kind::SmithingTable;
+                // What the result slot is currently offering, and what taking it
+                // costs. A smithing table upgrades rather than crafts, so it can
+                // never be a grid pattern - but from here it behaves the same
+                // way, which is what keeps the take path as one piece of code.
+                const auto pendingResult = [&] {
+                    return smithingOpen ? game::smithingResult(craftSlots[0], craftSlots[1])
+                                        : game::craftResult(craftSlots.data(), craftExtent);
+                };
+                const auto spendIngredients = [&] {
+                    if (!smithingOpen) {
+                        game::consumeIngredients(craftSlots.data(), craftExtent);
+                        return;
+                    }
+                    for (int i = 0; i < 2; ++i) {
+                        if (--craftSlots[i].count <= 0) {
+                            craftSlots[i] = game::ItemStack{};
+                        }
+                    }
+                };
                 if (furnaceOpen) {
                     furnaceToSlots();
                 }
@@ -1218,6 +2317,13 @@ int main() {
                 const auto stackAt = [&](const game::inventoryScreen::SlotHit& at) -> game::ItemStack* {
                     if (at.region == Region::Grid) {
                         return &inventory.slot(at.index);
+                    }
+                    if (at.region == Region::Chest) {
+                        const glm::ivec3 where =
+                            at.index < game::kChestSlots ? openChestPosition : openChestPartner;
+                        const auto found = chests.find(where);
+                        return found == chests.end() ? nullptr
+                                                     : &found->second.slots[at.index % game::kChestSlots];
                     }
                     if (at.region == Region::Craft) {
                         return &craftSlots[at.index];
@@ -1241,6 +2347,31 @@ int main() {
                             targets.push_back(&inventory.slot(i));
                         }
                     };
+
+                    if (*openScreen == game::inventoryScreen::Kind::Chest ||
+                        *openScreen == game::inventoryScreen::Kind::DoubleChest) {
+                        // A chest is a second container, not a workbench: a
+                        // shift-click crosses between the two halves of the
+                        // screen rather than shuffling within one.
+                        if (at.region == Region::Chest) {
+                            append(0, game::kInventorySlots);
+                            return targets;
+                        }
+                        const bool doubled = *openScreen == game::inventoryScreen::Kind::DoubleChest;
+                        for (int half = 0; half < (doubled ? 2 : 1); ++half) {
+                            const auto found =
+                                chests.find(half == 0 ? openChestPosition : openChestPartner);
+                            if (found == chests.end()) {
+                                continue;
+                            }
+                            for (game::ItemStack& slot : found->second.slots) {
+                                targets.push_back(&slot);
+                            }
+                        }
+                        if (!targets.empty()) {
+                            return targets;
+                        }
+                    }
 
                     if (at.region != Region::Grid) {
                         append(0, game::kInventorySlots);
@@ -1321,6 +2452,23 @@ int main() {
                 for (const engine::MouseButton button : presses) {
                     const bool right = button == engine::MouseButton::Right;
 
+                    // Focus follows the click, and every click that is not on
+                    // the field lets it go - which is what a text box does
+                    // everywhere, and the only thing that makes "E closes the
+                    // screen" true again the moment you are not typing.
+                    {
+                        const bool onField =
+                            catalogue.tab == game::inventoryScreen::CatalogueTab::Search &&
+                            game::inventoryScreen::insideSearchField(*openScreen, cursorX, cursorY);
+                        if (onField != catalogue.searchFocused) {
+                            catalogue.searchFocused = onField;
+                            hudDirty = true;
+                        }
+                        if (onField) {
+                            continue; // The field swallows its own click.
+                        }
+                    }
+
                     if (!hit.has_value()) {
                         if (const auto tab = game::inventoryScreen::tabAt(*openScreen, cursorX, cursorY);
                             tab.has_value()) {
@@ -1328,6 +2476,7 @@ int main() {
                             // A new tab starts at the top. Keeping the offset
                             // would open a short list scrolled past its end.
                             catalogue.scrollRow = 0;
+                            catalogue.searchFocused = false;
                             hudDirty = true;
                             continue;
                         }
@@ -1350,7 +2499,7 @@ int main() {
                                     *openScreen, cursorX, cursorY, catalogue.scrollRow);
                                 cell.has_value()) {
                                 const std::vector<game::ItemId> listed =
-                                    game::inventoryScreen::catalogueItems(catalogue.tab);
+                                    game::inventoryScreen::catalogueItems(catalogue.tab, catalogue.query);
                                 if (*cell < listed.size()) {
                                     const game::ItemId picked = listed[*cell];
                                     if (window.isKeyDown(engine::Key::LeftShift) && !right) {
@@ -1369,7 +2518,8 @@ int main() {
                             if (tookEntry) {
                                 continue;
                             }
-                            if (game::inventoryScreen::insideCatalogueList(*openScreen, cursorX, cursorY)) {
+                            if (creative &&
+                                game::inventoryScreen::insideCatalogueList(*openScreen, cursorX, cursorY)) {
                                 // Every part of the list that is not a filled
                                 // entry is the bin: the empty cells, the gaps and
                                 // the clipped row at the bottom. Left click
@@ -1411,13 +2561,12 @@ int main() {
                             // pass spends at least one ingredient, so this always
                             // terminates.
                             while (true) {
-                                const game::ItemStack batch =
-                                    game::craftResult(craftSlots.data(), craftExtent);
+                                const game::ItemStack batch = pendingResult();
                                 if (batch.empty() || !inventory.hasRoomFor(batch.item, batch.count)) {
                                     break;
                                 }
                                 inventory.add(batch.item, batch.count);
-                                game::consumeIngredients(craftSlots.data(), craftExtent);
+                                spendIngredients();
                             }
                         } else if (game::ItemStack* moving = stackAt(*hit); moving != nullptr) {
                             game::slots::quickMove(*moving, quickMoveTargets(*hit));
@@ -1429,7 +2578,7 @@ int main() {
                     if (hit->region == Region::CraftResult && !furnaceOpen) {
                         // The result is a preview until it is taken, which is why
                         // the ingredients are only spent here.
-                        const game::ItemStack made = game::craftResult(craftSlots.data(), craftExtent);
+                        const game::ItemStack made = pendingResult();
                         if (made.empty()) {
                             continue;
                         }
@@ -1442,7 +2591,7 @@ int main() {
                             } else {
                                 heldStack.count += made.count;
                             }
-                            game::consumeIngredients(craftSlots.data(), craftExtent);
+                            spendIngredients();
                             hudDirty = true;
                         }
                         continue;
@@ -1541,10 +2690,13 @@ int main() {
             // the hotbar underneath - silently, because the bar is hidden behind
             // the panel while you are looking at it.
             const float scroll = window.consumeScrollDelta();
-            if (const int notches = static_cast<int>(scroll); notches != 0) {
+            scrollCarry += scroll;
+            const int notches = static_cast<int>(scrollCarry);
+            scrollCarry -= static_cast<float>(notches);
+            if (notches != 0) {
                 if (openScreen.has_value() && game::inventoryScreen::showsCatalogue(*openScreen)) {
                     const int limit = game::inventoryScreen::catalogueMaxScroll(
-                        game::inventoryScreen::catalogueItems(catalogue.tab).size());
+                        game::inventoryScreen::catalogueItems(catalogue.tab, catalogue.query).size());
                     const int next = std::clamp(catalogue.scrollRow - notches, 0, limit);
                     if (next != catalogue.scrollRow) {
                         catalogue.scrollRow = next;
@@ -1564,12 +2716,42 @@ int main() {
             // The overlay wants refreshing continuously, and so does the
             // inventory because the held stack follows the cursor. Everything
             // else only when the selection changes.
+            //
+            // **A drawing bow is the third continuous thing.** `hudDirty` is
+            // only set when the draw starts and when it ends, so without this
+            // the hotbar was built once at the start of the pull and not again
+            // until the arrow left - the picture and the pullback were both
+            // computed correctly every frame and never uploaded. Exactly the
+            // dig bar's bug: a transient HUD element has to ask for the frames
+            // it changes on.
             const bool overlayDue = overlayVisible && now - lastHudRebuild >= kOverlayRefreshInterval;
+            uiSeconds = std::fmod(uiSeconds + deltaSeconds, kCaretBlinkSeconds);
+            catalogue.caretVisible = uiSeconds < kCaretBlinkSeconds * 0.5f;
             if (breakProgress <= 0.0f && lastBreakProgress > 0.0f) {
                 hudDirty = true;
             }
             lastBreakProgress = breakProgress;
-            if (hudDirty || overlayDue || openScreen.has_value() || breakProgress > 0.0f) {
+
+            // **The survival bars are the fifth continuous case**, and they get
+            // a comparison rather than a flag because nothing sets one: health,
+            // food and air all change from inside the physics. Comparing what
+            // was last *drawn* means a bar cannot stick on screen after the
+            // number behind it moved, which is the dig bar's bug in its fourth
+            // outfit. The flash is included so the hearts stop shaking.
+            const int airBars = static_cast<int>(
+                std::ceil(std::clamp(player.air / game::fluid::kAirSeconds, 0.0f, 1.0f) * 10.0f));
+            const bool statusMoved = player.health != lastShownHealth ||
+                                     player.food != lastShownFood || airBars != lastShownAir ||
+                                     (player.hurtFlash > 0.0f) != lastShownHurt;
+            if (statusMoved) {
+                hudDirty = true;
+                lastShownHealth = player.health;
+                lastShownFood = player.food;
+                lastShownAir = airBars;
+                lastShownHurt = player.hurtFlash > 0.0f;
+            }
+
+            if (hudDirty || overlayDue || openScreen.has_value() || breakProgress > 0.0f || bowHeld) {
                 game::OverlayStats stats;
                 stats.frameMilliseconds = deltaSeconds * 1000.0f;
                 stats.gpuMilliseconds = renderer.stats().gpuMilliseconds;
@@ -1588,6 +2770,9 @@ int main() {
                                                   .dominant)
                                   .name;
                 stats.air = player.air;
+                stats.toneMapper = kToneMapperNames[settings.toneMapper];
+                stats.shadows = kShadowQualityNames[settings.shadows];
+                stats.clouds = kCloudQualityNames[settings.clouds];
 
                 rebuildHud(stats);
                 lastHudRebuild = now;
@@ -1595,9 +2780,7 @@ int main() {
                 if (hudDirty) {
                     const game::ItemStack& held = inventory.slot(selectedSlot);
                     engine::logInfo(std::string("Holding: ") +
-                                    (held.empty()             ? "nothing"
-                                     : game::isSpawnEgg(held.item) ? game::spawnEggName(held.item)
-                                                                   : game::itemDisplayName(held.item)) +
+                                    (held.empty() ? "nothing" : game::displayNameOf(held.item)) +
                                     (held.empty() ? "" : " x" + std::to_string(held.count)));
                     hudDirty = false;
                 }
@@ -1635,6 +2818,7 @@ int main() {
                 move.sprint = window.isKeyDown(engine::Key::LeftControl);
                 move.sneak = window.isKeyDown(engine::Key::LeftShift);
                 move.lookY = glm::normalize(camera.forward()).y;
+                move.invulnerable = creative;
                 move.verticalWish = (window.isKeyDown(engine::Key::Space) ? 1.0f : 0.0f) -
                                     (window.isKeyDown(engine::Key::LeftShift) ? 1.0f : 0.0f);
             }
@@ -1642,15 +2826,127 @@ int main() {
             game::updatePlayer(player, move, world, deltaSeconds);
             camera.position = player.renderEyePosition();
 
+            // The ears follow the camera. Done here rather than at the top of
+            // the frame so a sound started later in the same frame is placed
+            // against where the player actually ended up.
+            {
+                const glm::vec3 facing = camera.forward();
+                audio.setListener(camera.position.x, camera.position.y, camera.position.z,
+                                  facing.x, facing.z);
+            }
+            sounds.tickMusic(audio, deltaSeconds);
+
+            // **Footsteps are paced by distance, not by time**, which is what
+            // makes a sprint sound like a sprint without a second animation or
+            // a second interval. The reference does the same.
+            if (player.onGround && !player.flying) {
+                const float moved = glm::distance(glm::vec2{player.position.x, player.position.z},
+                                                  glm::vec2{lastStepAt.x, lastStepAt.z});
+                if (moved >= kStepDistance) {
+                    lastStepAt = player.position;
+                    const game::BlockId under = world.blockAt(
+                        static_cast<int>(std::floor(player.position.x)),
+                        static_cast<int>(std::floor(player.position.y - 0.2f)),
+                        static_cast<int>(std::floor(player.position.z)));
+                    const game::SoundEvent step =
+                        game::stepSoundFor(game::soundMaterialFor(under));
+                    if (step != game::SoundEvent::Count) {
+                        sounds.play(audio, step, player.position, 0.32f);
+                    }
+                }
+            } else if (!player.onGround) {
+                // Landing should not fire a step for the whole distance fallen.
+                lastStepAt = player.position;
+            }
+
+            // Taking damage is something that happens to you, so it is not
+            // placed in the world. A long drop gets its own heavier noise,
+            // which is the reference's own split and is most of how you know
+            // how badly you landed.
+            if (player.hurtFlash > 0.0f && !wasHurt) {
+                if (lastFallDistance > kBigFallDistance) {
+                    sounds.playGlobal(audio, game::SoundEvent::FallBig, 0.8f);
+                } else if (lastFallDistance > game::survival::kSafeFallDistance) {
+                    sounds.playGlobal(audio, game::SoundEvent::FallSmall, 0.7f);
+                } else {
+                    sounds.playGlobal(audio, game::SoundEvent::Hurt, 0.7f);
+                }
+                if (settings.particles && lastFallDistance > game::survival::kSafeFallDistance) {
+                    const auto feet = glm::ivec3{glm::floor(player.position)};
+                    particles.spawnFootstep(player.position,
+                                            world.blockAt(feet.x, feet.y - 1, feet.z), 14);
+                }
+            }
+            wasHurt = player.hurtFlash > 0.0f;
+            // Sampled *before* the landing clears it, or every fall reads as
+            // zero blocks by the time the damage arrives.
+            if (!player.onGround) {
+                lastFallDistance = player.fallDistance;
+            }
+
+            // Breaking the surface, either way. The reference plays this on
+            // entry and on exit and so do we, off the same edge the underwater
+            // view already watches.
+            if (player.inWater != wasInWater) {
+                sounds.play(audio, game::SoundEvent::Splash, player.position, 0.5f);
+            }
+            wasInWater = player.inWater;
+
+            // Cave ambience: rare, unplaced, and only when the sky cannot see
+            // you. It is the reference's own most effective piece of sound
+            // design and costs one light lookup.
+            caveTimer -= deltaSeconds;
+            if (caveTimer <= 0.0f) {
+                caveTimer = kCaveCheckSeconds;
+                const int sky = world.skyLightAt(static_cast<int>(std::floor(player.position.x)),
+                                                 static_cast<int>(std::floor(player.position.y + 1.0f)),
+                                                 static_cast<int>(std::floor(player.position.z)));
+                if (sky <= 2 && player.position.y < 40.0f) {
+                    sounds.playGlobal(audio, game::SoundEvent::Cave, 0.55f);
+                }
+            }
+
+            // **Dying takes a moment.** The world keeps running underneath, so
+            // the body settles and whatever killed you is still visible; only
+            // once `kRespawnSeconds` is up does the world put you back. Anything
+            // faster reads as a teleport rather than as a death.
+            if (!player.alive()) {
+                hudDirty = true;
+                if (player.deathSeconds >= game::survival::kRespawnSeconds) {
+                    // Everything carried is thrown down where it fell, which is
+                    // the reference's rule and the only reason death costs
+                    // anything at all.
+                    if (!creative) {
+                        for (std::size_t slot = 0; slot < inventory.size(); ++slot) {
+                            game::ItemStack& stack = inventory.slot(slot);
+                            if (!stack.empty()) {
+                                drops.spawn(player.position + glm::vec3{0.0f, 0.5f, 0.0f},
+                                            stack.item, stack.count);
+                                stack = game::ItemStack{};
+                            }
+                        }
+                    }
+                    closeScreen();
+                    const int rx = spawnX;
+                    const int rz = spawnZ;
+                    game::respawnPlayer(
+                        player, glm::vec3{static_cast<float>(rx) + 0.5f,
+                                          static_cast<float>(world.highestSolid(rx, rz) + 1),
+                                          static_cast<float>(rz) + 0.5f});
+                    engine::logInfo("Respawned.");
+                }
+            }
+
             // Being underwater has to be visible, not merely felt. Without this
             // the only evidence is the physics changing, which reads as gravity
             // being broken rather than as swimming.
             {
-                const bool submergedNow =
-                    game::isWater(world.blockAt(static_cast<int>(std::floor(camera.position.x)),
-                                                static_cast<int>(std::floor(camera.position.y)),
-                                                static_cast<int>(std::floor(camera.position.z))));
-                eyeUnderwater = submergedNow;
+                const game::BlockId eyeIn =
+                    world.blockAt(static_cast<int>(std::floor(camera.position.x)),
+                                  static_cast<int>(std::floor(camera.position.y)),
+                                  static_cast<int>(std::floor(camera.position.z)));
+                eyeUnderwater = game::isWater(eyeIn);
+                eyeInLava = game::isLava(eyeIn);
             }
 
             const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kBlockReach);
@@ -1664,11 +2960,46 @@ int main() {
                     // nobody has touched costs nothing.
                     furnaces.try_emplace(openFurnacePosition);
                     openScreen = game::inventoryScreen::Kind::Furnace;
+                } else if (game::isChest(opened)) {
+                    const std::optional<glm::ivec3> partner = chestPartnerAt(target.block);
+                    // The half further back along the join axis always fills the
+                    // top three rows, so both halves open the same view.
+                    const bool firstIsThis =
+                        !partner.has_value() ||
+                        target.block.x + target.block.z < partner->x + partner->z;
+                    openChestPosition = firstIsThis ? target.block : *partner;
+                    openChestPartner = partner.has_value() ? (firstIsThis ? *partner : target.block) : openChestPosition;
+                    chests.try_emplace(openChestPosition);
+                    chests.try_emplace(openChestPartner);
+                    openScreen = partner.has_value() ? game::inventoryScreen::Kind::DoubleChest
+                                                     : game::inventoryScreen::Kind::Chest;
+                    sounds.play(audio, game::SoundEvent::ChestOpen,
+                                glm::vec3{openChestPosition} + glm::vec3{0.5f}, 0.6f);
+                } else if (opened == game::BlockId::SmithingTable) {
+                    openScreen = game::inventoryScreen::Kind::SmithingTable;
                 } else {
                     openScreen = game::inventoryScreen::Kind::CraftingTable;
                 }
                 window.setCursorCaptured(false);
                 hudDirty = true;
+            }
+
+            // A gate swings. It shares `wantInteract` with the screens above
+            // rather than the placement path below, because opening one is not
+            // a use of whatever you happen to be holding - the reference lets
+            // you open a gate with a full stack of blocks in hand.
+            if (wantInteract && target.hit) {
+                const game::BlockId aimed =
+                    world.blockAt(target.block.x, target.block.y, target.block.z);
+                if (game::isFenceGate(aimed)) {
+                    const bool opening = !game::gateIsOpen(aimed);
+                    world.setBlock(target.block.x, target.block.y, target.block.z,
+                                   game::gateAt(game::gateFamily(aimed), game::gateFacing(aimed),
+                                                opening));
+                    sounds.play(audio,
+                                opening ? game::SoundEvent::DoorOpen : game::SoundEvent::DoorClose,
+                                glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                }
             }
 
             // Gated on the cursor state from the start of the frame, so the
@@ -1700,6 +3031,60 @@ int main() {
             // pressing again always acts immediately.
             swingTimer = std::max(0.0f, swingTimer - deltaSeconds);
             breakCooldown = std::max(0.0f, breakCooldown - deltaSeconds);
+            pearlCooldown = std::max(0.0f, pearlCooldown - deltaSeconds);
+
+            // Drawing and loosing the bow. **Firing happens on the falling
+            // edge**, so this needs the button's previous state rather than the
+            // one-shot press list, which reports the wrong end of the gesture.
+            {
+                const bool drawing = wantPlace && inventory.slot(selectedSlot).item == game::ItemId::Bow &&
+                                     (creative || inventory.count(game::ItemId::Arrow) > 0);
+                if (drawing) {
+                    bowDraw = std::min(bowDraw + deltaSeconds, game::kBowDrawSeconds);
+                } else if (bowHeld) {
+                    const float charge = game::bowCharge(bowDraw);
+                    if (charge >= game::kMinBowCharge) {
+                        // Eye height less a tenth, the reference's own anchor
+                        // and offset. Spawning at the eye itself puts the shaft
+                        // through your own head at point-blank range.
+                        const glm::vec3 from = camera.position - glm::vec3{0.0f, 0.1f, 0.0f};
+                        // Blocks per tick, which is the unit the whole
+                        // projectile system is written in.
+                        glm::vec3 launch =
+                            camera.forward() * (game::projectileInfo(game::ProjectileKind::Arrow).power * charge);
+                        // The shooter's own momentum carries into the shot, but
+                        // only the vertical part, and only while airborne -
+                        // otherwise running along the ground would lift your aim.
+                        launch += player.velocity * (1.0f / 20.0f) *
+                                  glm::vec3{1.0f, player.onGround ? 0.0f : 1.0f, 1.0f};
+
+                        const bool spendsArrows = !creative;
+                        projectiles.spawn(game::ProjectileKind::Arrow, from, launch,
+                                          charge >= 1.0f, spendsArrows);
+                        // Pitched by the charge, so a snap shot sounds thinner
+                        // than a full draw - one number doing two jobs.
+                        sounds.playGlobal(audio, game::SoundEvent::Bow, 0.7f, 0.85f + charge * 0.35f);
+                        if (spendsArrows) {
+                            inventory.consume(game::ItemId::Arrow, 1);
+                            game::ItemStack& bow = inventory.slot(selectedSlot);
+                            if (++bow.damage >= game::kBowDurability) {
+                                bow = game::ItemStack{};
+                            }
+                            hudDirty = true;
+                        }
+                        // Releasing must not also place a block against
+                        // whatever the shot was aimed at.
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                    bowDraw = 0.0f;
+                } else {
+                    bowDraw = 0.0f;
+                }
+                if (bowHeld != drawing) {
+                    hudDirty = true;
+                }
+                bowHeld = drawing;
+            }
 
             // A creature in the way takes the swing instead of the block behind
             // it. Asked every frame rather than only when a swing is ready,
@@ -1714,6 +3099,7 @@ int main() {
                                                                        : 1 + swung.tier;
                 if (creatures.strike(camera.position, camera.forward(), entityReach, damage)) {
                     swingTimer = kSwingSeconds;
+                    player.exhaustion += game::survival::kExhaustAttack;
                 }
             }
 
@@ -1743,11 +3129,30 @@ int main() {
                 if (breakProgress >= 1.0f) {
                     breakProgress = 0.0f;
                     breakingBlock = kNoBlock;
+                    player.exhaustion += game::survival::kExhaustBreakBlock;
+                    {
+                        const game::SoundEvent dug = game::digSoundFor(
+                            game::soundMaterialFor(world.blockAt(target.block.x, target.block.y,
+                                                                 target.block.z)));
+                        if (dug != game::SoundEvent::Count) {
+                            sounds.play(audio, dug, glm::vec3{target.block} + glm::vec3{0.5f}, 0.8f);
+                        }
+                        if (settings.particles) {
+                            particles.spawnBlockBreak(target.block,
+                                                      world.blockAt(target.block.x, target.block.y,
+                                                                    target.block.z));
+                        }
+                    }
                     // Only an instant break needs holding back. A timed one is
                     // already paced by its own progress bar, and pausing it too
                     // would make ordinary mining stutter.
                     breakCooldown = seconds <= 0.0f ? kBreakRepeatSeconds : 0.0f;
                     const game::BlockId broken = aimed;
+                    // **Before the block goes**, because the pairing is derived
+                    // from what is standing there and asking afterwards returns
+                    // nothing.
+                    const std::optional<glm::ivec3> brokenPartner =
+                        game::isChest(broken) ? chestPartnerAt(target.block) : std::nullopt;
                     world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air);
 
                     // A broken furnace spills what was inside it. Erasing the
@@ -1770,6 +3175,51 @@ int main() {
                         }
                     }
 
+                    // Twenty-seven slots, same reasoning.
+                    if (game::isChest(broken)) {
+                        const auto found = chests.find(target.block);
+                        if (found != chests.end()) {
+                            const glm::vec3 centre = glm::vec3{target.block} + glm::vec3{0.5f};
+                            for (const game::ItemStack& stack : found->second.slots) {
+                                if (!stack.empty()) {
+                                    drops.spawn(centre, stack.item, stack.count);
+                                }
+                            }
+                            chests.erase(found);
+                        }
+                        if ((openScreen == game::inventoryScreen::Kind::Chest ||
+                             openScreen == game::inventoryScreen::Kind::DoubleChest) &&
+                            (openChestPosition == target.block || openChestPartner == target.block)) {
+                            closeScreen();
+                        }
+
+                        // A joined chest is one container to the player, so
+                        // breaking either half takes the whole thing - otherwise
+                        // half the storage walks into your inventory and the
+                        // other half stays standing with its contents inside.
+                        if (brokenPartner) {
+                            const glm::ivec3 other = *brokenPartner;
+                            const game::BlockId otherBlock =
+                                world.blockAt(other.x, other.y, other.z);
+                            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
+                            const auto pair = chests.find(other);
+                            if (pair != chests.end()) {
+                                const glm::vec3 centre = glm::vec3{other} + glm::vec3{0.5f};
+                                for (const game::ItemStack& stack : pair->second.slots) {
+                                    if (!stack.empty()) {
+                                        drops.spawn(centre, stack.item, stack.count);
+                                    }
+                                }
+                                chests.erase(pair);
+                            }
+                            const game::ItemId half = game::dropForBlock(otherBlock);
+                            if (half != game::ItemId::None &&
+                                (creative || game::yieldsDrop(otherBlock, tool.item))) {
+                                drops.spawn(glm::vec3{other} + glm::vec3{0.5f}, half, 1);
+                            }
+                        }
+                    }
+
                     // Breaking yields its drop in every mode, but only if what
                     // you are holding is good enough for it. Stone mined by hand
                     // gives nothing, which is what makes a pickaxe worth making.
@@ -1777,6 +3227,25 @@ int main() {
                     if (dropped != game::ItemId::None && (creative || game::yieldsDrop(broken, tool.item))) {
                         drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped,
                                     game::dropCountForBlock(broken));
+
+                        // Gravel gives up flint about one time in ten, the
+                        // reference's own rate and the only source of the one
+                        // ingredient an arrow cannot be made without.
+                        //
+                        // **Rolled off the block's own position, not a running
+                        // random.** Every other drop in the game is a pure
+                        // function of what was broken, and a roll that changed
+                        // between two identical actions would be the one place
+                        // that stopped being true.
+                        if (broken == game::BlockId::Gravel) {
+                            const auto mix = static_cast<unsigned>(target.block.x * 73856093 ^
+                                                                   target.block.y * 19349663 ^
+                                                                   target.block.z * 83492791);
+                            if ((mix ^ (mix >> 13)) % 10u == 0u) {
+                                drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f},
+                                            game::ItemId::Flint, 1);
+                            }
+                        }
                     }
 
                     // Tools wear only on blocks that actually resist them.
@@ -1795,11 +3264,34 @@ int main() {
                     // being left hanging in the air.
                     const glm::ivec3 above{target.block.x, target.block.y + 1, target.block.z};
                     const game::BlockId resting = world.blockAt(above.x, above.y, above.z);
-                    if (game::needsSupportBelow(resting) && !world.isSolid(above.x, above.y - 1, above.z)) {
+                    if (game::needsSupportBelow(resting) &&
+                        !hasSupportUnder(resting, above.x, above.y, above.z)) {
                         world.setBlock(above.x, above.y, above.z, game::BlockId::Air);
                         const game::ItemId shed = game::dropForBlock(resting);
                         if (shed != game::ItemId::None) {
                             drops.spawn(glm::vec3{above} + glm::vec3{0.5f}, shed, 1);
+                        }
+                    }
+
+                    // A ladder is held up sideways rather than from below, so
+                    // it is the four neighbours that have to be checked instead
+                    // of the one cell above.
+                    for (const glm::ivec3& step : {glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0},
+                                                   glm::ivec3{0, 0, 1}, glm::ivec3{0, 0, -1}}) {
+                        const glm::ivec3 beside = target.block + step;
+                        const game::BlockId hung = world.blockAt(beside.x, beside.y, beside.z);
+                        if (!game::isLadder(hung)) {
+                            continue;
+                        }
+                        const game::FaceDirection wall = game::ladderFacing(hung);
+                        const bool lostIt = (wall == game::FaceDirection::PosX && step.x < 0) ||
+                                            (wall == game::FaceDirection::NegX && step.x > 0) ||
+                                            (wall == game::FaceDirection::PosZ && step.z < 0) ||
+                                            (wall == game::FaceDirection::NegZ && step.z > 0);
+                        if (lostIt) {
+                            world.setBlock(beside.x, beside.y, beside.z, game::BlockId::Air);
+                            drops.spawn(glm::vec3{beside} + glm::vec3{0.5f},
+                                        game::dropForBlock(hung), 1);
                         }
                     }
                 }
@@ -1807,9 +3299,49 @@ int main() {
 
             if (!wantPlace) {
                 placeTimer = 0.0f;
+                player.eatingSeconds = 0.0f;
             } else {
                 placeTimer -= deltaSeconds;
                 const game::ItemStack& held = inventory.slot(selectedSlot);
+
+                // **Eating is held, not clicked**, which is the whole of why it
+                // has a timer of its own rather than sharing `placeTimer`: the
+                // reference takes 1.6 s and shows the food going down, and a
+                // meal you can tap through is not a cost.
+                //
+                // A full bar refuses, exactly as the reference does - otherwise
+                // the first thing anyone does is eat their entire stack.
+                if (!held.empty() && game::survival::isEdible(held.item) &&
+                    player.food < game::survival::kMaxFood) {
+                    player.eatingSeconds += deltaSeconds;
+                    // Crumbs, on a spacing rather than every frame - the same
+                    // handful whatever the frame rate.
+                    constexpr float kCrumbSpacing = 0.11f;
+                    if (settings.particles &&
+                        std::floor(player.eatingSeconds / kCrumbSpacing) !=
+                            std::floor((player.eatingSeconds - deltaSeconds) / kCrumbSpacing)) {
+                        const glm::vec3 gaze = camera.forward();
+                        particles.spawnEat(camera.position + gaze * 0.35f -
+                                               glm::vec3{0.0f, 0.18f, 0.0f},
+                                           gaze,
+                                           static_cast<float>(game::itemTextureLayer(held.item)), 3);
+                    }
+                    if (player.eatingSeconds >= game::survival::kEatSeconds) {
+                        player.eatingSeconds = 0.0f;
+                        game::feedPlayer(player, game::survival::foodValue(held.item));
+                        sounds.playGlobal(audio, game::SoundEvent::Burp, 0.5f);
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                        }
+                        hudDirty = true;
+                    } else if (player.eatingSeconds - deltaSeconds <= 0.0f) {
+                        // One bite at the start rather than a chew loop, which
+                        // is a whole timer for something nobody would miss.
+                        sounds.playGlobal(audio, game::SoundEvent::Eat, 0.5f);
+                    }
+                } else {
+                    player.eatingSeconds = 0.0f;
+                }
 
                 // A spawn egg is used rather than placed. It shares `placeTimer`
                 // deliberately: without a cooldown one click at 120 fps drops
@@ -1835,24 +3367,60 @@ int main() {
                 // water has no selection geometry, so the ordinary aim passes
                 // straight through it to the riverbed.
                 if (placeTimer <= 0.0f && !held.empty() &&
-                    (held.item == game::ItemId::Bucket || held.item == game::ItemId::WaterBucket)) {
+                    (held.item == game::ItemId::Bucket ||
+                     held.item == game::ItemId::WaterBucket ||
+                     held.item == game::ItemId::LavaBucket ||
+                     held.item == game::ItemId::MilkBucket)) {
                     const bool filling = held.item == game::ItemId::Bucket;
                     const game::RaycastHit reached =
                         game::raycast(world, camera.position, camera.forward(), kBlockReach, filling);
 
                     bool used = false;
-                    if (filling && reached.hit &&
-                        game::isWaterSource(world.blockAt(reached.block.x, reached.block.y, reached.block.z))) {
-                        world.setBlock(reached.block.x, reached.block.y, reached.block.z,
-                                       game::BlockId::Air);
+                    game::ItemId became = game::ItemId::Bucket;
+
+                    if (held.item == game::ItemId::MilkBucket) {
+                        // Drinking. There are no status effects yet, so all this
+                        // does is hand the empty bucket back - which is the part
+                        // that has to be right whenever they arrive.
                         used = true;
-                    } else if (!filling && reached.hit &&
-                               !game::playerOverlapsBlock(player, reached.adjacent)) {
+                    } else if (filling) {
+                        // A cow first: an empty bucket aimed at one milks it,
+                        // and only falls through to the world if it misses.
+                        const std::size_t milked =
+                            creatures.findMilkable(camera.position, camera.forward(), kBlockReach);
+                        if (milked != game::Creatures::kNoCreature) {
+                            became = game::ItemId::MilkBucket;
+                            used = true;
+                        } else if (reached.hit) {
+                            const game::BlockId source =
+                                world.blockAt(reached.block.x, reached.block.y, reached.block.z);
+                            // **A source only.** Scooping a flowing cell leaves a
+                            // gap its own source refills a moment later, which
+                            // reads as the bucket having done nothing.
+                            if (game::isWaterSource(source) || game::isLavaSource(source)) {
+                                const bool lava = game::isLavaSource(source);
+                                became = lava ? game::ItemId::LavaBucket
+                                              : game::ItemId::WaterBucket;
+                                world.setBlock(reached.block.x, reached.block.y, reached.block.z,
+                                               game::BlockId::Air);
+                                sounds.play(audio,
+                                            lava ? game::SoundEvent::BucketFillLava
+                                                 : game::SoundEvent::BucketFill,
+                                            glm::vec3{reached.block} + glm::vec3{0.5f}, 0.8f);
+                                used = true;
+                            }
+                        }
+                    } else if (reached.hit && !game::playerOverlapsBlock(player, reached.adjacent)) {
                         // Level 0 is a *source*, not merely a full cell. Placing
                         // a flowing level instead would drain itself the moment
                         // the fluid update ran.
+                        const bool lava = held.item == game::ItemId::LavaBucket;
                         world.setBlock(reached.adjacent.x, reached.adjacent.y, reached.adjacent.z,
-                                       game::BlockId::Water0);
+                                       lava ? game::BlockId::Lava0 : game::BlockId::Water0);
+                        sounds.play(audio,
+                                    lava ? game::SoundEvent::BucketEmptyLava
+                                         : game::SoundEvent::BucketEmpty,
+                                    glm::vec3{reached.adjacent} + glm::vec3{0.5f}, 0.8f);
                         used = true;
                     }
 
@@ -1861,8 +3429,6 @@ int main() {
                         // which is the one thing creative is allowed to skip.
                         if (!creative) {
                             game::ItemStack& slot = inventory.slot(selectedSlot);
-                            const game::ItemId became =
-                                filling ? game::ItemId::WaterBucket : game::ItemId::Bucket;
                             if (slot.count > 1) {
                                 // A stack of empties gives back one full bucket,
                                 // so the swap has to go somewhere else.
@@ -1877,28 +3443,161 @@ int main() {
                     }
                 }
 
+                // Flint and steel. It sits before block placement for the same
+                // reason the bucket does: it is a *use*, and the held item is
+                // not a block, so the placement branch would decline it anyway.
+                if (placeTimer <= 0.0f && !held.empty() &&
+                    held.item == game::ItemId::FlintAndSteel && target.hit) {
+                    const game::BlockId aimed =
+                        world.blockAt(target.block.x, target.block.y, target.block.z);
+                    if (aimed == game::BlockId::Tnt) {
+                        // Lighting a charge directly rather than setting a fire
+                        // beside it, which is the reference's own behaviour.
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::BlockId::TntPrimed);
+                        world.primeTnt(target.block);
+                        sounds.play(audio, game::SoundEvent::Fuse,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.9f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else {
+                        // A plant is replaced rather than built on, so the fire
+                        // lands in its cell; anything solid is lit against.
+                        const glm::ivec3 lightCell =
+                            game::isReplaceable(aimed) ? target.block : target.adjacent;
+                        const game::BlockId inCell =
+                            world.blockAt(lightCell.x, lightCell.y, lightCell.z);
+                        if (!game::playerOverlapsBlock(player, lightCell) &&
+                            (inCell == game::BlockId::Air || game::isWashedAway(inCell)) &&
+                            world.fireCanSurvive(lightCell.x, lightCell.y, lightCell.z)) {
+                            world.setBlock(lightCell.x, lightCell.y, lightCell.z,
+                                           game::BlockId::Fire);
+                            sounds.play(audio, game::SoundEvent::Ignite,
+                                        glm::vec3{lightCell} + glm::vec3{0.5f}, 0.7f);
+                            placeTimer = kPlaceRepeatSeconds;
+                        }
+                    }
+                }
+
+                // Stripping, bottling and throwing. All three are *uses* of a
+                // held item rather than placements, so they share the repeat
+                // timer and sit ahead of the block branch, which would decline
+                // them anyway.
+                //
+                // **Eating is not among them any more.** It used to be, back
+                // when there was no hunger bar and a click simply destroyed the
+                // food; M21 gave it a held 1.6 s timer above and this branch was
+                // left standing, so every meal was swallowed whole on the first
+                // frame and the timer above could never finish. Nothing caught
+                // it, because both halves compiled and the survival tests
+                // called `feedPlayer` directly rather than through a click.
+                if (placeTimer <= 0.0f && !held.empty()) {
+                    const game::ItemId used = held.item;
+                    bool consumed = false;
+
+                    if (used == game::ItemId::GlassBottle && target.hit) {
+                        // A bottle fills from any water, source or flowing -
+                        // unlike a bucket, which needs a source.
+                        const game::RaycastHit wet = game::raycast(
+                            world, camera.position, camera.forward(), kBlockReach, true);
+                        if (wet.hit &&
+                            game::isWater(world.blockAt(wet.block.x, wet.block.y, wet.block.z))) {
+                            if (!creative) {
+                                game::ItemStack& slot = inventory.slot(selectedSlot);
+                                if (slot.count > 1) {
+                                    --slot.count;
+                                    inventory.add(game::ItemId::WaterBottle, 1);
+                                } else {
+                                    slot = game::ItemStack{game::ItemId::WaterBottle, 1};
+                                }
+                                hudDirty = true;
+                            }
+                            placeTimer = kPlaceRepeatSeconds;
+                        }
+                    } else if ((used == game::ItemId::VoidPearl && pearlCooldown <= 0.0f) ||
+                               used == game::ItemId::Egg) {
+                        // A thrown entity that arcs, rather than a look-ray
+                        // that dropped you where you were already aiming. Same
+                        // anchor as the bow: spawning at the eye itself puts it
+                        // through your own head at point-blank range.
+                        const game::ProjectileKind kind = used == game::ItemId::Egg
+                                                              ? game::ProjectileKind::Egg
+                                                              : game::ProjectileKind::Pearl;
+                        const glm::vec3 from = camera.position - glm::vec3{0.0f, 0.1f, 0.0f};
+                        glm::vec3 launch = camera.forward() * game::projectileInfo(kind).power;
+                        // Blocks per tick, and only the vertical part while
+                        // airborne - the same rule the bow uses, for the same
+                        // reason: running along the ground must not lift a throw.
+                        launch += player.velocity * (1.0f / 20.0f) *
+                                  glm::vec3{1.0f, player.onGround ? 0.0f : 1.0f, 1.0f};
+                        projectiles.spawn(kind, from, launch, false, false);
+                        if (kind == game::ProjectileKind::Pearl) {
+                            pearlCooldown = kPearlCooldownSeconds;
+                        }
+                        consumed = true;
+                    } else if (game::toolFor(used).kind == game::ToolKind::Axe && target.hit) {
+                        const game::BlockId bark =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        const game::BlockId stripped = game::strippedFor(bark);
+                        if (stripped != bark) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z, stripped);
+                            placeTimer = kPlaceRepeatSeconds;
+                        }
+                    }
+
+                    if (consumed) {
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                            hudDirty = true;
+                        }
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
                 const bool canPlace = !held.empty() && game::isBlockItem(held.item);
-                if (placeTimer <= 0.0f && canPlace && target.hit &&
-                    !game::playerOverlapsBlock(player, target.adjacent)) {
+                // A lily pad is set down **on** the water, so its aim stops at
+                // the surface every other block's ray goes straight through,
+                // and it lands in the cell above rather than in it.
+                const bool floating = canPlace && game::restsOnWater(game::blockForItem(held.item));
+                const game::RaycastHit placeTarget =
+                    floating ? game::raycast(world, camera.position, camera.forward(), kBlockReach, true)
+                             : target;
+                const game::BlockId aimedAt =
+                    placeTarget.hit ? world.blockAt(placeTarget.block.x, placeTarget.block.y,
+                                                    placeTarget.block.z)
+                                    : game::BlockId::Air;
+                // Aiming at a plant puts the block **in** its cell rather than a
+                // step above it, which is what left a flower standing under
+                // whatever had just been placed on it.
+                const glm::ivec3 placeCell =
+                    floating && game::isWater(aimedAt)
+                        ? placeTarget.block + glm::ivec3{0, 1, 0}
+                        : (game::isReplaceable(aimedAt) ? placeTarget.block : placeTarget.adjacent);
+                if (placeTimer <= 0.0f && canPlace && placeTarget.hit &&
+                    !game::playerOverlapsBlock(player, placeCell)) {
                     game::BlockId placing = game::blockForItem(held.item);
-                    glm::ivec3 where = target.adjacent;
+                    glm::ivec3 where = placeCell;
 
                     const bool clickedAbove = target.adjacent.y > target.block.y;
                     const bool clickedBelow = target.adjacent.y < target.block.y;
 
                     // Two halves meeting in one cell become a whole block. Left
                     // as separate halves they stack as slab, gap, slab, which is
-                    // never what anyone is trying to build.
-                    const game::BlockId aimedAt = world.blockAt(target.block.x, target.block.y, target.block.z);
-                    const bool completesSlab = game::isSlab(placing) && game::isSlab(aimedAt) &&
-                                               (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
+                    // never what anyone is trying to build. **Both halves have
+                    // to be the same material**, or a spruce slab dropped on a
+                    // stone one silently produced a block of stone.
+                    const bool completesSlab =
+                        game::isSlab(placing) && game::isSlab(aimedAt) &&
+                        game::slabFamily(placing) == game::slabFamily(aimedAt) &&
+                        (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
 
                     if (completesSlab) {
-                        placing = game::BlockId::Stone;
+                        placing = game::kSlabFamilies[static_cast<std::size_t>(
+                                                          game::slabFamily(placing))]
+                                      .parent;
                         where = target.block;
                     } else if (game::isSlab(placing)) {
                         // Clicking an underside puts the half up against it.
-                        placing = clickedBelow ? game::BlockId::StoneSlabTop : game::BlockId::StoneSlab;
+                        placing = game::slabAt(game::slabFamily(placing), clickedBelow);
                     } else if (game::isStairs(placing)) {
                         // Oriented blocks take their facing from the camera and
                         // their half from which end of the block was clicked,
@@ -1908,7 +3607,16 @@ int main() {
                             std::abs(aim.x) > std::abs(aim.z)
                                 ? (aim.x > 0.0f ? game::Facing::West : game::Facing::East)
                                 : (aim.z > 0.0f ? game::Facing::North : game::Facing::South);
-                        placing = game::stairsAt(facing, clickedBelow);
+                        placing = game::stairsAt(game::stairFamily(placing), facing, clickedBelow);
+                    } else if (game::isFenceGate(placing)) {
+                        // A gate takes the facing of whoever set it down, and is
+                        // always shut to begin with.
+                        const glm::vec3 aim = camera.forward();
+                        const game::FaceDirection front =
+                            std::abs(aim.x) > std::abs(aim.z)
+                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
+                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
+                        placing = game::gateAt(game::gateFamily(placing), front, false);
                     } else if (game::isFurnace(placing)) {
                         // The mouth turns to face whoever placed it, which is
                         // the reference's rule and the only way three plain
@@ -1918,14 +3626,80 @@ int main() {
                             std::abs(aim.x) > std::abs(aim.z)
                                 ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
                                 : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
-                        placing = game::furnaceFacing(front, false);
+                        placing = game::furnaceFacing(front, false, game::isSmoker(placing));
+                    } else if (game::isChest(placing)) {
+                        // Same rule, same reason: one face has the latch on it.
+                        const glm::vec3 aim = camera.forward();
+                        const game::FaceDirection front =
+                            std::abs(aim.x) > std::abs(aim.z)
+                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
+                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
+                        placing = game::chestFacing(front);
+                    } else if (game::isBeehive(placing)) {
+                        // Same rule again: a hive has one entrance, and the bees
+                        // that will use it need to know which side it is on.
+                        const glm::vec3 aim = camera.forward();
+                        const game::FaceDirection front =
+                            std::abs(aim.x) > std::abs(aim.z)
+                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
+                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
+                        placing = game::beehiveAt(front, game::beehiveHasHoney(placing));
+                    } else if (game::isLadder(placing) || game::isVine(placing) ||
+                               game::isCocoa(placing)) {
+                        // **These three take their facing from the wall they
+                        // were put against, not from the camera.** They are the
+                        // only placed blocks whose orientation is a fact about
+                        // where they landed rather than about who put them
+                        // there, and one facing into open air would be useless.
+                        const glm::ivec3 back = placeTarget.block - where;
+                        game::FaceDirection wall = game::FaceDirection::Unknown;
+                        if (back.x > 0) {
+                            wall = game::FaceDirection::PosX;
+                        } else if (back.x < 0) {
+                            wall = game::FaceDirection::NegX;
+                        } else if (back.z > 0) {
+                            wall = game::FaceDirection::PosZ;
+                        } else if (back.z < 0) {
+                            wall = game::FaceDirection::NegZ;
+                        }
+                        const bool solidBehind =
+                            world.isSolid(placeTarget.block.x, placeTarget.block.y,
+                                          placeTarget.block.z);
+                        if (wall == game::FaceDirection::Unknown || !solidBehind) {
+                            placing = game::BlockId::Air;
+                        } else if (game::isLadder(placing)) {
+                            placing = game::ladderFacing(wall);
+                        } else if (game::isCocoa(placing)) {
+                            placing = game::cocoaAt(wall, 0);
+                        } else {
+                            // A vine clings to the side of its own cell facing
+                            // the wall, which is the opposite of the wall's own
+                            // compass direction.
+                            const std::uint8_t side =
+                                wall == game::FaceDirection::PosX   ? game::ConnectEast
+                                : wall == game::FaceDirection::NegX ? game::ConnectWest
+                                : wall == game::FaceDirection::PosZ ? game::ConnectSouth
+                                                                    : game::ConnectNorth;
+                            placing = game::vineWith(side);
+                        }
                     }
 
-                    // Nothing that needs a floor may be placed without one.
-                    if (game::needsSupportBelow(placing) && !world.isSolid(where.x, where.y - 1, where.z)) {
+                    // A ladder with no wall behind it clears `placing` above;
+                    // nothing else that needs a support may go down without one.
+                    if (placing == game::BlockId::Air) {
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (game::needsSupportBelow(placing) &&
+                               !hasSupportUnder(placing, where.x, where.y, where.z)) {
                         placeTimer = kPlaceRepeatSeconds;
                     } else {
                         world.setBlock(where.x, where.y, where.z, placing);
+                        // The reference uses a block's *dig* sound for placing
+                        // it too, quieter. One recording, two events.
+                        const game::SoundEvent placed =
+                            game::digSoundFor(game::soundMaterialFor(placing));
+                        if (placed != game::SoundEvent::Count) {
+                            sounds.play(audio, placed, glm::vec3{where} + glm::vec3{0.5f}, 0.6f);
+                        }
                         if (!creative) {
                             inventory.consumeOne(selectedSlot);
                             hudDirty = true;
@@ -1943,22 +3717,28 @@ int main() {
             // the lit and unlit block as they light and go out. Only a change is
             // written, or every frame would re-mesh the chunk they sit in.
             for (auto& [position, furnace] : furnaces) {
-                const bool lit = game::tickFurnace(furnace, deltaSeconds);
                 const game::BlockId present = world.blockAt(position.x, position.y, position.z);
                 if (!game::isFurnace(present)) {
                     continue;
                 }
-                // Lighting one must not turn it round: the facing and the lit
-                // state are both in the id, so they are recombined rather than
+                // A smoker runs the **whole** tick at double rate, which is the
+                // reference's behaviour in one number: it cooks in five seconds
+                // instead of ten and burns its fuel twice as fast, so the items
+                // per lump of charcoal are unchanged.
+                const bool lit = game::tickFurnace(furnace, deltaSeconds * game::cookSpeed(present));
+                // Lighting one must not turn it round or change what kind it is:
+                // all three live in the id, so they are recombined rather than
                 // one being overwritten with a default.
-                const game::BlockId wanted = game::furnaceFacing(game::furnaceFacing(present), lit);
+                const game::BlockId wanted =
+                    game::furnaceFacing(game::furnaceFacing(present), lit, game::isSmoker(present));
                 if (present != wanted) {
                     world.setBlock(position.x, position.y, position.z, wanted);
                 }
             }
 
-            // Anything a spreading flow swept aside drops, the same way a plant
-            // left hanging by mining below it does.
+            // Anything a spreading flow swept aside - or a falling block landed
+            // on - drops, the same way a plant left hanging by mining below it
+            // does.
             for (const game::World::WashedBlock& washed : world.takeWashedBlocks()) {
                 const game::ItemId shed = game::dropForBlock(washed.block);
                 if (shed != game::ItemId::None) {
@@ -1966,9 +3746,137 @@ int main() {
                 }
             }
 
+            // Blocks the world just took out of the grid become entities, and
+            // the entities put themselves back when they land.
+            for (const game::World::WashedBlock& detached : world.takeDetachedBlocks()) {
+                fallingBlocks.spawn(detached.position, detached.block);
+            }
+
+            // What the population had to say for itself this tick.
+            for (const game::CreatureVoiceEvent& voice : creatures.takeVoices()) {
+                const game::VoiceState state =
+                    voice.sound == game::CreatureSound::Hurt    ? game::VoiceState::Hurt
+                    : voice.sound == game::CreatureSound::Death ? game::VoiceState::Death
+                                                                : game::VoiceState::Idle;
+                sounds.playVoice(audio, voice.kind, state, voice.at, voice.scale);
+            }
+
+            // Meat from anything that was killed, on the same path as every
+            // other drop.
+            for (const game::Creatures::Loot& loot : creatures.takeLoot()) {
+                drops.spawn(loot.position + glm::vec3{0.0f, 0.4f, 0.0f}, loot.item, loot.count);
+            }
+
+            // What a grazing animal just ate. The reference's
+            // `eat_and_replace_block_pairs`: a mouthful of tall grass takes the
+            // plant, and a mouthful of turf takes the grass off the block and
+            // leaves bare dirt. Handed over rather than done inside `Creatures`
+            // because only the main thread may write to the world.
+            for (const glm::ivec3& cell : creatures.takeGrazed()) {
+                if (world.blockAt(cell.x, cell.y, cell.z) == game::BlockId::TallGrass) {
+                    world.setBlock(cell.x, cell.y, cell.z, game::BlockId::Air);
+                } else if (world.blockAt(cell.x, cell.y - 1, cell.z) == game::BlockId::Grass) {
+                    world.setBlock(cell.x, cell.y - 1, cell.z, game::BlockId::Dirt);
+                }
+            }
+
+            // An archer's arrows, on the same handover: `Creatures` works out
+            // where and how fast, and the loop that owns projectiles fires
+            // them. **Never collectable** - the reference refuses a mob's
+            // arrow even in creative, or a skeleton is an arrow farm.
+            for (const game::Creatures::Launch& shot : creatures.takeLaunches()) {
+                projectiles.spawn(game::ProjectileKind::Arrow, shot.origin, shot.velocity, false, false);
+            }
+            for (const game::FallingBlocks::Crushed& hit : fallingBlocks.update(world, deltaSeconds)) {
+                const game::ItemId shed = game::dropForBlock(hit.block);
+                if (shed != game::ItemId::None) {
+                    drops.spawn(glm::vec3{hit.position} + glm::vec3{0.5f}, shed, 1);
+                }
+            }
+
             // Dropped items live entirely on the main thread: there are a
             // handful of them and they touch the world only to read it.
             drops.update(world, player.position, deltaSeconds);
+            projectiles.update(world, creatures, deltaSeconds);
+
+            // A shot that reports where it stopped. **What to do about it lives
+            // here**, not in the projectile system, which reads the world and
+            // never writes it.
+            for (const game::Projectiles::Landing& landing : projectiles.takeLandings()) {
+                const glm::ivec3 cell{static_cast<int>(std::floor(landing.position.x)),
+                                      static_cast<int>(std::floor(landing.position.y)),
+                                      static_cast<int>(std::floor(landing.position.z))};
+                const glm::vec2 centre{static_cast<float>(cell.x) + 0.5f, static_cast<float>(cell.z) + 0.5f};
+
+                // An arrow biting into wood, and everything else breaking on
+                // it. The reference splits these the same way and it is most of
+                // how you know whether a shot stuck or a snowball burst.
+                sounds.play(audio,
+                            landing.kind == game::ProjectileKind::Arrow ? game::SoundEvent::HitLand
+                                                                        : game::SoundEvent::Pop,
+                            landing.position, 0.7f);
+
+                if (landing.kind == game::ProjectileKind::Egg) {
+                    // `egg.json`'s own odds: one throw in eight leaves a chick,
+                    // and one of those in four leaves four instead.
+                    blastRandom ^= blastRandom << 13;
+                    blastRandom ^= blastRandom >> 17;
+                    blastRandom ^= blastRandom << 5;
+                    if (blastRandom % 8u != 0u) {
+                        continue;
+                    }
+                    const int hatched = blastRandom % 32u == 0u ? 4 : 1;
+                    for (int i = 0; i < hatched; ++i) {
+                        creatures.place(game::CreatureKind::Chicken,
+                                        glm::vec3{centre.x, static_cast<float>(cell.y), centre.y},
+                                        static_cast<float>(i) * 1.57f);
+                    }
+                    engine::logInfo("An egg hatched " + std::to_string(hatched) + " chicken(s)");
+                    continue;
+                }
+
+                // A pearl that has landed moves whoever threw it. **The body is
+                // wider and taller than the pearl**, so the cell it stopped in
+                // is a starting guess rather than the answer - anything that
+                // still overlaps is walked upward until it fits, and a throw
+                // with nowhere to stand is spent without moving you rather than
+                // melding you into the wall it hit.
+                constexpr float kHalf = game::player_constants::kWidth * 0.5f;
+                const auto fits = [&](const glm::vec3& feet) {
+                    const game::Aabb body{feet - glm::vec3{kHalf, 0.0f, kHalf},
+                                          feet + glm::vec3{kHalf, game::player_constants::kHeight, kHalf}};
+                    return !game::overlapsSolid(world, body);
+                };
+
+                bool moved = false;
+                for (int lift = 0; lift < kPearlLandingLift && !moved; ++lift) {
+                    const float y = static_cast<float>(cell.y + lift);
+                    // Where it actually stopped first, then the middle of that
+                    // cell - which is what saves a throw that clipped a corner.
+                    const glm::vec3 tries[2]{{landing.position.x, y, landing.position.z},
+                                             {centre.x, y, centre.y}};
+                    for (const glm::vec3& feet : tries) {
+                        if (fits(feet)) {
+                            player.position = feet;
+                            player.velocity = glm::vec3{0.0f};
+                            player.onGround = false;
+                            moved = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            for (const game::Projectiles::Collectable& ready : projectiles.collectable(player.position)) {
+                if (!inventory.hasRoomFor(ready.item, ready.count)) {
+                    continue;
+                }
+                if (inventory.add(ready.item, ready.count) == 0) {
+                    projectiles.remove(ready.index);
+                    sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
+                    hudDirty = true;
+                }
+                break; // Indices shift as shots are removed.
+            }
             for (const game::ItemEntities::Collectable& ready : drops.collectable(player.position)) {
                 // Collection is mode-independent, like dropping. Skipping it in
                 // creative left anything dropped orbiting the player forever.
@@ -1977,6 +3885,9 @@ int main() {
                 }
                 const int left = inventory.add(ready.item, ready.count);
                 drops.reduce(ready.index, ready.count - left);
+                if (left < ready.count) {
+                    sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
+                }
                 hudDirty = true;
                 break; // Indices shift as drops are removed.
             }
@@ -1986,7 +3897,7 @@ int main() {
             // normals from world position. The handle is reused rather than
             // recreated, or every frame would retire a GPU buffer.
             {
-                engine::MeshData dropGeometry = drops.buildMesh(world, timeOfDay * 1000.0f);
+                engine::MeshData dropGeometry = drops.buildMesh(world, timeOfDay * 1000.0f, spriteMask);
                 if (dropGeometry.empty()) {
                     if (dropMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(dropMesh);
@@ -1996,6 +3907,34 @@ int main() {
                     dropMesh = renderer.addMesh(dropGeometry);
                 } else {
                     renderer.updateMesh(dropMesh, dropGeometry);
+                }
+            }
+
+            {
+                engine::MeshData fallingGeometry = fallingBlocks.buildMesh(world);
+                if (fallingGeometry.empty()) {
+                    if (fallingMesh != engine::kInvalidMesh) {
+                        renderer.removeMesh(fallingMesh);
+                        fallingMesh = engine::kInvalidMesh;
+                    }
+                } else if (fallingMesh == engine::kInvalidMesh) {
+                    fallingMesh = renderer.addMesh(fallingGeometry);
+                } else {
+                    renderer.updateMesh(fallingMesh, fallingGeometry);
+                }
+            }
+
+            {
+                engine::MeshData shotGeometry = projectiles.buildMesh(world, spriteMask, camera.position);
+                if (shotGeometry.empty()) {
+                    if (projectileMesh != engine::kInvalidMesh) {
+                        renderer.removeMesh(projectileMesh);
+                        projectileMesh = engine::kInvalidMesh;
+                    }
+                } else if (projectileMesh == engine::kInvalidMesh) {
+                    projectileMesh = renderer.addMesh(shotGeometry);
+                } else {
+                    renderer.updateMesh(projectileMesh, shotGeometry);
                 }
             }
 
@@ -2009,8 +3948,13 @@ int main() {
                     creatures.update(world, player.position, deltaSeconds, night, player.sneaking,
                                      blasts);
                 if (blow.landed) {
-                    // Knockback only. Health and damage are M21's, and a hostile
-                    // that shoves you is honest feedback until then.
+                    // The damage was computed and discarded for four milestones
+                    // because there was nothing to apply it to. `damagePlayer`
+                    // owns the half-second invulnerability window, so a pack
+                    // standing on you still only lands twice a second.
+                    if (!creative) {
+                        game::damagePlayer(player, blow.damage);
+                    }
                     player.velocity += blow.push;
                     player.onGround = false;
                 }
@@ -2018,6 +3962,14 @@ int main() {
                 // Only the strongest blast of a frame throws the player.
                 glm::vec3 blastPush{0.0f};
                 float strongestBlast = 0.0f;
+                int blastDamage = 0;
+
+                // Charges that finished their fuse join the creature blasts, so
+                // the whole destroy-spill-drop path below is shared rather than
+                // written twice. Power 4 is the reference's TNT.
+                for (const glm::ivec3& cell : world.takeDetonations()) {
+                    blasts.push_back({glm::vec3{cell} + glm::vec3{0.5f}, kTntPower});
+                }
 
                 for (const game::CreatureExplosion& blast : blasts) {
                     // Applied here rather than inside the creature system, which
@@ -2046,6 +3998,29 @@ int main() {
                                 }
                                 furnaces.erase(found);
                             }
+                        }
+                        if (game::isChest(removed)) {
+                            const auto found = chests.find(cell);
+                            if (found != chests.end()) {
+                                const glm::vec3 centre = glm::vec3{cell} + glm::vec3{0.5f};
+                                for (const game::ItemStack& stack : found->second.slots) {
+                                    if (!stack.empty()) {
+                                        drops.spawn(centre, stack.item, stack.count);
+                                    }
+                                }
+                                chests.erase(found);
+                            }
+                        }
+
+                        // Whatever was blown up has already spilled its contents
+                        // as drops, so a screen still open on it is showing a
+                        // copy the player could take a second time.
+                        if (openScreen.has_value() &&
+                            ((*openScreen == game::inventoryScreen::Kind::Furnace && openFurnacePosition == cell) ||
+                             ((*openScreen == game::inventoryScreen::Kind::Chest ||
+                               *openScreen == game::inventoryScreen::Kind::DoubleChest) &&
+                              (openChestPosition == cell || openChestPartner == cell)))) {
+                            closeScreen();
                         }
 
                         // One block in `power` survives as an item, which is the
@@ -2083,7 +4058,8 @@ int main() {
                             // adding their own is the accumulator bug that once
                             // launched the player clear off the map.
                             strongestBlast = impact;
-                            blastPush = away / reach * impact * 20.0f;
+                            blastPush = away / reach * impact * kBlastKnockback;
+                            blastDamage = game::explosionDamage(blast.power, impact);
                         }
                     }
 
@@ -2091,6 +4067,10 @@ int main() {
                     // caller's business and the population is the creature
                     // system's, which is why this is a call rather than a loop.
                     const int caught = creatures.applyExplosion(world, blast.centre, blast.power);
+                    sounds.play(audio, game::SoundEvent::Explode, blast.centre, 1.0f, 1.0f);
+                    if (settings.particles) {
+                        particles.spawnExplosion(blast.centre, blast.power);
+                    }
 
                     engine::logInfo("Blast at " + std::to_string(static_cast<int>(blast.centre.x)) + ", " +
                                     std::to_string(static_cast<int>(blast.centre.y)) + ", " +
@@ -2103,6 +4083,13 @@ int main() {
                 }
 
                 if (strongestBlast > 0.0f) {
+                    // Damage follows the same "strongest of the frame" rule the
+                    // throw does, rather than summing: several charges going off
+                    // together should hit as hard as the worst of them, not as
+                    // hard as all of them added up.
+                    if (!creative) {
+                        game::damagePlayer(player, blastDamage);
+                    }
                     player.velocity += blastPush;
                     player.onGround = false;
                 }
@@ -2140,39 +4127,377 @@ int main() {
                 // Read from the world rather than from `target`, which was
                 // resolved before this frame's edits: breaking a slab otherwise
                 // flashes a full-size cage around the cell just emptied.
+                const game::BlockId aimedBlock =
+                    world.blockAt(target.block.x, target.block.y, target.block.z);
                 const game::BlockBoxes aimed =
-                    game::selectionBoxes(world.blockAt(target.block.x, target.block.y, target.block.z));
+                    game::worldSelectionBoxes(world, target.block.x, target.block.y, target.block.z);
                 if (aimed.count > 0) {
-                    float lowY = 1.0f;
-                    float highY = 0.0f;
+                    // **The union of the shape's boxes on all three axes.**
+                    // This used to measure only the height and assume a full
+                    // cell across, so a ladder, a pane, a fence or a torch was
+                    // caged as if it were a block - which is what made them
+                    // read as blocks with an invisible shell round them.
+                    glm::vec3 low{1.0f};
+                    glm::vec3 high{0.0f};
                     for (int i = 0; i < aimed.count; ++i) {
-                        lowY = std::min(lowY, aimed.boxes[i].minY);
-                        highY = std::max(highY, aimed.boxes[i].maxY);
+                        const game::BlockBox& b = aimed.boxes[i];
+                        low = glm::min(low, glm::vec3{b.minX, b.minY, b.minZ});
+                        high = glm::max(high, glm::vec3{b.maxX, b.maxY, b.maxZ});
                     }
 
-                    // Rebuilt only when the targeted height changes, which is a
-                    // handful of times a session rather than every frame.
-                    const float height = highY - lowY;
-                    if (height != outlineHeight) {
-                        outlineHeight = height;
-                        renderer.setOverlayMesh(game::makeBlockOutline(height));
+                    // A joined chest is one container, so it gets one cage. The
+                    // origin moves to whichever half is lower on the join axis,
+                    // and the box grows along it.
+                    glm::ivec3 origin = target.block;
+                    glm::vec3 size = high - low;
+                    if (game::isChest(aimedBlock)) {
+                        if (const std::optional<glm::ivec3> partner = chestPartnerAt(target.block)) {
+                            origin = glm::min(target.block, *partner);
+                            const glm::ivec3 span = glm::abs(target.block - *partner);
+                            size.x += static_cast<float>(span.x);
+                            size.z += static_cast<float>(span.z);
+                        }
                     }
-                    highlight = glm::translate(glm::mat4{1.0f},
-                                               glm::vec3{target.block} + glm::vec3{0.0f, lowY, 0.0f});
+
+                    // Rebuilt only when the targeted size changes, which is a
+                    // handful of times a session rather than every frame.
+                    if (size != outlineSize) {
+                        outlineSize = size;
+                        renderer.setOverlayMesh(game::makeBlockOutline(size));
+                    }
+                    highlight = glm::translate(glm::mat4{1.0f}, glm::vec3{origin} + low);
                 }
             }
 
             timeOfDay += deltaSeconds / static_cast<float>(settings.dayLengthSeconds);
+            if (timeOfDay >= 1.0f) {
+                // A new day, so a new phase. Rebuilt here rather than every
+                // frame: it is four vertices, and each rebuild retires a buffer.
+                moonPhase = (moonPhase + 1) % game::kMoonPhases;
+                renderer.setSkyMesh(game::sky::makeMoonQuad(moonPhase), 1);
+            }
             timeOfDay -= std::floor(timeOfDay);
 
-            const glm::vec3 sunDirection = game::sky::sunDirection(timeOfDay);
-            float ambient = 0.0f;
-            float sunStrength = 0.0f;
-            game::sky::sunLighting(sunDirection, ambient, sunStrength);
+            // Wrapped against the field's own period so a long session cannot
+            // lose the fraction the noise is sampled at.
+            cloudDrift = std::fmod(cloudDrift + deltaSeconds * kCloudDriftPerSecond, 100000.0f);
+            renderer.setCloudDrift(cloudDrift);
 
-            renderer.setSunDirection(sunDirection);
-            renderer.setSunLighting(ambient, sunStrength, game::sky::kAmbientFloor);
-            renderer.setSkyTransform(game::sky::sunTransform(camera.position, sunDirection));
+            waveSeconds = std::fmod(waveSeconds + deltaSeconds, 100000.0f);
+            renderer.setWaterTime(waveSeconds);
+
+            const glm::vec3 sunDirection = game::sky::sunDirection(timeOfDay);
+            const game::sky::Sunlight light = game::sky::lighting(timeOfDay);
+
+            // --- Weather -------------------------------------------------
+            weather.update(deltaSeconds, settings.weather);
+            weather.strike(world, camera.position, deltaSeconds);
+
+            const float rainAmount = weather.rainLevel();
+            const float thunderAmount = weather.thunderLevel();
+            const float flash = weather.flash();
+
+            // --- Wind ------------------------------------------------------
+            // Computed once, before anything reads it, because the rain's
+            // slant, the deck's drift and the grass must all use the same
+            // vector this frame or they visibly disagree.
+            windClock = std::fmod(windClock + deltaSeconds, 10000.0f);
+            // Turned slowly rather than pinned due west, so a cloud still
+            // roughly tells you which way west is.
+            windAngle = std::fmod(windAngle + deltaSeconds * 0.02f, 6.2831853f);
+            const glm::vec2 windDirection{std::cos(windAngle), std::sin(windAngle)};
+            // **Gusts, not a constant breeze.** Two slow waves multiplied, so
+            // the product spends real time at nothing: on a clear day the world
+            // stands still and then a gust crosses it, which is what wind
+            // actually looks like. A steady sway reads as an animation someone
+            // left running.
+            const float gust = std::max(0.0f, std::sin(windClock * 0.19f)) *
+                               std::max(0.0f, std::sin(windClock * 0.11f + 1.7f));
+            const float weatherWind = rainAmount * 4.0f + thunderAmount * 5.0f;
+            const float windStrength = weatherWind + gust * (2.0f + weatherWind * 0.5f);
+
+            {
+                // A bolt only exists for a few tenths of a second, so this is
+                // rebuilt on the frames one appears and cleared once on the
+                // frame the last one goes.
+                static bool boltShown = false;
+                const bool anyBolt = !weather.strikes().empty();
+                if (anyBolt) {
+                    renderer.setBoltMesh(game::weather::buildBoltMesh(weather.strikes()));
+                    for (game::weather::Strike& bolt : weather.strikes()) {
+                        if (bolt.resolved) {
+                            continue;
+                        }
+                        bolt.resolved = true;
+                        // Delayed by the distance sound actually travels, which
+                        // the reference does not do - it plays thunder to the
+                        // whole world at once. Ours is the better answer and is
+                        // marked as a divergence.
+                        const float away = glm::distance(camera.position, bolt.position);
+                        thunderQueue.push_back({away / 343.0f, away});
+                        // The reference's five points over a 6x12x6 box centred
+                        // on the strike.
+                        if (std::abs(camera.position.x - bolt.position.x) <= 3.0f &&
+                            std::abs(camera.position.z - bolt.position.z) <= 3.0f &&
+                            camera.position.y > bolt.position.y - 3.0f &&
+                            camera.position.y < bolt.position.y + 9.0f) {
+                            game::damagePlayer(player, 5);
+                        }
+
+                        // What it does to everything that is not the player. A
+                        // bolt used to be scenery with a sound.
+                        const glm::ivec3 hit{static_cast<int>(std::floor(bolt.position.x)),
+                                             static_cast<int>(std::floor(bolt.position.y)),
+                                             static_cast<int>(std::floor(bolt.position.z))};
+                        if (world.blockAt(hit.x, hit.y, hit.z) == game::BlockId::Air &&
+                            world.isSolid(hit.x, hit.y - 1, hit.z)) {
+                            // Safe to light because the storm that threw the
+                            // bolt is already putting fires out - see
+                            // `World::setPrecipitating`.
+                            world.setBlock(hit.x, hit.y, hit.z, game::BlockId::Fire);
+                        }
+                        creatures.applyLightning(bolt.position);
+                        if (settings.particles) {
+                            particles.spawnSmoke(bolt.position + glm::vec3{0.5f, 0.4f, 0.5f}, 0.09f,
+                                                 0.8f, 1.6f);
+                        }
+                    }
+                } else if (boltShown) {
+                    renderer.setBoltMesh(engine::MeshData{});
+                }
+                boltShown = anyBolt;
+            }
+
+            // Thunder arrives after its flash. Volume falls off with distance
+            // because a strike on the horizon should be a rumble, not a crack.
+            for (std::size_t i = 0; i < thunderQueue.size();) {
+                thunderQueue[i].delay -= deltaSeconds;
+                if (thunderQueue[i].delay <= 0.0f) {
+                    const float near = std::clamp(1.0f - thunderQueue[i].distance / 220.0f, 0.15f, 1.0f);
+                    sounds.playGlobal(audio, game::SoundEvent::Thunder, near,
+                                      0.7f + 0.3f * near);
+                    thunderQueue.erase(thunderQueue.begin() + static_cast<std::ptrdiff_t>(i));
+                    continue;
+                }
+                ++i;
+            }
+
+            {
+                const auto column = glm::ivec2{static_cast<int>(std::floor(camera.position.x)),
+                                               static_cast<int>(std::floor(camera.position.z))};
+                const auto biome =
+                    game::sampleBiome(kWorldSeed, column.x, column.y).dominant;
+                const int surface = std::max(world.highestSolid(column.x, column.y), 0);
+                const auto kind = game::weather::precipitationFor(biome, surface);
+                const bool falls = kind != game::weather::Precipitation::None && rainAmount > 0.01f;
+                const float level = falls ? rainAmount : 0.0f;
+                // One bit, for the fire update: anything under an open sky goes
+                // out while this holds.
+                world.setPrecipitating(falls && rainAmount > 0.2f);
+
+                // Rebuilt on a column change or a material change in strength.
+                // Every rebuild retires a buffer, so "every frame" is not free.
+                // The wind is in there too: its component along each quad is
+                // baked per vertex, so a slow turn eventually goes stale.
+                if (level > 0.0f &&
+                    (column != precipitationColumn || std::abs(level - precipitationLevel) > 0.05f ||
+                     kind != precipitationKind ||
+                     std::abs(windAngle - precipitationWind) > 0.08f)) {
+                    precipitationColumn = column;
+                    precipitationLevel = level;
+                    precipitationKind = kind;
+                    precipitationWind = windAngle;
+                    renderer.setPrecipitationMesh(game::weather::buildPrecipitationMesh(
+                        world, camera.position, static_cast<int>(settings.rainDistance), level,
+                        windDirection));
+                } else if (level <= 0.0f) {
+                    precipitationLevel = 0.0f;
+                }
+
+                const bool snow = kind == game::weather::Precipitation::Snow;
+
+                // **Snow settles and water freezes**, scattered over columns
+                // near the player rather than swept, which is the reference's
+                // random tick in everything but name. One column per fire,
+                // because each one that lands calls `setBlock` and that costs a
+                // remesh.
+                settleTimer -= deltaSeconds;
+                if (settleTimer <= 0.0f && rainAmount > 0.2f) {
+                    settleTimer = 0.08f;
+                    const float angle = static_cast<float>(std::rand()) / RAND_MAX * 6.2831853f;
+                    const float away =
+                        std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 26.0f;
+                    const int sx =
+                        static_cast<int>(std::floor(camera.position.x + std::cos(angle) * away));
+                    const int sz =
+                        static_cast<int>(std::floor(camera.position.z + std::sin(angle) * away));
+                    const int top = world.highestSolid(sx, sz);
+                    // Its own biome, not the player's: a snow line runs through
+                    // the middle of a view and settling by the column you happen
+                    // to stand in would put snow on the warm side of it.
+                    const auto here = game::sampleBiome(kWorldSeed, sx, sz).dominant;
+                    const auto falling = game::weather::precipitationFor(
+                        here, std::max(top, 0));
+                    if (top >= 0 && falling == game::weather::Precipitation::Snow) {
+                        const game::BlockId standing = world.blockAt(sx, top, sz);
+                        const game::BlockId above = world.blockAt(sx, top + 1, sz);
+                        // Only under an open sky. Sky light is "can this cell
+                        // see up", not brightness, so this holds at night too.
+                        const bool open =
+                            world.skyLightAt(sx, top + 1, sz) >= game::kMaxLight;
+                        // A torch keeps its own patch clear, which is the
+                        // reference's rule and the only thing that stops a
+                        // sheltered doorway filling in.
+                        const bool warmed = world.blockLightAt(sx, top + 1, sz) >= 12;
+                        if (open && !warmed) {
+                            if (game::isSnowLayer(standing)) {
+                                const int deeper = game::snowLayerDepth(standing) + 1;
+                                world.setBlock(sx, top, sz, game::snowLayerAt(deeper));
+                            } else if (above == game::BlockId::Air &&
+                                       game::blockShape(standing) == game::BlockShape::Full &&
+                                       !game::isFluid(standing) && standing != game::BlockId::Air) {
+                                world.setBlock(sx, top + 1, sz, game::snowLayerAt(1));
+                            }
+                        }
+
+                        // Ice, on the same pass. Water is not solid, so the
+                        // surface sits above whatever `highestSolid` found.
+                        for (int y = top + 1; y < top + 40; ++y) {
+                            const game::BlockId cell = world.blockAt(sx, y, sz);
+                            if (!game::isWater(cell)) {
+                                break;
+                            }
+                            if (world.blockAt(sx, y + 1, sz) == game::BlockId::Air &&
+                                game::isWaterSource(cell) &&
+                                world.skyLightAt(sx, y + 1, sz) >= game::kMaxLight &&
+                                world.blockLightAt(sx, y, sz) < 12) {
+                                // A source only. Freezing a flowing cell is
+                                // undone by the next fluid tick, which would
+                                // leave the shoreline flickering.
+                                world.setBlock(sx, y, sz, game::BlockId::Ice);
+                            }
+                        }
+                    }
+                }
+
+                const float fallSpeed = snow ? 1.2f : 10.0f;
+                precipitationFallen =
+                    std::fmod(precipitationFallen + deltaSeconds * fallSpeed, 4096.0f);
+                // Sheared, not tilted: a thirty-two block quad leaned over for a
+                // gale would swing eight blocks sideways and part company with
+                // the column it belongs to. Capped near twenty degrees, past
+                // which it stops reading as rain and starts reading as a broken
+                // particle system.
+                const float slant = std::clamp(windStrength * 0.45f / fallSpeed, 0.0f, 0.35f);
+                renderer.setPrecipitation(level, snow, precipitationFallen, slant);
+
+                // **Retriggered rather than looped**, because the mixer has no
+                // loop point. Eight recordings and a slightly early restart mean
+                // the seam never lands twice in the same place. Silent under a
+                // roof, which the sky light answers for free.
+                rainSoundTimer -= deltaSeconds;
+                if (level > 0.05f && !snow && rainSoundTimer <= 0.0f) {
+                    const int sky = world.skyLightAt(static_cast<int>(std::floor(camera.position.x)),
+                                                     static_cast<int>(std::floor(camera.position.y)),
+                                                     static_cast<int>(std::floor(camera.position.z)));
+                    const float sheltered = static_cast<float>(sky) / 15.0f;
+                    sounds.playGlobal(audio, game::SoundEvent::Rain, level * sheltered * 0.6f);
+                    rainSoundTimer = 3.4f;
+                }
+            }
+
+            // The deck gathers before the first drop and clears long after the
+            // last, which is what makes weather read as having a cause.
+            renderer.setClouds(static_cast<int>(settings.clouds),
+                               std::min(1.0f, settings.cloudCoverage + weather.cloudLevel() * 0.5f),
+                               settings.cloudShadow);
+
+            // --- Particles and foliage ------------------------------------
+            const float bend = settings.foliageSway * std::min(0.22f, 0.016f * windStrength);
+            renderer.setWind(windDirection, bend, windClock);
+
+            if (settings.particles) {
+                // Smoke leans on the same wind that bends the grass and slants
+                // the rain, so the three cannot disagree about which way it is
+                // blowing.
+                particles.update(world, deltaSeconds,
+                                 glm::vec3{windDirection.x, 0.0f, windDirection.y} * windStrength *
+                                     0.35f);
+                particles.emitAmbient(world, camera.position, deltaSeconds);
+
+                // Rain landing. Scattered around the player rather than
+                // everywhere, because a splash is only legible within a few
+                // metres and the rest would be spent on sub-pixel specks.
+                splashTimer -= deltaSeconds;
+                if (rainAmount > 0.2f && precipitationKind == game::weather::Precipitation::Rain &&
+                    splashTimer <= 0.0f) {
+                    splashTimer = 0.06f;
+                    for (int i = 0; i < 4; ++i) {
+                        const float angle = static_cast<float>(std::rand()) / RAND_MAX * 6.2831853f;
+                        const float away = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 9.0f;
+                        const int sx = static_cast<int>(std::floor(camera.position.x + std::cos(angle) * away));
+                        const int sz = static_cast<int>(std::floor(camera.position.z + std::sin(angle) * away));
+                        const int top = world.highestSolid(sx, sz);
+                        if (top < 0) {
+                            continue;
+                        }
+                        // Water is not solid, so `highestSolid` finds the bed
+                        // rather than the surface. A drop lands on whichever is
+                        // higher - and rain on water is the splash worth having,
+                        // since the ripple rings under it are already drawn.
+                        int surface = top;
+                        for (int y = top + 1; y < top + 40; ++y) {
+                            if (!game::isWater(world.blockAt(sx, y, sz))) {
+                                break;
+                            }
+                            surface = y;
+                        }
+                        // Only where the sky can actually reach it, or rain
+                        // splashes on the floor of a cave.
+                        if (world.skyLightAt(sx, surface + 1, sz) < 12) {
+                            continue;
+                        }
+                        particles.spawnSplash(glm::vec3{static_cast<float>(sx) + 0.5f,
+                                                        static_cast<float>(surface) + 1.02f,
+                                                        static_cast<float>(sz) + 0.5f});
+                    }
+                }
+
+                const glm::vec3 toScreen = camera.forward();
+                const glm::vec3 sideways =
+                    glm::normalize(glm::cross(toScreen, glm::vec3{0.0f, 1.0f, 0.0f}));
+                renderer.setParticleMesh(particles.buildMesh(
+                    world, sideways, glm::normalize(glm::cross(sideways, toScreen))));            }
+
+            renderer.setSunDirection(light.direction);
+            // The same distance the far plane is set from, held just inside it.
+            // A body drawn nearer than the world is drawn reads as an object in
+            // the landscape rather than as the sky - it passes behind hills a
+            // few hundred metres off and appears to sink into the ground.
+            const float skyDistance =
+                static_cast<float>(world.loadRadius() * game::Chunk::kSize) * 1.8f * 0.92f;
+            renderer.setSkyDistance(skyDistance);
+            // Warm for the sun, a cool white at a fraction of the strength for
+            // the moon. The shader cannot tell them apart - there is one
+            // directional light and `sunDirection` is whichever is up.
+            const bool moonUp = sunDirection.y <= 0.0f;
+            renderer.setSkyGlow(moonUp ? glm::vec3{0.74f, 0.82f, 1.00f}
+                                       : glm::vec3{1.00f, 0.84f, 0.62f},
+                                light.strength * (moonUp ? 0.55f : 1.0f));
+            // Rain takes the sun down about a fifth and a storm a third, which
+            // is the reference's 15 -> 12 -> 10 on its own light scale. The
+            // ambient is lifted a little as it goes, because an overcast sky is
+            // a diffuser rather than simply a darker sun.
+            const float overcast = 1.0f - 0.24f * rainAmount - 0.26f * thunderAmount;
+            const float ambient = light.ambient * (1.0f - 0.18f * rainAmount) + flash * 0.55f;
+            renderer.setSunLighting(ambient, light.strength * overcast, game::sky::kAmbientFloor);
+            renderer.setSkyTransform(game::sky::skyTransform(camera.position, sunDirection,
+                                                             game::sky::kSunSize, skyDistance),
+                                     0);
+            renderer.setSkyTransform(game::sky::skyTransform(camera.position,
+                                                             game::sky::moonDirection(timeOfDay),
+                                                             game::sky::kMoonSize, skyDistance),
+                                     1);
 
             // The water surface plays its own strip of frames. Redirecting the
             // layer at draw time is what makes it free: not one chunk is rebuilt
@@ -2187,12 +4512,50 @@ int main() {
             renderer.setAnimatedLayer(static_cast<float>(game::TextureLayer::Water),
                                       static_cast<float>(game::kWaterFrameFirst + waterFrame));
 
+            // Fire runs on its own clock, faster than water, on the second slot.
+            const int fireFrame =
+                static_cast<int>(waterAnimationSeconds / game::kFireFrameSeconds) % game::kFireFrames;
+            renderer.setSecondAnimatedLayer(static_cast<float>(game::kFireSprite),
+                                            static_cast<float>(game::kFireFrameFirst + fireFrame));
+
             // Underwater everything fades to one colour over a fixed distance,
             // and your eyes open out over the first half-minute. Dimmed by the
             // daylight the surface is getting, or a night dive glows.
             const glm::vec3 sky = game::sky::skyColor(sunDirection);
-            glm::vec3 background = sky;
+            // **Flattened toward grey, not darkened per biome.** The reference
+            // replaces the sky colour outright during rain rather than tinting
+            // whatever was there, which is why an overcast day looks the same
+            // everywhere. Thunder blends three quarters of the way again.
+            constexpr glm::vec3 kRainSky{0.160f, 0.168f, 0.185f};
+            constexpr glm::vec3 kStormSky{0.042f, 0.045f, 0.052f};
+            glm::vec3 weatherSky = glm::mix(sky, kRainSky, rainAmount);
+            weatherSky = glm::mix(weatherSky, kStormSky, thunderAmount * 0.75f);
+            // A strike lights the whole sky from inside the deck. Added rather
+            // than mixed, so it clears 1.0 and bloom turns it into a real flash
+            // instead of a grey wash.
+            weatherSky += glm::vec3{0.55f, 0.55f, 0.70f} * flash;
+            glm::vec3 background = weatherSky;
+            // Where the surface is, for the shafts of light coming down through
+            // it. Walked from the eye once a frame rather than published by the
+            // water system, because it is the only thing that ever asks and it
+            // is only asked while submerged.
             if (eyeUnderwater) {
+                const auto ex = static_cast<int>(std::floor(camera.position.x));
+                const auto ez = static_cast<int>(std::floor(camera.position.z));
+                int top = static_cast<int>(std::floor(camera.position.y));
+                for (int i = 0; i < 64 && game::isWater(world.blockAt(ex, top + 1, ez)); ++i) {
+                    ++top;
+                }
+                renderer.setUnderwaterShafts(static_cast<float>(top + 1),
+                                             settings.waterCaustics * 0.9f);
+            } else {
+                renderer.setUnderwaterShafts(0.0f, 0.0f);
+            }
+            if (eyeInLava) {
+                // Nearly zero distance, so nothing but lava reaches the screen.
+                renderer.setFog(game::fluid::kLavaFogColour, game::fluid::kLavaFogDistance);
+                background = game::fluid::kLavaFogColour;
+            } else if (eyeUnderwater) {
                 // A flat colour and a fixed distance, both constant. Anything
                 // that varies with the time of day or with how long you have
                 // been under makes the water look like a different colour every
@@ -2202,7 +4565,30 @@ int main() {
                 // must not show through from sixty metres down.
                 background = game::fluid::kFogColour;
             } else {
-                renderer.setFog(glm::vec3{0.0f}, 0.0f);
+                // The last stretch before the far edge fades into the sky, so
+                // the world reads as continuing rather than stopping at a wall.
+                // The clear colour *is* that sky, which is what makes the join
+                // invisible; ending the ramp exactly at the visible radius
+                // spends the outermost ring of chunks hiding the boundary.
+                //
+                // **Measured in chunks, not as a fraction of the view.** Fog is
+                // here to hide the edge and nothing else, so it should cover the
+                // same short distance whatever the render distance is - a fixed
+                // fraction hazed a third of the world at distance 12 and barely
+                // anything at distance 4.
+                //
+                // Measured radially from the eye, so the wall sits the same
+                // distance away in every direction rather than only straight
+                // ahead - see `PushConstants::eye`.
+                constexpr float kFogChunks = 1.25f;
+                const float visible = std::max(static_cast<float>(world.visibleRadius()), 1.0f);
+                const float fogStart = std::clamp(1.0f - kFogChunks / visible, 0.35f, 0.95f);
+                // Weather closes the world in. The reference cuts the view by
+                // about a third in a storm, and it is most of what makes one
+                // feel enclosing rather than merely grey.
+                const float reach = static_cast<float>(world.visibleRadius() * game::Chunk::kSize) *
+                                    (1.0f - 0.18f * rainAmount - 0.15f * thunderAmount);
+                renderer.setFog(weatherSky, reach, fogStart);
             }
 
             renderer.drawFrame(engine::ClearColor{background.r, background.g, background.b, 1.0f},
@@ -2240,7 +4626,10 @@ int main() {
                                 std::to_string(renderer.stats().triangles) + " | creatures " +
                                 std::to_string(creatures.count()) + " (" + censusText + ") hunting " +
                                 std::to_string(creatures.hunting()) + " | drops " +
-                                std::to_string(drops.count()));
+                                std::to_string(drops.count()) + " | particles " +
+                                std::to_string(particles.count()) + " | weather " +
+                                std::to_string(weather.rainLevel()).substr(0, 4) + "/" +
+                                std::to_string(weather.thunderLevel()).substr(0, 4));
                 framesSinceReport = 0;
                 lastReportTime = now;
             }
@@ -2250,7 +4639,9 @@ int main() {
 
         engine::logInfo("Window closed. Saving world.");
         world.saveAll();
-        world.store().savePlayer(game::SavedPlayer{player.position, camera.yaw, camera.pitch});
+        world.store().savePlayer(game::SavedPlayer{player.position, camera.yaw, camera.pitch,
+                                                   player.health, player.food, player.saturation,
+                                                   player.exhaustion});
 
         // Empty ones are dropped rather than written: a furnace nobody has used
         // is indistinguishable from one that has never been opened.
@@ -2263,6 +4654,15 @@ int main() {
         }
         world.store().saveFurnaces(savedFurnaces);
 
+        std::vector<game::PlacedChest> savedChests;
+        savedChests.reserve(chests.size());
+        for (const auto& [position, chest] : chests) {
+            if (!chest.empty()) {
+                savedChests.push_back(game::PlacedChest{position, chest});
+            }
+        }
+        world.store().saveChests(savedChests);
+
         // And it must not write one back either. The showcase population is
         // three copies of whatever was being looked at; saving that would
         // replace the world's animals with it.
@@ -2270,6 +4670,12 @@ int main() {
         if (settings.creatureShowcase == 0) {
             savedCreatures.reserve(creatures.all().size());
             for (const game::Creature& creature : creatures.all()) {
+                // Something caught part-way through falling over is already
+                // gone; the body is only still there so the fall can finish.
+                // Writing it out would reload a corpse that dies again on sight.
+                if (creature.health <= 0) {
+                    continue;
+                }
                 savedCreatures.push_back(game::SavedCreature{static_cast<std::uint8_t>(creature.kind),
                                                              creature.position.x, creature.position.y,
                                                              creature.position.z, creature.yaw,

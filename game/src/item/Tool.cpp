@@ -11,9 +11,16 @@ struct ToolRule {
     ToolProperties properties;
 };
 
-/// Stone is roughly twice the tool wood is, in both speed and how long it
-/// lasts, which is what makes the upgrade worth making.
-constexpr std::array<ToolRule, 10> kTools{{
+/// Speeds and durabilities are the reference's own, looked up rather than
+/// invented: mining speed 2 / 4 / 6 / 8 / 9 and durability 59 / 131 / 250 /
+/// 1561 / 2031 by rising tier. Wood and stone were written as 60 and 132 before
+/// the table was checked and are left alone - one use either way is noise.
+///
+/// A sword's number is smaller than its tier's mining speed because a sword is
+/// not a mining tool: the reference gives it a flat 1.5x on everything, and it
+/// is the **blow** that scales with the material. `strike` reads this same
+/// field for damage, which is why the two rise together here.
+constexpr std::array<ToolRule, 27> kTools{{
     {ItemId::WoodenPickaxe, {ToolKind::Pickaxe, kWoodTier, 2.0f, 60}},
     {ItemId::WoodenAxe, {ToolKind::Axe, kWoodTier, 2.0f, 60}},
     {ItemId::WoodenShovel, {ToolKind::Shovel, kWoodTier, 2.0f, 60}},
@@ -24,6 +31,29 @@ constexpr std::array<ToolRule, 10> kTools{{
     {ItemId::StoneShovel, {ToolKind::Shovel, kStoneTier, 4.0f, 132}},
     {ItemId::StoneSword, {ToolKind::Sword, kStoneTier, 2.0f, 132}},
     {ItemId::StoneHoe, {ToolKind::Hoe, kStoneTier, 2.0f, 132}},
+    {ItemId::IronPickaxe, {ToolKind::Pickaxe, kIronTier, 6.0f, 250}},
+    {ItemId::IronAxe, {ToolKind::Axe, kIronTier, 6.0f, 250}},
+    {ItemId::IronShovel, {ToolKind::Shovel, kIronTier, 6.0f, 250}},
+    {ItemId::IronSword, {ToolKind::Sword, kIronTier, 2.5f, 250}},
+    {ItemId::IronHoe, {ToolKind::Hoe, kIronTier, 2.5f, 250}},
+    {ItemId::DiamondPickaxe, {ToolKind::Pickaxe, kDiamondTier, 8.0f, 1561}},
+    {ItemId::DiamondAxe, {ToolKind::Axe, kDiamondTier, 8.0f, 1561}},
+    {ItemId::DiamondShovel, {ToolKind::Shovel, kDiamondTier, 8.0f, 1561}},
+    {ItemId::DiamondSword, {ToolKind::Sword, kDiamondTier, 3.0f, 1561}},
+    {ItemId::DiamondHoe, {ToolKind::Hoe, kDiamondTier, 3.0f, 1561}},
+    {ItemId::EmberitePickaxe, {ToolKind::Pickaxe, kEmberiteTier, 9.0f, 2031}},
+    {ItemId::EmberiteAxe, {ToolKind::Axe, kEmberiteTier, 9.0f, 2031}},
+    {ItemId::EmberiteShovel, {ToolKind::Shovel, kEmberiteTier, 9.0f, 2031}},
+    {ItemId::EmberiteSword, {ToolKind::Sword, kEmberiteTier, 3.5f, 2031}},
+    {ItemId::EmberiteHoe, {ToolKind::Hoe, kEmberiteTier, 3.5f, 2031}},
+    // A bow wears like a tool and mines like nothing, which is exactly what
+    // `ToolKind::None` with a durability says. It is deliberately outside
+    // `isTool`: that predicate gates mining speed, the harvest tier and an
+    // axe's stripping behaviour, none of which a bow should gain.
+    {ItemId::Bow, {ToolKind::None, kHandTier, 1.0f, kBowDurability}},
+    // Shears are deliberately no faster than a bare hand on a vine - the axe is
+    // the quick tool there. What they are is the only thing that collects one.
+    {ItemId::Shears, {ToolKind::Shears, kHandTier, 1.0f, 238}},
 }};
 
 } // namespace
@@ -38,20 +68,189 @@ ToolProperties toolFor(ItemId item) {
 }
 
 float blockHardness(BlockId block) {
-    if (isWater(block) || block == BlockId::Air) {
+    // Neither fluid, fire nor air is something you mine; fire is put out by a
+    // touch, which is the same zero from the breaking code's point of view.
+    if (isFluid(block) || block == BlockId::Air || block == BlockId::Fire) {
         return 0.0f;
     }
-    if (blockShape(block) == BlockShape::Cross) {
+    // A stair, slab, wall, fence or gate mines exactly like the block it was cut
+    // from. **Answered before anything else**, because the old test named the
+    // two families that existed and returned a flat 1.5 - which is right for
+    // cobblestone and wrong for oak, obsidian and everything else.
+    {
+        const BlockId material = shapedParent(block);
+        if (material != block) {
+            return blockHardness(material);
+        }
+    }
+    // The reference gives a charge no hardness at all, lit or not.
+    if (block == BlockId::Tnt || block == BlockId::TntPrimed) {
+        return 0.0f;
+    }
+    if (blockShape(block) == BlockShape::Cross || blockShape(block) == BlockShape::Flat) {
         // Plants and torches come away instantly, whatever you are holding.
         return 0.0f;
     }
-    if (isStairs(block) || isSlab(block)) {
-        return 1.5f;
+    // The deepslate half of an ore is the stone half in harder rock - the
+    // reference's 4.5 against 3.0. Deriving it is what stops the tool and tier
+    // tables below needing a second copy of the ore list.
+    if (isDeepslateOre(block)) {
+        return blockHardness(stoneOreFor(block)) * 1.5f;
+    }
+    if (isLeafBlock(block)) {
+        return 0.2f;
+    }
+    // The third run: glass and its panes are the reference's 0.3, iron bars and
+    // the lanterns are metal, and a torch comes away in a touch.
+    if (block == BlockId::IronBars) {
+        return 5.0f;
+    }
+    if (block == BlockId::Lantern || block == BlockId::SoulLantern) {
+        return 3.5f;
+    }
+    if (block == BlockId::EndRod || isLadder(block)) {
+        return 0.4f;
+    }
+    if (isVine(block) || isCocoa(block)) {
+        return 0.2f;
+    }
+    if (block >= BlockId::WhiteStainedGlass && block <= BlockId::BlackStainedGlass) {
+        return 0.3f;
+    }
+    if (isLogBlock(block)) {
+        return 2.0f;
     }
     if (isFurnace(block)) {
         return 3.5f;
     }
+    if (isChest(block) || block == BlockId::SmithingTable) {
+        return 2.5f;
+    }
+    if (isBeehive(block)) {
+        return 0.6f;
+    }
+    // The reference's own, and deliberately below the solid snow block's 0.2 -
+    // a layer is brushed aside rather than dug out.
+    if (isSnowLayer(block)) {
+        return 0.1f;
+    }
     switch (block) {
+    // The second table run. Grouped by the reference's own values rather than
+    // listed one per line.
+    case BlockId::Netherrack:
+        return 0.4f;    case BlockId::SoulSand:
+    case BlockId::SoulSoil:
+    case BlockId::Podzol:
+    case BlockId::Mycelium:
+        return 0.5f;
+    case BlockId::SlimeBlock:
+    case BlockId::DriedKelpBlock:
+        return 0.1f;
+    case BlockId::NetherWartBlock:
+        return 1.0f;
+    case BlockId::WarpedWartBlock:
+    case BlockId::Shroomlight:
+        return 1.0f;
+    case BlockId::Cactus:
+    case BlockId::Target:
+        return 0.4f;
+    case BlockId::SnowBlock:
+        return 0.2f;
+    case BlockId::OchreFroglight:
+    case BlockId::VerdantFroglight:
+    case BlockId::PearlescentFroglight:
+        return 0.3f;
+    case BlockId::CrimsonNylium:
+    case BlockId::WarpedNylium:
+        return 0.4f;
+    case BlockId::SculkCatalyst:
+        return 3.0f;
+    case BlockId::Azalea:
+    case BlockId::FloweringAzalea:
+        return 0.0f;
+    case BlockId::CrimsonStem:
+    case BlockId::WarpedStem:
+    case BlockId::MangroveLog:
+    case BlockId::BambooBlock:
+    case BlockId::CrimsonPlanks:
+    case BlockId::WarpedPlanks:
+    case BlockId::MangrovePlanks:
+    case BlockId::BambooPlanks:
+    case BlockId::BambooMosaic:
+    case BlockId::MuddyMangroveRoots:
+    case BlockId::BoneBlock:
+        return 2.0f;
+    case BlockId::QuartzPillar:
+        return 0.8f;
+    case BlockId::PurpurPillar:
+        return 1.5f;
+    case BlockId::WhiteGlazedTerracotta:
+    case BlockId::OrangeGlazedTerracotta:
+    case BlockId::MagentaGlazedTerracotta:
+    case BlockId::LightBlueGlazedTerracotta:
+    case BlockId::YellowGlazedTerracotta:
+    case BlockId::LimeGlazedTerracotta:
+    case BlockId::PinkGlazedTerracotta:
+    case BlockId::GrayGlazedTerracotta:
+    case BlockId::LightGrayGlazedTerracotta:
+    case BlockId::CyanGlazedTerracotta:
+    case BlockId::PurpleGlazedTerracotta:
+    case BlockId::BlueGlazedTerracotta:
+    case BlockId::BrownGlazedTerracotta:
+    case BlockId::GreenGlazedTerracotta:
+    case BlockId::RedGlazedTerracotta:
+    case BlockId::BlackGlazedTerracotta:
+        return 1.4f;
+    case BlockId::Sculk:
+        return 0.2f;
+    case BlockId::BuddingAmethyst:
+        return 1.5f;
+    case BlockId::Blackstone:
+    case BlockId::PolishedBlackstone:
+    case BlockId::PolishedBlackstoneBricks:
+    case BlockId::ChiseledPolishedBlackstone:
+    case BlockId::CrackedPolishedBlackstoneBricks:
+    case BlockId::GildedBlackstone:
+    case BlockId::NetherBricks:
+    case BlockId::RedNetherBricks:
+    case BlockId::CrackedNetherBricks:
+    case BlockId::ChiseledNetherBricks:
+    case BlockId::EndStone:
+    case BlockId::EndStoneBricks:
+    case BlockId::PurpurBlock:
+    case BlockId::PolishedTuff:
+    case BlockId::TuffBricks:
+    case BlockId::ChiseledTuff:
+    case BlockId::PolishedBasalt:
+    case BlockId::ChiseledDeepslate:
+    case BlockId::CrackedDeepslateBricks:
+    case BlockId::CrackedDeepslateTiles:
+    case BlockId::SmoothRedSandstone:
+        return 2.0f;
+    case BlockId::NetherGoldOre:
+    case BlockId::NetherQuartzOre:
+        return 3.0f;
+    case BlockId::QuartzBlock:
+    case BlockId::SmoothQuartz:
+    case BlockId::ChiseledQuartz:
+    case BlockId::QuartzBricks:
+        return 0.8f;
+    case BlockId::RawIronBlock:
+    case BlockId::RawGoldBlock:
+    case BlockId::RawCopperBlock:
+    case BlockId::ExposedCopper:
+    case BlockId::WeatheredCopper:
+    case BlockId::OxidizedCopper:
+    case BlockId::CutCopper:
+    case BlockId::ExposedCutCopper:
+    case BlockId::WeatheredCutCopper:
+    case BlockId::OxidizedCutCopper:
+    case BlockId::ChiseledCopper:
+        return 3.0f;
+    // Only the wither can break it in the reference; ours settles for making it
+    // the hardest thing in the world short of bedrock.
+    case BlockId::ReinforcedDeepslate:
+        return 55.0f;
     case BlockId::Sand:
     case BlockId::Gravel:
     case BlockId::Snow:
@@ -62,7 +261,6 @@ float blockHardness(BlockId block) {
     case BlockId::Leaves:
         return 0.2f;
     case BlockId::Planks:
-    case BlockId::PlanksFence:
     case BlockId::CraftingTable:
         return 2.0f;
     case BlockId::Log:
@@ -97,6 +295,31 @@ float blockHardness(BlockId block) {
         return 50.0f;
     case BlockId::PackedIce:
         return 0.5f;
+    case BlockId::Prismarine:
+        return 1.5f;
+    case BlockId::SeaLantern:
+        // Glass-like: quick to break and it takes no tool to do it.
+        return 0.3f;
+    case BlockId::CoarseDirt:
+        return 0.5f;
+    // The appended run, by family. Ranges rather than forty-eight cases: the
+    // enum is grouped for exactly this.
+    case BlockId::Ice:
+    case BlockId::BlueIce:
+        return 0.5f;
+    case BlockId::IronBlock:
+    case BlockId::GoldBlock:
+    case BlockId::DiamondBlock:
+    case BlockId::EmeraldBlock:
+    case BlockId::LapisBlock:
+    case BlockId::CopperBlock:
+        return 3.0f;
+    case BlockId::CoalBlock:
+    case BlockId::RedstoneBlock:
+        return 5.0f;
+    case BlockId::Sponge:
+    case BlockId::WetSponge:
+        return 0.6f;
     case BlockId::Terracotta:
         return 1.25f;
     case BlockId::CoalOre:
@@ -109,6 +332,46 @@ float blockHardness(BlockId block) {
     case BlockId::EmeraldOre:
     case BlockId::Deepslate:
         return 3.0f;
+    case BlockId::AncientDebris:
+        // The reference's 30, which is twenty times stone and the reason it is
+        // worth blasting for rather than digging out.
+        return 30.0f;
+    case BlockId::EmberiteBlock:
+        return 50.0f;
+    // Appended 2026-08-07. Wool and the soft blocks come away by hand; the
+    // coloured stone families sit where their plain forms do.
+    case BlockId::HoneyBlock:
+    case BlockId::MossBlock:
+        return 0.1f;
+    case BlockId::Mud:
+    case BlockId::RootedDirt:
+    case BlockId::MagmaBlock:
+    case BlockId::HayBlock:
+        return 0.5f;
+    case BlockId::HoneycombBlock:
+        return 0.6f;
+    case BlockId::Calcite:
+    case BlockId::RedSandstone:
+    case BlockId::CutRedSandstone:
+    case BlockId::ChiseledRedSandstone:
+    case BlockId::NoteBlock:
+        return 0.8f;
+    case BlockId::PackedMud:
+    case BlockId::Pumpkin:
+    case BlockId::Melon:
+        return 1.0f;
+    case BlockId::SmoothBasalt:
+    case BlockId::Basalt:
+        return 1.25f;
+    case BlockId::Tuff:
+    case BlockId::DripstoneBlock:
+    case BlockId::MudBricks:
+    case BlockId::AmethystBlock:
+        return 1.5f;
+    case BlockId::Jukebox:
+        return 2.0f;
+    case BlockId::Cobweb:
+        return 4.0f;
     case BlockId::Bedrock:
         // The reference's own value for "never". Nothing here treats a block as
         // unbreakable, so an absurd hardness is what enforces it, and creative
@@ -120,8 +383,91 @@ float blockHardness(BlockId block) {
 }
 
 ToolKind harvestTool(BlockId block) {
-    if (isStairs(block) || isSlab(block) || isFurnace(block)) {
+    if (isDeepslateOre(block)) {
+        block = stoneOreFor(block);
+    }
+    // Same forwarding as the hardness: an oak fence wants an axe and a
+    // blackstone wall wants a pickaxe, and neither needs a row of its own.
+    {
+        const BlockId material = shapedParent(block);
+        if (material != block) {
+            return harvestTool(material);
+        }
+    }
+    // Settled snow is asked **before** the flat-shape rule below, which answers
+    // "no tool at all" for carpets and lily pads. Snow is the one flat block
+    // that is dug rather than picked up, and a shovel is what digs it.
+    if (isSnowLayer(block)) {
+        return ToolKind::Shovel;
+    }
+    // A plant needs no tool, whatever run its id happens to sit in. Without
+    // this the second run's pickaxe default reached every plant in it, and
+    // seventeen of them broke instantly and dropped nothing.
+    if (blockShape(block) == BlockShape::Cross || blockShape(block) == BlockShape::Flat) {
+        return ToolKind::None;
+    }
+    if (isLogBlock(block) || isBeehive(block)) {
+        return ToolKind::Axe;
+    }
+    if (isFurnace(block)) {
         return ToolKind::Pickaxe;
+    }
+    if (isChest(block)) {
+        return ToolKind::Axe;
+    }
+    // The third run. Glass wants nothing, metal wants a pickaxe, and a ladder
+    // is wood.
+    if (block == BlockId::IronBars || block == BlockId::Lantern ||
+        block == BlockId::SoulLantern) {
+        return ToolKind::Pickaxe;
+    }
+    if (isLadder(block)) {
+        return ToolKind::Axe;
+    }
+    if (isVine(block)) {
+        return ToolKind::Shears;
+    }
+    if (isCocoa(block)) {
+        return ToolKind::Axe;
+    }
+    // The second table run is almost entirely rock. Naming the handful that is
+    // not, and letting the rest fall through to the pickaxe, is shorter than
+    // fifty case labels and cannot go stale when the run grows.
+    if (block >= kFirstExtraBlock2 && block <= kLastExtraBlock2) {
+        switch (block) {
+        case BlockId::SoulSand:
+        case BlockId::SoulSoil:
+        case BlockId::Podzol:
+        case BlockId::Mycelium:
+        case BlockId::SnowBlock:
+            return ToolKind::Shovel;
+        case BlockId::SlimeBlock:
+        case BlockId::DriedKelpBlock:
+        case BlockId::NetherWartBlock:
+        case BlockId::WarpedWartBlock:
+        case BlockId::Sculk:
+        case BlockId::SculkCatalyst:
+        case BlockId::Shroomlight:
+        case BlockId::Cactus:
+        case BlockId::Azalea:
+        case BlockId::FloweringAzalea:
+        case BlockId::Target:
+            return ToolKind::None;
+        case BlockId::CrimsonPlanks:
+        case BlockId::WarpedPlanks:
+        case BlockId::MangrovePlanks:
+        case BlockId::MangroveLog:
+        case BlockId::BambooPlanks:
+        case BlockId::BambooMosaic:
+        case BlockId::BambooBlock:
+        case BlockId::CrimsonStem:
+        case BlockId::WarpedStem:
+        case BlockId::MuddyMangroveRoots:
+            return ToolKind::Axe;
+        default:
+            break;
+        }
+        return isConcretePowder(block) ? ToolKind::Shovel : ToolKind::Pickaxe;
     }
     switch (block) {
     case BlockId::Stone:
@@ -147,12 +493,50 @@ ToolKind harvestTool(BlockId block) {
     case BlockId::Deepslate:
     case BlockId::Terracotta:
     case BlockId::PackedIce:
+    case BlockId::AncientDebris:
+    case BlockId::EmberiteBlock:
+    case BlockId::Prismarine:
+    case BlockId::SeaLantern:
+    case BlockId::CobbledDeepslate:
+    case BlockId::Ice:
+    case BlockId::BlueIce:
+    case BlockId::CoalBlock:
+    case BlockId::IronBlock:
+    case BlockId::GoldBlock:
+    case BlockId::DiamondBlock:
+    case BlockId::EmeraldBlock:
+    case BlockId::LapisBlock:
+    case BlockId::RedstoneBlock:
+    case BlockId::CopperBlock:
+    case BlockId::PolishedAndesite:
+    case BlockId::PolishedDiorite:
+    case BlockId::PolishedGranite:
+    case BlockId::ChiseledStoneBricks:
+    case BlockId::MossyStoneBricks:
+    case BlockId::CrackedStoneBricks:
+    case BlockId::PolishedDeepslate:
+    case BlockId::DeepslateBricks:
+    case BlockId::DeepslateTiles:
+    case BlockId::SmoothSandstone:
+    case BlockId::CutSandstone:
+    case BlockId::ChiseledSandstone:
+    case BlockId::TubeCoralBlock:
+    case BlockId::BrainCoralBlock:
+    case BlockId::BubbleCoralBlock:
+    case BlockId::FireCoralBlock:
+    case BlockId::HornCoralBlock:
+    case BlockId::DarkPrismarine:
+    case BlockId::PrismarineBricks:
         return ToolKind::Pickaxe;
     case BlockId::Log:
     case BlockId::Planks:
-    case BlockId::PlanksFence:
     case BlockId::CraftingTable:
+    case BlockId::SmithingTable:
     case BlockId::Bookshelf:
+    case BlockId::SpruceLog:
+    case BlockId::SprucePlanks:
+    case BlockId::BirchLog:
+    case BlockId::BirchPlanks:
         return ToolKind::Axe;
     case BlockId::Dirt:
     case BlockId::Grass:
@@ -160,6 +544,7 @@ ToolKind harvestTool(BlockId block) {
     case BlockId::Gravel:
     case BlockId::Snow:
     case BlockId::Clay:
+    case BlockId::CoarseDirt:
         return ToolKind::Shovel;
     default:
         return ToolKind::None;
@@ -170,8 +555,46 @@ int harvestTier(BlockId block) {
     // Only stone-family blocks withhold their drop, which is what makes the
     // first pickaxe the thing that opens the game up. Wood and soil always give
     // something, or a fresh world would be unplayable.
-    if (isStairs(block) || isSlab(block) || isFurnace(block)) {
+    if (isDeepslateOre(block)) {
+        block = stoneOreFor(block);
+    }
+    {
+        const BlockId material = shapedParent(block);
+        if (material != block) {
+            return harvestTier(material);
+        }
+    }
+    if (isFurnace(block)) {
         return kWoodTier;
+    }
+    // The second table run. Only the ores and copper family gate above wood.
+    if (block >= kFirstExtraBlock2 && block <= kLastExtraBlock2) {
+        switch (block) {
+        case BlockId::NetherGoldOre:
+        case BlockId::NetherQuartzOre:
+            return kWoodTier;
+        case BlockId::RawIronBlock:
+        case BlockId::RawCopperBlock:
+        case BlockId::ExposedCopper:
+        case BlockId::WeatheredCopper:
+        case BlockId::OxidizedCopper:
+        case BlockId::CutCopper:
+        case BlockId::ExposedCutCopper:
+        case BlockId::WeatheredCutCopper:
+        case BlockId::OxidizedCutCopper:
+        case BlockId::ChiseledCopper:
+            return kStoneTier;
+        case BlockId::RawGoldBlock:
+        case BlockId::ReinforcedDeepslate:
+            return kIronTier;
+        default:
+            break;
+        }
+        // Only rock withholds its drop, which is the rule stated at the top of
+        // this function. A blanket wood tier here meant every plank, wool,
+        // plant and soil block in the run - about two hundred of them - was
+        // destroyed rather than collected when broken by hand.
+        return harvestTool(block) == ToolKind::Pickaxe ? kWoodTier : kHandTier;
     }
     switch (block) {
     case BlockId::Stone:
@@ -191,16 +614,21 @@ int harvestTier(BlockId block) {
         return kWoodTier;
     case BlockId::IronOre:
     case BlockId::CopperOre:
+    case BlockId::LapisOre:
+        return kStoneTier;
+    // **The reference's own gating, which we could not honour until now.**
+    // These four demand an iron pickaxe there, and sat at stone here purely
+    // because stone was the highest tier that existed - a named divergence that
+    // this milestone closes rather than a balance decision.
     case BlockId::GoldOre:
     case BlockId::RedstoneOre:
-    case BlockId::LapisOre:
     case BlockId::DiamondOre:
     case BlockId::EmeraldOre:
+        return kIronTier;
     case BlockId::Obsidian:
-        // The hardest thing a stone pickaxe can still take home. There is no
-        // higher tier yet, so gating any of these above it would make them
-        // unobtainable rather than aspirational.
-        return kStoneTier;
+    case BlockId::AncientDebris:
+    case BlockId::EmberiteBlock:
+        return kDiamondTier;
     default:
         return kHandTier;
     }
@@ -226,7 +654,15 @@ float breakSeconds(BlockId block, ItemId item) {
 }
 
 bool yieldsDrop(BlockId block, ItemId item) {
-    return toolFor(item).tier >= harvestTier(block);
+    const ToolProperties tool = toolFor(item);
+    // **Some blocks are not gated on how good your tool is but on what kind it
+    // is.** A vine comes away from anything and is collected by nothing but
+    // shears, which no tier comparison can express - the reference's Silk Touch
+    // does not do it either.
+    if (harvestTool(block) == ToolKind::Shears) {
+        return tool.kind == ToolKind::Shears;
+    }
+    return tool.tier >= harvestTier(block);
 }
 
 } // namespace game

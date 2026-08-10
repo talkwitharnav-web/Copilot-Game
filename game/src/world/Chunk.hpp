@@ -62,8 +62,45 @@ public:
     std::uint8_t* lightData() { return m_light.data(); }
     const std::uint8_t* lightData() const { return m_light.data(); }
 
-    /// Raw storage, for bulk operations such as saving and loading. One byte per
-    /// block, so the array is exactly `kBlockCount` bytes.
+    /// Whether this cell also holds water.
+    ///
+    /// **The reference's `waterlogged` blockstate, as one bit per cell.** A
+    /// seagrass in the sea is not "seagrass instead of water", it is both at
+    /// once - and without somewhere to record that, placing the plant deletes
+    /// the water and punches a hole in the ocean. It cannot live in `BlockId`:
+    /// that is one byte written straight to disk and every value is spoken for.
+    ///
+    /// Outside the chunk reads false, which is the right answer for an unloaded
+    /// neighbour for the same reason `at` reads Air.
+    bool waterloggedAt(int x, int y, int z) const {
+        if (!contains(x, y, z)) {
+            return false;
+        }
+        const std::size_t bit = index(x, y, z);
+        return (m_waterlogged[bit >> 3] & (1u << (bit & 7u))) != 0u;
+    }
+
+    void setWaterlogged(int x, int y, int z, bool on) {
+        if (!contains(x, y, z)) {
+            return;
+        }
+        const std::size_t bit = index(x, y, z);
+        const auto mask = static_cast<std::uint8_t>(1u << (bit & 7u));
+        if (on) {
+            m_waterlogged[bit >> 3] |= mask;
+        } else {
+            m_waterlogged[bit >> 3] &= static_cast<std::uint8_t>(~mask);
+        }
+    }
+
+    static constexpr std::size_t kWaterloggedBytes = kBlockCount / 8;
+    std::uint8_t* waterloggedData() { return m_waterlogged.data(); }
+    const std::uint8_t* waterloggedData() const { return m_waterlogged.data(); }
+
+    /// Raw storage, for bulk operations such as saving and loading. **Two bytes
+    /// per block since the id was widened**, so use `kBlockBytes` rather than
+    /// `kBlockCount` for anything measured in bytes.
+    static constexpr std::size_t kBlockBytes = kBlockCount * sizeof(BlockId);
     BlockId* data() { return m_blocks.data(); }
     const BlockId* data() const { return m_blocks.data(); }
 
@@ -79,10 +116,13 @@ private:
     // Value-initialised, and Air is 0, so a fresh chunk is empty.
     std::array<BlockId, kBlockCount> m_blocks{};
 
-    /// Doubles a chunk's memory. Kept alongside the blocks rather than
+    /// Half a chunk's block storage. Kept alongside the blocks rather than
     /// recomputed per mesh because light crosses chunk boundaries, so it cannot
     /// be derived from one chunk's contents.
     std::array<std::uint8_t, kBlockCount> m_light{};
+
+    /// One bit per cell, so 4 KB against the block array's 32 KB.
+    std::array<std::uint8_t, kWaterloggedBytes> m_waterlogged{};
 };
 
 } // namespace game

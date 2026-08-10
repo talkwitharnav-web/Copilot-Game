@@ -61,4 +61,33 @@ void Inventory::consumeOne(std::size_t index) {
     }
 }
 
+int Inventory::count(ItemId item) const {
+    int held = 0;
+    for (const ItemStack& stack : m_slots) {
+        if (!stack.empty() && stack.item == item) {
+            held += stack.count;
+        }
+    }
+    return held;
+}
+
+int Inventory::consume(ItemId item, int wanted) {
+    int taken = 0;
+    for (ItemStack& stack : m_slots) {
+        if (taken >= wanted) {
+            break;
+        }
+        if (stack.empty() || stack.item != item) {
+            continue;
+        }
+        const int from = std::min(stack.count, wanted - taken);
+        stack.count -= from;
+        taken += from;
+        if (stack.count <= 0) {
+            stack = ItemStack{};
+        }
+    }
+    return taken;
+}
+
 } // namespace game

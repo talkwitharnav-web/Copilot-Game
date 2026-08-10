@@ -273,7 +273,8 @@ void VulkanContext::selectPhysicalDevice() {
 
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
-    logInfo(std::string("Selected GPU: ") + properties.deviceName);
+    logInfo(std::string("Selected GPU: ") + properties.deviceName + " (push constants " +
+            std::to_string(properties.limits.maxPushConstantsSize) + " bytes)");
 }
 
 void VulkanContext::createLogicalDevice() {

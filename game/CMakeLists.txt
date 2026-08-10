@@ -1,30 +1,38 @@
-add_executable(game
+﻿add_executable(game
     src/Main.cpp
     src/core/Settings.cpp
+    src/core/Sounds.cpp
     src/hud/Crosshair.cpp
     src/hud/DebugOverlay.cpp
     src/hud/HudPrimitives.cpp
     src/hud/Hotbar.cpp
     src/hud/LoadingScreen.cpp
     src/hud/InventoryScreen.cpp
+    src/hud/StatusBars.cpp
     src/item/Inventory.cpp
     src/item/Recipe.cpp
     src/item/Smelting.cpp
     src/item/SlotOps.cpp
+    src/item/SpriteModel.cpp
     src/item/Tool.cpp
     src/world/Creature.cpp
     src/world/Explosion.cpp
+    src/world/FallingBlock.cpp
     src/world/Furnace.cpp
     src/world/ItemEntity.cpp
     src/world/Noise.cpp
+    src/world/Particles.cpp
     src/world/Biome.cpp
+    src/world/Climate.cpp
     src/world/Pathfinder.cpp
+    src/world/Projectile.cpp
     src/world/Structures.cpp
     src/world/World.cpp
     src/world/WorldStore.cpp
     src/world/Player.cpp
     src/world/Raycast.cpp
     src/world/Sky.cpp
+    src/world/Weather.cpp
     src/world/BlockOutline.cpp
     src/world/TerrainGenerator.cpp
     src/world/ChunkMesher.cpp

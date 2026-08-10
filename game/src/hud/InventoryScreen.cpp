@@ -1,10 +1,12 @@
-#include "hud/InventoryScreen.hpp"
+﻿#include "hud/InventoryScreen.hpp"
 
 #include "hud/HudPrimitives.hpp"
+#include "item/Recipe.hpp"
 #include "world/Creature.hpp"
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>
 
 namespace game::inventoryScreen {
 namespace {
@@ -24,6 +26,11 @@ constexpr float kPanelDepth = 0.0040f;
 constexpr float kSelectedTabDepth = 0.0038f;
 // 0.0037 is free: a tab's icon is part of its sprite, not drawn over it.
 constexpr float kCellDepth = 0.0036f;
+/// The search field, front to back: its border, its recess, then the text and
+/// caret on the ordinary label band. All four sit between the cell and the
+/// icons, so nothing on the card can cover them.
+constexpr float kSearchBorderDepth = 0.003570f;
+constexpr float kSearchFieldDepth = 0.003560f;
 constexpr float kLabelDepth = 0.0035f;
 // 0.0034 is left free for the scrollbar.
 constexpr float kCatalogueIconDepth = 0.0032f;
@@ -38,6 +45,17 @@ constexpr float kTooltipDepth = 0.0006f;
 constexpr glm::vec4 kDim{0.0f, 0.0f, 0.0f, 0.55f};
 constexpr glm::vec4 kCount{1.0f, 1.0f, 1.0f, 1.0f};
 constexpr glm::vec4 kLabel{0.24f, 0.24f, 0.24f, 1.0f};
+/// The search field. A pale border round a black recess with white text on it
+/// is the reference's own text box, and the contrast is the whole point: the
+/// first cut drew grey text on a mid-grey slab and could barely be read.
+constexpr glm::vec4 kSearchBorder{0.66f, 0.66f, 0.66f, 1.0f};
+/// Brighter while it has the keyboard, which is the reference's own cue and the
+/// only thing on the card that says where your typing is going.
+constexpr glm::vec4 kSearchBorderLit{1.0f, 1.0f, 1.0f, 1.0f};
+constexpr glm::vec4 kSearchBack{0.02f, 0.02f, 0.02f, 1.0f};
+constexpr glm::vec4 kSearchText{1.0f, 1.0f, 1.0f, 1.0f};
+/// What the field says when nothing has been typed.
+constexpr glm::vec4 kSearchHint{0.42f, 0.42f, 0.42f, 1.0f};
 /// Unselected tabs and their icons are knocked back rather than recoloured.
 constexpr glm::vec4 kUnselectedTint{0.72f, 0.72f, 0.72f, 1.0f};
 
@@ -48,6 +66,14 @@ constexpr glm::vec2 kPanelPixelSize{176.0f, 166.0f};
 constexpr glm::vec2 kInventoryPanelMin{0.0f, 41.0f};
 constexpr glm::vec2 kCraftingPanelMin{0.0f, 207.0f};
 constexpr glm::vec2 kFurnacePanelMin{0.0f, 373.0f};
+constexpr glm::vec2 kSmithingPanelMin{0.0f, 793.0f};
+constexpr glm::vec2 kChestPanelMin{0.0f, 959.0f};
+constexpr glm::vec2 kDoubleChestPanelMin{0.0f, 1125.0f};
+
+/// The chest's own three rows, in the panel's pixels. The reference's chest GUI
+/// puts them at 17, 35 and 53 - which is where our crafting area already sits,
+/// so the panel is the inventory's with the top cleared and this stamped in.
+constexpr float kChestFirstCentreY = 26.0f;
 
 /// The catalogue card, and the tab strip. Both are written by
 /// `tools/make-hud-sheet.ps1`, which reports the offsets it used - if they
@@ -65,9 +91,37 @@ constexpr float kTabSheetTop = 721.0f;
 constexpr float kTabSheetRowPitch = 27.0f;
 
 /// The catalogue reuses the inventory's own storage cell rather than carrying a
-/// second copy of it. Slice 5 adds the red and selected variants beside it.
-constexpr glm::vec2 kCellSheetMin{kInventoryPanelMin.x + 7.0f, kInventoryPanelMin.y + 83.0f};
+/// second copy of it - six times over, once per background state, written by
+/// `tools/make-hud-sheet.ps1` from that same 18x18 tile so the bevels match to
+/// the pixel. An 18-wide cell on a 20-pixel pitch leaves a two-pixel guard so
+/// mip generation cannot bleed one state into its neighbour.
 constexpr glm::vec2 kCellSheetSize{18.0f, 18.0f};
+constexpr float kCellSheetPitch = 20.0f;
+constexpr float kCellSheetTop = 773.0f;
+
+/// What a catalogue cell's background says.
+///
+/// **Four, where `INTERFACE.md` Â§3.1 describes six.** Three of vanilla's six are
+/// expandable groups, which are slice 9 and do not exist. The fourth is a
+/// *selected recipe*, and that one was built and taken back out: nothing sets
+/// it - slice 8 fills the grid on the click rather than remembering it - so it
+/// was a highlight that meant nothing and stayed lit behind an item already
+/// taken. What is left is the answer this slice exists to give, plus the cell
+/// under the pointer.
+///
+/// Order is the order the strip is written in, and nothing else may reorder it.
+enum class CellState : std::uint8_t {
+    Craftable,
+    CraftableHovered,
+    Uncraftable,
+    UncraftableHovered,
+    Count,
+};
+
+constexpr glm::vec2 cellSheetMin(CellState state) {
+    return {static_cast<float>(state) * kCellSheetPitch, kCellSheetTop};
+}
+
 
 /// The lit indicators, kept off the panel so they can be drawn over the spent
 /// versions baked into it and cut off part way.
@@ -86,7 +140,23 @@ constexpr float kPanelHeight = 1.30f;
 /// One art pixel in screen units. Every position below is measured off the
 /// artwork in its own pixels and scaled through this, so the layout cannot
 /// drift away from the image it was taken from.
+///
+/// **Fixed to the ordinary panel's height on purpose.** A taller screen grows
+/// downward at the same slot size rather than shrinking everything to fit.
 constexpr float kPixel = kPanelHeight / kPanelPixelSize.y;
+
+/// The double chest carries three extra rows of nine, so its panel is 54 art
+/// pixels taller and everything below those rows moves down by the same.
+constexpr float kDoubleChestExtraPixels = 3.0f * 18.0f;
+
+constexpr float panelPixelHeight(Kind kind) {
+    return kPanelPixelSize.y + (kind == Kind::DoubleChest ? kDoubleChestExtraPixels : 0.0f);
+}
+
+/// How far the player's own rows are pushed down by a taller container above.
+constexpr float storageShiftY(Kind kind) {
+    return kind == Kind::DoubleChest ? kDoubleChestExtraPixels : 0.0f;
+}
 
 /// Measured from the art: slot borders run 7, 25, 43 ... 169 across, the three
 /// storage rows begin at y 83, and the separated hotbar row at y 141.
@@ -116,8 +186,12 @@ constexpr float kPanelOffsetX(Kind kind) {
 }
 
 constexpr float kPanelHalfWidth = kPanelPixelSize.x * kPixel * 0.5f;
-constexpr float kPanelHalfHeight = kPanelHeight * 0.5f;
+constexpr float panelHalfHeight(Kind kind) {
+    return panelPixelHeight(kind) * kPixel * 0.5f;
+}
 constexpr float kBookHalfWidth = kBookPixelSize.x * kPixel * 0.5f;
+/// The catalogue card never grows - only the inventory card has taller variants.
+constexpr float kBookHalfHeight = kPanelHeight * 0.5f;
 
 /// Art pixel to screen space, for the inventory card. The card is centred
 /// vertically; horizontally it is wherever the layout block puts it, and
@@ -125,7 +199,7 @@ constexpr float kBookHalfWidth = kBookPixelSize.x * kPixel * 0.5f;
 /// test and panel bound comes through here, so the two cannot drift apart.
 constexpr glm::vec2 toScreen(Kind kind, float artX, float artY) {
     return {(artX - kPanelPixelSize.x * 0.5f) * kPixel + kPanelOffsetX(kind),
-            (artY - kPanelPixelSize.y * 0.5f) * kPixel};
+            (artY - panelPixelHeight(kind) * 0.5f) * kPixel};
 }
 
 /// The same, in the catalogue card's own pixels. Both cards are 166 tall, so
@@ -144,6 +218,14 @@ constexpr float kCatalogueLeft = (kBookPixelSize.x - kCatalogueColumns * kSlotPi
 constexpr float kCatalogueTop = 26.0f;
 constexpr float kCatalogueBottom = 160.0f;
 constexpr float kCatalogueLabelY = 15.0f;
+
+/// The search field, in the card's own pixels. It replaces the tab-name row, so
+/// it is as wide as the grid below it. **One owner**, because the hit test that
+/// focuses it and the geometry that draws it have to agree exactly.
+constexpr float kSearchFieldWidth = kCatalogueColumns * kSlotPitchPixels;
+constexpr float kSearchFieldHeight = 13.0f;
+constexpr float kSearchBorderPixels = 1.0f;
+constexpr float kSearchTextHeight = 8.0f;
 
 /// Tabs hang directly above the card, flush with its top edge.
 ///
@@ -169,12 +251,13 @@ constexpr glm::vec2 tabSheetMin(CatalogueTab tab, bool selected) {
 glm::vec2 gridSlotCentre(Kind kind, std::size_t index) {
     const auto column = static_cast<float>(index % kHotbarSlots);
     const float artX = kFirstSlotCentreX + column * kSlotPitchPixels;
+    const float shift = storageShiftY(kind);
 
     if (index < kHotbarSlots) {
-        return toScreen(kind, artX, kHotbarCentreY);
+        return toScreen(kind, artX, kHotbarCentreY + shift);
     }
     const auto row = static_cast<float>(index / kHotbarSlots) - 1.0f;
-    return toScreen(kind, artX, kStorageTopCentreY + row * kSlotPitchPixels);
+    return toScreen(kind, artX, kStorageTopCentreY + shift + row * kSlotPitchPixels);
 }
 
 /// Measured off the art the same way the storage grid was.
@@ -199,6 +282,15 @@ constexpr Layout layoutFor(Kind kind) {
         // differ, which is exactly what this table is for.
         return Layout{kFurnacePanelMin, 0, {63.0f, 25.0f}, {123.0f, 43.0f}};
     }
+    if (kind == Kind::SmithingTable) {
+        // Side by side rather than stacked: a tool goes in and the material
+        // beside it, which is how the reference reads.
+        return Layout{kSmithingPanelMin, 2, {45.0f, 43.0f}, {131.0f, 43.0f}};
+    }
+    if (kind == Kind::Chest || kind == Kind::DoubleChest) {
+        return Layout{kind == Kind::Chest ? kChestPanelMin : kDoubleChestPanelMin, 0,
+                      {16.0f, kChestFirstCentreY}, {0.0f, 0.0f}};
+    }
     return Layout{kInventoryPanelMin, 2, {106.0f, 26.0f}, {162.0f, 36.0f}};
 }
 
@@ -217,9 +309,19 @@ glm::vec2 craftSlotCentre(Kind kind, const Layout& layout, std::size_t index) {
                     layout.craftFirstCentre.y + row * kSlotPitchPixels);
 }
 
-/// The furnace's own slot count, which is not a square grid.
+/// The furnace's and the smithing table's own slot counts, neither of which is
+/// a square grid.
 constexpr std::size_t slotsFor(Kind kind) {
-    return kind == Kind::Furnace ? 2u : craftSlotCount(kind);
+    return (kind == Kind::Furnace || kind == Kind::SmithingTable) ? 2u : craftSlotCount(kind);
+}
+
+/// Where one of a chest's twenty-seven slots sits, on the same nine-wide pitch
+/// the storage rows below it use.
+glm::vec2 chestSlotCentre(Kind kind, std::size_t index) {
+    const auto column = static_cast<float>(index % kHotbarSlots);
+    const auto row = static_cast<float>(index / kHotbarSlots);
+    return toScreen(kind, kFirstSlotCentreX + column * kSlotPitchPixels,
+                    kChestFirstCentreY + row * kSlotPitchPixels);
 }
 
 glm::vec2 craftResultCentre(Kind kind, const Layout& layout) {
@@ -285,8 +387,9 @@ constexpr const char* tabName(CatalogueTab tab) {
 }
 
 void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const CatalogueState& state,
-                     const std::vector<ItemId>& shown) {
-    hud::appendSprite(mesh, kBookCentrePixels * kPixel, 0.0f, kBookHalfWidth, kPanelHalfHeight, kPanelDepth,
+                     const std::vector<ItemId>& shown, const std::unordered_set<ItemId>& craftable,
+                     std::optional<std::size_t> hovered, bool everythingReachable) {
+    hud::appendSprite(mesh, kBookCentrePixels * kPixel, 0.0f, kBookHalfWidth, kBookHalfHeight, kPanelDepth,
                       kBookPanelMin, kBookPixelSize, hud::kSheetSize);
 
     // Each tab is one sprite carrying its own icon, so nothing is drawn over
@@ -303,7 +406,45 @@ void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const Ca
     }
 
     const glm::vec2 label = toBook(kCatalogueLeft, kCatalogueLabelY);
-    hud::appendText(mesh, tabName(state.tab), label.x, label.y, 8.0f * kPixel, kLabelDepth, kLabel);
+    if (state.tab == CatalogueTab::Search) {
+        // The tab-name row becomes the field. Nothing else on the card has room
+        // for one, and a heading reading "Search" over a search box says nothing
+        // the tab strip has not already said.
+        const glm::vec2 centre = toBook(kCatalogueLeft + kSearchFieldWidth * 0.5f, kCatalogueLabelY);
+        const float white = static_cast<float>(TextureLayer::White);
+
+        hud::appendQuad(mesh, centre.x, centre.y, kSearchFieldWidth * kPixel * 0.5f,
+                        kSearchFieldHeight * kPixel * 0.5f, kSearchBorderDepth,
+                        state.searchFocused ? kSearchBorderLit : kSearchBorder, white, false);
+        hud::appendQuad(mesh, centre.x, centre.y,
+                        (kSearchFieldWidth - 2.0f * kSearchBorderPixels) * kPixel * 0.5f,
+                        (kSearchFieldHeight - 2.0f * kSearchBorderPixels) * kPixel * 0.5f, kSearchFieldDepth,
+                        kSearchBack, white, false);
+
+        const float textLeft = label.x + (kSearchBorderPixels + 2.0f) * kPixel;
+        const float textHeight = kSearchTextHeight * kPixel;
+        // The hint is what the field says when it is doing nothing. Clicking
+        // into it is a statement that you are about to type, so it goes.
+        const bool showHint = state.query.empty() && !state.searchFocused;
+        if (showHint) {
+            hud::appendText(mesh, "Search", textLeft, centre.y, textHeight, kLabelDepth, kSearchHint);
+        } else if (!state.query.empty()) {
+            hud::appendText(mesh, state.query, textLeft, centre.y, textHeight, kLabelDepth, kSearchText, true);
+        }
+
+        // A solid bar rather than an underscore, so it reads at this size, and
+        // **measured from the query alone** - with the field empty the caret
+        // belongs at the start, not after the hint standing in for it. Only
+        // while the field is focused, and only on the frames the caller says it
+        // is on: a caret that does not blink looks like part of the text.
+        if (state.searchFocused && state.caretVisible) {
+            const float caretX = textLeft + hud::textWidth(state.query, textHeight) + kPixel * 0.5f;
+            hud::appendQuad(mesh, caretX, centre.y, kPixel * 0.5f, textHeight * 0.5f, kLabelDepth,
+                            kSearchText, white, false);
+        }
+    } else {
+        hud::appendText(mesh, tabName(state.tab), label.x, label.y, 8.0f * kPixel, kLabelDepth, kLabel);
+    }
 
     const std::size_t capacity = catalogueCapacity();
     const auto columns = static_cast<std::size_t>(kCatalogueColumns);
@@ -321,8 +462,22 @@ void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const Ca
         const float height = cell.visiblePixels;
         const glm::vec2 centre =
             toBook(cell.artTopLeft.x + kSlotPitchPixels * 0.5f, cell.artTopLeft.y + height * 0.5f);
+
+        // An entry past the end of the list keeps the pale cell: it is the
+        // neutral slot rather than a claim that nothing can be made there.
+        CellState cellState = CellState::Craftable;
+        if (first + i < shown.size()) {
+            const ItemId item = shown[first + i];
+            const bool affordable = everythingReachable || craftable.count(item) != 0;
+            const bool under = hovered.has_value() && *hovered == first + i;
+            if (affordable) {
+                cellState = under ? CellState::CraftableHovered : CellState::Craftable;
+            } else {
+                cellState = under ? CellState::UncraftableHovered : CellState::Uncraftable;
+            }
+        }
         hud::appendSprite(mesh, centre.x, centre.y, kSlotPitchPixels * kPixel * 0.5f, height * kPixel * 0.5f,
-                          kCellDepth, kCellSheetMin, {kCellSheetSize.x, height}, hud::kSheetSize);
+                          kCellDepth, cellSheetMin(cellState), {kCellSheetSize.x, height}, hud::kSheetSize);
 
         // Full size, in the cell it belongs to. The row the card cuts through
         // is cut for real by the renderer's scissor rather than shrunk to fit,
@@ -337,10 +492,46 @@ void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const Ca
 
 } // namespace
 
-std::vector<ItemId> catalogueItems(CatalogueTab tab) {
+std::vector<ItemId> catalogueItems(CatalogueTab tab, std::string_view query) {
+    // Matching at the start of a word rather than anywhere in the name is what
+    // keeps a two-letter query useful: "st" finds Stone and Stone Stairs and
+    // leaves Sandstone out.
+    const auto lower = [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    std::string needle;
+    if (tab == CatalogueTab::Search) {
+        for (const char c : query) {
+            needle.push_back(lower(c));
+        }
+    }
+    const auto matches = [&](ItemId item) {
+        if (needle.empty()) {
+            return true;
+        }
+        const std::string_view name = displayNameOf(item);
+        for (std::size_t start = 0; start + needle.size() <= name.size(); ++start) {
+            if (start != 0 && name[start - 1] != ' ') {
+                continue;
+            }
+            bool same = true;
+            for (std::size_t i = 0; i < needle.size() && same; ++i) {
+                same = lower(name[start + i]) == needle[i];
+            }
+            if (same) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     std::vector<ItemId> shown;
     for (const ItemId item : allItems()) {
-        if (tab == CatalogueTab::Search || categoryFor(item) == static_cast<ItemCategory>(tab)) {
+        if (tab == CatalogueTab::Search) {
+            if (matches(item)) {
+                shown.push_back(item);
+            }
+        } else if (categoryFor(item) == static_cast<ItemCategory>(tab)) {
             shown.push_back(item);
         }
     }
@@ -392,6 +583,15 @@ int catalogueMaxScroll(std::size_t itemCount) {
     return rowsNeeded > whole ? static_cast<int>(rowsNeeded - whole) : 0;
 }
 
+bool insideSearchField(Kind kind, float x, float y) {
+    if (!showsCatalogue(kind)) {
+        return false;
+    }
+    const glm::vec2 centre = toBook(kCatalogueLeft + kSearchFieldWidth * 0.5f, kCatalogueLabelY);
+    return std::abs(x - centre.x) <= kSearchFieldWidth * kPixel * 0.5f &&
+           std::abs(y - centre.y) <= kSearchFieldHeight * kPixel * 0.5f;
+}
+
 std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
     const Layout layout = layoutFor(kind);
 
@@ -399,6 +599,15 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
         if (within(x, y, gridSlotCentre(kind, i), kSlotHalf)) {
             return SlotHit{Region::Grid, i};
         }
+    }
+    if (kind == Kind::Chest || kind == Kind::DoubleChest) {
+        for (std::size_t i = 0; i < chestSlotCount(kind); ++i) {
+            if (within(x, y, chestSlotCentre(kind, i), kSlotHalf)) {
+                return SlotHit{Region::Chest, i};
+            }
+        }
+        // A chest has no crafting slots and no result, so nothing below applies.
+        return std::nullopt;
     }
     for (std::size_t i = 0; i < slotsFor(kind); ++i) {
         if (within(x, y, craftSlotCentre(kind, layout, i), kSlotHalf)) {
@@ -425,11 +634,12 @@ std::pair<glm::vec2, glm::vec2> catalogueListBounds() {
 }
 
 bool insidePanel(Kind kind, float x, float y) {
-    if (y < -kPanelHalfHeight || y > kPanelHalfHeight) {
+    const float halfHeight = panelHalfHeight(kind);
+    if (y < -halfHeight || y > halfHeight) {
         // The tab strip hangs above the card and is still "inside" as far as
         // dropping a held stack is concerned.
-        const float tabTop = -kPanelHalfHeight - kTabSheetSize.y * kPixel;
-        if (!showsCatalogue(kind) || y < tabTop || y > -kPanelHalfHeight) {
+        const float tabTop = -halfHeight - kTabSheetSize.y * kPixel;
+        if (!showsCatalogue(kind) || y < tabTop || y > -halfHeight) {
             return false;
         }
     }
@@ -444,7 +654,8 @@ bool insidePanel(Kind kind, float x, float y) {
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
                        const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
                        float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
-                       engine::MeshData& clipped) {
+                       bool creative, const Chest* chest, const Chest* partner, engine::MeshData& clipped,
+                       engine::MeshData& top) {
     engine::MeshData mesh;
     const Layout layout = layoutFor(kind);
     const float panelCentreX = kPanelOffsetX(kind);
@@ -456,13 +667,25 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     // The whole panel is one sprite from the artwork. Rebuilding its frames,
     // bevels and icons out of primitives would mean redrawing by hand something
     // that already exists as a picture.
-    hud::appendSprite(mesh, panelCentreX, 0.0f, kPanelHalfWidth, kPanelHalfHeight, kPanelDepth,
-                      layout.panelPixelMin, kPanelPixelSize, hud::kSheetSize);
+    hud::appendSprite(mesh, panelCentreX, 0.0f, kPanelHalfWidth, panelHalfHeight(kind), kPanelDepth,
+                      layout.panelPixelMin, {kPanelPixelSize.x, panelPixelHeight(kind)}, hud::kSheetSize);
 
     std::vector<ItemId> catalogueList;
+    const std::optional<std::size_t> hoveredEntry =
+        catalogueCellAt(kind, cursorX, cursorY, catalogue.scrollRow);
     if (showsCatalogue(kind)) {
-        catalogueList = catalogueItems(catalogue.tab);
-        appendCatalogue(mesh, clipped, catalogue, catalogueList);
+        catalogueList = catalogueItems(catalogue.tab, catalogue.query);
+        // **Nothing is red in creative**, because nothing there is out of
+        // reach: the catalogue is a source and every entry is one click away.
+        // So the check is not run at all rather than run and ignored.
+        //
+        // Otherwise it is asked once for the whole table rather than per cell,
+        // and against the grid this screen actually has - a 3x3 recipe is not
+        // craftable from the inventory's own 2x2, which is the reference's rule
+        // and the whole reason `fitsInTwoByTwo` exists.
+        const std::unordered_set<ItemId> affordable =
+            creative ? std::unordered_set<ItemId>{} : craftableItems(inventory, craftSize(kind));
+        appendCatalogue(mesh, clipped, catalogue, catalogueList, affordable, hoveredEntry, creative);
     }
 
     for (std::size_t i = 0; i < kInventorySlots; ++i) {
@@ -474,6 +697,17 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
                          kCountDepth);
     }
     hud::appendStack(mesh, craftResult, craftResultCentre(kind, layout), kSlotHalf, kIconDepth, kCountDepth);
+
+    if (chest != nullptr) {
+        for (std::size_t i = 0; i < chestSlotCount(kind); ++i) {
+            const Chest* half = i < kChestSlots ? chest : partner;
+            if (half == nullptr) {
+                continue;
+            }
+            hud::appendStack(mesh, half->slots[i % kChestSlots], chestSlotCentre(kind, i), kSlotHalf, kIconDepth,
+                             kCountDepth);
+        }
+    }
 
     if (kind == Kind::Furnace) {
         // Both indicators are the lit sprite drawn over the spent one already in
@@ -501,8 +735,10 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
         }
     }
 
-    // Drawn last and nearest, so what the cursor carries is never behind a slot.
-    hud::appendStack(mesh, heldStack, {cursorX, cursorY}, kSlotHalf, kHeldIconDepth, kHeldCountDepth);
+    // Its own layer, drawn after the clipped catalogue: nearest is not enough
+    // when a blended fragment still writes depth, and being drawn *earlier*
+    // than the icons behind it punched a hole through them.
+    hud::appendStack(top, heldStack, {cursorX, cursorY}, kSlotHalf, kHeldIconDepth, kHeldCountDepth);
 
     // Only with an empty cursor: while carrying a stack the pointer already has
     // something attached, and a label as well is noise over the slot you are
@@ -510,14 +746,18 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     if (heldStack.empty()) {
         const ItemStack* under = nullptr;
         ItemStack catalogueEntry;
-        if (const std::optional<std::size_t> cell = catalogueCellAt(kind, cursorX, cursorY, catalogue.scrollRow);
-            cell.has_value() && *cell < catalogueList.size()) {
-            catalogueEntry = ItemStack{catalogueList[*cell], 1};
+        if (hoveredEntry.has_value() && *hoveredEntry < catalogueList.size()) {
+            catalogueEntry = ItemStack{catalogueList[*hoveredEntry], 1};
             under = &catalogueEntry;
         } else if (const std::optional<SlotHit> hover = slotAt(kind, cursorX, cursorY); hover.has_value()) {
             switch (hover->region) {
             case Region::Grid:
                 under = &inventory.slot(hover->index);
+                break;
+            case Region::Chest:
+                if (const Chest* half = hover->index < kChestSlots ? chest : partner; half != nullptr) {
+                    under = &half->slots[hover->index % kChestSlots];
+                }
                 break;
             case Region::Craft:
                 under = &craftSlots[hover->index];
@@ -530,8 +770,8 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
             }
         }
         if (under != nullptr && !under->empty()) {
-            hud::appendTooltip(mesh,
-                               isSpawnEgg(under->item) ? spawnEggName(under->item) : itemDisplayName(under->item),
+            hud::appendTooltip(top,
+                               displayNameOf(under->item),
                                cursorX, cursorY, aspect, kTooltipTextHeight, kTooltipDepth);
         }
     }

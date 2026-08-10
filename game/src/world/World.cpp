@@ -1,4 +1,4 @@
-#include "world/World.hpp"
+﻿#include "world/World.hpp"
 
 #include "world/ChunkMesher.hpp"
 
@@ -39,6 +39,40 @@ constexpr std::array<glm::ivec3, 4> kFlowSteps{glm::ivec3{1, 0, 0}, glm::ivec3{-
 
 /// One block every five ticks, which is the reference's water flow speed.
 constexpr std::chrono::milliseconds kFluidSpreadDelay{250};
+
+/// Thirty ticks, the reference's Overworld lava. Six times slower than water,
+/// and combined with a level step of two it is what makes lava creep three
+/// blocks where water runs seven.
+constexpr std::chrono::milliseconds kLavaSpreadDelay{1500};
+
+/// Eighty ticks. The reference's fuse for anything lit by hand, by fire or by
+/// redstone; only a charge set off by another blast gets a shorter one.
+constexpr std::chrono::milliseconds kTntFuse{4000};
+
+/// How fast a lit charge blinks, and how many blinks it gets. Their product is
+/// the reference's four-second fuse.
+constexpr std::chrono::milliseconds kTntBlink{250};
+constexpr int kTntBlinks = 16;
+
+/// The reference re-evaluates a fire every 30-40 ticks. One figure in the
+/// middle of that band is enough here, because nothing else keys off the exact
+/// number.
+constexpr std::chrono::milliseconds kFireTickDelay{1750};
+
+/// Chance per tick that a fire takes an adjacent fuel block, and the chance it
+/// dies once there is nothing left to eat. Ours are one number each where the
+/// reference has a per-block table of ignite odds - a named simplification, and
+/// the place to start if fire ever feels wrong.
+constexpr unsigned kFireSpreadPercent = 25;
+constexpr unsigned kFireBurnoutPercent = 40;
+
+/// How often flowing lava quenched by water sets as obsidian rather than
+/// cobblestone. Ours alone - the reference has no such chance.
+constexpr unsigned kFlowingLavaObsidianPercent = 20;
+
+/// One block of fall per step. Short enough to read as falling rather than as
+/// teleporting, and it is the only thing setting how fast a column collapses.
+constexpr std::chrono::milliseconds kFallDelay{60};
 
 /// Everything a mesh job reads, allocated once and shared with the job.
 ///
@@ -283,7 +317,15 @@ void World::unpropagate(std::deque<LightRemoval>& removals, std::deque<glm::ivec
                 continue;
             }
 
-            if (level < entry.previousLevel) {
+            // Sky light falls straight down at full strength, so the cell under
+            // a removed full-strength one was lit by it at the *same* level -
+            // which "dimmer than its source" can never detect. Without this a
+            // roof left the whole column under it lit by a sky it can no longer
+            // see.
+            const bool litFromAbove = sky && step.y == -1 &&
+                                      entry.previousLevel == kMaxLight && level == kMaxLight;
+
+            if (level < entry.previousLevel || litFromAbove) {
                 // This neighbour was lit by what we just removed.
                 if (sky) {
                     setSkyLightAt(n.x, n.y, n.z, 0);
@@ -376,6 +418,193 @@ void World::scheduleFluidUpdate(int x, int y, int z) {
         return;
     }
     m_fluidUpdates.push_back({{x, y, z}, std::chrono::steady_clock::now() + kFluidSpreadDelay});
+}
+
+void World::scheduleLavaUpdate(int x, int y, int z) {
+    if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
+        return;
+    }
+    m_lavaUpdates.push_back({{x, y, z}, std::chrono::steady_clock::now() + kLavaSpreadDelay});
+}
+
+void World::primeTnt(const glm::ivec3& at) {
+    // The fuse is spent as a run of blinks rather than one long wait, so the
+    // charge visibly counts down. The last one detonates.
+    m_tntFuses.push_back({at, std::chrono::steady_clock::now() + kTntBlink, kTntBlinks});
+}
+
+void World::scheduleFireUpdate(int x, int y, int z) {
+    if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
+        return;
+    }
+    m_fireUpdates.push_back({{x, y, z}, std::chrono::steady_clock::now() + kFireTickDelay});
+}
+
+bool World::fireCanSurvive(int x, int y, int z) const {
+    const BlockId under = blockAt(x, y - 1, z);
+    if (feedsEternalFire(under) || game::isSolid(under)) {
+        return true;
+    }
+    for (const glm::ivec3& step : kLightSteps) {
+        if (isFlammable(blockAt(x + step.x, y + step.y, z + step.z))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void World::updateFire(const BudgetCheck& budgetSpent) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!m_fireUpdates.empty() && !budgetSpent()) {
+        if (m_fireUpdates.front().due > now) {
+            break;
+        }
+        const glm::ivec3 p = m_fireUpdates.front().position;
+        m_fireUpdates.pop_front();
+        if (blockAt(p.x, p.y, p.z) != BlockId::Fire) {
+            continue;
+        }
+
+        const BlockId under = blockAt(p.x, p.y - 1, p.z);
+        // Netherrack and its cousins keep a fire for ever; everything else
+        // needs either fuel beside it or a floor beneath it.
+        const bool eternal = feedsEternalFire(under);
+
+        bool fuelNearby = false;
+        for (const glm::ivec3& step : kLightSteps) {
+            if (isFlammable(blockAt(p.x + step.x, p.y + step.y, p.z + step.z))) {
+                fuelNearby = true;
+                break;
+            }
+        }
+
+        if (!fireCanSurvive(p.x, p.y, p.z)) {
+            setBlock(p.x, p.y, p.z, BlockId::Air);
+            continue;
+        }
+
+        // Rain puts out anything the sky can reach. This is what makes a bolt
+        // safe to hand a real fire to - the reference lights them during a
+        // storm precisely because the same storm is already putting them out.
+        if (m_precipitating && !feedsEternalFire(under) &&
+            skyLightAt(p.x, p.y, p.z) >= kMaxLight) {
+            setBlock(p.x, p.y, p.z, BlockId::Air);
+            continue;
+        }
+        auto roll = [this]() {
+            m_fireRandom ^= m_fireRandom << 13;
+            m_fireRandom ^= m_fireRandom >> 17;
+            m_fireRandom ^= m_fireRandom << 5;
+            return m_fireRandom;
+        };
+
+        if (fuelNearby) {
+            // **Spread is what consumes the fuel**, rather than a separate
+            // burn-away pass: the block that catches is replaced by fire, so a
+            // log wall is eaten one cell at a time and the flame front moves.
+            for (const glm::ivec3& step : kLightSteps) {
+                const glm::ivec3 n = p + step;
+                const BlockId neighbour = blockAt(n.x, n.y, n.z);
+                if (!isFlammable(neighbour) || (roll() % 100u) >= kFireSpreadPercent) {
+                    continue;
+                }
+                // A charge does not burn away - it lights.
+                if (neighbour == BlockId::Tnt) {
+                    setBlock(n.x, n.y, n.z, BlockId::TntPrimed);
+                    primeTnt(n);
+                    continue;
+                }
+                setBlock(n.x, n.y, n.z, BlockId::Fire);
+            }
+        }
+
+        // Left burning: come back and ask again. A fire with nothing left to eat
+        // and no eternal floor dies on one of these passes.
+        if (blockAt(p.x, p.y, p.z) == BlockId::Fire) {
+            if (!eternal && !fuelNearby && (roll() % 100u) < kFireBurnoutPercent) {
+                setBlock(p.x, p.y, p.z, BlockId::Air);
+                continue;
+            }
+            scheduleFireUpdate(p.x, p.y, p.z);
+        }
+    }
+}
+
+std::vector<glm::ivec3> World::takeDetonations() {
+    return std::exchange(m_detonations, {});
+}
+
+void World::updateTnt(const BudgetCheck& budgetSpent) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!m_tntFuses.empty() && !budgetSpent()) {
+        if (m_tntFuses.front().due > now) {
+            break;
+        }
+        const PendingFluid entry = m_tntFuses.front();
+        m_tntFuses.pop_front();
+        const glm::ivec3 p = entry.position;
+        const BlockId here = blockAt(p.x, p.y, p.z);
+        // Broken or already gone. The fuse is not cancelled when the block is
+        // mined - it is simply found missing here, which costs nothing and
+        // means breaking a lit charge needs no bookkeeping of its own.
+        if (!isTntBlock(here)) {
+            continue;
+        }
+        if (entry.blinks > 0) {
+            // **The blink is the block, not a texture swap.** Both animated
+            // layer slots are spent on water and fire, and toggling the id
+            // costs one remesh of one chunk a few times a second - which is
+            // also what makes the countdown visible in the world's own state.
+            setBlock(p.x, p.y, p.z,
+                     here == BlockId::TntPrimed ? BlockId::Tnt : BlockId::TntPrimed);
+            m_tntFuses.push_back({p, now + kTntBlink, entry.blinks - 1});
+            continue;
+        }
+        setBlock(p.x, p.y, p.z, BlockId::Air);
+        m_detonations.push_back(p);
+    }
+}
+
+void World::scheduleFallUpdate(int x, int y, int z) {
+    if (y < 0 || y >= kWorldHeightChunks * Chunk::kSize) {
+        return;
+    }
+    m_fallUpdates.push_back({{x, y, z}, std::chrono::steady_clock::now() + kFallDelay});
+}
+
+void World::updateFalls(const BudgetCheck& budgetSpent) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!m_fallUpdates.empty() && !budgetSpent()) {
+        if (m_fallUpdates.front().due > now) {
+            break;
+        }
+        const glm::ivec3 p = m_fallUpdates.front().position;
+        m_fallUpdates.pop_front();
+
+        const BlockId falling = blockAt(p.x, p.y, p.z);
+        if (p.y <= 0 || !isFalling(falling)) {
+            continue;
+        }
+        // An unloaded chunk reads as air, so a column on the edge of the loaded
+        // world would otherwise pour itself into nothing and never come back.
+        if (!columnResident(p.x, p.z)) {
+            continue;
+        }
+        if (!isReplaceable(blockAt(p.x, p.y - 1, p.z))) {
+            continue;
+        }
+
+        // Detached, not moved. Where it ends up is the entity's business; all
+        // the world does is take it out of the grid and say so - which also
+        // schedules whatever was resting on top of it, so a column collapses
+        // from the bottom without a loop here.
+        setBlock(p.x, p.y, p.z, BlockId::Air);
+        m_detachedBlocks.push_back({p, falling});
+    }
+}
+
+std::vector<World::WashedBlock> World::takeDetachedBlocks() {
+    return std::exchange(m_detachedBlocks, {});
 }
 
 namespace {
@@ -490,6 +719,19 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
         m_fluidUpdates.pop_front();
 
         const BlockId current = blockAt(p.x, p.y, p.z);
+        // Concrete powder sets the instant water touches it, on any of the six
+        // sides. It is answered before the "is this the fluid system's
+        // business" test below, because a powder is neither air nor water and
+        // would otherwise fall straight through.
+        if (isConcretePowder(current)) {
+            for (const glm::ivec3& step : kLightSteps) {
+                if (isWater(blockAt(p.x + step.x, p.y + step.y, p.z + step.z))) {
+                    setBlock(p.x, p.y, p.z, concreteFor(current));
+                    break;
+                }
+            }
+            continue;
+        }
         // Only air, water and things a flow sweeps aside are the fluid system's
         // business. Testing for "not solid" was the same thing while every block
         // was a full cube or water, but a slab is neither - and falling through
@@ -517,6 +759,19 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
         // tower fan out sideways at every level it passed.
         const bool fedFromAbove = isWater(blockAt(p.x, p.y + 1, p.z));
 
+        // **The slope only decides which empty cells a flow spreads into; it
+        // never re-decides a cell that already holds water.** The reference
+        // keeps these apart - its `getNewLiquid` recomputes a level from the
+        // neighbours with no slope test in it at all, and the weights are
+        // consulted only when spreading. Folding the two together meant a
+        // settled cell could be starved by a weight that changed *because of
+        // its own outflow*: water reaches an edge, the column below it fills,
+        // that direction stops scoring as a drop, a rival direction wins, the
+        // cell empties, the column drains, the weight flips back. Air, water,
+        // air, water, once per tick, for ever - which is what "the water near
+        // the edge goes mad" was.
+        const bool arriving = !isWater(current);
+
         if (!fedFromAbove) {
             for (std::size_t i = 0; i < kFlowSteps.size(); ++i) {
                 const glm::ivec3 n = p + kFlowSteps[i];
@@ -541,7 +796,8 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
                 // A cell that can itself drain is always worth flowing into -
                 // nothing can score better than a drop one step away - so the
                 // search is skipped rather than run to reach the same answer.
-                if (!fluidCanDrainFrom(p.x, p.y, p.z) && !fluidSpreadsToward(n, i ^ 1u)) {
+                if (arriving && !fluidCanDrainFrom(p.x, p.y, p.z) &&
+                    !fluidSpreadsToward(n, i ^ 1u)) {
                     continue;
                 }
                 // Competing flows resolve to whichever supply is strongest.
@@ -572,6 +828,143 @@ void World::updateFluids(const BudgetCheck& budgetSpent) {
                 continue;
             }
             m_washedBlocks.push_back({p, current});
+        }
+        setBlock(p.x, p.y, p.z, wanted);
+    }
+}
+
+bool World::coolLava(const glm::ivec3& p, BlockId lava) {
+    // The reference's mixing rules 1 and 3. **Which block wins is decided by
+    // source-versus-flowing, not by where the water is**: a source touched
+    // anywhere above or beside becomes obsidian, and anything flowing becomes
+    // cobblestone. Water *below* is excluded from both - that case is lava
+    // falling in, and it is the water that changes, not the lava.
+    bool touchingWater = isWater(blockAt(p.x, p.y + 1, p.z));
+    for (const glm::ivec3& step : kFlowSteps) {
+        if (touchingWater) {
+            break;
+        }
+        touchingWater = isWater(blockAt(p.x + step.x, p.y, p.z + step.z));
+    }
+    if (!touchingWater) {
+        return false;
+    }
+    // A source always sets to obsidian. Flowing lava gives cobblestone in the
+    // reference, but a share of it comes out as obsidian here - it is the one
+    // place obsidian is renewable, and always-cobblestone makes a lava-and-water
+    // meeting worth nothing.
+    if (isLavaSource(lava)) {
+        setBlock(p.x, p.y, p.z, BlockId::Obsidian);
+        return true;
+    }
+    m_fireRandom ^= m_fireRandom << 13;
+    m_fireRandom ^= m_fireRandom >> 17;
+    m_fireRandom ^= m_fireRandom << 5;
+    setBlock(p.x, p.y, p.z,
+             (m_fireRandom % 100u) < kFlowingLavaObsidianPercent ? BlockId::Obsidian
+                                                                 : BlockId::Cobblestone);
+    return true;
+}
+
+void World::updateLava(const BudgetCheck& budgetSpent) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!m_lavaUpdates.empty() && !budgetSpent()) {
+        if (m_lavaUpdates.front().due > now) {
+            break;
+        }
+        const glm::ivec3 p = m_lavaUpdates.front().position;
+        m_lavaUpdates.pop_front();
+
+        const BlockId current = blockAt(p.x, p.y, p.z);
+
+        if (isLava(current) && coolLava(p, current)) {
+            continue;
+        }
+
+        // Lava sets light to what is near it. Bedrock's rule is the simple one:
+        // the fuel must sit inside the 3x3x3 centred on the lava and have air
+        // above it, and the fire appears in that air cell.
+        //
+        // **A settled lava cell would otherwise never tick again**, so this is
+        // also the one place lava reschedules itself - and only while there is
+        // something nearby worth burning, which is what keeps a lava lake in
+        // open stone from queueing work for ever.
+        if (isLava(current)) {
+            bool fuelNearby = false;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const glm::ivec3 n{p.x + dx, p.y + dy, p.z + dz};
+                        if (!isFlammable(blockAt(n.x, n.y, n.z))) {
+                            continue;
+                        }
+                        fuelNearby = true;
+                        if (blockAt(n.x, n.y + 1, n.z) == BlockId::Air) {
+                            setBlock(n.x, n.y + 1, n.z, BlockId::Fire);
+                        }
+                    }
+                }
+            }
+            if (fuelNearby) {
+                scheduleLavaUpdate(p.x, p.y, p.z);
+            }
+        }
+
+        // Rule 2, and the only case where the *water* is what changes: lava
+        // arriving from directly overhead sets the water it lands in.
+        if (isWater(current) && isLava(blockAt(p.x, p.y + 1, p.z))) {
+            setBlock(p.x, p.y, p.z, BlockId::Stone);
+            continue;
+        }
+
+        if (current != BlockId::Air && !isLava(current) && !isWashedAway(current)) {
+            continue;
+        }
+        // A source never drains. Unlike water, nothing here ever *creates* one:
+        // the reference does not let lava sources self-generate, so there is no
+        // two-neighbours rule to mirror.
+        if (isLavaSource(current)) {
+            continue;
+        }
+
+        const bool fedFromAbove = isLava(blockAt(p.x, p.y + 1, p.z));
+        int supply = kMaxLavaLevel + 1;
+        if (!fedFromAbove) {
+            for (const glm::ivec3& step : kFlowSteps) {
+                const glm::ivec3 n = p + step;
+                const BlockId neighbour = blockAt(n.x, n.y, n.z);
+                if (!isLava(neighbour)) {
+                    continue;
+                }
+                // A neighbour with somewhere to fall does not also run sideways,
+                // which is what keeps a lava fall a column.
+                const BlockId under = blockAt(n.x, n.y - 1, n.z);
+                const bool pools = game::isSolid(under) || isLava(under) || isWater(under);
+                if (!pools) {
+                    continue;
+                }
+                const int level = lavaLevel(neighbour);
+                if (level + kLavaSpreadStep > kMaxLavaLevel) {
+                    continue;
+                }
+                supply = std::min(supply, level + kLavaSpreadStep);
+            }
+        }
+
+        BlockId wanted = BlockId::Air;
+        if (fedFromAbove) {
+            wanted = BlockId::LavaFalling;
+        } else if (supply <= kMaxLavaLevel) {
+            wanted = lavaAtLevel(supply);
+        }
+
+        if (wanted == current) {
+            continue;
+        }
+        // Flowing lava destroys what it sweeps aside rather than dropping it,
+        // which is the one place it differs from water.
+        if (isWashedAway(current) && wanted == BlockId::Air) {
+            continue;
         }
         setBlock(p.x, p.y, p.z, wanted);
     }
@@ -635,9 +1028,17 @@ BlockId World::blockAt(int x, int y, int z) const {
     return chunk->at(floorMod(x, Chunk::kSize), floorMod(y, Chunk::kSize), floorMod(z, Chunk::kSize));
 }
 
-bool World::isSolid(int x, int y, int z) const {
-    return game::isSolid(blockAt(x, y, z));
+bool World::waterloggedAt(int x, int y, int z) const {
+    const ChunkCoord coord{floorDiv(x, Chunk::kSize), floorDiv(y, Chunk::kSize),
+                           floorDiv(z, Chunk::kSize)};
+    const Chunk* chunk = chunkAt(coord);
+    return chunk != nullptr && chunk->waterloggedAt(floorMod(x, Chunk::kSize),
+                                                    floorMod(y, Chunk::kSize),
+                                                    floorMod(z, Chunk::kSize));
 }
+
+bool World::isSolid(int x, int y, int z) const {
+    return game::isSolid(blockAt(x, y, z));}
 
 int World::highestSolid(int x, int z) const {
     for (int y = kWorldHeightChunks * Chunk::kSize - 1; y >= 0; --y) {
@@ -686,7 +1087,25 @@ void World::setBlock(int x, int y, int z, BlockId block) {
     if (previous == block) {
         return;
     }
-    it->second.blocks.set(lx, ly, lz, block);
+
+    // **A waterlogged cell that loses its block becomes water, not air.** Take
+    // the plant out of a patch of seagrass and the sea has to close over it;
+    // leaving air there is the hole this whole feature exists to stop. And
+    // anything that fills the cell displaces the water it was sharing.
+    const bool wasLogged = it->second.blocks.waterloggedAt(lx, ly, lz);
+    BlockId placed = block;
+    if (wasLogged && block == BlockId::Air) {
+        placed = BlockId::Water0;
+        it->second.blocks.setWaterlogged(lx, ly, lz, false);
+    } else if (!canWaterlog(block)) {
+        it->second.blocks.setWaterlogged(lx, ly, lz, false);
+    } else if (isWater(previous)) {
+        // Put a plant into water and it takes the water with it, which is the
+        // other half of the rule above.
+        it->second.blocks.setWaterlogged(lx, ly, lz, true);
+    }
+
+    it->second.blocks.set(lx, ly, lz, placed);
     it->second.modified = true;
 
     // Relight around the change. Removals have to run before additions, because
@@ -730,6 +1149,27 @@ void World::setBlock(int x, int y, int z, BlockId block) {
         scheduleFluidUpdate(x + step.x, y + step.y, z + step.z);
     }
 
+    // And the same for lava. **Both queues get every edit** rather than one
+    // being chosen by what is in the cell right now: the cell that just changed
+    // may be air that lava is about to reach, and a queue that finds the wrong
+    // fluid there simply does nothing. Guessing here is how a flow stalls one
+    // block short of where it should stop.
+    scheduleLavaUpdate(x, y, z);
+    for (const glm::ivec3& step : kLightSteps) {
+        scheduleLavaUpdate(x + step.x, y + step.y, z + step.z);
+    }
+
+    // A fire that has just been placed needs its first tick; one that already
+    // exists reschedules itself, so this is the only way in.
+    if (block == BlockId::Fire) {
+        scheduleFireUpdate(x, y, z);
+    }
+
+    // Only two cells can have lost their footing: this one, if what just landed
+    // in it falls, and the one resting on top of it.
+    scheduleFallUpdate(x, y, z);
+    scheduleFallUpdate(x, y + 1, z);
+
     invalidateMesh(coord);
 
     // Only a block on a chunk face can change a neighbour's mesh, but missing
@@ -760,6 +1200,42 @@ void World::setBlock(int x, int y, int z, BlockId block) {
 bool World::neighboursLoaded(const ChunkCoord& coord) const {
     return hasChunk({coord.x - 1, coord.y, coord.z}) && hasChunk({coord.x + 1, coord.y, coord.z}) &&
            hasChunk({coord.x, coord.y, coord.z - 1}) && hasChunk({coord.x, coord.y, coord.z + 1});
+}
+
+namespace {
+
+/// How far a run of chests is followed before giving up. A row this long is not
+/// something anyone builds by accident, and the cap keeps the walk bounded.
+constexpr int kMaxChestRun = 64;
+
+} // namespace
+
+std::optional<glm::ivec3> World::chestPartnerAt(const glm::ivec3& at) const {
+    const BlockId id = blockAt(at.x, at.y, at.z);
+    if (!isChest(id)) {
+        return std::nullopt;
+    }
+    const glm::ivec3 axis = chestJoinsAlongX(id) ? glm::ivec3{1, 0, 0} : glm::ivec3{0, 0, 1};
+    const auto sameChest = [&](const glm::ivec3& cell) {
+        return blockAt(cell.x, cell.y, cell.z) == id;
+    };
+    // Walk back to the start of the run, then pair off in twos from there. Both
+    // halves reach the same answer because they do the same walk.
+    int back = 0;
+    while (back < kMaxChestRun && sameChest(at - axis * (back + 1))) {
+        ++back;
+    }
+    const glm::ivec3 partner = back % 2 == 0 ? at + axis : at - axis;
+    return sameChest(partner) ? std::optional<glm::ivec3>{partner} : std::nullopt;
+}
+
+ChestHalf World::chestHalfAt(const glm::ivec3& at) const {
+    const std::optional<glm::ivec3> partner = chestPartnerAt(at);
+    if (!partner) {
+        return ChestHalf::Single;
+    }
+    const glm::ivec3 offset = *partner - at;
+    return chestHalfFor(chestFacing(blockAt(at.x, at.y, at.z)), offset.x, offset.z);
 }
 
 ChunkVolume World::gatherVolume(const ChunkCoord& coord) const {
@@ -800,9 +1276,22 @@ ChunkVolume World::gatherVolume(const ChunkCoord& coord) const {
                     // a band of darkness.
                     volume.blocks[at] = BlockId::Air;
                     volume.light[at] = 0xF0;
+                    volume.flags[at] = 0u;
                 } else {
-                    volume.blocks[at] = source->at(lx, ly, lz);
+                    const BlockId block = source->at(lx, ly, lz);
+                    volume.blocks[at] = block;
                     volume.light[at] = source->lightAt(lx, ly, lz);
+                    volume.flags[at] = static_cast<std::uint8_t>(
+                        source->waterloggedAt(lx, ly, lz) ? ChunkVolume::kWaterlogged : 0u);
+                    // Only a chest can answer anything but `Single`, and chests
+                    // are rare, so the run walk is never paid for on the cells
+                    // that make up the world.
+                    if (isChest(block)) {
+                        const glm::ivec3 world{coord.x * size + x, coord.y * size + y,
+                                               coord.z * size + z};
+                        volume.flags[at] |= static_cast<std::uint8_t>(
+                            static_cast<int>(chestHalfAt(world)) << ChunkVolume::kChestHalfShift);
+                    }
                 }
             }
         }
@@ -1034,6 +1523,10 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
     propagateLight(budgetSpent);
     flushLightDirty();
     updateFluids(budgetSpent);
+    updateLava(budgetSpent);
+    updateFire(budgetSpent);
+    updateTnt(budgetSpent);
+    updateFalls(budgetSpent);
 
     // Uploading is the only part still on the main thread, so it is what the
     // budget now meters.

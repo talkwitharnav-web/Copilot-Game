@@ -34,8 +34,11 @@ void appendQuad(engine::MeshData& mesh, float halfWidth, float halfHeight, float
         {-halfWidth, -halfHeight}, {halfWidth, -halfHeight}, {halfWidth, halfHeight}, {-halfWidth, halfHeight}};
 
     for (const glm::vec2& corner : corners) {
-        mesh.vertices.push_back(engine::Vertex{
-            {corner.x, corner.y, depth}, {color.r, color.g, color.b, color.a}, {0.5f, 0.5f}, layer});
+        mesh.vertices.push_back(engine::Vertex{{corner.x, corner.y, depth},
+                                               engine::packVertexColor(color.r, color.g, color.b, color.a),
+                                               {0.5f, 0.5f},
+                                               layer,
+                                               engine::kVertexSurfaceDefault});
     }
 
     // Both windings. Backface culling is on, and screen-space geometry skips the

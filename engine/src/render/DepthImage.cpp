@@ -34,7 +34,9 @@ DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_cont
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    // SAMPLED, because the deferred lighting pass reads depth back to recover
+    // where each pixel is in the world - and M24's shadows will want it too.
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     vkCheck(vkCreateImage(context.device(), &imageInfo, nullptr, &m_image), "vkCreateImage");
@@ -48,7 +50,7 @@ DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_cont
     allocInfo.memoryTypeIndex =
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (vkAllocateMemory(context.device(), &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
+    if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
         vkDestroyImage(context.device(), m_image, nullptr);
         m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for depth image");
@@ -67,7 +69,7 @@ DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_cont
 
     if (vkCreateImageView(context.device(), &viewInfo, nullptr, &m_view) != VK_SUCCESS) {
         vkDestroyImage(context.device(), m_image, nullptr);
-        vkFreeMemory(context.device(), m_memory, nullptr);
+        freeDeviceMemory(context.device(), m_memory);
         m_image = VK_NULL_HANDLE;
         m_memory = VK_NULL_HANDLE;
         throw std::runtime_error("vkCreateImageView failed for depth image");
@@ -81,9 +83,7 @@ DepthImage::~DepthImage() {
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
     }
-    if (m_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context.device(), m_memory, nullptr);
-    }
+    freeDeviceMemory(m_context.device(), m_memory);
 }
 
 } // namespace engine

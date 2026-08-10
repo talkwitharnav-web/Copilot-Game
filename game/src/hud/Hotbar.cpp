@@ -1,6 +1,7 @@
 #include "hud/Hotbar.hpp"
 
 #include "hud/HudPrimitives.hpp"
+#include "world/Projectile.hpp"
 
 #include <string>
 
@@ -42,6 +43,12 @@ constexpr float kBarCentreY = 0.888f;
 /// Half-height of a block icon as a fraction of the cell's half-size, leaving
 /// clear margin between the icon and the bevel.
 constexpr float kIconScale = 0.56f;
+
+/// How much of its size a fully drawn bow gives up. **The whole of the draw
+/// animation**, because the icon stays centred: a fraction of itself is a limit
+/// by construction, where a slide has to be clamped against the slot and still
+/// ends up looking like the icon fell into a corner.
+constexpr float kBowPullShrink = 0.24f;
 
 /// Darkens whatever is behind a slot so the block icon stays readable against
 /// bright sky or sand, without hiding the world.
@@ -94,7 +101,7 @@ void appendCellFrame(engine::MeshData& mesh, const CellSprite& cell, float centr
 
 } // namespace
 
-engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected) {
+engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected, float bowDrawSeconds) {
     engine::MeshData mesh;
 
     // Cells butt up against each other so neighbouring borders merge into a
@@ -135,9 +142,30 @@ engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected) {
             hud::appendBlockIcon(mesh, blockForItem(stack.item), interiorCentre.x, interiorCentre.y, iconHalf,
                                  iconDepth);
         } else if (const int layer = itemTextureLayer(stack.item); layer >= 0) {
-            // Flat, because there is no block to build a little cube out of.
-            hud::appendQuad(mesh, interiorCentre.x, interiorCentre.y, iconHalf, iconHalf, iconDepth,
-                            {1.0f, 1.0f, 1.0f, 1.0f}, static_cast<float>(layer), true);
+            // A bow being drawn shows one of three pictures instead of its own.
+            // **Driven by the draw time, never used to decide the shot** - the
+            // reference finishes the picture in half the time it finishes the
+            // charge, so the two must not share a number.
+            const bool pulling =
+                isSelected && stack.item == ItemId::Bow && bowDrawSeconds >= 0.0f;
+            const float sprite =
+                pulling ? static_cast<float>(kBowPullingFirstSprite + bowPullStage(bowDrawSeconds))
+                        : static_cast<float>(layer);
+
+            // The three pictures are only the string's own travel. Shrinking
+            // the icon on the charge curve is what fills the gaps between them:
+            // it reads as the bow being drawn back **away from you**, and it is
+            // the one way to say that without moving the icon.
+            //
+            // **Centred, deliberately.** Sliding it back along the arrow's own
+            // axis was tried first and read as the bow slipping into the bottom
+            // left corner of the slot - a slot is a frame, and anything that
+            // leaves its middle looks dropped rather than pulled.
+            const float pull = pulling ? bowCharge(bowDrawSeconds) : 0.0f;
+            const float half = iconHalf * (1.0f - kBowPullShrink * pull);
+
+            hud::appendQuad(mesh, interiorCentre.x, interiorCentre.y, half, half, iconDepth,
+                            {1.0f, 1.0f, 1.0f, 1.0f}, sprite, true);
         } else {
             continue;
         }

@@ -90,18 +90,104 @@ bool shielded(const World& world, const glm::vec3& from, const glm::vec3& to) {
 } // namespace
 
 float blastResistance(BlockId block) {
-    if (isWater(block)) {
+    if (isFluid(block)) {
         // 100, and it is the whole reason a blast underwater breaks nothing:
-        // a single 0.3 step costs 30, which no creeper ray can pay.
+        // a single 0.3 step costs 30, which no creeper ray can pay. Lava is the
+        // same figure in the reference.
         return 100.0f;
+    }
+    // A cut shape resists exactly as the block it came from does, so an obsidian
+    // stair is as blast-proof as obsidian and an oak fence is not.
+    {
+        const BlockId material = shapedParent(block);
+        if (material != block) {
+            return blastResistance(material);
+        }
     }
     // Every facing and both lit states share one resistance, so the family is
     // answered once rather than as eight cases.
     if (isFurnace(block)) {
         return 3.5f;
     }
+    // Wooden, so the stone default at the bottom would be badly wrong.
+    if (isChest(block)) {
+        return 2.5f;
+    }
+    // Snow, which the stone default at the bottom would make blast-proof.
+    if (isSnowLayer(block)) {
+        return 0.1f;
+    }
+    // The second table run. Almost all of it is rock at 6; the exceptions are
+    // named and the rest falls through, which is what stops this needing an
+    // edit every time the run grows.
+    if (block >= kFirstExtraBlock2 && block <= kLastExtraBlock2) {
+        switch (block) {
+        case BlockId::Netherrack:
+        case BlockId::Sculk:
+            return 0.4f;
+        case BlockId::SoulSand:
+        case BlockId::SoulSoil:
+        case BlockId::Podzol:
+        case BlockId::Mycelium:
+            return 0.5f;
+        case BlockId::SlimeBlock:
+        case BlockId::DriedKelpBlock:
+        case BlockId::SnowBlock:
+        case BlockId::Azalea:
+        case BlockId::FloweringAzalea:
+            return 0.1f;
+        case BlockId::NetherWartBlock:
+        case BlockId::WarpedWartBlock:
+        case BlockId::Shroomlight:
+            return 1.0f;
+        case BlockId::Cactus:
+        case BlockId::Target:
+        case BlockId::OchreFroglight:
+        case BlockId::VerdantFroglight:
+        case BlockId::PearlescentFroglight:
+        case BlockId::CrimsonNylium:
+        case BlockId::WarpedNylium:
+            return 0.4f;
+        case BlockId::QuartzBlock:
+        case BlockId::SmoothQuartz:
+        case BlockId::ChiseledQuartz:
+        case BlockId::QuartzBricks:
+        case BlockId::QuartzPillar:
+            return 0.8f;
+        case BlockId::EndStone:
+        case BlockId::EndStoneBricks:
+            return 9.0f;
+        case BlockId::CrimsonStem:
+        case BlockId::WarpedStem:
+        case BlockId::MangroveLog:
+        case BlockId::BambooBlock:
+        case BlockId::CrimsonPlanks:
+        case BlockId::WarpedPlanks:
+        case BlockId::MangrovePlanks:
+        case BlockId::BambooPlanks:
+        case BlockId::BambooMosaic:
+        case BlockId::MuddyMangroveRoots:
+        case BlockId::BoneBlock:
+        case BlockId::PurpurPillar:
+            return 2.0f;
+        case BlockId::SculkCatalyst:
+            return 3.0f;
+        // The reference makes it blast-proof so a wither cannot open a vault.
+        case BlockId::ReinforcedDeepslate:
+            return 1200.0f;
+        default:
+            break;
+        }
+        return isConcretePowder(block) ? 0.5f : 6.0f;
+    }
     switch (block) {
     case BlockId::Air:
+        return 0.0f;
+    // A charge offers no resistance at all, which is what lets one blast set
+    // off a whole stack.
+    case BlockId::Tnt:
+    case BlockId::TntPrimed:
+    case BlockId::Fire:
         return 0.0f;
     case BlockId::Torch:
     case BlockId::TallGrass:
@@ -120,8 +206,9 @@ float blastResistance(BlockId block) {
         return 2.0f;
     case BlockId::CraftingTable:
         return 2.5f;
+    case BlockId::SmithingTable:
+        return 2.5f;
     case BlockId::Planks:
-    case BlockId::PlanksFence:
         return 3.0f;
     case BlockId::Glowstone:
         return 0.3f;
@@ -142,9 +229,16 @@ float blastResistance(BlockId block) {
     case BlockId::Obsidian:
         // 1200, and it is why obsidian is what you build a blast shelter from.
         return 1200.0f;
+    case BlockId::AncientDebris:
+    case BlockId::EmberiteBlock:
+        // The reference's 1200 as well. Blasting for it is a real technique
+        // there precisely because the blast cannot destroy what it uncovers.
+        return 1200.0f;
     case BlockId::Bedrock:
         return 3600.0f;
     case BlockId::PackedIce:
+    case BlockId::Ice:
+    case BlockId::BlueIce:
         return 0.5f;
     case BlockId::Terracotta:
         return 4.2f;

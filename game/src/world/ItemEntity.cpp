@@ -1,5 +1,7 @@
 #include "world/ItemEntity.hpp"
 
+#include "item/SpriteModel.hpp"
+
 #include "world/Collision.hpp"
 #include "world/Fluid.hpp"
 #include "world/World.hpp"
@@ -12,7 +14,11 @@ namespace game {
 namespace {
 
 constexpr float kGravity = 22.0f;
-constexpr float kHalfSize = 0.10f;
+/// Half a drop's extent. The reference renders one at a quarter of a block;
+/// ours is larger on purpose, because a dropped tool at that size is hard to
+/// pick out of grass. It is the collision box as well as the model, so the two
+/// cannot disagree about how big the thing is.
+constexpr float kHalfSize = 0.15f;
 constexpr float kTerminalVelocity = 24.0f;
 
 /// How fast a drop rises to the surface. Gentle on purpose - the reference's
@@ -209,23 +215,29 @@ void ItemEntities::reduce(std::size_t index, int taken) {
     }
 }
 
-engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds) const {
+engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
+                                         const SpriteMask& sprites) const {
     engine::MeshData mesh;
 
     for (const Drop& drop : m_drops) {
         if (drop.item == ItemId::None) {
             continue;
         }
-        // Anything that is not a block has no cube to build, so it draws as a
-        // sprite. Until spawn eggs arrived nothing ever tested this: a dropped
-        // pickaxe existed, fell, could be picked up and rendered **nothing at
-        // all**, which is a bug you can only see by throwing one on the floor.
+        // Anything without a cube to build is drawn from its sprite: every
+        // non-block item, and every plant. Until spawn eggs arrived nothing
+        // ever tested the first: a dropped pickaxe existed, fell, could be
+        // picked up and rendered **nothing at all**, which is a bug you can
+        // only see by throwing one on the floor.
         const bool blockLike = isBlockItem(drop.item);
-        const int spriteLayer = blockLike ? -1 : itemTextureLayer(drop.item);
-        if (!blockLike && spriteLayer < 0) {
+        const BlockId block = blockLike ? blockForItem(drop.item) : BlockId::Air;
+        const bool flat = !blockLike || usesFlatIcon(blockShape(block));
+        const int spriteLayer =
+            !flat ? -1
+                  : (blockLike ? static_cast<int>(blockTextureLayer(block, BlockFace::Side))
+                               : itemTextureLayer(drop.item));
+        if (flat && spriteLayer < 0) {
             continue;
         }
-        const BlockId block = blockLike ? blockForItem(drop.item) : BlockId::Air;
 
         const float bob = drop.onGround ? (std::sin(timeSeconds * kBobSpeed + drop.position.x) * 0.5f + 0.5f) * kBobHeight
                                         : 0.0f;
@@ -257,48 +269,27 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds) 
 
             for (int i = 0; i < 4; ++i) {
                 mesh.vertices.push_back(engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
-                                                       {sky, blockLight, shade, 1.0f},
+                                                       engine::packVertexColor(sky, blockLight, shade, 1.0f),
                                                        {uvs[i].x, uvs[i].y},
-                                                       blockLike ? blockTextureLayer(block, face)
-                                                                 : static_cast<float>(spriteLayer)});
+                                                       flat ? static_cast<float>(spriteLayer)
+                                                            : blockTextureLayer(block, face),
+                                                       engine::kVertexSurfaceDefault});
             }
             // Both windings: the cube spins, so either side can face the camera.
             mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
                                                      base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
         };
 
-        // A tool or a spawn egg is one flat sprite with a little thickness.
-        // Crossing two of them - which is what a plant does - made a dropped
-        // sword read as two swords passing through each other.
-        if (!blockLike) {
-            // **One texel of the sprite's own grid**, which is what the
-            // reference extrudes a dropped item by. It was 0.045, very nearly
-            // half the sprite's width, and two quads that far apart stopped
-            // looking like one object with depth and started looking like two
-            // swords side by side.
-            //
-            // `quad` emits both windings, so each face is already visible from
-            // behind; the pair is here for the thickness and the shading
-            // difference between front and back, not for visibility.
-            constexpr float kSpriteTexels = 16.0f;
-            const float halfDepth = kHalfSize / kSpriteTexels;
-            const glm::vec3 depth = forward * (halfDepth / kHalfSize);
-            quad(centre - right - up + depth, centre + right - up + depth, centre + right + up + depth,
-                 centre - right + up + depth, BlockFace::Side, 1.0f);
-            quad(centre - right - up - depth, centre + right - up - depth, centre + right + up - depth,
-                 centre - right + up - depth, BlockFace::Side, 0.82f);
-            continue;
-        }
-
-        // A plant is two crossed quads, the same shape it has once placed and
-        // the same reason the hotbar icon is flat: wrapping the artwork around a
-        // cube shows a box of grass rather than the thing you are holding.
-        if (blockShape(block) == BlockShape::Cross) {
-            constexpr float kSquare = 0.70710678f; // 1/sqrt(2), so the diagonal matches a cube face
-            const glm::vec3 a = (right + forward) * kSquare;
-            const glm::vec3 b = (right - forward) * kSquare;
-            quad(centre - a - up, centre + a - up, centre + a + up, centre - a + up, BlockFace::Side, 1.0f);
-            quad(centre - b - up, centre + b - up, centre + b + up, centre - b + up, BlockFace::Side, 1.0f);
+        // A tool, a spawn egg or a flower is its sprite made solid, built by
+        // `appendSpriteModel` - shared with thrown items, which have to look
+        // like the same object in the air as they do on the floor.
+        //
+        // **A plant takes the same path deliberately.** In the ground it is two
+        // crossed quads, which is the shape it grows in; lying on the floor it
+        // is one flower with real thickness, exactly like everything else that
+        // has been dropped.
+        if (flat) {
+            appendSpriteModel(mesh, sprites, spriteLayer, centre, right, up, forward, sky, blockLight);
             continue;
         }
 

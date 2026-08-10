@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world/Fluid.hpp"
+#include "world/Survival.hpp"
 
 #include <glm/glm.hpp>
 
@@ -36,6 +37,14 @@ constexpr float kStepHeight = 0.6f;
 constexpr float kWalkSpeed = 4.317f;
 constexpr float kSprintSpeed = 5.612f;
 constexpr float kSneakSpeed = 1.295f;
+
+/// What honey leaves you of your walking speed. The reference's own factor.
+constexpr float kStickySpeedScale = 0.4f;
+
+/// How much of an impact a slime block returns, and the speed below which it
+/// simply stops you - without a floor, resting on slime jitters for ever.
+constexpr float kSlimeBounce = 0.8f;
+constexpr float kBounceThreshold = 1.5f;
 constexpr float kFlySpeed = 11.0f;
 /// Flying with sprint held. Fast enough to cross terrain quickly, but opt-in
 /// rather than the default, which made ordinary flying uncontrollable.
@@ -48,11 +57,17 @@ constexpr float kFlyDeceleration = 26.0f;
 
 /// Walking ramps up and down too. Stopping is quicker than starting, so the
 /// player still feels planted rather than skating.
+///
+/// These are the **dry-land** figures. `SurfaceMotion` scales both, along with
+/// the top speed, by the slipperiness of whatever is underfoot, so ice is the
+/// same two numbers seen through one block property rather than a rule of its
+/// own. Ordinary ground scales by exactly 1.
 constexpr float kGroundAcceleration = 30.0f;
 constexpr float kGroundDeceleration = 42.0f;
 
 /// Mid-air steering is deliberately feeble, and air drag is close to nothing:
-/// that is what makes a jump commit to its arc instead of being flown.
+/// that is what makes a jump commit to its arc instead of being flown. It is
+/// also what carries a glide off the edge of an ice sheet.
 constexpr float kAirAcceleration = 9.0f;
 constexpr float kAirDeceleration = 2.0f;
 
@@ -105,9 +120,55 @@ struct Player {
     /// Seconds of breath left, counting down only while the eye is submerged.
     float air = fluid::kAirSeconds;
 
-    /// Counts on past empty, and every whole second of it is two health points
-    /// once there is player health to take them from.
+    /// Counts on past empty, and every whole second of it is two health points.
     float drowningSeconds = 0.0f;
+
+    // --- Survival. M21. `world/Survival.hpp` owns every constant behind these.
+
+    /// Half-hearts, 0 to 20. Zero is dead.
+    int health = survival::kMaxHealth;
+
+    /// The hunger bar, and the two numbers behind it that never appear on
+    /// screen. **Saturation is spent before food and is capped at the food
+    /// level**; exhaustion is an accumulator that costs a saturation point
+    /// every time it fills.
+    int food = survival::kMaxFood;
+    float saturation = 5.0f;
+    float exhaustion = 0.0f;
+
+    /// **The rule that makes melee survivable.** While this is running a blow
+    /// no larger than `lastDamage` is ignored and a larger one deals only the
+    /// difference - so a creature standing inside you cannot kill in a frame,
+    /// and damage is capped at two hits a second from any one source.
+    float invulnerableSeconds = 0.0f;
+    int lastDamage = 0;
+
+    /// Cosmetic, and deliberately shorter than the invulnerability so the two
+    /// are never mistaken for one another.
+    float hurtFlash = 0.0f;
+
+    /// How far it has dropped since it last stood on something. Fall damage is
+    /// **change in Y, not speed**, which is why this is a distance.
+    float fallDistance = 0.0f;
+
+    /// Cadences for the hazards that tick rather than land once, and the
+    /// counters that heal and starve. Separate timers because they run at
+    /// different rates and one shared counter would make them interfere.
+    float hazardTimer = 0.0f;
+    float burnTimer = 0.0f;
+    float burningSeconds = 0.0f;
+    float regenTimer = 0.0f;
+    float starveTimer = 0.0f;
+
+    /// How long the meal in hand has been going. Reset the moment the button
+    /// comes up or the stack changes.
+    float eatingSeconds = 0.0f;
+
+    /// How long it has been dead. The world keeps running underneath, which is
+    /// what lets the body settle before the screen takes over.
+    float deathSeconds = 0.0f;
+
+    bool alive() const { return health > 0; }
 
     float eyeOffset = player_constants::kEyeHeight;
 
@@ -147,6 +208,10 @@ struct PlayerInput {
     /// looking down cannot drive you into the ground, and this is what puts the
     /// pitch back for the one case that wants it.
     float lookY = 0.0f;
+    /// Creative. Nothing hurts and nothing is spent - and it arrives here
+    /// rather than being read from the settings, because the physics has no
+    /// business knowing what a game mode is.
+    bool invulnerable = false;
 };
 
 /// Advances the player by one frame against the world.
@@ -155,6 +220,24 @@ struct PlayerInput {
 /// internally, because a long stall must not let the player move far enough in
 /// one step to pass straight through a wall.
 void updatePlayer(Player& player, const PlayerInput& input, const World& world, float deltaSeconds);
+
+/// **The one way the player takes damage**, and the only place the half-second
+/// invulnerability window is applied.
+///
+/// Returns whether anything actually landed. `bypassInvulnerability` is for the
+/// handful of sources the reference exempts - starvation and the void - which
+/// are not blows and must not be shrugged off by having just taken one.
+bool damagePlayer(Player& player, int amount, bool bypassInvulnerability = false);
+
+void healPlayer(Player& player, int amount);
+
+/// Eats one of something. Saturation is clamped to the food bar on the way in,
+/// which is what stops a rich meal on an empty stomach banking more than it
+/// should.
+void feedPlayer(Player& player, const survival::FoodValue& value);
+
+/// Puts the player back on their feet with everything reset.
+void respawnPlayer(Player& player, const glm::vec3& at);
 
 /// True if a block at these coordinates would intersect the player's box.
 /// Placing there would seal the player inside solid geometry.

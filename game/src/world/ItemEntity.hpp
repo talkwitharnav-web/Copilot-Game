@@ -1,6 +1,7 @@
 #pragma once
 
 #include "item/Item.hpp"
+#include "item/SpriteMask.hpp"
 
 #include <engine/render/MeshData.hpp>
 
@@ -46,7 +47,10 @@ public:
     /// drawn with an identity model matrix - the shader recovers its normals
     /// from screen-space derivatives of world position, which only holds while
     /// vertex positions *are* world positions.
-    engine::MeshData buildMesh(const World& world, float timeSeconds) const;
+    ///
+    /// `sprites` is the silhouette of every item sprite, which is what turns a
+    /// dropped tool from two flat faces into a solid shape.
+    engine::MeshData buildMesh(const World& world, float timeSeconds, const SpriteMask& sprites) const;
 
     std::size_t count() const { return m_drops.size(); }
 

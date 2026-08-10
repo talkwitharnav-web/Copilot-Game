@@ -330,7 +330,7 @@ Bounded, but still surfaces errors — do not filter on words like `error`, beca
 
 Final numbers, as a template for the next creature. One texel is 1/16 of a block.
 
-**Sheet** — the shared `assets/textures/creatures.png` is **128×3552**, and `kCreatureSheetWidth`/`Height` in `Creature.hpp` is the single owner of that number. The sheep still occupies its original first two 64×32 regions: row 0 bare hide and row 32 fleece shell. Selected by texture layer `-3.0`, following the same negative-layer convention the HUD (`-1`) and font (`-2`) use.
+**Sheet** — the shared `assets/textures/creatures.png` is **128×3680**, and `kCreatureSheetWidth`/`Height` in `Creature.hpp` is the single owner of that number. The sheep still occupies its original first two 64×32 regions: row 0 bare hide and row 32 fleece shell. Selected by texture layer `-3.0`, following the same negative-layer convention the HUD (`-1`) and font (`-2`) use.
 
 **The last 32 rows (1856–1887) are not a species.** They hold the charged Bramble's energy shell — the reference's `creeper_armor` overlay, on the *same net as the Bramble itself* so the same box UVs read it, mostly transparent so only the blue survives the cutout test. `kCreatureSheetWidth/Height` in `Creature.hpp` is the single owner of the size, and `Main.cpp` checks the PNG header against it, because a sheet of the wrong height does not fail — it slides every UV and mistextures the whole roster in silence.
 

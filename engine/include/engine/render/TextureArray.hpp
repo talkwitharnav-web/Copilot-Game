@@ -36,6 +36,14 @@ public:
     VkImageView view() const { return m_view; }
     VkSampler sampler() const { return m_sampler; }
     std::uint32_t layerCount() const { return m_layerCount; }
+    std::uint32_t width() const { return m_width; }
+    std::uint32_t height() const { return m_height; }
+
+    /// Alpha of one texel, kept from the load so a caller can build geometry
+    /// from a sprite's silhouette without decoding the file a second time. Out
+    /// of range reads answer zero, so walking off the edge of an image needs no
+    /// bounds test of its own.
+    std::uint8_t alphaAt(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const;
 
 private:
     void generateMipmaps(VkCommandBuffer commandBuffer);
@@ -51,6 +59,10 @@ private:
     std::uint32_t m_height = 0;
     std::uint32_t m_layerCount = 0;
     std::uint32_t m_mipLevels = 1;
+
+    /// One byte per texel per layer. Roughly 46 KB for the current sheet, and
+    /// the alternative is decoding the same PNGs again elsewhere.
+    std::vector<std::uint8_t> m_alpha;
 };
 
 } // namespace engine

@@ -7,6 +7,8 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace game::hud {
@@ -21,13 +23,36 @@ constexpr float kHudLayer = -1.0f;
 /// it has to follow the image. It lives here rather than in each screen because
 /// the sheet grows whenever a panel is added, and a stale copy silently skews
 /// every sprite that reads from it.
-constexpr glm::vec2 kSheetSize{185.0f, 773.0f};
+constexpr glm::vec2 kSheetSize{185.0f, 1355.0f};
 
 /// Layer value selecting the font atlas.
 constexpr float kFontLayer = -2.0f;
 
-/// Width of a character relative to its height, from the font atlas cell shape.
-constexpr float kFontAspect = 8.0f / 14.0f;
+/// The font atlas is a 16x16 grid of square cells in which **the cell index is
+/// the codepoint**, which is the reference's own `ascii.png` layout - so its
+/// file is a drop-in replacement for ours and one set of constants serves both.
+constexpr glm::vec2 kFontSheetSize{128.0f, 128.0f};
+constexpr float kFontCell = 8.0f;
+constexpr int kFontColumns = 16;
+
+/// How far the shadow sits behind the glyph, in cell texels, how much of the
+/// colour it keeps, and how far back in depth it goes. The first two are the
+/// reference's: one texel down and right, at a quarter brightness. The third is
+/// ours, and only has to be small enough to stay inside the caller's depth band.
+constexpr float kFontShadowOffset = 1.0f;
+constexpr float kFontShadowTint = 0.25f;
+constexpr float kFontShadowDepth = 0.00002f;
+
+/// Teaches the text routines how wide each glyph actually is, in cell texels.
+///
+/// **Measured from the atlas that loaded, never written down.** A variable
+/// width font's advances are a property of its artwork, and a second copy of
+/// them is exactly the bug this project keeps paying for. Called once at
+/// startup; until it is, everything is treated as monospace.
+void setFontAdvances(const std::array<std::uint8_t, 128>& advances);
+
+/// Advance of one character, in cell texels.
+float fontAdvance(char c);
 
 /// Screen-space quad centred on (centreX, centreY).
 ///
@@ -61,8 +86,13 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
 
 /// Draws a string from the font atlas, left-aligned and vertically centred on
 /// `centreY`. Returns the width consumed.
+///
+/// `shadow` draws the whole string again a texel down and right at a quarter
+/// brightness, behind. It is most of what makes text read as the reference's
+/// rather than as a label pasted on the screen, and it costs one extra quad per
+/// character.
 float appendText(engine::MeshData& mesh, std::string_view text, float leftX, float centreY, float charHeight,
-                 float depth, const glm::vec4& color);
+                 float depth, const glm::vec4& color, bool shadow = false);
 
 /// Draws what a slot holds: the item's icon, and a count where there is more
 /// than one.

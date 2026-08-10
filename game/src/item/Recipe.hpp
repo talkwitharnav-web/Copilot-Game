@@ -4,9 +4,12 @@
 
 #include <array>
 #include <cstddef>
+#include <unordered_set>
 #include <vector>
 
 namespace game {
+
+class Inventory;
 
 /// The largest grid any recipe is matched against. The player's own grid is
 /// 2x2; a crafting table will raise this to 3x3 without the matcher changing.
@@ -77,5 +80,25 @@ ItemStack craftResult(const ItemStack* slots, int size);
 /// Separate from `craftResult` because the result has to be shown before it is
 /// taken: the player sees what a grid would make, then decides to take it.
 void consumeIngredients(ItemStack* slots, int size);
+
+/// Everything the inventory could make right now on a grid this wide.
+///
+/// **Shape is ignored entirely** - this is the other of the two questions in
+/// `INTERFACE.md` §4.1: whether you *have* nine cobblestone has nothing to do
+/// with where they go. `gridSize` still matters, because a 3x3 recipe is not
+/// craftable while you are standing at the inventory's own 2x2.
+///
+/// Answered for the whole table at once rather than per item, because the
+/// catalogue asks about 126 cells every frame a screen is open.
+std::unordered_set<ItemId> craftableItems(const Inventory& inventory, int gridSize);
+
+/// What a smithing table makes of a tool and a material, or nothing.
+///
+/// **Its own table, not a recipe**, which is what the reference does too: an
+/// upgrade keeps the item it is given rather than consuming it into something
+/// unrelated, so it can never be expressed as a grid pattern. Ours is the
+/// diamond tools against an Emberite ingot; the reference also needs a template
+/// item, which we have no source for.
+ItemStack smithingResult(const ItemStack& base, const ItemStack& addition);
 
 } // namespace game

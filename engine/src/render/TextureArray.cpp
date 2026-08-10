@@ -159,7 +159,7 @@ TextureArray::TextureArray(const VulkanContext& context, VkCommandPool commandPo
     allocInfo.memoryTypeIndex =
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (vkAllocateMemory(context.device(), &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
+    if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
         vkDestroyImage(context.device(), m_image, nullptr);
         m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for texture array");
@@ -177,6 +177,14 @@ TextureArray::TextureArray(const VulkanContext& context, VkCommandPool commandPo
         std::copy_n(images[layer]->pixels(), layerBytes, combined.begin() + static_cast<std::ptrdiff_t>(layer * layerBytes));
     }
     staging.writeFromHost(combined.data(), combined.size());
+
+    // Kept before the decoded images go out of scope. The pixels themselves are
+    // not worth holding, but the shape they cut out is: it is what lets a
+    // caller extrude a sprite into geometry rather than draw it on a card.
+    m_alpha.resize(static_cast<std::size_t>(m_width) * m_height * m_layerCount);
+    for (std::size_t texel = 0; texel < m_alpha.size(); ++texel) {
+        m_alpha[texel] = combined[texel * kChannels + 3];
+    }
 
     const ScopedCommandBuffer upload(context.device(), commandPool);
 
@@ -300,9 +308,14 @@ TextureArray::~TextureArray() {
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
     }
-    if (m_memory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_context.device(), m_memory, nullptr);
+    freeDeviceMemory(m_context.device(), m_memory);
+}
+
+std::uint8_t TextureArray::alphaAt(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const {
+    if (layer >= m_layerCount || x >= m_width || y >= m_height) {
+        return 0;
     }
+    return m_alpha[(static_cast<std::size_t>(layer) * m_height + y) * m_width + x];
 }
 
 } // namespace engine

@@ -17,15 +17,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace game {
-
-/// How tall the world is, in chunks. Terrain never reaches the top, so the
-/// upper chunks exist purely as building room.
-constexpr int kWorldHeightChunks = 3;
 
 /// Fallback render distance when nothing else specifies one.
 constexpr int kDefaultVisibleRadiusChunks = 5;
@@ -73,6 +70,32 @@ public:
     BlockId blockAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
 
+    /// Whether fire may exist in this cell: something flammable beside it, or a
+    /// floor under it. **Shared by lighting one and by keeping one alive** - the
+    /// two used to disagree, and the placement half demanded solid ground where
+    /// the tick half accepted fuel, so a fire could burn where it could not be
+    /// lit.
+    bool fireCanSurvive(int x, int y, int z) const;
+
+    /// Whether this cell also holds water. Anything asking "am I in water?"
+    /// has to ask this too, or a swimmer drowns in a patch of seagrass.
+    bool waterloggedAt(int x, int y, int z) const;
+
+    /// The other half of a double chest, or nothing if this one stands alone.
+    ///
+    /// **Worked out from position alone, never remembered.** A stored pairing
+    /// would have to go into the save, survive a reload and be repaired every
+    /// time a neighbour was placed or broken; deriving it costs a short walk and
+    /// cannot disagree with itself, because both halves run this same function.
+    /// The price is one named divergence: a long row re-pairs when a chest in
+    /// the middle of it is removed.
+    std::optional<glm::ivec3> chestPartnerAt(const glm::ivec3& at) const;
+
+    /// Which half of a double chest this is, seen from the front. What the
+    /// mesher needs, and derived from the same walk as the pairing so the
+    /// texture and the screen can never disagree about which half is which.
+    ChestHalf chestHalfAt(const glm::ivec3& at) const;
+
     /// Whether the whole vertical column at a block position is resident.
     /// Anything that falls under gravity must ask this first: an absent chunk
     /// reads as air, so a creature over one drops straight through the world.
@@ -94,6 +117,29 @@ public:
     /// exist - the owning loop turns these into drops, exactly as it does for a
     /// plant left hanging when you mine the block under it.
     std::vector<WashedBlock> takeWashedBlocks();
+
+    /// Sand and gravel that just lost its footing, already removed from the
+    /// grid. The caller turns each into a falling entity; `World` cannot,
+    /// because it has no idea entities exist.
+    std::vector<WashedBlock> takeDetachedBlocks();
+
+    /// Starts a charge's fuse. The block must already be `TntPrimed`; this only
+    /// schedules when it goes off.
+    void primeTnt(const glm::ivec3& at);
+
+    /// Whether it is currently precipitating overhead.
+    ///
+    /// Plain data rather than a handle on the weather: the fire update needs to
+    /// know one bit, and a fire under an open sky goes out in the rain. Without
+    /// this, the first bolt of a storm could burn a forest down permanently -
+    /// the reference lights those fires *and* puts them out.
+    void setPrecipitating(bool precipitating) { m_precipitating = precipitating; }
+
+    /// Charges that reached the end of their fuse this frame. Drained by the
+    /// caller and turned into blasts there, because `World` reads blocks and
+    /// knows nothing about drops, creatures or damage - the same hand-off
+    /// `takeDetachedBlocks` already uses.
+    std::vector<glm::ivec3> takeDetonations();
 
     void setBlock(int x, int y, int z, BlockId block);
 
@@ -261,6 +307,31 @@ private:
     /// runs until something disturbs them.
     void updateFluids(const BudgetCheck& budgetSpent);
     void scheduleFluidUpdate(int x, int y, int z);
+
+    /// The same for lava, on its own queue because it runs six times slower.
+    /// One queue holding both would no longer be in due order, and the drain
+    /// loop's "the front one is not ready so none of them is" shortcut - which
+    /// is what keeps it O(ready) rather than O(queued) - depends on that.
+    void updateLava(const BudgetCheck& budgetSpent);
+    void scheduleLavaUpdate(int x, int y, int z);
+
+    /// Fire, on its own cadence again. It both spreads and dies out, so unlike
+    /// the fluids it reschedules itself rather than waiting for an edit nearby.
+    void updateFire(const BudgetCheck& budgetSpent);
+    void scheduleFireUpdate(int x, int y, int z);
+
+    /// The reference's fluid mixing. Returns true when the cell was consumed,
+    /// so the caller stops treating it as lava.
+    bool coolLava(const glm::ivec3& p, BlockId lava);
+
+    /// Drops sand and gravel that has nothing under it, one block per step.
+    ///
+    /// Stepwise rather than a falling entity, which is what the reference uses.
+    /// An entity buys a smooth animation and costs a whole spawn/land/merge
+    /// path; a scheduled move down one block reuses the queue that is already
+    /// here and cannot leave anything in mid-air.
+    void updateFalls(const BudgetCheck& budgetSpent);
+    void scheduleFallUpdate(int x, int y, int z);
     /// A cell water may occupy, one it may still drain downward out of, and
     /// whether it spreads sideways at all. **The last two are different
     /// questions**: a cell resting on water can neither drain nor pool.
@@ -327,11 +398,35 @@ private:
     struct PendingFluid {
         glm::ivec3 position;
         std::chrono::steady_clock::time_point due;
+        /// Only a lit charge uses this: how many blinks are left before it goes.
+        int blinks = 0;
     };
     std::deque<PendingFluid> m_fluidUpdates;
 
+    /// Lava's own, drained on its own slower cadence.
+    std::deque<PendingFluid> m_lavaUpdates;
+
+    /// Lit charges, and the cells that finished counting down this frame.
+    std::deque<PendingFluid> m_tntFuses;
+    std::vector<glm::ivec3> m_detonations;
+    void updateTnt(const BudgetCheck& budgetSpent);
+
+    /// Burning cells due for another look.
+    std::deque<PendingFluid> m_fireUpdates;    /// Fire's own randomness. Kept here rather than taken from a shared
+    /// generator so a burning forest cannot perturb worldgen or spawning.
+    std::uint32_t m_fireRandom = 0x9E3779B9u;
+
+    /// Whether the sky is currently dropping something. Read only by the fire
+    /// update.
+    bool m_precipitating = false;
+    /// Sand and gravel that may have lost its footing, on the same pacing.
+    std::deque<PendingFluid> m_fallUpdates;
+
     /// Plants a flow destroyed this frame, waiting to be turned into drops.
     std::vector<WashedBlock> m_washedBlocks;
+
+    /// Blocks that started falling this frame, waiting to become entities.
+    std::vector<WashedBlock> m_detachedBlocks;
 
     ChunkCoord m_centre{0, 0, 0};
     bool m_hasCentre = false;

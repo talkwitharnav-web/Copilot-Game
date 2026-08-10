@@ -25,7 +25,7 @@ class World;
 /// `tools/make-creature-skins.ps1` owns the file; this is the one place the
 /// number is written down in code, and `Main.cpp` checks the PNG against it.
 constexpr int kCreatureSheetWidth = 128;
-constexpr int kCreatureSheetHeight = 3552;
+constexpr int kCreatureSheetHeight = 3680;
 
 /// Which animal this is.
 enum class CreatureKind : std::uint8_t {
@@ -111,6 +111,9 @@ enum class CreatureKind : std::uint8_t {
     MagmaCubeSmall,
     MagmaCubeMedium,
     MagmaCubeLarge,
+    /// The first thing here that flies. *Bee* is an ordinary English word for a
+    /// real animal, so it keeps its name.
+    Bee,
     Count,
 };
 
@@ -122,12 +125,67 @@ enum class CreatureKind : std::uint8_t {
 /// table rather than three branches inside one function - the producers never
 /// know who consumes what they wrote, and the consumers never know who wrote it.
 ///
-/// There is exactly one thing worth attacking so far. When creatures fight each
-/// other this becomes an index into the population.
+/// `Creature` names another animal, and *which* one is `Creature::targetId`
+/// rather than an index: the population is a vector that retires by swapping
+/// the last element down, so an index goes stale the moment anything dies.
 enum class CreatureTarget : std::uint8_t {
     None,
     Player,
+    Creature,
 };
+
+/// What a species *is*, as a bitmask, so that anything reacting to it asks for a
+/// property rather than naming a list of kinds.
+///
+/// The same reasoning as `BiomeTag`, and it exists for the same reason: a wolf
+/// hunts sheep, rabbits, foxes and the skeleton family, and a villager runs from
+/// six kinds of undead. Written as lists of names, every one of those rows would
+/// have to be revisited each time the roster grew, and forgetting one would be
+/// silent. Written as tags, a new species inherits every rule it qualifies for
+/// the moment it declares what it is.
+///
+/// Deliberately narrow families rather than broad ones: the reference names
+/// entity types outright, so a tag that lumps two kinds together buys a
+/// divergence. `Grazer` is the sheep alone because a wolf hunts sheep and not
+/// cows, and that is the whole reason `Livestock` is not a tag.
+enum class CreatureTag : std::uint32_t {
+    None = 0,
+    /// Rotting humanoids. What a villager runs from.
+    Undead = 1u << 0,
+    /// The bone family. What a wolf hunts and what runs from a wolf in turn.
+    Skeletal = 1u << 1,
+    /// Cat and ocelot. What a Bramble runs from.
+    Feline = 1u << 2,
+    Canine = 1u << 3,
+    Ursine = 1u << 4,
+    /// The sheep alone - a wolf hunts sheep and leaves cattle be.
+    Grazer = 1u << 5,
+    /// The rabbit alone.
+    Critter = 1u << 6,
+    /// The chicken alone.
+    Fowl = 1u << 7,
+    Vulpine = 1u << 8,
+    /// Anything a fox would take out of the water.
+    Fish = 1u << 9,
+    /// Villager and wandering trader.
+    Trader = 1u << 10,
+};
+
+constexpr std::uint32_t operator|(CreatureTag a, CreatureTag b) {
+    return static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b);
+}
+constexpr std::uint32_t operator|(std::uint32_t a, CreatureTag b) {
+    return a | static_cast<std::uint32_t>(b);
+}
+/// One tag as a mask. `operator|` already covers two or more.
+constexpr std::uint32_t tagMask(CreatureTag t) {
+    return static_cast<std::uint32_t>(t);
+}
+
+/// Which families a species belongs to. One switch rather than a column on all
+/// fifty-seven rows, because the great majority belong to none of them - and a
+/// grouped `case` list reads as the family it is naming.
+std::uint32_t creatureTags(CreatureKind kind);
 
 /// Everything that varies between species, one row each.
 ///
@@ -240,10 +298,45 @@ struct CreatureSpecies {
     float swellStartRange = 2.5f;
     float swellStopRange = 6.0f;
 
-    /// Runs from cats and ocelots inside this, or zero to ignore them. The
-    /// reference's `avoid_mob_type`, narrowed to the one pairing that exists
-    /// here - and it is the whole reason a cat is worth keeping around.
-    float avoidFelineRange = 0.0f;
+    /// Which families it runs from, and from how far. The reference's
+    /// `avoid_mob_type`, whose per-entry `max_dist` is what this range is - not
+    /// the goal-level one, which is a different field with a different default
+    /// on the same page.
+    ///
+    /// Zero range means it runs from nothing, whatever the mask says.
+    std::uint32_t avoids = 0;
+    float avoidRange = 0.0f;
+    /// And whether the player is one of the things it runs from. Separate
+    /// because the player is not a `CreatureKind` and never will be. The
+    /// reference gives a rabbit a *shorter* range for the player than for a
+    /// wolf, so this carries its own.
+    float avoidPlayerRange = 0.0f;
+
+    /// Which families it hunts on sight, or zero for none. This is the whole of
+    /// creature-versus-creature aggression: the row says what it eats and the
+    /// behaviour table works out the rest, exactly as `hostile` does for the
+    /// player.
+    ///
+    /// **It never targets its own kind**, which is checked rather than encoded,
+    /// so a fox tagged `Vulpine` may still hunt `Critter` without hunting foxes.
+    std::uint32_t hunts = 0;
+
+    /// Whether being struck makes it fight back rather than bolt.
+    ///
+    /// Until creatures hunted each other, "can it bite" and "will it fight you"
+    /// were the same question and `attackDamage > 0` answered both. A cat is
+    /// the case that separates them: it kills rabbits and it runs from *you*,
+    /// so it needs a bite and no willingness to use it on a player. The
+    /// reference says the same thing by simply not giving it a `hurt_by_target`
+    /// goal.
+    ///
+    /// True by default, so every row written before this existed is unchanged.
+    bool retaliates = true;
+
+    /// Stops to eat the ground. Bedrock's `behavior.eat_block`, which on the
+    /// shipped roster is the **sheep alone** - it is what regrows a shorn
+    /// fleece there, and it is why a flock leaves bare dirt behind it.
+    bool grazes = false;
 
     /// How high a rise it simply walks up, and how high it can jump when one is
     /// taller than that. **These are two different mechanisms and the reference
@@ -308,6 +401,16 @@ struct CreatureSpecies {
     /// this roster wants them apart. **It is not `amphibious`** - that is a
     /// walker that copes underwater, and this is something that cannot walk.
     bool swims = false;
+
+    /// Flies, and is the airborne mirror of `swims`: no gravity, a heading in
+    /// three dimensions, and no pathfinder because there are no floors to plan
+    /// across. The two are deliberately **separate flags rather than one
+    /// "moves in 3D"**, because everything else about them differs - a swimmer
+    /// is confined to water and suffocates outside it, a flier is confined to
+    /// air and is perfectly happy to land.
+    ///
+    /// It does not imply `walksOnLand = false`: a bee settles on a flower.
+    bool flies = false;
 
     /// Bedrock's `breathable.breathes_air`. False is a fish: out of water it
     /// runs the same fifteen-second supply down and then suffocates, which is
@@ -420,10 +523,14 @@ struct CreatureSpecies {
     /// while closing on something than while going anywhere else. The skeleton
     /// family and the Bramble sprint the last stretch; a zombie does not.
     float chaseSpeedScale = 1.0f;
-    /// And `panic.speed_multiplier`. Expressed against the roster rather than
-    /// against the reference's own stroll speed, so only the rows that
-    /// genuinely stand out move - a fleeing villager is slower than it walks,
-    /// a rabbit is far faster.
+    /// And `panic.speed_multiplier` - but **in our unit, which multiplies
+    /// `runSpeed`.** The reference's is not interchangeable with it: a Bedrock
+    /// mob has a single `movement` speed and scales that, while we author walk
+    /// and run separately, so `runSpeed` already means "in earnest". A value
+    /// below 1.0 here therefore says "flee slower than you run", which lands
+    /// within a whisker of a stroll and reads as not fleeing at all. Copying
+    /// the reference's 0.6 straight in is exactly that mistake, and it shipped
+    /// on both humanoids until a playtest caught a struck trader ambling away.
     float panicSpeedScale = 1.0f;
 
     /// Whether a blow from this species swings its arms.
@@ -440,6 +547,13 @@ struct CreatureSpecies {
     /// the rows that want this are the handful that opt in rather than the
     /// majority that would have to remember to opt out.
     bool swingsArms = false;
+
+    /// Fights at a distance instead of closing. **The other half of the same
+    /// split `swingsArms` names**: the skeleton family were archers with
+    /// nothing to shoot, so they were given contact damage as a stopgap and
+    /// told not to mime a swing. This is the real thing, and it replaces that
+    /// stopgap rather than adding to it - an archer does not also punch.
+    bool shootsArrows = false;
 };
 
 const CreatureSpecies& speciesInfo(CreatureKind kind);
@@ -463,6 +577,13 @@ constexpr CreatureKind creatureForSpawnEgg(ItemId item) {
 /// a species is called, and returns a stable pointer so the tooltip can hold it.
 const char* spawnEggName(ItemId item);
 
+/// What to call an item on screen. **Use this rather than `itemDisplayName`** -
+/// that one lives in `Item.hpp`, which cannot see the creature roster, so it
+/// answers plain "Spawn Egg" for all fifty-six of them.
+inline const char* displayNameOf(ItemId item) {
+    return isSpawnEgg(item) ? spawnEggName(item) : itemDisplayName(item);
+}
+
 /// Whether this species will spawn in that region.
 bool spawnsIn(CreatureKind kind, BiomeId biome);
 
@@ -485,6 +606,39 @@ struct CreatureExplosion {
     float power = 0.0f;
 };
 
+/// A blow one creature landed on another this tick.
+///
+/// Collected and applied after the update loop has finished walking the
+/// population, for the same reason every other hand-off here exists: the loop
+/// holds a reference into the vector it would otherwise be writing to, and a
+/// behaviour that mutates its neighbour mid-walk leaves half the population
+/// reading this tick and half reading the last one.
+struct CreatureHit {
+    std::uint32_t targetId = 0;
+    std::uint32_t fromId = 0;
+    int damage = 0;
+    glm::vec3 push{0.0f};
+};
+
+/// A noise a creature made this tick, for whoever owns the speakers.
+///
+/// Handed over rather than played, for the same reason loot is handed over
+/// rather than spawned: `Creatures` has no idea audio exists, and the loop that
+/// owns it does.
+enum class CreatureSound : std::uint8_t {
+    Idle,
+    Hurt,
+    Death,
+};
+
+struct CreatureVoiceEvent {
+    CreatureKind kind = CreatureKind::Sheep;
+    CreatureSound sound = CreatureSound::Idle;
+    glm::vec3 at{0.0f};
+    /// Carried so a baby can be pitched up from the adult's own recording.
+    float scale = 1.0f;
+};
+
 /// A living thing in the world.
 ///
 /// The **general entity** dropped items deliberately were not: it has size, so
@@ -493,10 +647,31 @@ struct CreatureExplosion {
 struct Creature {
     CreatureKind kind = CreatureKind::Sheep;
 
+    /// Stable for this creature's whole life, and **never an index**: the
+    /// population retires by swapping the last element down over the hole, so
+    /// an index names a different animal the moment anything dies. Zero is
+    /// "nobody", which is why the counter starts at one.
+    std::uint32_t id = 0;
+
     /// What it is trying to attack right now. Recomputed from scratch every
     /// tick, so it can never go stale: a producer that stops running stops
     /// asserting the target, and the consumers simply find nothing there.
     CreatureTarget target = CreatureTarget::None;
+    /// Which creature, when `target` names one. Unlike `target` this **does**
+    /// persist between ticks, because it is the memory that lets a chase
+    /// survive a moment out of sight - the same job `forgetTimer` does for the
+    /// player.
+    std::uint32_t targetId = 0;
+
+    /// Who last hurt it. Zero means the player, which is the common case and
+    /// the one the whole grudge system was built around. Only meaningful while
+    /// `provokedTimer` is running.
+    std::uint32_t threatId = 0;
+
+    /// Counts down the 1.8 s of a graze. The reference's `time_until_eat`, and
+    /// the block is taken when it reaches zero rather than when it starts, so
+    /// interrupting a sheep costs it the mouthful.
+    float eatTimer = 0.0f;
 
     /// Centre of the feet, matching the player, so standing on a surface is the
     /// same arithmetic for both.
@@ -698,12 +873,18 @@ struct Creature {
     int health = 6;
     /// Brief flash after being struck.
     float hurtTimer = 0.0f;
+    /// How long it has been dead, in seconds. `health <= 0` is what starts it
+    /// running; the body tips over onto its side while it counts, and is
+    /// retired by `manage` once it is done. Alive creatures leave it at zero.
+    float deathTimer = 0.0f;
     /// Stops a hostile landing a blow every frame it is touching you.
     float attackTimer = 0.0f;
     /// Time left in the arm swing of a blow that has just landed. Far shorter
     /// than `attackTimer`, because the arm is moving for well under a third of
     /// the cycle and rests visibly in between.
     float swingTimer = 0.0f;
+    /// Seconds until this archer may loose again.
+    float shootTimer = 0.0f;
 
     /// This individual's size against its species. One for an adult; a baby is
     /// smaller, and it multiplies the collision box as well as the model, so a
@@ -752,6 +933,53 @@ public:
     /// most of its time failing to find a spot.
     void manage(const World& world, const glm::vec3& playerFeet, float deltaSeconds, bool night);
 
+    /// What a killed creature left behind, waiting to be turned into drops.
+    ///
+    /// Handed over rather than spawned here, for the same reason `World` hands
+    /// over the blocks a flow swept aside: `Creatures` has no idea dropped
+    /// items exist, and the loop that owns them does.
+    struct Loot {
+        glm::vec3 position;
+        ItemId item;
+        int count;
+    };
+    std::vector<Loot> takeLoot();
+
+    /// An arrow an archer has just loosed, waiting to be turned into a
+    /// projectile.
+    ///
+    /// Handed over rather than fired here, for the same reason `takeLoot` hands
+    /// drops over and `World` hands over the blocks a flow swept aside:
+    /// `Creatures` has no idea projectiles exist, and the loop that owns them
+    /// does.
+    struct Launch {
+        glm::vec3 origin;
+        /// Blocks per tick, already carrying the archer's spread.
+        glm::vec3 velocity;
+    };
+    std::vector<Launch> takeLaunches();
+
+    /// A block a grazing animal has just eaten, waiting for the owner of the
+    /// world to actually remove it.
+    ///
+    /// Handed over rather than done here for the hardest of the reasons in this
+    /// file: **only the main thread may mutate the world**, and `Creatures`
+    /// reads it and never writes it. Same arrangement as `takeLoot`,
+    /// `takeLaunches` and the blast list.
+    std::vector<glm::ivec3> takeGrazed();
+
+    /// Every noise the population made this tick.
+    std::vector<CreatureVoiceEvent> takeVoices();
+
+    /// How far creatures live, appear and are retired, in blocks.
+    /// **Follows the render distance rather than a number of its own.** A fixed
+    /// 90 m meant an animal blinked out well inside the world you could see,
+    /// which is the one place the illusion is easiest to break. Safe to change
+    /// mid-session: the next `manage` places or retires the difference, and the
+    /// population cap scales with the *area* so a wider world is not a thinner
+    /// one.
+    void setActiveRadius(float blocks);
+
     /// Strikes the first creature the aim ray reaches. Returns true if one was
     /// hit, so the caller can spend a swing on it instead of the block behind.
     bool strike(const glm::vec3& eye, const glm::vec3& forward, float reach, int damage);
@@ -766,10 +994,28 @@ public:
     /// caught in a blast still splits.
     int applyExplosion(const World& world, const glm::vec3& centre, float power);
 
+    /// Damages everything a lightning bolt lands on, and **charges a Bramble**.
+    /// Returns how many were hit.
+    ///
+    /// The reference's box rather than a radius, and the same one the player is
+    /// judged against, so a bolt cannot hit you and spare the animal beside you.
+    /// A charged Bramble is *supposed* to come from a storm; until there was
+    /// weather, a share of them spawned that way instead.
+    int applyLightning(const glm::vec3& at);
+
     /// Whether a creature stands in the way of the aim ray. Asked every frame,
     /// where `strike` only lands once a swing is ready - the block behind a
     /// creature must stay protected during the swing's cooldown too.
     bool aimedAt(const glm::vec3& eye, const glm::vec3& forward, float reach) const;
+
+    /// No creature, for `findMilkable`. A sentinel rather than an optional
+    /// because every other index here is a plain `size_t` into the same list.
+    static constexpr std::size_t kNoCreature = static_cast<std::size_t>(-1);
+
+    /// The cow this ray hits, or `kNoCreature`. Milk comes from an animal
+    /// rather than a block, so the bucket has to ask the roster before it asks
+    /// the world.
+    std::size_t findMilkable(const glm::vec3& eye, const glm::vec3& forward, float reach) const;
 
     /// Built fresh each frame, for the same reason dropped items are: world
     /// meshes are drawn with an identity model matrix, so vertex positions have
@@ -822,16 +1068,29 @@ private:
     /// Pushes overlapping creatures apart horizontally. Soft, so it never
     /// fights the world collision that runs before it.
     void separate(const World& world, float deltaSeconds);
+    /// Lands every creature-on-creature blow collected this tick.
+    void applyHits();
+    /// **The one way a creature enters the population**, and the only place an
+    /// id is handed out. There were five creation sites and two of them were
+    /// patched by hand when ids arrived, which left everything spawned by the
+    /// world itself carrying id 0 - so a wolf could never be named as anything's
+    /// threat. Routing all five through here makes that impossible rather than
+    /// remembered.
+    void add(Creature creature);
     /// Rouses the struck creature's own kind nearby: fighters join in, prey
     /// bolts with it. The reference's `alert_same_type`, and the same mechanism
     /// serves pack anger and herd flight.
-    void alertNeighbours(const Creature& struck, std::size_t struckIndex);
+    void alertNeighbours(const Creature& struck, std::size_t struckIndex, std::uint32_t threatId);
     /// Places a chunk's own group of animals the first time the player comes
     /// near it. Derived entirely from the seed and the chunk coordinate, so a
     /// given chunk always produces the same herd.
     void populateChunks(const World& world, const glm::vec3& playerFeet);
     /// Index of the nearest creature on the aim ray, or `size()` for none.
     std::size_t findAimed(const glm::vec3& eye, const glm::vec3& forward, float reach) const;
+    /// The live creature carrying this id, or null. Linear across a population
+    /// capped in the tens, which is cheaper than keeping a map in step.
+    const Creature* creatureById(std::uint32_t id) const;
+    Creature* creatureById(std::uint32_t id);
 
     std::vector<Creature> m_creatures;
     /// Chunks whose one-off group has already been placed, keyed by packed
@@ -840,7 +1099,18 @@ private:
     /// walking back and forth.
     std::unordered_set<std::uint64_t> m_populated;
     std::uint32_t m_random;
+    /// Handed out by `place` and `restore`. Starts at one so that zero can mean
+    /// "nobody" everywhere it is stored.
+    std::uint32_t m_nextId = 1;
     float m_spawnTimer = 0.0f;
+    std::vector<Loot> m_loot;
+    std::vector<Launch> m_launches;
+    std::vector<glm::ivec3> m_grazed;
+    std::vector<CreatureVoiceEvent> m_voices;
+    std::vector<CreatureHit> m_hits;
+    /// Overwritten at startup from the render distance; the default only covers
+    /// the window before the first `setActiveRadius`.
+    float m_activeRadius = 90.0f;
 
     /// The one route planner, shared by the whole population so that repeated
     /// searches reuse its buffers instead of allocating.

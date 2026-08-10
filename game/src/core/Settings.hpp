@@ -46,6 +46,28 @@ struct Settings {
     /// half of that produced bugs twice.
     bool creativeMode = true;
 
+    /// Sound and music, 0 to 1. **Two buses rather than one**, because turning
+    /// the music down without silencing the world is the split every settings
+    /// screen in this genre offers - and M34 builds the screen, not the system.
+    float soundVolume = 1.0f;
+    float musicVolume = 0.55f;
+
+    /// Census the generated world and exit, without opening a window.
+    ///
+    /// **Terrain is the one thing here with a distribution, and a distribution
+    /// can be printed.** It reports the surface range, how much of the world is
+    /// sea, every biome's share, the top block of each biome, the hollow
+    /// fraction of deep rock, per-ore counts, and — the one that matters most —
+    /// the number of solid cells sitting above the terrain top, which is
+    /// floating land and must be zero.
+    ///
+    /// It exists because "both presets build clean with zero validation errors"
+    /// says nothing whatsoever about whether the world is right. This found
+    /// caves being flooded wholesale, humidity clamped so hard that forests
+    /// nearly vanished, iron outnumbering coal, and peaks too smooth for the
+    /// steep rule to fire - none of which any build could have caught.
+    bool worldgenProbe = false;
+
     /// Where the player starts, in world blocks. Height is still found from the
     /// terrain, so this only chooses the column.
     ///
@@ -68,12 +90,129 @@ struct Settings {
     /// `creatureShowcase - 2` on its own, close enough to judge.
     int creatureShowcase = 0;
 
+    /// Which curve squashes the high dynamic range image back into a range a
+    /// monitor can show. 0 Khronos PBR Neutral, 1 Hable, 2 Reinhard on
+    /// luminance, 3 ACES. **A number rather than a name** so it goes through the
+    /// same validated parser as everything else. Cycled live with F10.
+    ///
+    /// ACES by the player's own choice after comparing all four on screen. The
+    /// theoretical objection to it - that it hue-shifts saturated primaries,
+    /// which is most of a blocky palette - turned out to matter less than the
+    /// contrast it gives the sky.
+    unsigned toneMapper = 3;
+
+    /// Multiplies the scene before that curve. Deliberately manual - an
+    /// automatic exposure would make a torchlit cave's brightness depend on
+    /// where you were looking two seconds ago, and light level 0-15 is a game
+    /// mechanic that has to stay readable off the screen.
+    float exposure = 1.0f;
+
+    /// Light bleeding out of bright surfaces. The most expensive thing M23
+    /// added, so it gets an off switch. Toggled live with F11.
+    bool bloom = true;
+
+    /// How far the final image is mixed toward the blurred copy.
+    float bloomStrength = 0.12f;
+
+    /// Cast shadows from the sun. 0 off, 1 low, 2 medium, 3 high — each level
+    /// raises the shadow map's resolution, how many slices of the view it is
+    /// split into, and how far shadows reach. Cycled live with G.
+    unsigned shadows = 2;
+
+    /// How far a cast shadow darkens the ambient sky as well as the sun, 0 to 1.
+    /// Cutting the sun alone leaves shadows reading as pale patches, because a
+    /// shadowed surface still receives the whole sky.
+    float shadowDarkness = 0.55f;
+
+    /// A lamp riding on the camera, 0 to 1. **Off by default and that is the
+    /// decision, not the default value:** its light direction is the view
+    /// direction, so every surface faced head-on sits at the peak of its own
+    /// highlight, and it reads as a bright spot glued to the middle of the
+    /// screen. Offered because it is the only light indoors with a position.
+    float handheldLight = 0.0f;
+
+    /// The cloud deck. 0 off, 1 fast, 2 fancy — which is how many steps each
+    /// ray takes through it. Cycled live with C.
+    unsigned clouds = 2;
+
+    /// How much of the sky is cloud, 0 to 1. The reference covers a little over
+    /// a quarter of it.
+    float cloudCoverage = 0.36f;
+
+    /// How far a cloud darkens the ground beneath it. The cheapest part of the
+    /// whole effect and most of what makes it read from ground level.
+    float cloudShadow = 0.55f;
+
+    /// How steeply the ripples tilt a water surface. 0 is a flat mirror.
+    float waterWaves = 1.0f;
+
+    /// How much sky a water surface returns. 1 is what real water does; lower
+    /// is a stylistic choice, not a performance one.
+    float waterReflection = 1.0f;
+
+    /// Foam where water meets land, 0 to 1. The one cue that says where a pond
+    /// ends; without it a shoreline reads as terrain that happens to be blue.
+    float waterFoam = 1.0f;
+
+    /// The moving net of focused light on a lake bed and on everything seen
+    /// while submerged, 0 to 1.
+    float waterCaustics = 1.0f;
+
+    /// How far the surface bends what is seen through it, 0 to 1.
+    float waterRefraction = 1.0f;
+
+    /// Whether the weather cycles on its own. Off freezes it wherever it is,
+    /// which is the reference's `doWeatherCycle`. V still forces it either way.
+    bool weather = true;
+
+    /// What the world opens with: 0 whatever the cycle says, 1 rain, 2 storm,
+    /// 3 clear. Anything but 0 holds until V is pressed.
+    unsigned startWeather = 0;
+
+    /// Breaking showers, rain splashes and footstep puffs.
+    bool particles = true;
+
+    /// How far the wind bends grass and leaves, as a multiplier on the weather's
+    /// own wind. 0 leaves the world still.
+    float foliageSway = 1.0f;
+
+    /// Softens hard edges after the tone curve, 0 to 1. **Off by default**: this
+    /// world is made of squares, and an anti-aliaser strong enough to soften a
+    /// diagonal also softens every texel boundary in it.
+    float antiAlias = 0.0f;
+
+    /// Radius in screen pixels for the depth-based darkening where surfaces
+    /// meet. Catches what the mesher's baked occlusion cannot: a creature's
+    /// feet, a dropped item, two surfaces meeting far from any vertex.
+    float contactShadows = 24.0f;
+
+    /// What fraction of the window's resolution the **world** is drawn at, from
+    /// 0.5 to 1. The interface is drawn afterwards and is always full size, so
+    /// text and inventory slots stay sharp however low this goes.
+    ///
+    /// The cheapest frame rate there is: everything before the tone map scales
+    /// with the pixel count, so 0.75 is a little over half the shading work.
+    float renderScale = 1.0f;
+
+    /// How far the falling curtain is drawn, in columns. Kept well inside the
+    /// fog, or its edge shows as a ring in clear air.
+    unsigned rainDistance = 22;
+
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;
 
     /// Beyond this the chunk count grows faster than anything can feed it.
     static constexpr unsigned kMaxRenderDistance = 32;
+
+    /// How many curves `tonemap.frag` implements.
+    static constexpr unsigned kToneMapperCount = 4;
+
+    /// Off, low, medium, high.
+    static constexpr unsigned kShadowQualityCount = 4;
+
+    /// Off, fast, fancy.
+    static constexpr unsigned kCloudQualityCount = 3;
 };
 
 /// Reads `file`, filling anything missing with defaults for this machine. A

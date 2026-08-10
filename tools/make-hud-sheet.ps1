@@ -218,6 +218,75 @@ function New-FurnacePanel {
     return $panel
 }
 
+# Two inputs side by side and a result, with an arrow between. Derived from the
+# inventory panel like every other screen, so the cells are literally the same
+# pixels as the slots beneath them.
+function New-SmithingPanel {
+    param([System.Drawing.Bitmap]$Source)
+
+    $panel = New-ContainerPanel -Source $Source
+    Copy-Cell -Target $panel -Source $Source -DestX 36 -DestY 34
+    Copy-Cell -Target $panel -Source $Source -DestX 54 -DestY 34
+    Copy-Cell -Target $panel -Source $Source -DestX 122 -DestY 34
+    Set-Arrow -Target $panel -Left 89 -Right 109 -CentreY 43 -Color $Source.GetPixel(16, 92)
+    return $panel
+}
+
+# Three rows of nine above the player's own storage. The reference's chest GUI
+# puts them at y 17, 35 and 53 on the same 18 px pitch and the same x columns as
+# the storage rows below - so this is the inventory panel with the top cleared
+# and the very same cell stamped 27 times.
+function New-ChestPanel {
+    param([System.Drawing.Bitmap]$Source)
+
+    $panel = New-ContainerPanel -Source $Source
+    for ($row = 0; $row -lt 3; $row++) {
+        for ($column = 0; $column -lt 9; $column++) {
+            Copy-Cell -Target $panel -Source $Source -DestX (7 + $column * 18) -DestY (17 + $row * 18)
+        }
+    }
+    return $panel
+}
+
+# Six rows of nine, which does not fit the ordinary 166-tall card - so the plain
+# interior is STRETCHED by three rows' worth and everything below it moves down
+# together. The top border, the player's own grid and the bottom border are
+# copied verbatim; only the empty middle is repeated, which is why no bevel or
+# frame has to be redrawn.
+function New-DoubleChestPanel {
+    param([System.Drawing.Bitmap]$Source)
+
+    $extra = 54
+    $height = $Source.Height + $extra
+    # Already cleared to flat backdrop between the frame and the storage grid,
+    # so any row of it is a safe thing to repeat.
+    $clean = New-ContainerPanel -Source $Source
+    $panel = New-Object System.Drawing.Bitmap -ArgumentList $Source.Width, $height,
+        ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+
+    for ($x = 0; $x -lt $Source.Width; $x++) {
+        for ($y = 0; $y -lt 3; $y++) {
+            $panel.SetPixel($x, $y, $clean.GetPixel($x, $y))
+        }
+        $filler = $clean.GetPixel($x, 40)
+        for ($y = 3; $y -lt (83 + $extra); $y++) {
+            $panel.SetPixel($x, $y, $filler)
+        }
+        for ($y = 83; $y -lt $Source.Height; $y++) {
+            $panel.SetPixel($x, $y + $extra, $Source.GetPixel($x, $y))
+        }
+    }
+
+    for ($row = 0; $row -lt 6; $row++) {
+        for ($column = 0; $column -lt 9; $column++) {
+            Copy-Cell -Target $panel -Source $Source -DestX (7 + $column * 18) -DestY (17 + $row * 18)
+        }
+    }
+
+    $clean.Dispose()
+    return $panel
+}
+
 # The lit indicators, on transparent ground so they can be drawn over the panel
 # and cut off part way. Sixteen rows is enough for both.
 function New-IndicatorStrip {    $strip = New-Object System.Drawing.Bitmap -ArgumentList 176, 16,
@@ -381,15 +450,142 @@ function New-TabStrip {
     return $strip
 }
 
+# The catalogue's four cell backgrounds, in `CellState` order:
+#
+#   accessible | accessible hovered | blocked | blocked hovered
+#
+# Every one is the panel's *own* 18x18 storage cell with its interior repainted,
+# so all four carry the identical bevel and cannot drift from the slots beside
+# them. The two base colours are the only things chosen here, and neither is
+# invented: the accessible one is the slot interior's own recessed grey, taken
+# from inside that same cell, and blocked is `243,74,63` measured off
+# reference/crafting-ui.avif (INTERFACE.md 3.1b).
+#
+# **Hover is the only emphasis, and it is deliberately the only one.** A
+# selected state was built and removed: a cell that stays lit after you have
+# taken what was in it reads as a stuck slot, and nothing sets it anyway.
+#
+# 18 wide on a 20 px pitch leaves a two-pixel guard, exactly like the tab strip.
+function New-CellStrip {
+    param([System.Drawing.Bitmap]$Source, [int]$CellSize = 18, [int]$Pitch = 20, [int]$Height = 20,
+          [int]$CellX = 7, [int]$CellY = 83)
+
+    $strip = New-Object System.Drawing.Bitmap -ArgumentList ([int]($Pitch * 3 + $CellSize)), ([int]$Height),
+        ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($strip)
+    $graphics.Clear([System.Drawing.Color]::FromArgb(0, 0, 0, 0))
+    $graphics.Dispose()
+
+    # **The accessible state is the ordinary slot grey, unchanged.** It is the
+    # colour every slot interior on the right-hand card already uses, sampled
+    # from inside the source's own storage cell, so "you can have this" looks
+    # like an ordinary slot and only "you cannot" stands out.
+    $pale = $Source.GetPixel(($CellX + 9), ($CellY + 9))
+    $red = [System.Drawing.Color]::FromArgb(255, 243, 74, 63)
+
+    # Hover is a mix toward white rather than a multiply, because red is already
+    # at 243 and scaling it only clamps the one channel that carries the hue -
+    # which turns "brighter red" into "washed-out orange".
+    $lift = 0.45
+
+    $states = @(
+        @{ Fill = $pale; Lift = 0.0 },
+        @{ Fill = $pale; Lift = $lift },
+        @{ Fill = $red;  Lift = 0.0 },
+        @{ Fill = $red;  Lift = $lift })
+
+    for ($i = 0; $i -lt $states.Count; $i++) {
+        $originX = $i * $Pitch
+        $base = $states[$i].Fill
+        $t = $states[$i].Lift
+        $interior = [System.Drawing.Color]::FromArgb(255,
+            [int]($base.R + (255 - $base.R) * $t),
+            [int]($base.G + (255 - $base.G) * $t),
+            [int]($base.B + (255 - $base.B) * $t))
+        for ($y = 0; $y -lt $CellSize; $y++) {
+            for ($x = 0; $x -lt $CellSize; $x++) {
+                # The bevel is the source's, untouched; only the recessed
+                # interior carries the state.
+                $inside = ($x -ge 1) -and ($x -le ($CellSize - 2)) -and
+                          ($y -ge 1) -and ($y -le ($CellSize - 2))
+                if ($inside) {
+                    $strip.SetPixel(($originX + $x), $y, $interior)
+                } else {
+                    $strip.SetPixel(($originX + $x), $y, $Source.GetPixel(($CellX + $x), ($CellY + $y)))
+                }
+            }
+        }
+    }
+    return $strip
+}
+
+# The eight 9x9 status icons the survival bars are built from, in the order
+# `hud::StatusIcon` names them. Deliberately the cheapest possible placeholders -
+# flat blobs, no shading - because `make-reference-hud.ps1` stamps Mojang's real
+# sprites over the top and the friend authoring our art will replace them. Time
+# spent making a placeholder pretty is time spent on somebody else's job.
+function New-StatusStrip {
+    $count = 8
+    $pitch = 10
+    $size = 9
+    $strip = New-Object System.Drawing.Bitmap -ArgumentList ([int]($count * $pitch)), ([int]$pitch),
+        ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+
+    $empty = [System.Drawing.Color]::FromArgb(255, 58, 58, 58)
+    $heart = [System.Drawing.Color]::FromArgb(255, 220, 40, 40)
+    $food = [System.Drawing.Color]::FromArgb(255, 150, 96, 42)
+    $air = [System.Drawing.Color]::FromArgb(255, 200, 232, 255)
+    $airLow = [System.Drawing.Color]::FromArgb(255, 132, 168, 200)
+
+    # index, fill, whether only the left half is filled over an empty base
+    $icons = @(
+        @{ Fill = $empty;  Half = $false; Base = $null }
+        @{ Fill = $heart;  Half = $false; Base = $null }
+        @{ Fill = $heart;  Half = $true;  Base = $empty }
+        @{ Fill = $empty;  Half = $false; Base = $null }
+        @{ Fill = $food;   Half = $false; Base = $null }
+        @{ Fill = $food;   Half = $true;  Base = $empty }
+        @{ Fill = $air;    Half = $false; Base = $null }
+        @{ Fill = $airLow; Half = $false; Base = $null }
+    )
+
+    for ($i = 0; $i -lt $count; $i++) {
+        $originX = $i * $pitch
+        for ($y = 0; $y -lt $size; $y++) {
+            for ($x = 0; $x -lt $size; $x++) {
+                # A one-texel bite out of each corner, so a blob reads as an
+                # icon rather than as a square.
+                $corner = (($x -eq 0) -or ($x -eq ($size - 1))) -and
+                          (($y -eq 0) -or ($y -eq ($size - 1)))
+                if ($corner) {
+                    continue
+                }
+                $colour = $icons[$i].Fill
+                if ($icons[$i].Half -and ($x -ge [int]($size / 2))) {
+                    $colour = $icons[$i].Base
+                }
+                $strip.SetPixel(($originX + $x), $y, $colour)
+            }
+        }
+    }
+    return $strip
+}
+
 $craftingImage = New-CraftingPanel -Source $inventoryImage
 $furnaceImage = New-FurnacePanel -Source $inventoryImage
 $indicatorImage = New-IndicatorStrip
 $bookImage = New-BookPanel -Source $inventoryImage
 $tabImage = New-TabStrip -Source $inventoryImage -BlockDir (Join-Path $root "assets\textures\blocks")
+$cellImage = New-CellStrip -Source $inventoryImage
+$smithingImage = New-SmithingPanel -Source $inventoryImage
+$chestImage = New-ChestPanel -Source $inventoryImage
+$doubleChestImage = New-DoubleChestPanel -Source $inventoryImage
+$statusImage = New-StatusStrip
 
 $width = [Math]::Max($widgetImage.Width, $inventoryImage.Width)
 $height = $widgetImage.Height + $inventoryImage.Height + $craftingImage.Height + $furnaceImage.Height +
-    $indicatorImage.Height + $bookImage.Height + $tabImage.Height
+    $indicatorImage.Height + $bookImage.Height + $tabImage.Height + $cellImage.Height +
+    $smithingImage.Height + $chestImage.Height + $doubleChestImage.Height + $statusImage.Height
 
 $sheet = New-Object System.Drawing.Bitmap -ArgumentList ([int]$width), ([int]$height),
     ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -409,6 +605,16 @@ $bookTop = $indicatorTop + $indicatorImage.Height
 $g.DrawImage($bookImage, 0, $bookTop, $bookImage.Width, $bookImage.Height)
 $tabTop = $bookTop + $bookImage.Height
 $g.DrawImage($tabImage, 0, $tabTop, $tabImage.Width, $tabImage.Height)
+$cellTop = $tabTop + $tabImage.Height
+$g.DrawImage($cellImage, 0, $cellTop, $cellImage.Width, $cellImage.Height)
+$smithingTop = $cellTop + $cellImage.Height
+$g.DrawImage($smithingImage, 0, $smithingTop, $smithingImage.Width, $smithingImage.Height)
+$chestTop = $smithingTop + $smithingImage.Height
+$g.DrawImage($chestImage, 0, $chestTop, $chestImage.Width, $chestImage.Height)
+$doubleChestTop = $chestTop + $chestImage.Height
+$g.DrawImage($doubleChestImage, 0, $doubleChestTop, $doubleChestImage.Width, $doubleChestImage.Height)
+$statusTop = $doubleChestTop + $doubleChestImage.Height
+$g.DrawImage($statusImage, 0, $statusTop, $statusImage.Width, $statusImage.Height)
 $g.Dispose()
 
 $sheet.Save((Join-Path $root $Output), [System.Drawing.Imaging.ImageFormat]::Png)
@@ -421,6 +627,11 @@ Write-Host "  furnace    at (0, $furnaceTop) size $($furnaceImage.Width) x $($fu
 Write-Host "  indicators at (0, $indicatorTop): lit flame 14x14 at x 0, white arrow at x 16..36"
 Write-Host "  book card  at (0, $bookTop) size $($bookImage.Width) x $($bookImage.Height)"
 Write-Host "  tabs       at (0, $tabTop) size $($tabImage.Width) x $($tabImage.Height): 5 tabs 22x25 on a 24 px pitch, unselected row at +0, selected row at +27"
+Write-Host "  cells      at (0, $cellTop) size $($cellImage.Width) x $($cellImage.Height): 4 states 18x18 on a 20 px pitch, in CellState order"
+Write-Host "  smithing   at (0, $smithingTop) size $($smithingImage.Width) x $($smithingImage.Height)"
+Write-Host "  chest      at (0, $chestTop) size $($chestImage.Width) x $($chestImage.Height)"
+Write-Host "  chest x2   at (0, $doubleChestTop) size $($doubleChestImage.Width) x $($doubleChestImage.Height)"
+Write-Host "  status     at (0, $statusTop) size $($statusImage.Width) x $($statusImage.Height): 8 icons 9x9 on a 10 px pitch, in StatusIcon order"
 Write-Host "  character box painted out: $($CharacterBox -join ', ')"
 
 $sheet.Dispose()
@@ -430,3 +641,7 @@ $inventoryImage.Dispose()
 $craftingImage.Dispose()
 $furnaceImage.Dispose()
 $indicatorImage.Dispose()
+$cellImage.Dispose()
+$smithingImage.Dispose()
+$chestImage.Dispose()
+$doubleChestImage.Dispose()

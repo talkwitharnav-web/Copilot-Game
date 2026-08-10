@@ -8,6 +8,15 @@
 
 namespace game {
 
+/// How tall the world is, in chunks. Terrain never reaches the top, so the
+/// upper chunks exist purely as building room.
+///
+/// It lives here rather than on `World` because generation is what decides
+/// where the ceiling is — the density function's top slide is quoted against
+/// it, and a second copy would put the slide and the world edge in different
+/// places.
+constexpr int kWorldHeightChunks = 3;
+
 /// Floor division, correct for negative coordinates. Plain integer division
 /// truncates toward zero, which puts blocks at -1 and 0 in the same cell.
 constexpr int floorDivInt(int value, int divisor) {
@@ -41,6 +50,16 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord);
 /// Surface height in blocks at a world column. Exposed so the game can place the
 /// player, and so terrain shape can be reasoned about without meshing anything.
 int surfaceHeightAt(std::uint32_t seed, int worldX, int worldZ);
+
+/// Whether a cave has cut the very top block of a column, so nothing may be
+/// planted on it.
+///
+/// The reference never needs to ask: its features read the `OCEAN_FLOOR`
+/// heightmap, which is the topmost *solid* block scanned down from the sky, so
+/// a void can never be chosen. Ours plants against the uncarved height, which
+/// is why a tree over a cave mouth was left standing in the air with its
+/// rooting dirt block beside it.
+bool surfaceCarvedAt(std::uint32_t seed, int worldX, int worldZ);
 
 } // namespace game
 

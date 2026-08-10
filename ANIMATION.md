@@ -14,7 +14,7 @@ Companion documents: `RESEARCH.md` (physics, AI, spawning), `TEXTURING.md` (box 
 >
 > **Step-ups ease the drawing, never the box** — for creatures since 2026-08-04 and for the **player's camera** since 2026-08-05. Ramping the collision box would leave a body part-way inside the block it is climbing, so the box snaps and only what is drawn trails, decaying by half every 50 ms. This is not in the reference at all; Minecraft's own step is instant and does read as a small pop.
 >
-> **Still outstanding:** the death fall (§7.1), the wolf's tail as a mood signal (§5.2), and the zombie's arm raise on acquiring a target (§5.5).
+> **Still outstanding:** the wolf's tail as a mood signal (§5.2) and the zombie's arm raise on acquiring a target (§5.5). The death fall (§7.1) is **built**.
 
 ---
 
@@ -1125,7 +1125,7 @@ Two small things that together buy a lot because we are 90% of the way to both:
 
 **Honourable mentions, in order, if there is appetite for a fourth and fifth:**
 
-- **The death fall** (§7.1) — `sqrt` eased, 90° about Z, 0.625 s, limbs frozen. Perhaps ten lines, and "things die properly" is a large readability win for a combat game.
+- **The death fall** (§7.1) — ✅ **built 2026-08-06.** 90° about the forward axis, 0.625 s, limbs wound down, the body retired at 1.0 s. One roll of the three local axes in `buildMesh`, so all fifty-seven species get it with no per-species table. **The easing is smoothstep rather than the reference's `sqrt`**, at the user's request: `sqrt` spends a quarter of the turn in its first tick, which reads as the body being swatted flat rather than falling.
 - **The wolf's tail as a mood signal** (§5.2) — 36° wild, 88° angry, and dropping with health when tame. We already pitch the tail on target; the health-linked version is one expression and turns geometry into a health bar.
 - **The zombie's 80° → 120° arm raise on acquiring a target** (§5.5) — one conditional, and it is the clearest "I have seen you" tell in the game.
 

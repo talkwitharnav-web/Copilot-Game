@@ -1,6 +1,5 @@
 #include "engine/render/GraphicsPipeline.hpp"
 
-#include "engine/render/PushConstants.hpp"
 #include "engine/render/Vertex.hpp"
 #include "render/VulkanCheck.hpp"
 
@@ -67,12 +66,9 @@ private:
 
 } // namespace
 
-GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path& vertexSpirv,
-                                   const std::filesystem::path& fragmentSpirv, VkFormat colorFormat,
-                                   VkFormat depthFormat, VkDescriptorSetLayout descriptorSetLayout)
-    : m_device(device) {
-    const ScopedShaderModule vertexModule(device, vertexSpirv);
-    const ScopedShaderModule fragmentModule(device, fragmentSpirv);
+GraphicsPipeline::GraphicsPipeline(VkDevice device, const PipelineDesc& desc) : m_device(device) {
+    const ScopedShaderModule vertexModule(device, desc.vertexSpirv);
+    const ScopedShaderModule fragmentModule(device, desc.fragmentSpirv);
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -92,10 +88,12 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInput.vertexBindingDescriptionCount = 1;
-    vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
-    vertexInput.pVertexAttributeDescriptions = attributes.data();
+    if (desc.vertexInput) {
+        vertexInput.vertexBindingDescriptionCount = 1;
+        vertexInput.pVertexBindingDescriptions = &binding;
+        vertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+        vertexInput.pVertexAttributeDescriptions = attributes.data();
+    }
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -111,7 +109,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.cullMode = desc.cullMode;
     // Geometry is wound counter-clockwise seen from outside, and this value is
     // what actually renders boxes solid rather than hollow. Verified on screen,
     // not derived: a hand derivation through the Y-flip argued for CLOCKWISE and
@@ -119,6 +117,10 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     // before trusting the reasoning.
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth = 1.0f;
+    rasterizer.depthBiasEnable =
+        (desc.depthBiasConstant != 0.0f || desc.depthBiasSlope != 0.0f) ? VK_TRUE : VK_FALSE;
+    rasterizer.depthBiasConstantFactor = desc.depthBiasConstant;
+    rasterizer.depthBiasSlopeFactor = desc.depthBiasSlope;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -127,27 +129,35 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     VkPipelineColorBlendAttachmentState blendAttachment{};
     blendAttachment.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    // World geometry is fully opaque, so blending is a no-op for it. It exists
-    // for HUD panels that need the scene to remain visible behind them.
-    blendAttachment.blendEnable = VK_TRUE;
-    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.blendEnable = desc.blend == BlendMode::None ? VK_FALSE : VK_TRUE;
     blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    if (desc.blend == BlendMode::Additive) {
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    } else {
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    }
+
+    // Every attachment gets the same state. `independentBlend` is the device
+    // feature that would allow otherwise and it is deliberately not enabled.
+    const std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(desc.colorFormats.size(),
+                                                                            blendAttachment);
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &blendAttachment;
+    colorBlending.attachmentCount = static_cast<std::uint32_t>(blendAttachments.size());
+    colorBlending.pAttachments = blendAttachments.data();
 
-    // Keep a fragment only if nothing nearer has already been drawn there, and
-    // record its distance so later fragments are tested against it.
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthTestEnable = desc.depthTest ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
     depthStencil.minDepthBounds = 0.0f;
     depthStencil.maxDepthBounds = 1.0f;
@@ -158,29 +168,27 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     dynamicState.dynamicStateCount = static_cast<std::uint32_t>(std::size(dynamicStates));
     dynamicState.pDynamicStates = dynamicStates;
 
-    // The matrix stays in push constants; the descriptor set carries sampled
-    // textures, which are too large to push.
     VkPushConstantRange pushRange{};
-    // The fragment stage needs the sun terms, the vertex stage needs the matrix.
+    // The fragment stage needs the flags, the vertex stage needs the matrix.
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(MeshPushConstants);
+    pushRange.size = desc.pushConstantBytes;
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = descriptorSetLayout != VK_NULL_HANDLE ? 1u : 0u;
-    layoutInfo.pSetLayouts = descriptorSetLayout != VK_NULL_HANDLE ? &descriptorSetLayout : nullptr;
-    layoutInfo.pushConstantRangeCount = 1;
-    layoutInfo.pPushConstantRanges = &pushRange;
+    layoutInfo.setLayoutCount = desc.descriptorSetLayout != VK_NULL_HANDLE ? 1u : 0u;
+    layoutInfo.pSetLayouts = desc.descriptorSetLayout != VK_NULL_HANDLE ? &desc.descriptorSetLayout : nullptr;
+    layoutInfo.pushConstantRangeCount = desc.pushConstantBytes > 0 ? 1u : 0u;
+    layoutInfo.pPushConstantRanges = desc.pushConstantBytes > 0 ? &pushRange : nullptr;
     vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_layout), "vkCreatePipelineLayout");
 
     // Dynamic rendering: describes the attachment formats directly instead of
     // requiring a VkRenderPass object to have been created up front.
     VkPipelineRenderingCreateInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachmentFormats = &colorFormat;
-    renderingInfo.depthAttachmentFormat = depthFormat;
+    renderingInfo.colorAttachmentCount = static_cast<std::uint32_t>(desc.colorFormats.size());
+    renderingInfo.pColorAttachmentFormats = desc.colorFormats.data();
+    renderingInfo.depthAttachmentFormat = desc.depthFormat;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -192,7 +200,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const std::filesystem::path&
     pipelineInfo.pViewportState = &viewportState;
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
-    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pDepthStencilState = desc.depthFormat != VK_FORMAT_UNDEFINED ? &depthStencil : nullptr;
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_layout;

@@ -2,6 +2,7 @@
 
 #include "world/Chunk.hpp"
 #include "world/Furnace.hpp"
+#include "world/Chest.hpp"
 #include "world/TerrainGenerator.hpp"
 
 #include <glm/glm.hpp>
@@ -14,16 +15,31 @@
 namespace game {
 
 /// Where the player was when they last quit, so they resume rather than respawn.
+///
+/// Widened at M21 to carry survival state. **`kFormatVersion` was bumped with
+/// it**, so an older file is refused and the player resumes at full health at
+/// spawn rather than being read as garbage - a save record is a stated list of
+/// fields, and growing one silently is how a struct starts lying about itself.
 struct SavedPlayer {
     glm::vec3 position{0.0f};
     float yaw = 0.0f;
     float pitch = 0.0f;
+    std::int32_t health = 20;
+    std::int32_t food = 20;
+    float saturation = 5.0f;
+    float exhaustion = 0.0f;
 };
 
 /// A furnace and the block it belongs to.
 struct PlacedFurnace {
     glm::ivec3 position{0};
     Furnace furnace;
+};
+
+/// A chest and the block it belongs to.
+struct PlacedChest {
+    glm::ivec3 position{0};
+    Chest chest;
 };
 
 /// One creature as it goes to disk.
@@ -85,6 +101,9 @@ public:
     /// are written when the world is saved rather than when a chunk unloads.
     std::vector<PlacedFurnace> loadFurnaces() const;
     void saveFurnaces(const std::vector<PlacedFurnace>& furnaces) const;
+
+    std::vector<PlacedChest> loadChests() const;
+    void saveChests(const std::vector<PlacedChest>& chests) const;
 
     std::vector<SavedCreature> loadCreatures() const;
     void saveCreatures(const std::vector<SavedCreature>& creatures) const;

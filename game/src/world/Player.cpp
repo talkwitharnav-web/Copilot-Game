@@ -47,6 +47,79 @@ bool hasGroundBelow(const World& world, const glm::vec3& feet, float probeDepth 
     return overlapsSolid(world, probe);
 }
 
+/// The ladder or vine the body is standing in, or `Air`.
+///
+/// Whole cells rather than the block's own geometry, and deliberately: neither
+/// has a collision box at all, so testing the shape would never report a touch
+/// and nothing would ever climb.
+BlockId climbableAt(const World& world, const Player& player) {
+    const Aabb box = boxAt(player.position, kHeight);
+    const int minY = static_cast<int>(std::floor(box.min.y));
+    const int maxY = static_cast<int>(std::floor(box.max.y - kSkin));
+    const int minX = static_cast<int>(std::floor(box.min.x));
+    const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
+    const int minZ = static_cast<int>(std::floor(box.min.z));
+    const int maxZ = static_cast<int>(std::floor(box.max.z - kSkin));
+    for (int y = minY; y <= maxY; ++y) {
+        for (int z = minZ; z <= maxZ; ++z) {
+            for (int x = minX; x <= maxX; ++x) {
+                const BlockId id = world.blockAt(x, y, z);
+                if (isClimbable(id)) {
+                    return id;
+                }
+            }
+        }
+    }
+    return BlockId::Air;
+}
+
+/// Which way you have to push to climb: toward whatever the block hangs on.
+///
+/// **A vine can hang on several sides at once, and pushing toward any of them
+/// counts.** So this returns a mask rather than a single direction, and a vine
+/// with no side at all - a curtain hanging from the one above - is climbed from
+/// any direction, which is the reference's own behaviour.
+glm::vec3 climbPush(BlockId block, const glm::vec2& wish, bool& anyDirection) {
+    anyDirection = false;
+    if (isLadder(block)) {
+        switch (ladderFacing(block)) {
+        case FaceDirection::PosX:
+            return {1.0f, 0.0f, 0.0f};
+        case FaceDirection::NegX:
+            return {-1.0f, 0.0f, 0.0f};
+        case FaceDirection::PosZ:
+            return {0.0f, 0.0f, 1.0f};
+        default:
+            return {0.0f, 0.0f, -1.0f};
+        }
+    }
+
+    const std::uint8_t sides = vineSides(block);
+    if (sides == 0) {
+        anyDirection = true;
+        return {0.0f, 0.0f, 0.0f};
+    }
+    glm::vec3 best{0.0f};
+    float bestPush = 0.0f;
+    const std::array<std::pair<std::uint8_t, glm::vec3>, 4> options{{
+        {ConnectNorth, {0.0f, 0.0f, -1.0f}},
+        {ConnectSouth, {0.0f, 0.0f, 1.0f}},
+        {ConnectWest, {-1.0f, 0.0f, 0.0f}},
+        {ConnectEast, {1.0f, 0.0f, 0.0f}},
+    }};
+    for (const auto& [bit, direction] : options) {
+        if ((sides & bit) == 0) {
+            continue;
+        }
+        const float push = wish.x * direction.x + wish.y * direction.z;
+        if (push > bestPush) {
+            bestPush = push;
+            best = direction;
+        }
+    }
+    return best;
+}
+
 /// Seconds of air, and the drowning clock, advanced from the head alone.
 ///
 /// Nothing consumes the damage yet, because the player has no health until M21;
@@ -66,6 +139,199 @@ void updateBreath(Player& player, float dt) {
     // `inhale_time` transfers straight across.
     player.air = std::min(kAirSeconds, player.air + dt * kAirSeconds / kInhaleSeconds);
     player.drowningSeconds = 0.0f;
+}
+
+/// Health, hunger and every hazard, once the frame's movement has settled.
+///
+/// Runs at the end of `updatePlayer` on purpose: fall damage is a function of
+/// where the body ended up, and hunger is a function of how far it travelled.
+void updateSurvival(Player& player, const World& world, float dt, const glm::vec3& from,
+                    bool invulnerable) {
+    using namespace survival;
+
+    player.invulnerableSeconds = std::max(0.0f, player.invulnerableSeconds - dt);
+    if (player.invulnerableSeconds <= 0.0f) {
+        player.lastDamage = 0;
+    }
+    player.hurtFlash = std::max(0.0f, player.hurtFlash - dt);
+
+    if (!player.alive()) {
+        player.deathSeconds += dt;
+        return;
+    }
+
+    // Creative pays none of this. Held here rather than at each call site so
+    // there is one gate rather than a dozen, and so a mode change cannot leave
+    // half the hazards armed.
+    if (invulnerable) {
+        player.fallDistance = 0.0f;
+        player.burningSeconds = 0.0f;
+        player.exhaustion = 0.0f;
+        return;
+    }
+
+    // **Out of the world.** Unconditional and unreducible, and it bypasses the
+    // invulnerability window because there is nothing to be invulnerable to.
+    if (player.position.y < kVoidDepth) {
+        damagePlayer(player, kMaxHealth * 2, true);
+        return;
+    }
+
+    // --- Falling. **Grounded, then damage, then accumulate** - the reference's
+    // own order, and it is directly observable: a 23-block drop ought to kill a
+    // full-health player and in fact needs 23.5, because the check runs before
+    // the distance is updated.
+    //
+    // Water, a ladder and a vine all reset it outright, which is why a dive
+    // from any height is free.
+    const bool climbing = climbableAt(world, player) != BlockId::Air;
+    if (player.onGround || player.inWater || player.flying || climbing) {
+        if (player.onGround && !player.inWater && !player.flying && !climbing) {
+            const int hurt = static_cast<int>(
+                std::floor((player.fallDistance - kSafeFallDistance) * kFallDamagePerBlock));
+            if (hurt > 0) {
+                damagePlayer(player, hurt);
+            }
+        }
+        player.fallDistance = 0.0f;
+    } else if (player.velocity.y < 0.0f) {
+        player.fallDistance += -player.velocity.y * dt;
+    }
+
+    // --- Drowning. Spent on the shared cadence below, at two points a second.
+
+    // --- Contact hazards. Sampled over the cells the body actually occupies,
+    // so a corner clipping a cactus counts and standing beside one does not.
+    const Aabb body = boxAt(player.position, player.height());
+    bool inLava = false;
+    bool inFire = false;
+    bool onCactus = false;
+    for (int x = static_cast<int>(std::floor(body.min.x));
+         x <= static_cast<int>(std::floor(body.max.x)); ++x) {
+        for (int y = static_cast<int>(std::floor(body.min.y));
+             y <= static_cast<int>(std::floor(body.max.y)); ++y) {
+            for (int z = static_cast<int>(std::floor(body.min.z));
+                 z <= static_cast<int>(std::floor(body.max.z)); ++z) {
+                const BlockId block = world.blockAt(x, y, z);
+                inLava = inLava || isLava(block);
+                inFire = inFire || block == BlockId::Fire;
+                onCactus = onCactus || block == BlockId::Cactus;
+            }
+        }
+    }
+
+    // Suffocation is the eye specifically, not the body: a block at your feet
+    // is something to stand on and a block in your face is not.
+    const BlockId eyeBlock =
+        world.blockAt(static_cast<int>(std::floor(player.position.x)),
+                      static_cast<int>(std::floor(player.position.y + player.eyeOffset)),
+                      static_cast<int>(std::floor(player.position.z)));
+    const bool suffocating = isOpaque(eyeBlock) && isSolid(eyeBlock);
+
+    // One shared cadence, because every one of these is a half second and
+    // running four separate timers would let them interleave into a much
+    // faster stream than any of them is supposed to be.
+    player.hazardTimer += dt;
+    while (player.hazardTimer >= kLavaInterval) {
+        player.hazardTimer -= kLavaInterval;
+        if (inLava) {
+            damagePlayer(player, kLavaDamage);
+        } else if (inFire) {
+            damagePlayer(player, kFireDamage);
+        }
+        if (onCactus) {
+            damagePlayer(player, kCactusDamage);
+        }
+        if (suffocating) {
+            damagePlayer(player, kSuffocationDamage);
+        }
+        if (player.air <= 0.0f && player.underwater) {
+            damagePlayer(player,
+                         static_cast<int>(kDrownDamagePerSecond * kLavaInterval + 0.5f));
+        }
+    }
+
+    // --- Burning, which outlives the flame that started it. Water puts it out.
+    if (inLava) {
+        player.burningSeconds = kLavaBurnSeconds;
+    } else if (inFire) {
+        player.burningSeconds = std::max(player.burningSeconds, kFireBurnSeconds);
+    }
+    if (player.inWater) {
+        player.burningSeconds = 0.0f;
+    }
+    if (player.burningSeconds > 0.0f) {
+        player.burningSeconds = std::max(0.0f, player.burningSeconds - dt);
+        player.burnTimer += dt;
+        while (player.burnTimer >= kBurnInterval) {
+            player.burnTimer -= kBurnInterval;
+            // Standing *in* the fire already charges the higher rate above.
+            if (!inLava && !inFire) {
+                damagePlayer(player, kBurnDamage);
+            }
+        }
+    } else {
+        player.burnTimer = 0.0f;
+    }
+
+    // --- Hunger. Walking is free; only hurrying and healing cost anything,
+    // which is the whole design of the system rather than an accident of the
+    // numbers.
+    const float travelled = glm::distance(glm::vec2{player.position.x, player.position.z},
+                                          glm::vec2{from.x, from.z});
+    if (player.inWater) {
+        player.exhaustion += travelled * kExhaustSwimPerMetre;
+    } else if (player.velocity.x != 0.0f || player.velocity.z != 0.0f) {
+        const bool sprinting =
+            glm::length(glm::vec2{player.velocity.x, player.velocity.z}) > kWalkSpeed + 0.1f;
+        player.exhaustion +=
+            travelled * (sprinting ? kExhaustSprintPerMetre : kExhaustWalkPerMetre);
+    }
+
+    while (player.exhaustion >= kExhaustionPerLevel) {
+        player.exhaustion -= kExhaustionPerLevel;
+        if (player.saturation > 0.0f) {
+            player.saturation = std::max(0.0f, player.saturation - 1.0f);
+        } else {
+            player.food = std::max(0, player.food - 1);
+        }
+    }
+    player.saturation = clampSaturation(player.saturation, player.food);
+
+    // --- Healing and starving, which are the two ends of the same bar.
+    if (player.food >= kRegenFoodFloor && player.health < kMaxHealth) {
+        // A full bar with saturation behind it heals eight times as fast. That
+        // is what makes cooked meat worth so much more than its hunger number
+        // suggests, and it is invisible on screen by design.
+        const bool saturated = player.food >= kMaxFood && player.saturation > 0.0f;
+        const float interval = saturated ? kSaturatedRegenInterval : kRegenInterval;
+        player.regenTimer += dt;
+        if (player.regenTimer >= interval) {
+            player.regenTimer = 0.0f;
+            healPlayer(player, kRegenAmount);
+            if (saturated) {
+                player.saturation = std::max(0.0f, player.saturation - kSaturatedRegenCost);
+            } else {
+                player.exhaustion += kExhaustPerHealed;
+            }
+        }
+    } else {
+        player.regenTimer = 0.0f;
+    }
+
+    if (player.food <= 0) {
+        player.starveTimer += dt;
+        if (player.starveTimer >= kStarveInterval) {
+            player.starveTimer = 0.0f;
+            // Normal difficulty stops at one point rather than killing, which
+            // is the reference's own floor.
+            if (player.health > kStarveFloor) {
+                damagePlayer(player, 1, true);
+            }
+        }
+    } else {
+        player.starveTimer = 0.0f;
+    }
 }
 
 /// The face that stopped motion along `axis`, or infinity if nothing did.
@@ -88,7 +354,7 @@ float blockingPlaneAlong(const World& world, const Aabb& box, int axis, bool pos
     for (int y = minY; y <= maxY; ++y) {
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
-                const BlockBoxes shape = collisionBoxes(world.blockAt(x, y, z));
+                const BlockBoxes shape = worldCollisionBoxes(world, x, y, z);
                 const glm::vec3 cell{static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)};
 
                 for (int i = 0; i < shape.count; ++i) {
@@ -168,10 +434,42 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount, f
     return true;
 }
 
+/// How a surface answers the controls, derived from its slipperiness alone.
+///
+/// The reference has no separate "ice rules". It multiplies horizontal velocity
+/// by `0.91 * S` every tick and adds `0.1 * (0.6/S)^3` of acceleration, and all
+/// three things a player notices on ice fall out of those two expressions: slow
+/// to get going, a long glide when you let go, and a **higher** top speed than
+/// dry land, because the drag falls away faster than the acceleration does.
+///
+/// Ours eases toward a target at a fixed rate instead of decaying, so each of
+/// those becomes a scale on what dry land already does. At `S == 0.6` all three
+/// are exactly 1, which is why ordinary ground is untouched by any of this.
+struct SurfaceMotion {
+    float speedScale;
+    float accelScale;
+    float decelScale;
+};
+
+SurfaceMotion surfaceMotion(float slipperiness) {    const float keep = 0.91f * slipperiness;
+    const float base = 0.91f * kDefaultSlipperiness;
+    const float ratio = kDefaultSlipperiness / slipperiness;
+
+    SurfaceMotion motion{};
+    motion.accelScale = ratio * ratio * ratio;
+    // Steady state of `v = (v + a) * keep`, against dry land's own steady state.
+    motion.speedScale = (motion.accelScale * keep / (1.0f - keep)) / (base / (1.0f - base));
+    // A decay has a time constant and our model has a rate; the rate that eases
+    // out over the same time is the honest translation between them.
+    motion.decelScale = std::log(keep) / std::log(base);
+    return motion;
+}
+
 } // namespace
 
 void updatePlayer(Player& player, const PlayerInput& input, const World& world, float deltaSeconds) {
     const float dt = std::min(deltaSeconds, kMaxDeltaSeconds);
+    const glm::vec3 startedAt = player.position;
 
     if (input.sneak) {
         player.sneaking = true;
@@ -189,11 +487,17 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
                               static_cast<int>(std::floor(player.position.y + player.eyeOffset)),
                               static_cast<int>(std::floor(player.position.z))));
 
+    // **Sprinting needs more than six food.** The reference's own gate, and it
+    // is what turns an empty bar from a slow trickle of damage into something
+    // that changes how you move.
+    const bool sprinting =
+        input.sprint && (player.flying || player.food > survival::kSprintFoodFloor);
+
     // Starting a sprint-swim needs the head under; keeping one only needs to be
     // in water at all, which is what lets you sprint along the surface without
     // dropping out of it every time the head breaks through.
     player.swimming =
-        input.sprint && !player.flying && player.inWater && (player.underwater || player.swimming);
+        sprinting && !player.flying && player.inWater && (player.underwater || player.swimming);
 
     updateBreath(player, dt);
 
@@ -201,11 +505,22 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     const float maxEyeChange = kEyeAdjustSpeed * dt;
     player.eyeOffset += std::clamp(targetEye - player.eyeOffset, -maxEyeChange, maxEyeChange);
 
-    const float flySpeed = input.sprint ? kFlySprintSpeed : kFlySpeed;
-    const float speed = player.flying   ? flySpeed
-                        : player.sneaking ? kSneakSpeed
-                        : input.sprint    ? kSprintSpeed
-                                          : kWalkSpeed;
+    const float flySpeed = sprinting ? kFlySprintSpeed : kFlySpeed;
+    // Honey drags. **Not slipperiness**, which is the obvious lever and the
+    // wrong one: the surface model raises acceleration as slipperiness falls,
+    // so a low value comes out *faster* than dry land. The reference scales
+    // movement directly here too.
+    const BlockId underfoot =
+        world.blockAt(static_cast<int>(std::floor(player.position.x)),
+                      static_cast<int>(std::floor(player.position.y - 0.5f)),
+                      static_cast<int>(std::floor(player.position.z)));
+    const float stickScale =
+        (player.onGround && !player.flying && isSticky(underfoot)) ? kStickySpeedScale : 1.0f;
+    const float speed = (player.flying   ? flySpeed
+                         : player.sneaking ? kSneakSpeed
+                         : sprinting       ? kSprintSpeed
+                                           : kWalkSpeed) *
+                        stickScale;
 
     glm::vec3 wish = input.moveDirection;
     wish.y = 0.0f;
@@ -323,14 +638,36 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
             !player.onGround && player.sinceWater < fluid::kSwimGrace
                 ? (player.swimming ? fluid::kSprintSwimSpeed : fluid::kSwimSpeed)
                 : speed;
-        const glm::vec2 target{wish.x * horizontal, wish.z * horizontal};
+
+        // Slipperiness comes from half a metre under the feet, so a slab or a
+        // snow layer over ice is as slippery as the ice. Airborne, the
+        // reference applies no ground drag at all.
+        const SurfaceMotion surface = surfaceMotion(
+            player.onGround
+                ? slipperiness(world.blockAt(static_cast<int>(std::floor(player.position.x)),
+                                             static_cast<int>(std::floor(player.position.y - 0.5f)),
+                                             static_cast<int>(std::floor(player.position.z))))
+                : kDefaultSlipperiness);
+
         const glm::vec2 current{player.velocity.x, player.velocity.z};
+
+        // **Never brake toward the walking speed while off the ground.** Nothing
+        // slows a jump horizontally in the reference, and speed carried off ice
+        // is the whole reason sprint-jumping along it is fast; pulling down to
+        // the walk target here would stop you dead the instant you left the
+        // surface, which on ice is every jump.
+        const float top = horizontal * surface.speedScale;
+        const float targetSpeed = player.onGround ? top : std::max(top, glm::length(current));
+
+        const glm::vec2 target{wish.x * targetSpeed, wish.z * targetSpeed};
         const glm::vec2 difference = target - current;
         const float distance = glm::length(difference);
 
         const bool wantsToMove = glm::dot(target, target) > 0.0f;
-        const float rate = player.onGround ? (wantsToMove ? kGroundAcceleration : kGroundDeceleration)
-                                           : (wantsToMove ? kAirAcceleration : kAirDeceleration);
+        const float rate = player.onGround
+                               ? (wantsToMove ? kGroundAcceleration * surface.accelScale
+                                              : kGroundDeceleration * surface.decelScale)
+                               : (wantsToMove ? kAirAcceleration : kAirDeceleration);
         const float maxStep = rate * dt;
 
         const glm::vec2 next =
@@ -341,8 +678,38 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
         if (input.jump && player.onGround) {
             player.velocity.y = kJumpVelocity;
             player.onGround = false;
+            // A sprint-jump costs four times an ordinary one, which is what
+            // makes travelling fast genuinely expensive rather than merely
+            // quicker.
+            player.exhaustion +=
+                sprinting ? survival::kExhaustSprintJump : survival::kExhaustJump;
         }
         player.velocity.y = std::max(player.velocity.y - kGravity * dt, -kTerminalVelocity);
+
+        // A ladder replaces gravity rather than fighting it: push into one and
+        // you go up, let go and you slide down slowly. **Applied after the
+        // fall**, because a climb is not a weaker fall - it is a different
+        // rule, and the same mistake in water once made every animal sink.
+        //
+        // **You climb by pushing *into* the ladder**, not by moving at all.
+        // That is the reference's rule and it is what leaves strafing free:
+        // walking along a wall has no component into it, so A and D move you
+        // sideways off the ladder instead of hauling you up it.
+        if (const BlockId climbable = climbableAt(world, player); climbable != BlockId::Air) {
+            constexpr float kClimbSpeed = 2.4f;
+            constexpr float kSlideSpeed = 1.4f;
+            bool anyDirection = false;
+            const glm::vec3 into = climbPush(climbable, target, anyDirection);
+            const bool pushingIn =
+                anyDirection ? glm::dot(target, target) > 0.01f
+                             : glm::dot(target, glm::vec2{into.x, into.z}) > 0.01f;
+            player.velocity.y = (pushingIn || input.jump) ? kClimbSpeed : -kSlideSpeed;
+            // Sneaking holds you still, which is what makes a ladder somewhere
+            // you can stop and look around from.
+            if (input.sneak) {
+                player.velocity.y = 0.0f;
+            }
+        }
     }
 
     // Vertical first, so standing on ground is established before the horizontal
@@ -364,6 +731,20 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     for (int i = 0; i < steps; ++i) {
         const bool movingDown = stepDelta.y <= 0.0f;
         if (moveAxis(player.position, world, 1, stepDelta.y, height)) {
+            // Slime throws you back up instead of stopping you. The reference
+            // returns the speed you arrived with unless you are sneaking, which
+            // is what makes a slime block both a trampoline and something you
+            // can walk across deliberately.
+            const BlockId landedOn =
+                world.blockAt(static_cast<int>(std::floor(player.position.x)),
+                              static_cast<int>(std::floor(player.position.y - 0.1f)),
+                              static_cast<int>(std::floor(player.position.z)));
+            if (movingDown && !player.sneaking && landedOn == BlockId::SlimeBlock &&
+                player.velocity.y < -kBounceThreshold) {
+                player.velocity.y = -player.velocity.y * kSlimeBounce;
+                player.onGround = false;
+                continue;
+            }
             player.onGround = movingDown;
             player.velocity.y = 0.0f;
 
@@ -457,6 +838,66 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
     if (player.stepSmooth < 0.001f) {
         player.stepSmooth = 0.0f;
     }
+
+    updateSurvival(player, world, dt, startedAt, input.invulnerable);
+}
+
+bool damagePlayer(Player& player, int amount, bool bypassInvulnerability) {
+    if (amount <= 0 || !player.alive()) {
+        return false;
+    }
+
+    // **The overwrite rule, and it is what makes melee survivable.** Inside the
+    // window a blow no larger than the last is ignored outright and a larger
+    // one lands only the difference - and the timer is deliberately *not*
+    // restarted, or a fast enough attacker would hold you invulnerable forever.
+    int landed = amount;
+    if (!bypassInvulnerability && player.invulnerableSeconds > 0.0f) {
+        if (amount <= player.lastDamage) {
+            return false;
+        }
+        landed = amount - player.lastDamage;
+    }
+
+    player.health = std::max(0, player.health - landed);
+    player.hurtFlash = survival::kHurtFlashSeconds;
+    // Being hurt costs hunger, the same way hurrying and healing do.
+    player.exhaustion += survival::kExhaustDamaged;
+
+    if (!bypassInvulnerability) {
+        player.invulnerableSeconds = survival::kInvulnerableSeconds;
+        player.lastDamage = std::max(player.lastDamage, amount);
+    }
+    return true;
+}
+
+void healPlayer(Player& player, int amount) {
+    player.health = std::min(survival::kMaxHealth, player.health + amount);
+}
+
+void feedPlayer(Player& player, const survival::FoodValue& value) {
+    player.food = std::min(survival::kMaxFood, player.food + value.hunger);
+    player.saturation =
+        survival::clampSaturation(player.saturation + value.saturation, player.food);
+}
+
+void respawnPlayer(Player& player, const glm::vec3& at) {
+    player.position = at;
+    player.velocity = glm::vec3{0.0f};
+    player.health = survival::kMaxHealth;
+    player.food = survival::kMaxFood;
+    player.saturation = 5.0f;
+    player.exhaustion = 0.0f;
+    player.air = fluid::kAirSeconds;
+    player.drowningSeconds = 0.0f;
+    player.fallDistance = 0.0f;
+    player.burningSeconds = 0.0f;
+    player.invulnerableSeconds = 0.0f;
+    player.lastDamage = 0;
+    player.deathSeconds = 0.0f;
+    player.eatingSeconds = 0.0f;
+    player.flying = false;
+    player.sneaking = false;
 }
 
 bool playerOverlapsBlock(const Player& player, const glm::ivec3& block) {
