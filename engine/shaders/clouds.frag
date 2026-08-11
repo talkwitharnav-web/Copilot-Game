@@ -140,9 +140,18 @@ void main() {
     // day. Elevation is the thing that actually reddens sunlight, so it is what
     // gates this.
     float lowBody = 1.0 - smoothstep(0.0, 0.35, frame.sunDirection.y);
+    // **Only the sun's tint is gated on elevation.** Sunlight reddens as it
+    // sinks; moonlight is cool wherever the moon is, so keying both off
+    // elevation lit the deck with warm white whenever the moon was high - which
+    // is why clouds at night came out white instead of grey.
+    bool moonUp = frame.glow.b > frame.glow.r;
     vec3 bodyTint = mix(vec3(1.0, 0.97, 0.92), normalize(frame.glow.rgb + vec3(1e-4)) * 1.732,
-                        lowBody * 0.8);
-    vec3 sunlight = bodyTint * frame.lighting.y * 2.2 * (1.0 - 0.80 * storm);
+                        moonUp ? 1.0 : lowBody * 0.8);
+    // A cloud picked out by the moon is a grey shape rather than a lit one, so
+    // the forward lobe that makes a sunlit cloud brilliant is flattened too.
+    float bodyGain = moonUp ? 0.55 : 1.0;
+    float bodyPhase = moonUp ? mix(phase, 1.0, 0.7) : phase;
+    vec3 sunlight = bodyTint * frame.lighting.y * 2.2 * bodyGain * (1.0 - 0.80 * storm);
     // **Pulled most of the way to white, not a little.** This is what a cloud
     // receives from the sky rather than from the body, and it used to keep so
     // much of the sky's own blue that a cloud lit mainly by it *was* the sky
@@ -172,7 +181,7 @@ void main() {
             float absorbed = 1.0 - exp(-extinction);
             float powder = 1.0 - exp(-density * 6.0);
 
-            vec3 luminance = skylight + sunlight * lightAmount * phase * powder;
+            vec3 luminance = skylight + sunlight * lightAmount * bodyPhase * powder;
             scattered += transmittance * absorbed * luminance;
             transmittance *= exp(-extinction);
             if (transmittance < 0.02) {

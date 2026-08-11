@@ -94,6 +94,8 @@ enum class SoundEvent : std::uint8_t {
     Rain,
     Thunder,
 
+    Bell,
+
     Count,
 };
 
@@ -139,6 +141,7 @@ enum class CreatureVoice : std::uint8_t {
     Silverfish,
     Princepin,
     Fish,
+    Golem,
     Count,
     /// Says nothing at all. The frog and the axolotl have voices in the
     /// reference that nothing here has been mapped to yet, and silence is a

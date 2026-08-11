@@ -519,7 +519,8 @@ void buildTree(Chunk& chunk, ChunkCoord coord, std::uint32_t seed, const Tree& t
 
 } // namespace
 
-void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord) {
+void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord,
+                  const village::Nearby& villages) {
     const int baseX = coord.x * Chunk::kSize;
     const int baseZ = coord.z * Chunk::kSize;
 
@@ -533,9 +534,15 @@ void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord) {
     for (int cellZ = firstCellZ; cellZ <= lastCellZ; ++cellZ) {
         for (int cellX = firstCellX; cellX <= lastCellX; ++cellX) {
             Tree tree;
-            if (treeInCell(seed, cellX, cellZ, tree)) {
-                buildTree(chunk, coord, seed, tree);
+            if (!treeInCell(seed, cellX, cellZ, tree)) {
+                continue;
             }
+            // A tree standing in a village grows through a roof. The test is
+            // pure, so both chunks either drop it or keep it.
+            if (village::occupies(villages, tree.x, tree.z)) {
+                continue;
+            }
+            buildTree(chunk, coord, seed, tree);
         }
     }
 }

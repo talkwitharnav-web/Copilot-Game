@@ -73,6 +73,36 @@ float blockHardness(BlockId block) {
     if (isFluid(block) || block == BlockId::Air || block == BlockId::Fire) {
         return 0.0f;
     }
+    // ---- Redstone, and it has to be asked first. ----
+    // A button and a pressure plate are cut shapes, so the forwarding below
+    // would hand them a plank's two seconds where the reference gives them half
+    // of one; and wire, a rail and a tripwire are all flat shapes, which the
+    // rule further down answers with a flat zero.
+    if (isRedstoneWire(block) || isRedstoneTorch(block) || isRepeater(block) ||
+        isComparator(block) || isTripwireHook(block) || isTripwire(block)) {
+        return 0.0f;
+    }
+    if (isButton(block) || isPressurePlate(block) || isLever(block) || isTarget(block)) {
+        return 0.5f;
+    }
+    if (isRail(block)) {
+        return 0.7f;
+    }
+    if (isNoteBlock(block)) {
+        return 0.8f;
+    }
+    if (isDaylightDetector(block)) {
+        return 0.2f;
+    }
+    if (isPiston(block) || isPistonHead(block)) {
+        return 1.5f;
+    }
+    if (isObserver(block) || isLightningRod(block)) {
+        return 3.0f;
+    }
+    if (isDispenserLike(block)) {
+        return 3.5f;
+    }
     // A stair, slab, wall, fence or gate mines exactly like the block it was cut
     // from. **Answered before anything else**, because the old test named the
     // two families that existed and returned a flat 1.5 - which is right for
@@ -87,6 +117,16 @@ float blockHardness(BlockId block) {
     if (block == BlockId::Tnt || block == BlockId::TntPrimed) {
         return 0.0f;
     }
+    // Settled snow is asked **before** the flat-shape rule below, exactly as
+    // `harvestTool` does and for the same reason: a layer is dug rather than
+    // brushed aside, so it has a real hardness where a carpet has none. Below
+    // that rule this branch was unreachable and every layer broke instantly.
+    //
+    // The reference's own value, and deliberately below the solid snow block's
+    // 0.2.
+    if (isSnowLayer(block)) {
+        return 0.1f;
+    }
     if (blockShape(block) == BlockShape::Cross || blockShape(block) == BlockShape::Flat) {
         // Plants and torches come away instantly, whatever you are holding.
         return 0.0f;
@@ -99,6 +139,97 @@ float blockHardness(BlockId block) {
     }
     if (isLeafBlock(block)) {
         return 0.2f;
+    }
+    // A door is the reference's 3, and iron is 5. The leaf is thin but it is
+    // still a whole door's worth of timber.
+    if (isDoor(block) || isTrapdoor(block)) {
+        const bool metal = isDoor(block)
+                               ? kDoorFamilies[static_cast<std::size_t>(doorFamily(block))].metal
+                               : kTrapdoorFamilies[static_cast<std::size_t>(
+                                     trapdoorFamily(block))].metal;
+        return metal ? 5.0f : 3.0f;
+    }
+    // A bed comes apart in a moment - the reference's 0.2, and no tool helps.
+    if (isBed(block)) {
+        return 0.2f;
+    }
+    // The farm. Tilled ground and a trodden path are barely firmer than the dirt
+    // they came from; a composter is the planks it is built out of; and both
+    // pumpkins are the reference's 1.0.
+    if (isFarmland(block)) {
+        return 0.6f;
+    }
+    if (block == BlockId::DirtPath) {
+        return 0.65f;
+    }
+    if (isComposter(block)) {
+        return 0.6f;
+    }
+    if (isCarvedPumpkin(block) || isJackOLantern(block)) {
+        return 1.0f;
+    }
+    // The fifth run. **Named rather than left to the default**, because the
+    // default is 1.0 and half of this run is either rock or wood.
+    if (block >= kFirstExtraBlock5 && block <= kLastExtraBlock5) {
+        if (block >= BlockId::OakWood && block <= BlockId::StrippedWarpedHyphae) {
+            return 2.0f;
+        }
+        if (isCoralBlock(block)) {
+            return 1.5f;
+        }
+        if ((block >= BlockId::WaxedCopperBlock && block <= BlockId::WaxedOxidizedCopperGrate) ||
+            isCopperBulb(block)) {
+            return 3.0f;
+        }
+        switch (block) {
+        case BlockId::BrownMushroomBlock:
+        case BlockId::RedMushroomBlock:
+        case BlockId::MushroomStem:
+        case BlockId::SculkVein:
+            return 0.2f;
+        case BlockId::CryingObsidian:
+        case BlockId::RespawnAnchor:
+            return 50.0f;
+        case BlockId::PowderSnow:
+            return 0.25f;
+        case BlockId::SuspiciousSand:
+        case BlockId::SuspiciousGravel:
+            return 0.25f;
+        case BlockId::RedstoneLamp:
+        case BlockId::RedstoneLampLit:
+            return 0.3f;
+        case BlockId::Lodestone:
+        case BlockId::BlastFurnace:
+        case BlockId::Stonecutter:
+            return 3.5f;
+        case BlockId::EnchantingTable:
+        case BlockId::Bell:
+        case BlockId::Anvil:
+        case BlockId::ChippedAnvil:
+        case BlockId::DamagedAnvil:
+            return 5.0f;
+        case BlockId::ChiseledBookshelf:
+            return 1.5f;
+        case BlockId::CartographyTable:
+        case BlockId::FletchingTable:
+        case BlockId::Loom:
+        case BlockId::Barrel:
+        case BlockId::Lectern:
+            return 2.5f;
+        case BlockId::Grindstone:
+        case BlockId::Cauldron:
+        case BlockId::Campfire:
+        case BlockId::SoulCampfire:
+            return 2.0f;
+        case BlockId::SculkSensor:
+            return 1.5f;
+        case BlockId::SculkShrieker:
+            return 3.0f;
+        case BlockId::MossCarpet:
+            return 0.1f;
+        default:
+            return 1.0f;
+        }
     }
     // The third run: glass and its panes are the reference's 0.3, iron bars and
     // the lanterns are metal, and a torch comes away in a touch.
@@ -128,11 +259,6 @@ float blockHardness(BlockId block) {
     }
     if (isBeehive(block)) {
         return 0.6f;
-    }
-    // The reference's own, and deliberately below the solid snow block's 0.2 -
-    // a layer is brushed aside rather than dug out.
-    if (isSnowLayer(block)) {
-        return 0.1f;
     }
     switch (block) {
     // The second table run. Grouped by the reference's own values rather than
@@ -386,6 +512,20 @@ ToolKind harvestTool(BlockId block) {
     if (isDeepslateOre(block)) {
         block = stoneOreFor(block);
     }
+    // The machines, asked before the flat-shape rule below hands a rail "no
+    // tool" and before the forwarding hands a stone button a pickaxe it does
+    // not need. A lever, a button and a plate keep their material's answer.
+    if (isPiston(block) || isPistonHead(block) || isObserver(block) || isDispenserLike(block) ||
+        isLightningRod(block) || isRail(block)) {
+        return ToolKind::Pickaxe;
+    }
+    if (isDaylightDetector(block) || isNoteBlock(block)) {
+        return ToolKind::Axe;
+    }
+    if (isRedstoneWire(block) || isRedstoneTorch(block) || isRepeater(block) ||
+        isComparator(block) || isTripwireHook(block) || isTripwire(block) || isLever(block)) {
+        return ToolKind::None;
+    }
     // Same forwarding as the hardness: an oak fence wants an axe and a
     // blackstone wall wants a pickaxe, and neither needs a row of its own.
     {
@@ -409,11 +549,91 @@ ToolKind harvestTool(BlockId block) {
     if (isLogBlock(block) || isBeehive(block)) {
         return ToolKind::Axe;
     }
+    // A smoker is a wooden block; a furnace is stone. `isFurnace` answers true
+    // for both families, so asking it here gave the smoker the furnace's
+    // pickaxe - which is the shape of bug widening a family predicate always
+    // has. Its hardness and blast resistance were both already right.
+    if (isSmoker(block)) {
+        return ToolKind::Axe;
+    }
     if (isFurnace(block)) {
         return ToolKind::Pickaxe;
     }
     if (isChest(block)) {
         return ToolKind::Axe;
+    }
+    if (isDoor(block) || isTrapdoor(block)) {
+        const bool metal = isDoor(block)
+                               ? kDoorFamilies[static_cast<std::size_t>(doorFamily(block))].metal
+                               : kTrapdoorFamilies[static_cast<std::size_t>(
+                                     trapdoorFamily(block))].metal;
+        return metal ? ToolKind::Pickaxe : ToolKind::Axe;
+    }
+    // Tilled ground and a path are dug; a composter is a wooden tub; a pumpkin
+    // is cut. None of them withholds its drop from bare hands.
+    if (isFarmland(block) || block == BlockId::DirtPath) {
+        return ToolKind::Shovel;
+    }
+    if (isComposter(block) || isCarvedPumpkin(block) || isJackOLantern(block)) {
+        return ToolKind::Axe;
+    }
+    // The fifth run, on the same rule the rest of the game uses: rock wants a
+    // pickaxe, timber wants an axe, and the sculk family wants a hoe.
+    if (block >= kFirstExtraBlock5 && block <= kLastExtraBlock5) {
+        if (block >= BlockId::OakWood && block <= BlockId::StrippedWarpedHyphae) {
+            return ToolKind::Axe;
+        }
+        if (isCoralBlock(block)) {
+            return ToolKind::Pickaxe;
+        }
+        if ((block >= BlockId::WaxedCopperBlock && block <= BlockId::WaxedOxidizedCopperGrate) ||
+            isCopperBulb(block)) {
+            return ToolKind::Pickaxe;
+        }
+        switch (block) {
+        case BlockId::BrownMushroomBlock:
+        case BlockId::RedMushroomBlock:
+        case BlockId::MushroomStem:
+        case BlockId::ChiseledBookshelf:
+        case BlockId::CartographyTable:
+        case BlockId::FletchingTable:
+        case BlockId::Loom:
+        case BlockId::Barrel:
+        case BlockId::Lectern:
+        case BlockId::Campfire:
+        case BlockId::SoulCampfire:
+            return ToolKind::Axe;
+        case BlockId::PowderSnow:
+        case BlockId::SuspiciousSand:
+        case BlockId::SuspiciousGravel:
+            return ToolKind::Shovel;
+        case BlockId::SculkVein:
+        case BlockId::SculkSensor:
+        case BlockId::SculkShrieker:
+        case BlockId::MossCarpet:
+            return ToolKind::Hoe;
+        case BlockId::CryingObsidian:
+        case BlockId::RespawnAnchor:
+        case BlockId::Lodestone:
+        case BlockId::BlastFurnace:
+        case BlockId::Stonecutter:
+        case BlockId::EnchantingTable:
+        case BlockId::Bell:
+        case BlockId::Anvil:
+        case BlockId::ChippedAnvil:
+        case BlockId::DamagedAnvil:
+        case BlockId::Grindstone:
+        case BlockId::Cauldron:
+        case BlockId::RedstoneLamp:
+        case BlockId::RedstoneLampLit:
+            return ToolKind::Pickaxe;
+        default:
+            return ToolKind::None;
+        }
+    }
+    // The sixth run: glass wants nothing, the rest want a pickaxe.
+    if (block >= kFirstExtraBlock6 && block <= kLastExtraBlock6) {
+        return block == BlockId::TintedGlass ? ToolKind::None : ToolKind::Pickaxe;
     }
     // The third run. Glass wants nothing, metal wants a pickaxe, and a ladder
     // is wood.
@@ -558,11 +778,34 @@ int harvestTier(BlockId block) {
     if (isDeepslateOre(block)) {
         block = stoneOreFor(block);
     }
+    // Every redstone machine is iron-age work and needs nothing better than the
+    // first pickaxe; everything else in the family comes away by hand.
+    //
+    // **A button and a plate are deliberately left out** so they fall through to
+    // the forwarding below and keep their material's answer - the reference does
+    // gate a stone pressure plate behind a pickaxe.
+    if (isPiston(block) || isPistonHead(block) || isObserver(block) || isDispenserLike(block) ||
+        isLightningRod(block) || isRail(block)) {
+        return kWoodTier;
+    }
+    if (isRedstoneComponent(block) && !isButton(block) && !isPressurePlate(block)) {
+        return kHandTier;
+    }
+    if (isNoteBlock(block)) {
+        return kHandTier;
+    }
     {
         const BlockId material = shapedParent(block);
         if (material != block) {
             return harvestTier(material);
         }
+    }
+    // A smoker is wood and a furnace is stone, so they part company here as
+    // well as in `harvestTool`: the reference gates a furnace behind a pickaxe
+    // and lets a smoker be broken by hand. `isFurnace` answers for both, so
+    // asking it alone made a smoker drop nothing bare-handed.
+    if (isSmoker(block)) {
+        return kHandTier;
     }
     if (isFurnace(block)) {
         return kWoodTier;

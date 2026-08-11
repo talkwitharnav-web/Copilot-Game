@@ -240,7 +240,8 @@ engine::MeshData buildPrecipitationMesh(const World& world, const glm::vec3& eye
 
             const float centreX = static_cast<float>(x) + 0.5f;
             const float centreZ = static_cast<float>(z) + 0.5f;
-            const float sky = static_cast<float>(world.skyLightAt(x, top + 1, z)) / 15.0f;
+            const float sky = static_cast<float>(world.skyLightAt(x, top + 1, z)) /
+                              static_cast<float>(kMaxLight);
             const float phase = hash01(static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(z));
             const float fade = level * (1.0f - away * away);
             // **How much of the wind runs along this quad**, which is the whole

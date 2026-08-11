@@ -81,6 +81,19 @@ constexpr float kLavaBurnSeconds = 15.0f;
 constexpr int kCactusDamage = 1;
 constexpr float kCactusInterval = 0.5f;
 
+/// **The one cadence every contact hazard is actually charged on.**
+///
+/// Four separate timers would interleave into a much faster stream than any of
+/// them is meant to be, so there is one - but the code used to run it off
+/// `kLavaInterval`, which made lava's figure silently the owner of drowning's
+/// pace as well. The per-hazard constants above stay because each records what
+/// the reference charges for that hazard; the assertion is what stops one of
+/// them being changed and quietly doing nothing.
+constexpr float kHazardInterval = 0.5f;
+static_assert(kSuffocationInterval == kHazardInterval && kFireInterval == kHazardInterval &&
+                  kLavaInterval == kHazardInterval && kCactusInterval == kHazardInterval,
+              "every contact hazard shares one timer, so they must all be charged at one rate");
+
 /// Below the world. Instant and unconditional - not reduced, not survivable.
 constexpr float kVoidDepth = -8.0f;
 
@@ -202,6 +215,23 @@ constexpr FoodValue foodValue(ItemId item) {
         return {1, 0.2f};
     case ItemId::ChorusFruit:
         return {4, 2.4f};
+    // The appended foods. The four bowls are the reference's own, and all four
+    // are worth more than anything you can eat without cooking - which is the
+    // whole reason to keep a bowl.
+    case ItemId::MushroomStew:
+    case ItemId::RabbitStew:
+    case ItemId::BeetrootSoup:
+    case ItemId::SuspiciousStew:
+        return {6, 7.2f};
+    case ItemId::EnchantedGoldenApple:
+        return {4, 9.6f};
+    // Deliberately still worth something: the reference's poisonous potato
+    // feeds you and then poisons you, so a zero here would make it inert
+    // rather than a gamble.
+    case ItemId::PoisonousPotato:
+        return {2, 1.2f};
+    case ItemId::GoldenCarrot:
+        return {6, 14.4f};
     default:
         return {0, 0.0f};
     }
@@ -214,6 +244,30 @@ constexpr FoodValue foodValue(ItemId item) {
 constexpr bool isEdible(ItemId item) {
     return foodValue(item).hunger > 0;
 }
+
+/// Proves the two answers name the same set, at compile time.
+///
+/// `isFood` decides a catalogue tab and what a furnace will cook; `isEdible`
+/// decides whether holding right-click does anything. They are different
+/// questions asked of the same items, which is precisely the arrangement where
+/// one gets a new row and the other does not - an item that reads as food and
+/// cannot be eaten, or one that can be eaten and never appears among the foods.
+/// Twenty lines of loop instead of a bug nobody would look for.
+constexpr bool foodTablesAgree() {
+    for (int raw = 0; raw <= static_cast<int>(ItemId::kLastItem); ++raw) {
+        const auto item = static_cast<ItemId>(raw);
+        if (item == ItemId::None) {
+            continue;
+        }
+        if (isFood(item) != isEdible(item)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(foodTablesAgree(),
+              "every item the catalogue calls food must restore hunger, and the other way round");
 
 /// How long holding right-click takes to finish a meal. The reference's own,
 /// and the same for everything except the two it makes instant, neither of

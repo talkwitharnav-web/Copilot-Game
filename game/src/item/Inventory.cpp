@@ -4,7 +4,7 @@
 
 namespace game {
 
-int Inventory::add(ItemId item, int count) {
+int Inventory::add(ItemId item, int count, int damage) {
     if (item == ItemId::None || count <= 0) {
         return 0;
     }
@@ -15,7 +15,7 @@ int Inventory::add(ItemId item, int count) {
         if (count <= 0) {
             break;
         }
-        if (!stack.empty() && stack.item == item) {
+        if (!stack.empty() && stack.item == item && stack.damage == damage) {
             const int moved = std::min(count, stack.space());
             stack.count += moved;
             count -= moved;
@@ -29,6 +29,7 @@ int Inventory::add(ItemId item, int count) {
         if (stack.empty()) {
             stack.item = item;
             stack.count = std::min(count, maxStackFor(item));
+            stack.damage = damage;
             count -= stack.count;
         }
     }

@@ -42,6 +42,17 @@ struct PlacedChest {
     Chest chest;
 };
 
+/// What is inside a stowbox that is currently **an item** rather than a block.
+///
+/// Keyed by a handle that rides in the item stack's `damage`, which is the one
+/// per-stack number every save format and every drop already carries. That is
+/// the whole trick: contents that travel with the item need no new field, no
+/// format bump and no migration.
+struct StowedBox {
+    std::int32_t handle = 0;
+    Chest contents;
+};
+
 /// One creature as it goes to disk.
 ///
 /// Deliberately its own record rather than the live `Creature`. A save format
@@ -61,6 +72,15 @@ struct SavedCreature {
     /// charged one that reloaded as ordinary would look like the charge simply
     /// wearing off.
     std::uint8_t charged = 0;
+    /// Whether an iron golem was built by the player rather than found in a
+    /// village. **Not cosmetic**: it is the whole of the golem's temperament,
+    /// so one that forgot and started hitting you after a reload would be a
+    /// nasty bug rather than a blemish.
+    std::uint8_t playerBuilt = 0;
+    /// A villager's trade. Derivable in principle from the block it claimed,
+    /// but only while that block is still there and still unclaimed - so it is
+    /// stored, exactly as the reference stores it.
+    std::uint8_t profession = 0;
 };
 
 /// Stores only the chunks the player actually changed.
@@ -104,6 +124,9 @@ public:
 
     std::vector<PlacedChest> loadChests() const;
     void saveChests(const std::vector<PlacedChest>& chests) const;
+
+    std::vector<StowedBox> loadStowboxes() const;
+    void saveStowboxes(const std::vector<StowedBox>& boxes) const;
 
     std::vector<SavedCreature> loadCreatures() const;
     void saveCreatures(const std::vector<SavedCreature>& creatures) const;

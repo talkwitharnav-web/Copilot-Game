@@ -101,4 +101,26 @@ std::unordered_set<ItemId> craftableItems(const Inventory& inventory, int gridSi
 /// item, which we have no source for.
 ItemStack smithingResult(const ItemStack& base, const ItemStack& addition);
 
+/// What a bottle and a reagent brew into, or nothing.
+///
+/// **Its own table rather than a `Recipe`**, for the same reason the smithing
+/// upgrade is: brewing *changes* the thing on the left rather than consuming
+/// two ingredients into a third, and no grid pattern can express that. The rows
+/// are transcribed from Mojang's own shipped `brew_*.json` recipes.
+///
+/// > **Named divergence: there is no twenty-second timer and no blaze powder.**
+/// > The reference brews over 400 ticks and burns a fuel charge doing it; ours
+/// > hands the potion over as soon as the two are in, exactly as the smithing
+/// > table and the stonecutter already do. Adding the timer means a block entity
+/// > that ticks and saves, which is the furnace's whole machinery over again.
+ItemStack brewingResult(const ItemStack& bottle, const ItemStack& reagent);
+
+/// Two damaged items of the same kind, combined into one.
+///
+/// The reference's own arithmetic: the durability left on both, **plus five per
+/// cent of the item's maximum as a bonus**, capped at that maximum. It is what
+/// a grindstone and an anvil both do, and the only part of either that does not
+/// depend on enchantments or experience - neither of which exists here.
+ItemStack repairResult(const ItemStack& left, const ItemStack& right);
+
 } // namespace game

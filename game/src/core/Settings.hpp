@@ -30,6 +30,22 @@ struct Settings {
     /// far above the frame budget on this machine. Raise it freely.
     unsigned renderDistance = 12;
 
+    /// How far out chunks are drawn with everything in them, in chunks.
+    /// Past it they are drawn as terrain only: the blocks and their baked
+    /// lighting are identical, and plants are simply not turned into triangles.
+    /// Creatures, dropped items and particles stop being drawn there too.
+    ///
+    /// **A rendering tier, not a simulation one.** Everything out there still
+    /// ticks, still spawns and despawns, still breaks and burns, and is still
+    /// saved. Only the triangles are skipped, and they are built again the
+    /// moment something comes back into range.
+    ///
+    /// Setting it to `renderDistance` or higher turns it off, which is what
+    /// makes it something to compare against rather than a change you are stuck
+    /// with. The frame here is bound by geometry rather than by pixels, so this
+    /// is the largest single lever available.
+    unsigned detailDistance = 8;
+
     /// Frames per second to aim for. Zero means uncapped. Adjustable at runtime
     /// with F1/F2; this is only the starting value.
     unsigned frameCap = 120;
@@ -68,6 +84,17 @@ struct Settings {
     /// steep rule to fire - none of which any build could have caught.
     bool worldgenProbe = false;
 
+    /// Writes `block-shapes.txt` beside the exe - one line per block id giving
+    /// its shape and the box its drawn geometry actually occupies - and exits
+    /// without opening a window.
+    ///
+    /// It is to block models what `worldgenProbe` is to terrain, and it exists
+    /// for the same reason: nothing about a build says whether a block is the
+    /// size the reference makes it. `tools/check-models.ps1` reads the dump
+    /// against the reference's own `models/block/*.json` and names every block
+    /// whose measurements disagree.
+    bool blockProbe = false;
+
     /// Where the player starts, in world blocks. Height is still found from the
     /// terrain, so this only chooses the column.
     ///
@@ -89,6 +116,15 @@ struct Settings {
     /// 0 is off, 1 shows every species in a grid, and anything higher shows
     /// `creatureShowcase - 2` on its own, close enough to judge.
     int creatureShowcase = 0;
+
+    /// Throws one of every awkward block on the floor in front of the spawn
+    /// point, so what a dropped item looks like can be judged without mining
+    /// for it. A dropped block is a miniature of the block itself, and the only
+    /// way to know a bell reads as a bell rather than a gold brick is to look.
+    ///
+    /// Nothing is written to the world - dropped items are not saved - so this
+    /// leaves no trace beyond the setting itself.
+    bool dropShowcase = false;
 
     /// Which curve squashes the high dynamic range image back into a range a
     /// monitor can show. 0 Khronos PBR Neutral, 1 Hable, 2 Reinhard on

@@ -1,6 +1,7 @@
 #include "hud/HudPrimitives.hpp"
 
 #include "world/Block.hpp"
+#include "world/FaceShading.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -169,23 +170,33 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
 
         const glm::vec2 topFace[4]{project(b.minX, b.maxY, b.minZ), project(b.maxX, b.maxY, b.minZ),
                                    project(b.maxX, b.maxY, b.maxZ), project(b.minX, b.maxY, b.maxZ)};
-        appendQuadCorners(mesh, topFace, lid, boxDepth, glm::vec4{1.00f, 1.00f, 1.00f, 1.0f},
+        // **The mesher's own shades, not literals.** The right face was written
+        // as 0.68 against the table's 0.72, so an icon was lit differently from
+        // the block it stands for.
+        const float topShade = kFaceShades[static_cast<std::size_t>(AxisFace::PosY)];
+        const float frontShade = kFaceShades[static_cast<std::size_t>(AxisFace::PosZ)];
+        const float rightShade = kFaceShades[static_cast<std::size_t>(AxisFace::PosX)];
+        appendQuadCorners(mesh, topFace, lid, boxDepth, glm::vec4{topShade, topShade, topShade, 1.0f},
                           model != nullptr ? layer : blockTextureLayer(block, BlockFace::Top));
 
         const glm::vec2 front[4]{project(b.minX, b.maxY, b.maxZ), project(b.maxX, b.maxY, b.maxZ),
                                  project(b.maxX, b.minY, b.maxZ), project(b.minX, b.minY, b.maxZ)};
-        appendQuadCorners(mesh, front, wall, boxDepth, glm::vec4{0.86f, 0.86f, 0.86f, 1.0f},
+        appendQuadCorners(mesh, front, wall, boxDepth,
+                          glm::vec4{frontShade, frontShade, frontShade, 1.0f},
                           model != nullptr ? layer : blockTextureLayer(block, BlockFace::Side, frontFacing));
 
         const glm::vec2 right[4]{project(b.maxX, b.maxY, b.minZ), project(b.maxX, b.maxY, b.maxZ),
                                  project(b.maxX, b.minY, b.maxZ), project(b.maxX, b.minY, b.minZ)};
-        appendQuadCorners(mesh, right, wall, boxDepth, glm::vec4{0.68f, 0.68f, 0.68f, 1.0f},
+        appendQuadCorners(mesh, right, wall, boxDepth,
+                          glm::vec4{rightShade, rightShade, rightShade, 1.0f},
                           model != nullptr ? layer : blockTextureLayer(block, BlockFace::Side, rightFacing));
     };
 
     // A lantern and an end rod are *models*, and drawing either as a flat crop
-    // of its sheet is what made the rod's slot picture a two-texel sliver.
-    if (shape == BlockShape::Post || shape == BlockShape::Cocoa) {
+    // of its sheet is what made the rod's slot picture a two-texel sliver. A
+    // bed joins them so its icon and its dropped form are a little bed rather
+    // than a cube of mattress.
+    if (usesModelIcon(shape)) {
         const ModelBoxes model = postModel(block);
         for (int i = 0; i < model.count; ++i) {
             box(model.boxes[i].box, &model.boxes[i]);
@@ -194,32 +205,10 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
     }
 
     // Everything else that is a set of boxes draws as those boxes, so a fence in
-    // the slot reads as a fence rather than as a cube of planks. **Two arms
-    // rather than four**, matching the reference's own inventory models: what
-    // you are holding is a section of fence, not a crossroads.
-    BlockBoxes parts;
-    switch (shape) {
-    case BlockShape::Fence:
-        parts = fenceRailBoxes(ConnectWest | ConnectEast);
-        break;
-    case BlockShape::Wall:
-        parts = wallBoxes(ConnectWest | ConnectEast);
-        break;
-    case BlockShape::Gate:
-        parts = gateBoxes(gateFacing(block), false);
-        break;
-    case BlockShape::Stairs:
-        // Two boxes, and drawing them as one cube made the icon
-        // indistinguishable from plain cobblestone.
-        parts = collisionBoxes(block);
-        break;
-    default:
-        // A slab is drawn at the height it actually stands, so the icon matches
-        // the block rather than implying a full cube.
-        parts.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, shapeHeight(shape), 1.0f};
-        parts.count = 1;
-        break;
-    }
+    // the slot reads as a fence rather than as a cube of planks. **`iconBoxes`
+    // owns that choice** - a dropped block reads the same function, so what is
+    // on the floor and what is in the hotbar cannot disagree.
+    const BlockBoxes parts = iconBoxes(block);
     for (int i = 0; i < parts.count; ++i) {
         box(parts.boxes[i], nullptr);
     }

@@ -48,6 +48,15 @@ struct RenderStats {
     float gpuMilliseconds = 0.0f;
     std::uint32_t drawCalls = 0;
     std::uint32_t triangles = 0;
+    /// Live `vkAllocateMemory` results, and what the device will allow. **A
+    /// hard limit with a spec floor of 4096**, and until it was reported here
+    /// the only way to see it approaching was the warning at three quarters.
+    std::uint32_t deviceAllocations = 0;
+    std::uint32_t deviceAllocationLimit = 0;
+    /// Megabytes of pooled buffer memory handed out, and held. The gap is what
+    /// sharing blocks costs.
+    std::uint32_t pooledMegabytesUsed = 0;
+    std::uint32_t pooledMegabytesHeld = 0;
 };
 
 /// Drives one frame of GPU work: acquire an image, record commands, submit, present.

@@ -1,6 +1,7 @@
 #include "world/Projectile.hpp"
 
 #include "item/SpriteModel.hpp"
+#include "world/Collision.hpp"
 #include "world/Creature.hpp"
 #include "world/Raycast.hpp"
 #include "world/World.hpp"
@@ -82,6 +83,32 @@ constexpr std::array<ProjectileSpecies, static_cast<std::size_t>(ProjectileKind:
      .halfWidth = 0.125f,
      .sticksInGround = false,
      .reportsImpact = true},
+    // A thrown potion. The reference's `splash_potion.json` publishes a **0.5**
+    // launch against the egg's 1.5 - it is lobbed rather than thrown - and the
+    // 4.95 terminal speed the order-of-operations assert above is calibrated
+    // against. Neither form damages what it hits: everything a potion does
+    // happens where it lands, which is the owner's business.
+    //
+    // `item` stays `None` for both, because forty-one brews share each row and
+    // which one this is rides on the shot instead.
+    {.item = ItemId::None,
+     .power = 0.5f,
+     .gravity = 0.05f,
+     .inertia = 0.99f,
+     .liquidInertia = 0.6f,
+     .damagePerSpeed = 0.0f,
+     .halfWidth = 0.125f,
+     .sticksInGround = false,
+     .reportsImpact = true},
+    {.item = ItemId::None,
+     .power = 0.5f,
+     .gravity = 0.05f,
+     .inertia = 0.99f,
+     .liquidInertia = 0.6f,
+     .damagePerSpeed = 0.0f,
+     .halfWidth = 0.125f,
+     .sticksInGround = false,
+     .reportsImpact = true},
 }};
 
 } // namespace
@@ -115,9 +142,10 @@ const ProjectileSpecies& projectileInfo(ProjectileKind kind) {
 }
 
 void Projectiles::spawn(ProjectileKind kind, const glm::vec3& position, const glm::vec3& velocity,
-                        bool crit, bool collectable) {
+                        bool crit, bool collectable, ItemId payload) {
     Shot shot;
     shot.kind = kind;
+    shot.payload = payload;
     shot.position = position;
     // Both ends of the first frame's blend are the muzzle, or a shot would be
     // drawn streaking in from wherever the previous one happened to be.
@@ -177,8 +205,11 @@ void Projectiles::tick(const World& world, Creatures& creatures) {
             const glm::ivec3 under{static_cast<int>(std::floor(shot.position.x)),
                                    static_cast<int>(std::floor(shot.position.y)),
                                    static_cast<int>(std::floor(shot.position.z))};
+            // **`worldCollisionBoxes`, not `collisionBoxes`.** The latter can
+            // only see an id, so it assumes a lone pane grows every arm - the
+            // exact bug the world-aware form was added to fix.
             if (!world.isSolid(under.x, under.y - 1, under.z) &&
-                collisionBoxes(world.blockAt(under.x, under.y, under.z)).count == 0) {
+                worldCollisionBoxes(world, under.x, under.y, under.z).count == 0) {
                 shot.landed = false;
             }
             continue;
@@ -220,7 +251,7 @@ void Projectiles::tick(const World& world, Creatures& creatures) {
             shot.shake = kShakeSeconds;
             shot.landed = true;
             if (species.reportsImpact) {
-                m_landings.push_back({shot.kind, shot.position, blocked.normal});
+                m_landings.push_back({shot.kind, shot.position, blocked.normal, shot.payload});
             }
             if (!species.sticksInGround) {
                 m_shots[i] = m_shots.back();
@@ -278,7 +309,7 @@ std::vector<Projectiles::Landing> Projectiles::takeLandings() {
 }
 
 engine::MeshData Projectiles::buildMesh(const World& world, const SpriteMask& sprites,
-                                        const glm::vec3& eye) const {
+                                        const glm::vec3& eye, const DrawRange& range) const {
     engine::MeshData mesh;
 
     // How far into the tick that has not happened yet the frame is. Blending by
@@ -289,6 +320,9 @@ engine::MeshData Projectiles::buildMesh(const World& world, const SpriteMask& sp
 
     for (const Shot& shot : m_shots) {
         const glm::vec3 drawnAt = glm::mix(shot.previousPosition, shot.position, blend);
+        if (!range.contains(drawnAt)) {
+            continue;
+        }
         const int lx = static_cast<int>(std::floor(drawnAt.x));
         const int ly = static_cast<int>(std::floor(drawnAt.y));
         const int lz = static_cast<int>(std::floor(drawnAt.z));

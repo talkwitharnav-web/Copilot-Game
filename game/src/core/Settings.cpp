@@ -126,6 +126,7 @@ Settings loadSettings(const std::filesystem::path& file) {
 
         read("worker_threads", Settings::kMaxWorkerThreads, settings.workerThreads);
         read("render_distance", Settings::kMaxRenderDistance, settings.renderDistance);
+        read("detail_distance", Settings::kMaxRenderDistance, settings.detailDistance);
         read("frame_cap", 1000, settings.frameCap);
         read("day_length_seconds", 86400, settings.dayLengthSeconds);
         read("tone_map", Settings::kToneMapperCount - 1, settings.toneMapper);
@@ -178,7 +179,8 @@ Settings loadSettings(const std::filesystem::path& file) {
         readFloat("water_refraction", settings.waterRefraction);
         readFloat("foliage_sway", settings.foliageSway);
         readFloat("anti_alias", settings.antiAlias);
-        readFloat("render_scale", settings.renderScale);        readFloat("contact_shadows", settings.contactShadows);
+        readFloat("render_scale", settings.renderScale);
+        readFloat("contact_shadows", settings.contactShadows);
 
         if (key == "bloom") {
             settings.bloom = (value == "1" || value == "true");
@@ -198,16 +200,23 @@ Settings loadSettings(const std::filesystem::path& file) {
         if (key == "creature_showcase") {
             settings.creatureShowcase = std::atoi(value.c_str());
         }
+        if (key == "drop_showcase") {
+            settings.dropShowcase = (value == "1" || value == "true");
+        }
         if (key == "creative_mode") {
             settings.creativeMode = (value == "1" || value == "true");
         }
         if (key == "worldgen_probe") {
             settings.worldgenProbe = (value == "1" || value == "true");
         }
+        if (key == "block_probe") {
+            settings.blockProbe = (value == "1" || value == "true");
+        }
     }
 
     // A render distance of zero would mesh nothing at all.
     settings.renderDistance = std::max(1u, settings.renderDistance);
+    settings.detailDistance = std::max(1u, settings.detailDistance);
     settings.dayLengthSeconds = std::max(10u, settings.dayLengthSeconds);
     settings.soundVolume = std::clamp(settings.soundVolume, 0.0f, 1.0f);
     settings.musicVolume = std::clamp(settings.musicVolume, 0.0f, 1.0f);
@@ -248,6 +257,12 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#   default  half this machine's hardware threads\n"
         << "#\n"
         << "# render_distance: how far the world is drawn, in 32-block chunks.\n"
+        << "# detail_distance: how far out plants, creatures, dropped items\n"
+        << "#   and particles are drawn, in the same chunks. Past it the world\n"
+        << "#   is drawn as terrain only - identical blocks, identical\n"
+        << "#   lighting, no decoration. Everything out there is still there\n"
+        << "#   and still running; it is only not turned into triangles. Set\n"
+        << "#   it to render_distance or higher to turn it off.\n"
         << "# frame_cap: frames per second to aim for; 0 means uncapped.\n"
         << "# day_length_seconds: real seconds for a full day and night.\n"
         << "#\n"
@@ -259,6 +274,11 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#   you, 2 and up show one species on its own (CreatureKind index\n"
         << "#   plus 2). The spawner is frozen and the world's own animals are\n"
         << "#   neither loaded nor saved while it is on. Reviewing models only.\n"
+        << "#\n"
+        << "# drop_showcase: 1 throws one of every awkward block on the floor in\n"
+        << "#   front of you at startup, so what a dropped item looks like can be\n"
+        << "#   judged without mining for it. Dropped items are never saved, so\n"
+        << "#   this leaves nothing behind.\n"
         << "#\n"
         << "# creative_mode: 1 starts you with a full hotbar and placing never\n"
         << "#   runs a stack down. 0 starts you empty-handed. Blocks drop when\n"
@@ -324,15 +344,24 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#   many solid cells sit above the terrain - which is floating land\n"
         << "#   and must read zero. Run it after any change to terrain.\n"
         << "#\n"
+        << "# block_probe: 1 writes block-shapes.txt beside the exe - one line\n"
+        << "#   per block giving its shape and the box its geometry occupies -\n"
+        << "#   and exits without opening a window. tools/check-models.ps1 sets\n"
+        << "#   this itself and compares the result against the reference's own\n"
+        << "#   models/block/*.json, which is the only thing that can say\n"
+        << "#   whether a block is the size it is supposed to be.\n"
+        << "#\n"
         << "# All of these take effect on restart.\n"
         << "worker_threads=" << settings.workerThreads << "\n"
         << "render_distance=" << settings.renderDistance << "\n"
+        << "detail_distance=" << settings.detailDistance << "\n"
         << "frame_cap=" << settings.frameCap << "\n"
         << "day_length_seconds=" << settings.dayLengthSeconds << "\n"
         << "spawn_x=" << settings.spawnX << "\n"
         << "spawn_z=" << settings.spawnZ << "\n"
         << "spawn_underground=" << (settings.spawnUnderground ? 1 : 0) << "\n"
         << "creature_showcase=" << settings.creatureShowcase << "\n"
+        << "drop_showcase=" << (settings.dropShowcase ? 1 : 0) << "\n"
         << "creative_mode=" << (settings.creativeMode ? 1 : 0) << "\n"
         << "sound_volume=" << settings.soundVolume << "\n"
         << "music_volume=" << settings.musicVolume << "\n"
@@ -359,7 +388,8 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "anti_alias=" << settings.antiAlias << "\n"
         << "contact_shadows=" << settings.contactShadows << "\n"
         << "render_scale=" << settings.renderScale << "\n"
-        << "worldgen_probe=" << (settings.worldgenProbe ? 1 : 0) << "\n";
+        << "worldgen_probe=" << (settings.worldgenProbe ? 1 : 0) << "\n"
+        << "block_probe=" << (settings.blockProbe ? 1 : 0) << "\n";
 }
 
 } // namespace game

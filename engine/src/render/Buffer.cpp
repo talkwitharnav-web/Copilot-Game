@@ -59,36 +59,36 @@ Buffer::Buffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFla
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(context.device(), m_buffer, &requirements);
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = requirements.size;
-    allocInfo.memoryTypeIndex =
-        findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, memoryProperties);
-
-    if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
+    // A slice of a shared block, not an allocation of its own. Vulkan caps how
+    // many allocations may exist and a buffer each blew past the spec floor at
+    // high render distances.
+    const MemoryRange range =
+        allocateBufferMemory(context.device(), context.physicalDevice(), requirements, memoryProperties);
+    if (!range.valid()) {
         // The buffer already exists; without this it would leak on a failed allocation.
         vkDestroyBuffer(context.device(), m_buffer, nullptr);
         m_buffer = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed");
     }
+    m_memory = range.memory;
+    m_memoryOffset = range.offset;
+    m_memorySize = range.size;
+    m_mapped = range.mapped;
 
-    vkCheck(vkBindBufferMemory(context.device(), m_buffer, m_memory, 0), "vkBindBufferMemory");
+    vkCheck(vkBindBufferMemory(context.device(), m_buffer, m_memory, m_memoryOffset), "vkBindBufferMemory");
 }
 
 Buffer::~Buffer() {
-    if (m_mapped != nullptr) {
-        vkUnmapMemory(m_context.device(), m_memory);
-    }
+    // **Never unmapped here.** A host-visible block is mapped once for its whole
+    // life and shared by every buffer in it, so unmapping on one buffer's death
+    // would pull the pointer out from under all the others.
     if (m_buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(m_context.device(), m_buffer, nullptr);
     }
-    freeDeviceMemory(m_context.device(), m_memory);
+    freeBufferMemory(m_context.device(), MemoryRange{m_memory, m_memoryOffset, m_memorySize, m_mapped});
 }
 
 void* Buffer::persistentMap() {
-    if (m_mapped == nullptr) {
-        vkCheck(vkMapMemory(m_context.device(), m_memory, 0, m_size, 0, &m_mapped), "vkMapMemory");
-    }
     return m_mapped;
 }
 
@@ -96,16 +96,10 @@ void Buffer::writeFromHost(const void* data, VkDeviceSize bytes, VkDeviceSize of
     if (offset + bytes > m_size) {
         throw std::runtime_error("Write exceeds buffer size");
     }
-
-    if (m_mapped != nullptr) {
-        std::memcpy(static_cast<std::byte*>(m_mapped) + offset, data, static_cast<std::size_t>(bytes));
-        return;
+    if (m_mapped == nullptr) {
+        throw std::runtime_error("Cannot write to buffer memory that is not host visible");
     }
-
-    void* mapped = nullptr;
-    vkCheck(vkMapMemory(m_context.device(), m_memory, offset, bytes, 0, &mapped), "vkMapMemory");
-    std::memcpy(mapped, data, static_cast<std::size_t>(bytes));
-    vkUnmapMemory(m_context.device(), m_memory);
+    std::memcpy(static_cast<std::byte*>(m_mapped) + offset, data, static_cast<std::size_t>(bytes));
 }
 
 void uploadBufferData(const VulkanContext& context, VkCommandPool commandPool, Buffer& destination, const void* data,

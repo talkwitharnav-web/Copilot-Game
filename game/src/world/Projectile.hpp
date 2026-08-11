@@ -2,6 +2,7 @@
 
 #include "item/Item.hpp"
 #include "item/SpriteMask.hpp"
+#include "world/DrawRange.hpp"
 
 #include <engine/render/MeshData.hpp>
 
@@ -29,6 +30,11 @@ enum class ProjectileKind : std::uint8_t {
     /// but it keeps the thrown-item family's drag - which is the whole reason
     /// the two are separate rows rather than one "thrown item".
     Egg,
+    /// A splash potion, and a lingering one. Both fly like a thrown egg and
+    /// neither damages what it hits - what they do happens where they land,
+    /// which is the owner's business rather than this system's.
+    SplashPotion,
+    LingeringPotion,
     Count,
 };
 
@@ -127,7 +133,7 @@ public:
     /// which is what stops a creative-fired arrow becoming collectable because
     /// the player changed mode while it was in the air.
     void spawn(ProjectileKind kind, const glm::vec3& position, const glm::vec3& velocity, bool crit,
-               bool collectable);
+               bool collectable, ItemId payload = ItemId::None);
 
     /// Flies, hits, sticks and expires. Takes the roster because a projectile
     /// has to ask what is in the way, and the world because a hit can matter to
@@ -157,6 +163,10 @@ public:
         /// Unit step out of the block that was struck, so the owner knows which
         /// way is clear.
         glm::ivec3 normal;
+        /// Which potion it was, for the two kinds that are one. **Carried
+        /// rather than looked up**: forty-one brews share two projectile kinds,
+        /// and the shot is the only thing that knows which one it is.
+        ItemId payload = ItemId::None;
     };
     std::vector<Landing> takeLandings();
 
@@ -176,7 +186,8 @@ public:
     /// `eye` is where the camera is. A thrown item is **billboarded** toward
     /// it, which is what the reference's own thrown-item renderer does - it
     /// takes the camera's orientation outright.
-    engine::MeshData buildMesh(const World& world, const SpriteMask& sprites, const glm::vec3& eye) const;
+    engine::MeshData buildMesh(const World& world, const SpriteMask& sprites, const glm::vec3& eye,
+                               const DrawRange& range = {}) const;
 
     std::size_t count() const { return m_shots.size(); }
 
@@ -196,6 +207,9 @@ private:
         /// travels rather than snapping twenty times a second.
         glm::vec3 previousHeading{0.0f, 0.0f, 1.0f};
         ProjectileKind kind = ProjectileKind::Arrow;
+        /// Which brew a thrown potion is carrying, and nothing for everything
+        /// else.
+        ItemId payload = ItemId::None;
         float age = 0.0f;
         /// Counts down the landing wobble, the reference's own 0.35 s.
         float shake = 0.0f;

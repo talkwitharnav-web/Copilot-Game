@@ -1,4 +1,4 @@
-﻿# Builds a temporary proof atlas: our own hud.png with the reference's real UI
+# Builds a temporary proof atlas: our own hud.png with the reference's real UI
 # crops laid over the regions whose art has not been authored yet.
 #
 # It exists to prove the *layout* - card widths, the fold between them, the tab

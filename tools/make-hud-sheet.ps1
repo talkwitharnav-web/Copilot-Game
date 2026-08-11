@@ -248,6 +248,35 @@ function New-ChestPanel {
     return $panel
 }
 
+# One input on the left and the cuts it offers in a row to the right, with an
+# arrow between. Same derivation as every other screen, so the cells match.
+function New-StonecutterPanel {
+    param([System.Drawing.Bitmap]$Source)
+
+    $panel = New-ContainerPanel -Source $Source
+    Copy-Cell -Target $panel -Source $Source -DestX 19 -DestY 34
+    for ($column = 0; $column -lt 3; $column++) {
+        Copy-Cell -Target $panel -Source $Source -DestX (85 + $column * 18) -DestY 34
+    }
+    Set-Arrow -Target $panel -Left 54 -Right 74 -CentreY 43 -Color $Source.GetPixel(16, 92)
+    return $panel
+}
+
+# Five slots in one centred row. The reference's hopper GUI is a short card of
+# its own; ours is the ordinary container panel with that row stamped into it,
+# so the cells are the same pixels as every other screen's.
+function New-HopperPanel {
+    param([System.Drawing.Bitmap]$Source)
+
+    $panel = New-ContainerPanel -Source $Source
+    # Five cells on the 18 px pitch come to 90, so the run starts at 43 to be
+    # centred in the 176-wide card.
+    for ($column = 0; $column -lt 5; $column++) {
+        Copy-Cell -Target $panel -Source $Source -DestX (43 + $column * 18) -DestY 34
+    }
+    return $panel
+}
+
 # Six rows of nine, which does not fit the ordinary 166-tall card - so the plain
 # interior is STRETCHED by three rows' worth and everything below it moves down
 # together. The top border, the player's own grid and the bottom border are
@@ -581,11 +610,14 @@ $smithingImage = New-SmithingPanel -Source $inventoryImage
 $chestImage = New-ChestPanel -Source $inventoryImage
 $doubleChestImage = New-DoubleChestPanel -Source $inventoryImage
 $statusImage = New-StatusStrip
+$hopperImage = New-HopperPanel -Source $inventoryImage
+$stonecutterImage = New-StonecutterPanel -Source $inventoryImage
 
 $width = [Math]::Max($widgetImage.Width, $inventoryImage.Width)
 $height = $widgetImage.Height + $inventoryImage.Height + $craftingImage.Height + $furnaceImage.Height +
     $indicatorImage.Height + $bookImage.Height + $tabImage.Height + $cellImage.Height +
-    $smithingImage.Height + $chestImage.Height + $doubleChestImage.Height + $statusImage.Height
+    $smithingImage.Height + $chestImage.Height + $doubleChestImage.Height + $statusImage.Height +
+    $hopperImage.Height + $stonecutterImage.Height
 
 $sheet = New-Object System.Drawing.Bitmap -ArgumentList ([int]$width), ([int]$height),
     ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -615,6 +647,12 @@ $doubleChestTop = $chestTop + $chestImage.Height
 $g.DrawImage($doubleChestImage, 0, $doubleChestTop, $doubleChestImage.Width, $doubleChestImage.Height)
 $statusTop = $doubleChestTop + $doubleChestImage.Height
 $g.DrawImage($statusImage, 0, $statusTop, $statusImage.Width, $statusImage.Height)
+# Appended last on purpose: every offset above is written down in
+# `InventoryScreen.cpp`, so a new panel goes at the end where it moves nothing.
+$hopperTop = $statusTop + $statusImage.Height
+$g.DrawImage($hopperImage, 0, $hopperTop, $hopperImage.Width, $hopperImage.Height)
+$stonecutterTop = $hopperTop + $hopperImage.Height
+$g.DrawImage($stonecutterImage, 0, $stonecutterTop, $stonecutterImage.Width, $stonecutterImage.Height)
 $g.Dispose()
 
 $sheet.Save((Join-Path $root $Output), [System.Drawing.Imaging.ImageFormat]::Png)
@@ -632,6 +670,8 @@ Write-Host "  smithing   at (0, $smithingTop) size $($smithingImage.Width) x $($
 Write-Host "  chest      at (0, $chestTop) size $($chestImage.Width) x $($chestImage.Height)"
 Write-Host "  chest x2   at (0, $doubleChestTop) size $($doubleChestImage.Width) x $($doubleChestImage.Height)"
 Write-Host "  status     at (0, $statusTop) size $($statusImage.Width) x $($statusImage.Height): 8 icons 9x9 on a 10 px pitch, in StatusIcon order"
+Write-Host "  hopper     at (0, $hopperTop) size $($hopperImage.Width) x $($hopperImage.Height)"
+Write-Host "  stonecutter at (0, $stonecutterTop) size $($stonecutterImage.Width) x $($stonecutterImage.Height)"
 Write-Host "  character box painted out: $($CharacterBox -join ', ')"
 
 $sheet.Dispose()
@@ -645,3 +685,5 @@ $cellImage.Dispose()
 $smithingImage.Dispose()
 $chestImage.Dispose()
 $doubleChestImage.Dispose()
+$hopperImage.Dispose()
+$stonecutterImage.Dispose()

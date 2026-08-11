@@ -75,6 +75,7 @@ set(ENGINE_SHADERS
     shaders/triangle.vert
     shaders/triangle.frag
     shaders/gbuffer.frag
+    shaders/hud.vert
     shaders/hud.frag
     shaders/shadow.vert
     shaders/shadow.frag

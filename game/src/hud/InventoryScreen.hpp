@@ -47,6 +47,15 @@ enum class Kind {
     /// container. They stay two separate blocks holding twenty-seven each -
     /// only the screen joins them.
     DoubleChest,
+    /// Five slots in one row. It is a container like a chest, only smaller, so
+    /// it borrows the `Chest` region outright and the entire click, drag and
+    /// shift-click path works with no hopper-specific branch anywhere.
+    Hopper,
+    /// One block in, and the cuts it offers laid out beside it. The results are
+    /// **previews** like a smithing table's, so they use `CraftResult` - but
+    /// there are three of them, and it is the only screen where that region's
+    /// index means anything.
+    Stonecutter,
 };
 
 /// Width and height of a screen's crafting grid.
@@ -61,6 +70,8 @@ constexpr int craftSize(Kind kind) {
     case Kind::SmithingTable:
     case Kind::Chest:
     case Kind::DoubleChest:
+    case Kind::Hopper:
+    case Kind::Stonecutter:
         return 0;
     default:
         return 2;
@@ -201,7 +212,24 @@ constexpr std::size_t chestSlotCount(Kind kind) {
     if (kind == Kind::DoubleChest) {
         return kChestSlots * 2;
     }
+    if (kind == Kind::Hopper) {
+        return kHopperSlots;
+    }
     return kind == Kind::Chest ? kChestSlots : 0;
+}
+
+/// How many previewed results a screen shows. Only the stonecutter shows more
+/// than one, and it is the only place `Region::CraftResult`'s index matters.
+constexpr std::size_t resultSlotCount(Kind kind) {
+    return kind == Kind::Stonecutter ? static_cast<std::size_t>(kStonecutterOptions) : 1u;
+}
+
+/// Every screen that shows a container, so the caller can ask one question
+/// rather than list three kinds. **`isContainer` and `chestSlotCount` must
+/// agree**: a kind that offers slots and is not named here would draw them and
+/// then refuse every click.
+constexpr bool isContainer(Kind kind) {
+    return chestSlotCount(kind) > 0;
 }
 
 /// `heldStack` is what the cursor is carrying, drawn at (cursorX, cursorY).
@@ -222,8 +250,10 @@ constexpr std::size_t chestSlotCount(Kind kind) {
 /// drawn after `clipped`. A blended fragment still writes depth, so a stack
 /// held over the catalogue was stamping a hole through the icons behind it
 /// wherever its own artwork was transparent.
+/// `craftResults` points at `resultSlotCount(kind)` previewed results. Every
+/// screen but the stonecutter has exactly one.
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
-                       const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
+                       const ItemStack* craftResults, const ItemStack& heldStack, float cursorX, float cursorY,
                        float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
                        bool creative, const Chest* chest, const Chest* partner, engine::MeshData& clipped,
                        engine::MeshData& top);

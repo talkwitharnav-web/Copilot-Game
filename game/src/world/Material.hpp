@@ -95,6 +95,12 @@ constexpr bool isMetalBlock(BlockId id) {
         return false;
     }
     const std::string_view name = extraBlockInfo(id).name;
+    // The rule above, enforced. A bare `find("Copper")` matched "Deepslate
+    // Copper Ore" and "Block of Raw Copper" - so the ore this comment exists to
+    // exclude was being rendered as chrome, and raw ore with it.
+    if (name.find("Ore") != std::string_view::npos || name.find("Raw ") != std::string_view::npos) {
+        return false;
+    }
     return name.find("Block of Iron") != std::string_view::npos ||
            name.find("Block of Gold") != std::string_view::npos ||
            name.find("Block of Copper") != std::string_view::npos ||
@@ -131,8 +137,26 @@ inline MaterialFamily materialFamilyFor(BlockId id) {
     // Before the plant test, and that is the point: a torch is drawn as a
     // crossed pair like a flower, so it would otherwise be tagged as foliage and
     // sway in the wind the moment anything reads that flag.
-    if (id == BlockId::Torch || id == BlockId::SoulTorch || id == BlockId::RedstoneTorch) {
+    //
+    // **`isTorchBlock`, not the three ids by name.** The redstone torch grew to
+    // ten states, and the nine new ones share the lit one's texture layer - so
+    // naming only `RedstoneTorch` left that layer claimed by two different
+    // families, which the startup check reports and one of which is then
+    // silently ignored.
+    if (isTorchBlock(id)) {
         return MaterialFamily::Wood;
+    }
+    // The rest of the redstone family. A rail already answers Metal through its
+    // name, and a button and a plate are cut shapes and answered above.
+    if (isRedstoneWire(id) || isRepeater(id) || isComparator(id) || isObserver(id) ||
+        isDispenserLike(id) || isPiston(id) || isPistonHead(id) || isLever(id) ||
+        isTripwireHook(id) || isTripwire(id) || isTarget(id) || isNoteBlock(id) ||
+        isDaylightDetector(id) || isRedstoneLamp(id)) {
+        return isNoteBlock(id) || isDaylightDetector(id) ? MaterialFamily::Wood
+                                                         : MaterialFamily::Stone;
+    }
+    if (isLightningRod(id)) {
+        return MaterialFamily::Metal;
     }
     if (isCrossBlock(id) || isVine(id) || isCocoa(id) || id == BlockId::Kelp || id == BlockId::Seagrass ||
         id == BlockId::LilyPad) {
@@ -160,7 +184,7 @@ inline MaterialFamily materialFamilyFor(BlockId id) {
     if (id == BlockId::Gravel || id == BlockId::Clay) {
         return MaterialFamily::Gravel;
     }
-    if (id == BlockId::Snow) {
+    if (id == BlockId::Snow || isSnowLayer(id)) {
         return MaterialFamily::Snow;
     }
     if (id == BlockId::Grass || id == BlockId::Dirt || id == BlockId::CoarseDirt || id == BlockId::Podzol ||
@@ -208,9 +232,21 @@ constexpr std::uint32_t packMaterial(float roughness, float metallic, float emis
 
 struct MaterialTable {
     std::vector<std::uint32_t> rows;
-    /// Layers two different families both claim. Should be zero; anything else
-    /// means one of them is being silently ignored.
+    /// **Distinct layers** two different families both claim. Should be zero;
+    /// anything else means one of them is being silently ignored, and which one
+    /// wins is decided by whichever block id happens to come first.
+    ///
+    /// Counted per layer, not per claim: the walk asks every face, facing and
+    /// chest half, so one disagreeing layer used to be reported forty-five
+    /// times over and the number looked like a catastrophe.
     int conflicts = 0;
+    /// The first layer two families both claimed, and which two. **A count on
+    /// its own is not a diagnostic** - it says something is wrong and gives you
+    /// nothing to look at, which cost a round trip the first time a redstone
+    /// block shared a picture with the block it was named after.
+    int firstConflictLayer = -1;
+    int firstConflictHeld = -1;
+    int firstConflictWanted = -1;
     /// Layers no block ever asks for - item sprites, the white utility layer,
     /// animation frames. They keep the default row.
     int unclaimed = 0;
@@ -230,6 +266,7 @@ inline MaterialTable buildMaterialTable(std::size_t layerCount) {
     table.rows.assign(layerCount, packMaterial(fallback.roughness, fallback.metallic, 0.0f, 0));
 
     std::vector<int> claimedBy(layerCount, -1);
+    std::vector<bool> conflicted(layerCount, false);
     std::vector<float> emission(layerCount, -1.0f);
 
     const auto faces = std::array{BlockFace::Top, BlockFace::Bottom, BlockFace::Side};
@@ -266,7 +303,14 @@ inline MaterialTable buildMaterialTable(std::size_t layerCount) {
                         claimedBy[static_cast<std::size_t>(layer)] = static_cast<int>(family);
                         table.rows[static_cast<std::size_t>(layer)] =
                             packMaterial(properties.roughness, properties.metallic, 0.0f, flags);
-                    } else if (claimedBy[static_cast<std::size_t>(layer)] != static_cast<int>(family)) {
+                    } else if (claimedBy[static_cast<std::size_t>(layer)] != static_cast<int>(family) &&
+                               !conflicted[static_cast<std::size_t>(layer)]) {
+                        conflicted[static_cast<std::size_t>(layer)] = true;
+                        if (table.firstConflictLayer < 0) {
+                            table.firstConflictLayer = layer;
+                            table.firstConflictHeld = claimedBy[static_cast<std::size_t>(layer)];
+                            table.firstConflictWanted = static_cast<int>(family);
+                        }
                         ++table.conflicts;
                     }
 

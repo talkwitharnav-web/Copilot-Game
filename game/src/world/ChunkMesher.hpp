@@ -66,12 +66,28 @@ struct ChunkMeshes {
     engine::MeshData translucent;
 };
 
+/// How much of a chunk is turned into triangles.
+///
+/// **An argument, never something looked up while the job runs.** Meshing is a
+/// pure function of its input volume and runs on a worker thread; reading the
+/// player's position from inside one would make two chunks meshed in the same
+/// frame disagree about where the boundary was. The owning world decides the
+/// tier on the main thread and hands it over with the volume.
+enum class MeshDetail : std::uint8_t {
+    /// Everything. What every chunk near the player gets.
+    Full,
+    /// Blocks and their baked lighting, with `isDistantDecoration` left out.
+    /// The silhouette is identical; the grass is not there.
+    TerrainOnly,
+};
+
 /// Turns blocks into triangles, emitting a face only where a solid block touches
 /// air. Interior faces are never generated, which is the single idea that makes
 /// voxel worlds affordable to render.
 ///
 /// Pure: it reads only its arguments, returns vertex data, and touches neither
 /// the GPU nor any global state. That is what lets it run on a worker thread.
-ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset);
+ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset,
+                      MeshDetail detail = MeshDetail::Full);
 
 } // namespace game

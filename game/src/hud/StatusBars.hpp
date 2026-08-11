@@ -1,5 +1,7 @@
 #pragma once
 
+#include "world/Survival.hpp"
+
 #include <engine/render/MeshData.hpp>
 
 namespace game::hud {
@@ -10,10 +12,13 @@ namespace game::hud {
 /// a pure function of what it is given - the same property `InventoryScreen`'s
 /// `build` has, and the reason either can be tested without a world.
 struct StatusValues {
-    int health = 20;
-    int maxHealth = 20;
-    int food = 20;
-    int maxFood = 20;
+    // **The survival table's own maxima, not a second copy of twenty.** Nothing
+    // assigns these, so whatever is written here is what ships - and a bar
+    // drawn against a stale maximum reports the wrong fraction of a full one.
+    int health = survival::kMaxHealth;
+    int maxHealth = survival::kMaxHealth;
+    int food = survival::kMaxFood;
+    int maxFood = survival::kMaxFood;
     /// Air left, as a fraction. Anything at or above 1 hides the bar entirely,
     /// which is the reference's behaviour: bubbles only appear once you are
     /// actually holding your breath.

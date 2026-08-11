@@ -1,4 +1,4 @@
-﻿#include "world/FallingBlock.hpp"
+#include "world/FallingBlock.hpp"
 
 #include "world/FaceShading.hpp"
 #include "world/World.hpp"
@@ -103,10 +103,13 @@ std::vector<FallingBlocks::Crushed> FallingBlocks::update(World& world, float de
     return crushed;
 }
 
-engine::MeshData FallingBlocks::buildMesh(const World& world) const {
+engine::MeshData FallingBlocks::buildMesh(const World& world, const DrawRange& range) const {
     engine::MeshData mesh;
 
     for (const Falling& falling : m_blocks) {
+        if (!range.contains(falling.position)) {
+            continue;
+        }
         const glm::vec3 min = falling.position;
         const glm::vec3 max = min + glm::vec3{1.0f};
 

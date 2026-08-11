@@ -2,6 +2,7 @@
 
 #include "engine/render/MeshData.hpp"
 #include "world/Block.hpp"
+#include "world/DrawRange.hpp"
 
 #include <glm/vec3.hpp>
 
@@ -38,7 +39,7 @@ public:
 
     /// Rebuilt every frame rather than transformed, for the same reason the
     /// drops are: world meshes are drawn with an identity model matrix.
-    engine::MeshData buildMesh(const World& world) const;
+    engine::MeshData buildMesh(const World& world, const DrawRange& range = {}) const;
 
     std::size_t count() const { return m_blocks.size(); }
 

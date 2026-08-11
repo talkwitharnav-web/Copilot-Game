@@ -1,4 +1,4 @@
-﻿#include "hud/InventoryScreen.hpp"
+#include "hud/InventoryScreen.hpp"
 
 #include "hud/HudPrimitives.hpp"
 #include "item/Recipe.hpp"
@@ -69,6 +69,15 @@ constexpr glm::vec2 kFurnacePanelMin{0.0f, 373.0f};
 constexpr glm::vec2 kSmithingPanelMin{0.0f, 793.0f};
 constexpr glm::vec2 kChestPanelMin{0.0f, 959.0f};
 constexpr glm::vec2 kDoubleChestPanelMin{0.0f, 1125.0f};
+/// Appended after the status strip, which is why its offset is the largest
+/// rather than following the chests it sits beside in this list.
+constexpr glm::vec2 kHopperPanelMin{0.0f, 1355.0f};
+constexpr glm::vec2 kStonecutterPanelMin{0.0f, 1521.0f};
+
+/// The hopper's one row: five cells on the usual pitch, centred in the card, so
+/// the run starts at 43 and the first centre lands on 52.
+constexpr float kHopperFirstCentreX = 52.0f;
+constexpr float kHopperCentreY = 43.0f;
 
 /// The chest's own three rows, in the panel's pixels. The reference's chest GUI
 /// puts them at 17, 35 and 53 - which is where our crafting area already sits,
@@ -101,7 +110,7 @@ constexpr float kCellSheetTop = 773.0f;
 
 /// What a catalogue cell's background says.
 ///
-/// **Four, where `INTERFACE.md` Â§3.1 describes six.** Three of vanilla's six are
+/// **Four, where `INTERFACE.md` S3.1 describes six.** Three of vanilla's six are
 /// expandable groups, which are slice 9 and do not exist. The fourth is a
 /// *selected recipe*, and that one was built and taken back out: nothing sets
 /// it - slice 8 fills the grid on the click rather than remembering it - so it
@@ -284,12 +293,22 @@ constexpr Layout layoutFor(Kind kind) {
     }
     if (kind == Kind::SmithingTable) {
         // Side by side rather than stacked: a tool goes in and the material
-        // beside it, which is how the reference reads.
+        // beside it, which is how the reference reads. The grindstone and the
+        // brewing stand borrow the same two slots - all three ask the same
+        // shape of question.
         return Layout{kSmithingPanelMin, 2, {45.0f, 43.0f}, {131.0f, 43.0f}};
     }
     if (kind == Kind::Chest || kind == Kind::DoubleChest) {
         return Layout{kind == Kind::Chest ? kChestPanelMin : kDoubleChestPanelMin, 0,
                       {16.0f, kChestFirstCentreY}, {0.0f, 0.0f}};
+    }
+    if (kind == Kind::Hopper) {
+        return Layout{kHopperPanelMin, 0, {kHopperFirstCentreX, kHopperCentreY}, {0.0f, 0.0f}};
+    }
+    if (kind == Kind::Stonecutter) {
+        // The input on the left, the first cut where the result normally sits;
+        // the other two follow it on the usual pitch.
+        return Layout{kStonecutterPanelMin, 0, {28.0f, 43.0f}, {94.0f, 43.0f}};
     }
     return Layout{kInventoryPanelMin, 2, {106.0f, 26.0f}, {162.0f, 36.0f}};
 }
@@ -303,8 +322,14 @@ glm::vec2 craftSlotCentre(Kind kind, const Layout& layout, std::size_t index) {
         return toScreen(kind, layout.craftFirstCentre.x,
                         index == 0 ? layout.craftFirstCentre.y : kFurnaceFuelCentreY);
     }
-    const auto column = static_cast<float>(index % static_cast<std::size_t>(layout.craftSize));
-    const auto row = static_cast<float>(index / static_cast<std::size_t>(layout.craftSize));
+    // **A screen with no grid still has slots**, and dividing by its grid width
+    // is an integer divide by zero — which on x86 is a hardware fault, not a
+    // wrong answer. The stonecutter has one input and `craftSize` 0, so opening
+    // it killed the process outright. A gridless screen lays its slots out in a
+    // single row.
+    const int width = layout.craftSize > 0 ? layout.craftSize : 1;
+    const auto column = static_cast<float>(index % static_cast<std::size_t>(width));
+    const auto row = static_cast<float>(index / static_cast<std::size_t>(width));
     return toScreen(kind, layout.craftFirstCentre.x + column * kSlotPitchPixels,
                     layout.craftFirstCentre.y + row * kSlotPitchPixels);
 }
@@ -312,12 +337,28 @@ glm::vec2 craftSlotCentre(Kind kind, const Layout& layout, std::size_t index) {
 /// The furnace's and the smithing table's own slot counts, neither of which is
 /// a square grid.
 constexpr std::size_t slotsFor(Kind kind) {
+    if (kind == Kind::Stonecutter) {
+        return 1u;
+    }
     return (kind == Kind::Furnace || kind == Kind::SmithingTable) ? 2u : craftSlotCount(kind);
+}
+
+/// Where the nth offered cut sits. Only the stonecutter has more than one
+/// result, which is why every other screen asks for index 0 and gets the
+/// layout's single position back.
+glm::vec2 resultSlotCentre(Kind kind, const Layout& layout, std::size_t index) {
+    return toScreen(kind, layout.craftResultCentre.x +
+                              static_cast<float>(index) * kSlotPitchPixels,
+                    layout.craftResultCentre.y);
 }
 
 /// Where one of a chest's twenty-seven slots sits, on the same nine-wide pitch
 /// the storage rows below it use.
 glm::vec2 chestSlotCentre(Kind kind, std::size_t index) {
+    if (kind == Kind::Hopper) {
+        return toScreen(kind, kHopperFirstCentreX + static_cast<float>(index) * kSlotPitchPixels,
+                        kHopperCentreY);
+    }
     const auto column = static_cast<float>(index % kHotbarSlots);
     const auto row = static_cast<float>(index / kHotbarSlots);
     return toScreen(kind, kFirstSlotCentreX + column * kSlotPitchPixels,
@@ -336,9 +377,11 @@ bool within(float x, float y, const glm::vec2& centre, float half) {
 /// leaves visible.
 ///
 /// The reference masks its list to a viewport and so clips the last row
-/// **through** a cell rather than dropping it. There is no scissor rectangle
-/// anywhere in this renderer, so the clip is arithmetic: a shorter quad with a
-/// correspondingly shorter slice of the sprite.
+/// **through** a cell rather than dropping it. The cell backgrounds do that
+/// arithmetically - a shorter quad with a correspondingly shorter slice of the
+/// sprite - because an isometric icon is three quads on a cube and no rectangle
+/// can clip one. The icons themselves go into `Renderer::setClippedScreenMesh`,
+/// which sets a real scissor.
 struct CatalogueCell {
     glm::vec2 artTopLeft{};
     float visiblePixels = 0.0f;
@@ -600,13 +643,14 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
             return SlotHit{Region::Grid, i};
         }
     }
-    if (kind == Kind::Chest || kind == Kind::DoubleChest) {
+    if (isContainer(kind)) {
         for (std::size_t i = 0; i < chestSlotCount(kind); ++i) {
             if (within(x, y, chestSlotCentre(kind, i), kSlotHalf)) {
                 return SlotHit{Region::Chest, i};
             }
         }
-        // A chest has no crafting slots and no result, so nothing below applies.
+        // A container has no crafting slots and no result, so nothing below
+        // applies.
         return std::nullopt;
     }
     for (std::size_t i = 0; i < slotsFor(kind); ++i) {
@@ -614,8 +658,10 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
             return SlotHit{Region::Craft, i};
         }
     }
-    if (within(x, y, craftResultCentre(kind, layout), kSlotHalf)) {
-        return SlotHit{Region::CraftResult, 0};
+    for (std::size_t i = 0; i < resultSlotCount(kind); ++i) {
+        if (within(x, y, resultSlotCentre(kind, layout, i), kSlotHalf)) {
+            return SlotHit{Region::CraftResult, i};
+        }
     }
     return std::nullopt;
 }
@@ -652,7 +698,7 @@ bool insidePanel(Kind kind, float x, float y) {
 }
 
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,
-                       const ItemStack& craftResult, const ItemStack& heldStack, float cursorX, float cursorY,
+                       const ItemStack* craftResults, const ItemStack& heldStack, float cursorX, float cursorY,
                        float aspect, const CatalogueState& catalogue, const FurnaceProgress& progress,
                        bool creative, const Chest* chest, const Chest* partner, engine::MeshData& clipped,
                        engine::MeshData& top) {
@@ -696,7 +742,10 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
         hud::appendStack(mesh, craftSlots[i], craftSlotCentre(kind, layout, i), kSlotHalf, kIconDepth,
                          kCountDepth);
     }
-    hud::appendStack(mesh, craftResult, craftResultCentre(kind, layout), kSlotHalf, kIconDepth, kCountDepth);
+    for (std::size_t i = 0; i < resultSlotCount(kind); ++i) {
+        hud::appendStack(mesh, craftResults[i], resultSlotCentre(kind, layout, i), kSlotHalf,
+                         kIconDepth, kCountDepth);
+    }
 
     if (chest != nullptr) {
         for (std::size_t i = 0; i < chestSlotCount(kind); ++i) {
@@ -763,7 +812,9 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
                 under = &craftSlots[hover->index];
                 break;
             case Region::CraftResult:
-                under = &craftResult;
+                if (hover->index < resultSlotCount(kind)) {
+                    under = &craftResults[hover->index];
+                }
                 break;
             default:
                 break;

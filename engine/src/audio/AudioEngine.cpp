@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 
 namespace engine {
@@ -46,8 +47,17 @@ constexpr std::size_t kMaxVoices = 48;
 constexpr float kAudibleFloor = 0.005f;
 
 struct Sound {
-    std::vector<float> samples; // Interleaved stereo.
+    /// **Kept as the sixteen-bit samples the file already held, and mono kept
+    /// mono.** Decoding everything to interleaved stereo float cost four times
+    /// what a mono clip needs - twice for a second channel carrying identical
+    /// numbers, twice again for a float that starts life as a `short`. With
+    /// five hundred recordings and eight music tracks that was most of a
+    /// gigabyte of resident memory. The mixer converts on read, which is one
+    /// multiply on a path that is already doing interpolation arithmetic.
+    std::vector<std::int16_t> samples;
     std::size_t frames = 0;
+    /// 1 or 2. A mono sound feeds both ears from the one channel.
+    int channels = 1;
 };
 
 struct Voice {
@@ -115,11 +125,18 @@ void AudioEngine::Impl::mix(float* output, ma_uint32 frameCount) {
             // Linear interpolation between the two straddling frames, which is
             // what makes a pitch shift a resample rather than a stutter.
             const double fraction = voice.cursor - static_cast<double>(index);
-            const float* a = &sound.samples[index * kChannels];
-            const float* b = &sound.samples[(index + 1) * kChannels];
             const auto blend = static_cast<float>(fraction);
-            const float left = a[0] + (b[0] - a[0]) * blend;
-            const float right = a[1] + (b[1] - a[1]) * blend;
+            constexpr float kFromShort = 1.0f / 32768.0f;
+            const std::int16_t* a = &sound.samples[index * static_cast<std::size_t>(sound.channels)];
+            const std::int16_t* b = &sound.samples[(index + 1) * static_cast<std::size_t>(sound.channels)];
+            // A mono sound has one channel to give and both ears take it.
+            const int right1 = sound.channels == 1 ? 0 : 1;
+            const float left = (static_cast<float>(a[0]) +
+                                (static_cast<float>(b[0]) - static_cast<float>(a[0])) * blend) *
+                               kFromShort;
+            const float right = (static_cast<float>(a[right1]) +
+                                 (static_cast<float>(b[right1]) - static_cast<float>(a[right1])) * blend) *
+                                kFromShort;
 
             output[frame * kChannels] += left * voice.leftGain * masterVolume * bus;
             output[frame * kChannels + 1] += right * voice.rightGain * masterVolume * bus;
@@ -188,20 +205,18 @@ SoundHandle AudioEngine::load(const std::filesystem::path& path) {
     // at worst a 9% stretch and usually a no-op.
     const double ratio = static_cast<double>(rate) / static_cast<double>(kSampleRate);
     const auto outFrames = static_cast<std::size_t>(static_cast<double>(frames) / ratio);
-    sound->samples.resize(outFrames * kChannels);
+    sound->channels = channels >= 2 ? 2 : 1;
+    const auto outChannels = static_cast<std::size_t>(sound->channels);
+    sound->samples.resize(outFrames * outChannels);
     sound->frames = outFrames;
 
     for (std::size_t frame = 0; frame < outFrames; ++frame) {
         const auto source =
             std::min(static_cast<std::size_t>(static_cast<double>(frame) * ratio),
                      static_cast<std::size_t>(frames - 1));
-        for (ma_uint32 channel = 0; channel < kChannels; ++channel) {
-            // A mono file feeds both ears, which is most of the reference's
-            // library and is why this is not an error case.
-            const int sourceChannel = channels == 1 ? 0 : static_cast<int>(channel);
-            const short raw = decoded[source * static_cast<std::size_t>(channels) +
-                                      static_cast<std::size_t>(sourceChannel)];
-            sound->samples[frame * kChannels + channel] = static_cast<float>(raw) / 32768.0f;
+        for (std::size_t channel = 0; channel < outChannels; ++channel) {
+            sound->samples[frame * outChannels + channel] =
+                decoded[source * static_cast<std::size_t>(channels) + channel];
         }
     }
     free(decoded);

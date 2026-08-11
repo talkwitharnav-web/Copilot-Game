@@ -21,6 +21,23 @@ struct OverlayStats {
     std::uint32_t triangles = 0;
     unsigned workerThreads = 0;
     int renderDistance = 0;
+    /// Live GPU allocations against what the device allows, and megabytes of
+    /// pooled buffer memory in use. The allocation count is a hard limit whose
+    /// spec floor is 4096, so it is worth a row of its own.
+    std::uint32_t deviceAllocations = 0;
+    std::uint32_t deviceAllocationLimit = 0;
+    std::uint32_t gpuMegabytes = 0;
+    /// The distance tier: how far out chunks keep their decoration, and how
+    /// many drawn chunks currently do. Equal to or above `renderDistance`
+    /// means off, which is what the row prints.
+    int detailDistance = 0;
+    std::size_t detailedChunks = 0;
+    /// Chunks drawn at a tier they should no longer be at, and how far off the
+    /// nearest of them is. **Standing still this must fall to zero**; while
+    /// moving, the nearest should sit at the detail distance rather than
+    /// anywhere near the player.
+    std::size_t detailLagChunks = 0;
+    int detailLagNearest = -1;
     const char* biome = "";
     /// Which of the four tone curves F10 is currently on, and which shadow
     /// quality G is on. Both are here because the only way to choose between

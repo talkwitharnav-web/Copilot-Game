@@ -2,6 +2,7 @@
 
 #include "world/Biome.hpp"
 #include "world/Block.hpp"
+#include "world/DrawRange.hpp"
 #include "world/Fluid.hpp"
 #include "world/Pathfinder.hpp"
 #include "item/Item.hpp"
@@ -25,7 +26,143 @@ class World;
 /// `tools/make-creature-skins.ps1` owns the file; this is the one place the
 /// number is written down in code, and `Main.cpp` checks the PNG against it.
 constexpr int kCreatureSheetWidth = 128;
-constexpr int kCreatureSheetHeight = 3680;
+constexpr int kCreatureSheetHeight = 4704;
+
+/// Where the iron golem's own 128-row net begins. It is the largest single
+/// allocation the sheet has — everything else is 32 or 64 tall.
+constexpr int kIronGolemSkinRow = 3680;
+
+/// The fourteen villager outfits, sixty-four rows each: the thirteen trades and
+/// the nitwit, in the same order as the job-site table. **Unemployed is not one
+/// of them** — it wears the plain villager skin that already exists, which is
+/// what makes a villager visibly change the moment it takes a job.
+constexpr int kVillagerProfessionSkinRow = kIronGolemSkinRow + 128;
+constexpr int kVillagerProfessionCount = 14;
+
+/// The nitwit: employable by nobody, and it is a profession index rather than a
+/// flag because it wears an outfit like every other trade.
+constexpr std::uint8_t kNitwit = 14;
+
+/// Which trade a block offers, 1 to 13, or 0 for a block nobody claims.
+///
+/// **The family predicates answer, never a list of ids.** A blast furnace has
+/// eight ids for its facing and lit state and a composter has nine for its
+/// fill, so naming ids here would be a second copy of `Block.hpp`'s own
+/// families and would go stale the moment one of them widened.
+constexpr std::uint8_t professionForJobSite(BlockId id) {
+    if (isComposter(id)) {
+        return 1; // Farmer
+    }
+    if (id == BlockId::Barrel) {
+        return 2; // Fisherman
+    }
+    if (id == BlockId::FletchingTable) {
+        return 3; // Fletcher
+    }
+    if (id == BlockId::Loom) {
+        return 4; // Shepherd
+    }
+    if (id == BlockId::CartographyTable) {
+        return 5; // Cartographer
+    }
+    if (id == BlockId::Lectern) {
+        return 6; // Librarian
+    }
+    if (id == BlockId::Stonecutter) {
+        return 7; // Mason
+    }
+    if (id == BlockId::SmithingTable) {
+        return 8; // Toolsmith
+    }
+    if (id == BlockId::Grindstone) {
+        return 9; // Weaponsmith
+    }
+    // **The narrow families are asked before the wide one.** `isFurnace` covers
+    // all three cookers, so testing it first would make every blast furnace and
+    // smoker in the world an armourer's - the same early-out trap that made
+    // eight `blockName` cases dead code when the smoker arrived.
+    if (isBlastFurnace(id)) {
+        return 10; // Armourer
+    }
+    if (isSmoker(id)) {
+        return 11; // Butcher
+    }
+    if (isCauldron(id)) {
+        return 12; // Leatherworker
+    }
+    if (id == BlockId::BrewingStand) {
+        return 13; // Cleric
+    }
+    return 0;
+}
+
+/// What a villager is called, for the debug overlay and nothing else.
+constexpr const char* professionName(std::uint8_t profession) {
+    switch (profession) {
+    case 1:
+        return "Farmer";
+    case 2:
+        return "Fisherman";
+    case 3:
+        return "Fletcher";
+    case 4:
+        return "Shepherd";
+    case 5:
+        return "Cartographer";
+    case 6:
+        return "Librarian";
+    case 7:
+        return "Mason";
+    case 8:
+        return "Toolsmith";
+    case 9:
+        return "Weaponsmith";
+    case 10:
+        return "Armourer";
+    case 11:
+        return "Butcher";
+    case 12:
+        return "Leatherworker";
+    case 13:
+        return "Cleric";
+    case kNitwit:
+        return "Nitwit";
+    default:
+        return "Unemployed";
+    }
+}
+
+/// What a villager is doing at this hour, as a fraction of the day.
+///
+/// The reference's `minecraft:scheduler`, and its five windows are quoted in
+/// ticks out of 24000. Our `timeOfDay` runs 0 to 1 from sunrise and so does the
+/// reference's tick count, so the mapping is a plain divide with no phase
+/// offset - which is worth stating, because getting it wrong would put a
+/// village to bed at lunchtime and nothing would report it.
+enum class VillagerPhase : std::uint8_t {
+    Work,
+    Gather,
+    Home,
+    Sleep,
+};
+
+constexpr VillagerPhase villagerPhaseAt(float dayFraction) {
+    // 0-8000 work, 8000-10000 gather, 10000-11000 work, 11000-12000 home,
+    // 12000-24000 bed.
+    if (dayFraction < 8000.0f / 24000.0f) {
+        return VillagerPhase::Work;
+    }
+    if (dayFraction < 10000.0f / 24000.0f) {
+        return VillagerPhase::Gather;
+    }
+    if (dayFraction < 11000.0f / 24000.0f) {
+        return VillagerPhase::Work;
+    }
+    if (dayFraction < 12000.0f / 24000.0f) {
+        return VillagerPhase::Home;
+    }
+    return VillagerPhase::Sleep;
+}
 
 /// Which animal this is.
 enum class CreatureKind : std::uint8_t {
@@ -114,6 +251,9 @@ enum class CreatureKind : std::uint8_t {
     /// The first thing here that flies. *Bee* is an ordinary English word for a
     /// real animal, so it keeps its name.
     Bee,
+    /// The village's own guard. *Iron golem* is two ordinary English words and
+    /// needs no rename.
+    IronGolem,
     Count,
 };
 
@@ -169,6 +309,12 @@ enum class CreatureTag : std::uint32_t {
     Fish = 1u << 9,
     /// Villager and wandering trader.
     Trader = 1u << 10,
+    /// Anything that hunts people. **The Bramble is deliberately not in it**:
+    /// its hostility comes from `hostile`, and leaving the tag off is how the
+    /// reference's "an iron golem never attacks a creeper" rule is expressed
+    /// here — as an absent tag rather than as a negative filter, which would be
+    /// a second place for the same rule to live.
+    Monster = 1u << 11,
 };
 
 constexpr std::uint32_t operator|(CreatureTag a, CreatureTag b) {
@@ -554,6 +700,26 @@ struct CreatureSpecies {
     /// told not to mime a swing. This is the real thing, and it replaces that
     /// stopgap rather than adding to it - an archer does not also punch.
     bool shootsArrows = false;
+
+    /// Top of a damage *range*, or zero to mean "exactly `attackDamage`".
+    ///
+    /// Defaulting to zero is what leaves all fifty-seven existing rows provably
+    /// unchanged: only a row that states a maximum gets a roll at all.
+    int attackDamageMax = 0;
+
+    /// How hard a blow from this species throws its target, against the ordinary
+    /// `kKnockbackSpeed`/`kKnockbackLift`.
+    ///
+    /// **Both numbers are ratios, not ported values.** Bedrock's iron golem
+    /// carries `horizontal_power` 0.52 against the player's own 0.165, so what
+    /// transfers is 3.15x — dropping 0.52 into our metres-per-second field would
+    /// be the wrong-unit mistake this project has already paid for once.
+    float knockbackScale = 1.0f;
+    float knockbackLiftScale = 1.0f;
+
+    /// Claims a bed and a job site, keeps a daily schedule, and gains a trade
+    /// from whatever block it claimed. The villager alone.
+    bool keepsHouse = false;
 };
 
 const CreatureSpecies& speciesInfo(CreatureKind kind);
@@ -908,12 +1074,58 @@ struct Creature {
     /// arrive this way instead of being made by a storm.
     bool charged = false;
 
+    /// Built by a player out of iron and a carved pumpkin, rather than found in
+    /// a village.
+    ///
+    /// **Per individual, not per species**, exactly like `charged`, and it is
+    /// the whole of the golem's temperament: a player-built one excludes the
+    /// player from `hurt_by_target` outright, so it is passive to you for ever
+    /// and there is no anger timer to expire. Bedrock has no `minecraft:angry`
+    /// on the golem at all.
+    ///
+    /// **This one has to be saved.** A golem that forgot who made it and
+    /// started hitting you after a reload is not a cosmetic bug.
+    bool playerBuilt = false;
+
+    /// What trade this villager took, or 0 for none. 1..13 index the job-site
+    /// table; 14 is the nitwit, which can never take one.
+    ///
+    /// **A profession is a claimed block, not a state that was assigned.** A
+    /// village generates nobody with a trade — every armourer in the world
+    /// claimed a blast furnace on its first morning, which is the reference's
+    /// own behaviour and much the simplest thing to implement.
+    std::uint8_t profession = 0;
+
+    /// The bed and the job site this villager claimed, and the bell it gathers
+    /// at. `y < 0` means none.
+    ///
+    /// **The claim lives here and nowhere else.** "Is this bed taken" is a scan
+    /// of the population rather than a map on `Creatures`, for the same reason
+    /// a double chest re-derives its pairing: a second copy cannot be kept in
+    /// step, needs saving, and has to be repaired when the block is broken.
+    glm::ivec3 bedCell{0, -1, 0};
+    glm::ivec3 jobCell{0, -1, 0};
+    glm::ivec3 meetCell{0, -1, 0};
+
+    /// Bedrock's `dweller.update_interval` — the point-of-interest scan runs
+    /// every 3 to 5 seconds rather than every tick.
+    float poiTimer = 0.0f;
+    /// `behavior.work`: 12.5 s standing at the job block, then 10 s of cooldown.
+    float workTimer = 0.0f;
+    /// The scheduler's own 0-10 s stagger, so a village does not change shift in
+    /// lockstep.
+    float phaseDelay = 0.0f;
+
     /// Which behaviours were running last tick, one bit per row of the table
     /// in `Creature.cpp`. Opaque outside the selector, and it exists for one
     /// reason: a behaviour that is already running is asked whether it may
     /// *continue*, which is deliberately a looser question than whether it may
     /// *start*. A hunter gives up further out than it engages.
-    std::uint16_t runningBehaviours = 0;
+    ///
+    /// **Thirty-two bits, not sixteen.** The villager's schedule took the table
+    /// past sixteen rows; overflowing this silently would make behaviours
+    /// forget they were running, and the symptom would read as a pathing bug.
+    std::uint32_t runningBehaviours = 0;
 };
 
 /// Every creature currently loaded, plus the rules that spawn and retire them.
@@ -926,7 +1138,8 @@ public:
     /// blow landed on the player for the caller to apply, and appends any blast
     /// that went off to `blasts` for the same reason.
     CreatureAttack update(const World& world, const glm::vec3& playerFeet, float deltaSeconds, bool night,
-                          bool playerSneaking, std::vector<CreatureExplosion>& blasts);
+                          bool playerSneaking, float timeOfDay,
+                          std::vector<CreatureExplosion>& blasts);
 
     /// Adds and retires creatures around the player. Kept apart from `update`
     /// because it runs on its own slower clock - trying every frame would spend
@@ -1025,7 +1238,13 @@ public:
     /// because blending depends on draw order and the renderer draws every
     /// opaque mesh before any translucent one. Only a slime's outer shell uses
     /// it so far.
-    engine::MeshData buildMesh(const World& world, engine::MeshData& translucent) const;
+    ///
+    /// `range` is a **drawing** limit and must never be confused with
+    /// `setActiveRadius`, which is the simulation one. A creature outside this
+    /// still walks, still paths, still hunts, still despawns on its own terms
+    /// and is still saved - it is only not built into triangles this frame.
+    engine::MeshData buildMesh(const World& world, engine::MeshData& translucent,
+                               const DrawRange& range = {}) const;
 
     std::size_t count() const { return m_creatures.size(); }
     /// How many are currently hunting the player. This is the number that makes
@@ -1048,7 +1267,7 @@ public:
     /// is for the showcase alone: the roster is frozen there, so a pufferfish
     /// can never inflate itself and has to be handed a stage.
     void place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged = false,
-               float puff = 0.0f);
+               float puff = 0.0f, bool playerBuilt = false);
 
     /// Every creature currently loaded, for the caller to write to disk. The
     /// store owns what a save record contains; this only hands over the live
@@ -1057,12 +1276,19 @@ public:
     /// Puts one back exactly as it was saved, bypassing every spawn rule. The
     /// population cap still applies from the next `manage` onward.
     void restore(CreatureKind kind, const glm::vec3& feet, float yaw, int health, float scale,
-                 bool charged = false);
+                 bool charged = false, bool playerBuilt = false, std::uint8_t profession = 0);
+
+    /// Places the villagers a freshly generated village comes with.
+    ///
+    /// **None of them has a trade**, which is the reference's own arrangement:
+    /// five per cent are babies, and of the adults one in ten is a nitwit and
+    /// the rest are unemployed. Everything else is claimed on the first morning.
+    void placeVillager(const glm::vec3& feet, float yaw, bool baby, bool nitwit);
 
 private:
     float random01();
     void think(const World& world, Creature& creature, const glm::vec3& playerFeet, float deltaSeconds,
-               bool night, bool playerSneaking, CreatureAttack& attack,
+               bool night, bool playerSneaking, float timeOfDay, CreatureAttack& attack,
                std::vector<CreatureExplosion>& blasts);
     void step(const World& world, Creature& creature, float deltaSeconds);
     /// Pushes overlapping creatures apart horizontally. Soft, so it never

@@ -114,8 +114,10 @@ engine::MeshData makeStatusBars(const StatusValues& values) {
         for (int i = 0; i < bubbles; ++i) {
             const float offset = kRowGap + (static_cast<float>(i) + 0.5f) * kIconStep;
             // The last one left is the one bursting, which is the only warning
-            // that the next thing to happen is damage.
-            const int icon = (i == bubbles - 1 && values.airFraction < 1.0f) ? AirBursting : AirFull;
+            // that the next thing to happen is damage. The whole loop already
+            // runs only while the meter is below full, so that is not asked
+            // again here.
+            const int icon = (i == bubbles - 1) ? AirBursting : AirFull;
             appendIcon(mesh, icon, offset, kAirRowY);
         }
     }

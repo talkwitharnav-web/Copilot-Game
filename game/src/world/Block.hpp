@@ -19,6 +19,39 @@ constexpr int kFenceFamilyCount = 12;
 constexpr int kGateFamilyCount = 11;
 constexpr int kCarpetFamilyCount = 16;
 constexpr int kPaneFamilyCount = 17;
+/// Eleven woods plus iron. **Thirty-two ids each** - four facings times a hinge
+/// side times open times which half - because the reference stores all four and
+/// the hinge in particular genuinely cannot be derived: the same neighbourhood
+/// can carry either hand, depending on what was there when it was placed.
+constexpr int kDoorFamilyCount = 12;
+/// The same woods and iron, at **sixteen ids each**: four facings times open
+/// times top-or-bottom half. A trapdoor has no hinge to choose.
+constexpr int kTrapdoorFamilyCount = 12;
+/// Sixteen dyed beds. **Eight ids each** - four facings times head-or-foot -
+/// because a bed is two blocks that have to know which end they are.
+constexpr int kBedColours = 16;
+
+/// Eleven woods and stone. **Twelve ids each** - six faces to hang it on times
+/// pressed - because the reference lets a button go on a floor or a ceiling as
+/// well as a wall, and a floor button is how half of all doorbells are built.
+constexpr int kButtonFamilyCount = 12;
+/// The same twelve, plus the two weighted plates that count what stands on them.
+constexpr int kPressurePlateFamilyCount = 14;
+
+/// One sign per wood, and one hanging sign per wood. **Eight ids each**: four
+/// facings standing on the ground, then four for the wall-mounted form.
+///
+/// > **Named divergence: the reference gives a standing sign sixteen
+/// > rotations.** Ours has four, because the box mesher is axis-aligned and a
+/// > board turned 22.5 degrees is not something it can express - the same
+/// > limitation that leaves the lever's handle sliding instead of tilting.
+constexpr int kSignFamilyCount = 11;
+/// Sixteen dyed banners, on the same eight states.
+constexpr int kBannerFamilyCount = 16;
+/// How many states a sign, a hanging sign or a banner spends on where it is and
+/// which way it looks. The single owner of that eight, because three runs and
+/// six functions all index by it.
+constexpr int kSignStates = 8;
 
 /// **Two bytes per block**, so a 32-cubed chunk is 64 KB of blocks.
 ///
@@ -172,7 +205,7 @@ enum class BlockId : std::uint16_t {
 
     /// **One ordered run, and the order is load-bearing.** `kExtraBlocks` below
     /// is indexed by the offset from `kFirstExtraBlock`, so every property of
-    /// these â€” name, texture layer, whether it is a cross â€” comes from one table
+    /// these - name, texture layer, whether it is a cross - comes from one table
     /// rather than from forty-eight cases in four different switches. Grouped by
     /// family so `Tool.cpp` and `categoryFor` can test ranges instead of names.
     CobbledDeepslate,
@@ -648,12 +681,460 @@ enum class BlockId : std::uint16_t {
     /// so this family costs no texture, no layer constant and no staging row.
     SnowLayerFirst,
     SnowLayerLast = SnowLayerFirst + 6,
+
+    /// **A fourth table-driven run**, and it exists for the same reason the
+    /// second and third do: everything before it is already written into saved
+    /// worlds, so widening a run in place renumbers every block above it.
+    ///
+    /// This one is the farm. Crops keep their age *in the id* exactly the way
+    /// water keeps its level and stairs keep their orientation - a growth stage
+    /// is which block this is, not a number beside it, so it costs no
+    /// per-chunk array and it saves and meshes for free.
+    ///
+    /// Farmland is two ids rather than a moisture counter: the reference stores
+    /// 0-7 and only ever *looks* different wet or dry, and a cell that is one
+    /// of two things is a cell that needs no second table.
+    Farmland,
+    FarmlandMoist,
+    DirtPath,
+
+    /// Eight ages each, so `age = id - WheatCrop0`. Carrots and potatoes have
+    /// eight ages but only four pictures - the reference maps 0-1, 2-3, 4-6, 7
+    /// - and that mapping lives in `cropTextureStage`, not in the id.
+    WheatCrop0,
+    WheatCropLast = WheatCrop0 + 7,
+    CarrotCrop0,
+    CarrotCropLast = CarrotCrop0 + 7,
+    PotatoCrop0,
+    PotatoCropLast = PotatoCrop0 + 7,
+    /// **Bedrock stores beetroot as `growth` 0-7 like every other crop**, not
+    /// Java's `age` 0-3. Four pictures over eight ages, same as the carrot.
+    BeetrootCrop0,
+    BeetrootCropLast = BeetrootCrop0 + 7,
+
+    /// A stem grows through eight ages and then *attaches* to whichever side it
+    /// put its fruit on. The attached form is four more ids rather than a flag,
+    /// so the direction is arithmetic and the mesher needs no extra state.
+    MelonStem0,
+    MelonStemLast = MelonStem0 + 7,
+    MelonStemAttachedFirst,
+    MelonStemAttachedLast = MelonStemAttachedFirst + 3,
+    PumpkinStem0,
+    PumpkinStemLast = PumpkinStem0 + 7,
+    PumpkinStemAttachedFirst,
+    PumpkinStemAttachedLast = PumpkinStemAttachedFirst + 3,
+
+    /// Four ages, three pictures - the reference draws age 2 and 3 the same.
+    NetherWart0,
+    NetherWartLast = NetherWart0 + 3,
+
+    /// Carved and lit, four facings each, in `FaceDirection`'s compass order
+    /// like the furnace. Only the first of each four is a catalogue entry,
+    /// because the other three drop it rather than themselves.
+    CarvedPumpkinFirst,
+    CarvedPumpkinLast = CarvedPumpkinFirst + 3,
+    JackOLanternFirst,
+    JackOLanternLast = JackOLanternFirst + 3,
+
+    /// Nine fill levels. Level 8 is the reference's separate "ready" state -
+    /// not merely full - and it is what you take the bone meal out of.
+    Composter0,
+    ComposterLast = Composter0 + 8,
+
+    /// **A fifth table-driven run**, appended for the reason all the others
+    /// were: everything before it is already on disk.
+    ///
+    /// Almost all of it is a plain cube wanting a name and a picture, which is
+    /// exactly what the table is for - so a hundred and sixteen blocks arrive
+    /// here without touching a single switch.
+    ///
+    /// Bark blocks first: a log wears its end grain on two faces, a **wood**
+    /// block wears bark on all six. They need no new art at all, because they
+    /// point at the log side their own family already staged.
+    OakWood,
+    SpruceWood,
+    BirchWood,
+    JungleWood,
+    AcaciaWood,
+    DarkOakWood,
+    CherryWood,
+    MangroveWood,
+    CrimsonHyphae,
+    WarpedHyphae,
+    StrippedOakWood,
+    StrippedSpruceWood,
+    StrippedBirchWood,
+    StrippedJungleWood,
+    StrippedAcaciaWood,
+    StrippedDarkOakWood,
+    StrippedCherryWood,
+    StrippedMangroveWood,
+    StrippedCrimsonHyphae,
+    StrippedWarpedHyphae,
+
+    BrownMushroomBlock,
+    RedMushroomBlock,
+    MushroomStem,
+
+    DeadTubeCoralBlock,
+    DeadBrainCoralBlock,
+    DeadBubbleCoralBlock,
+    DeadFireCoralBlock,
+    DeadHornCoralBlock,
+
+    /// Waxed copper. **The same pictures as the unwaxed run** - wax is not
+    /// visible, it is a promise that the block will not change - so these cost
+    /// nine ids and no art whatsoever.
+    WaxedCopperBlock,
+    WaxedExposedCopper,
+    WaxedWeatheredCopper,
+    WaxedOxidizedCopper,
+    WaxedCutCopper,
+    WaxedExposedCutCopper,
+    WaxedWeatheredCutCopper,
+    WaxedOxidizedCutCopper,
+    WaxedChiseledCopper,
+
+    CopperGrate,
+    ExposedCopperGrate,
+    WeatheredCopperGrate,
+    OxidizedCopperGrate,
+    WaxedCopperGrate,
+    WaxedExposedCopperGrate,
+    WaxedWeatheredCopperGrate,
+    WaxedOxidizedCopperGrate,
+
+    /// Four oxidation stages, unlit then lit. **The light falls with the
+    /// oxidation** - 15, 12, 8, 4 - which is not a formula and so is a table.
+    CopperBulb,
+    CopperBulbLit,
+    ExposedCopperBulb,
+    ExposedCopperBulbLit,
+    WeatheredCopperBulb,
+    WeatheredCopperBulbLit,
+    OxidizedCopperBulb,
+    OxidizedCopperBulbLit,
+
+    CryingObsidian,
+    PowderSnow,
+    SuspiciousSand,
+    SuspiciousGravel,
+    AzaleaLeaves,
+    FloweringAzaleaLeaves,
+    RedstoneLamp,
+    RedstoneLampLit,
+    Lodestone,
+    EnchantingTable,
+    ChiseledBookshelf,
+    CartographyTable,
+    FletchingTable,
+    Barrel,
+    BlastFurnace,
+    Loom,
+    Stonecutter,
+    Grindstone,
+    Lectern,
+    Bell,
+    Cauldron,
+    BrewingStand,
+    Anvil,
+    ChippedAnvil,
+    DamagedAnvil,
+    Scaffolding,
+    FlowerPot,
+
+    SculkVein,
+    SculkSensor,
+    SculkShrieker,
+    SmallAmethystBud,
+    MediumAmethystBud,
+    LargeAmethystBud,
+    BigDripleaf,
+    SmallDripleaf,
+    CaveVines,
+    CaveVinesBerries,
+    MossCarpet,
+    ChorusPlant,
+    ChorusFlower,
+
+    /// The five corals as plants, alive and dead, then the same ten as fans.
+    /// Kept in two contiguous fives so the dead form of a coral is one offset
+    /// from the live one.
+    TubeCoral,
+    BrainCoral,
+    BubbleCoral,
+    FireCoral,
+    HornCoral,
+    DeadTubeCoral,
+    DeadBrainCoral,
+    DeadBubbleCoral,
+    DeadFireCoral,
+    DeadHornCoral,
+    TubeCoralFan,
+    BrainCoralFan,
+    BubbleCoralFan,
+    FireCoralFan,
+    HornCoralFan,
+    DeadTubeCoralFan,
+    DeadBrainCoralFan,
+    DeadBubbleCoralFan,
+    DeadFireCoralFan,
+    DeadHornCoralFan,
+
+    /// The two-block flowers. **Bottom then top for each**, so a half is one
+    /// offset and the pair can be placed and broken together.
+    SunflowerLower,
+    SunflowerUpper,
+    LilacLower,
+    LilacUpper,
+    RoseBushLower,
+    RoseBushUpper,
+    PeonyLower,
+    PeonyUpper,
+    WitherRose,
+
+    Campfire,
+    SoulCampfire,
+    RespawnAnchor,
+
+    /// **A sixth run**, and the last of this batch. Seventeen candles - plain
+    /// and the sixteen dyes, declared white-first like every other colour
+    /// family so a colour is one offset here too - and a few blocks that had no
+    /// home in any earlier group.
+    ///
+    /// **Named divergence: a candle is one candle and is always lit.** The
+    /// reference stacks up to four in a cell and tracks whether they are burning,
+    /// which is four counts times two states times seventeen colours; that is a
+    /// hundred and thirty-six ids for a decoration, and it can be widened later
+    /// without moving anything because this run is at the end.
+    Candle,
+    WhiteCandle,
+    OrangeCandle,
+    MagentaCandle,
+    LightBlueCandle,
+    YellowCandle,
+    LimeCandle,
+    PinkCandle,
+    GrayCandle,
+    LightGrayCandle,
+    CyanCandle,
+    PurpleCandle,
+    BlueCandle,
+    BrownCandle,
+    GreenCandle,
+    RedCandle,
+    BlackCandle,
+
+    TintedGlass,
+    Beacon,
+    Conduit,
+    DragonEgg,
+    EndPortalFrame,
+    MonsterSpawner,
+
+    /// Four facings, like the chest it is a twin of. **A trapped chest pairs
+    /// only with another trapped chest** - the pairing test is already "the
+    /// neighbour is the same id", so that falls out for free.
+    TrappedChest,
+    TrappedChestEast,
+    TrappedChestSouth,
+    TrappedChestWest,
+
+    /// The blast furnace's other seven states. **The north-facing unlit one is
+    /// `BlastFurnace` above and stays exactly where it is** - it is already in
+    /// saved worlds and it is the catalogue entry - so the rest are appended
+    /// here and reached through one branch, which is the same arrangement the
+    /// legacy stair and slab families use.
+    ///
+    /// Order is east, south, west, then the same four lit.
+    BlastFurnaceExtraFirst,
+    BlastFurnaceExtraLast = BlastFurnaceExtraFirst + 6,
+
+    /// The candles' other hundred and nineteen states.
+    ///
+    /// **Outside every table run on purpose.** A row per id would be a hundred
+    /// and nineteen lines carrying nothing but a name and a layer that are both
+    /// already derivable from the colour - so these are answered by predicate
+    /// instead, exactly as the beehive, ladder, vine and cocoa families are.
+    ///
+    /// Seven states per colour, because the eighth - one candle, lit - is the
+    /// `Candle..BlackCandle` run above and is already on disk. Within a colour:
+    /// lit twos, threes and fours, then unlit ones, twos, threes and fours.
+    CandleExtraFirst,
+    CandleExtraLast = CandleExtraFirst + 17 * 7 - 1,
+
+    /// Doors. **Thirty-two states each**, packed so that every one of the four
+    /// facts about a door is a bit or two of the offset:
+    /// `half<<4 | open<<3 | hinge<<2 | facing`.
+    ///
+    /// Reached by arithmetic, never by name - three hundred and eighty-four
+    /// enumerators would be as many chances to put one in the wrong order, and
+    /// the order is the whole mapping.
+    DoorRunFirst,
+    DoorRunLast = DoorRunFirst + kDoorFamilyCount * 32 - 1,
+
+    /// Trapdoors, on the same arrangement one bit narrower:
+    /// `top<<3 | open<<2 | facing`.
+    TrapdoorRunFirst,
+    TrapdoorRunLast = TrapdoorRunFirst + kTrapdoorFamilyCount * 16 - 1,
+
+    /// Beds, `head<<2 | facing`. The facing is the direction the **head** lies
+    /// from the foot, so one value orients both blocks.
+    BedRunFirst,
+    BedRunLast = BedRunFirst + kBedColours * 8 - 1,
+
+    /// Four facings, like the chest. Its twenty-seven slots are **the player's,
+    /// not the block's** - every ender chest in the world is a window onto the
+    /// same ones.
+    EnderChest,
+    EnderChestEast,
+    EnderChestSouth,
+    EnderChestWest,
+
+    /// The cauldron's other six fill levels. The empty one is `Cauldron` in run
+    /// five and stays there; these are levels one to six, and **six is full**,
+    /// which is the reference's own range rather than a third of it.
+    CauldronExtraFirst,
+    CauldronExtraLast = CauldronExtraFirst + 5,
+
+    /// The hopper, and which way its spout points. Five states rather than six:
+    /// a spout may point down or at any of the four sides, but **never up** -
+    /// the reference has no such state and nor does the placement rule that
+    /// derives one from the face you clicked.
+    Hopper,
+    HopperNorth,
+    HopperSouth,
+    HopperEast,
+    HopperWest,
+
+    /// Our name for the shulker box, since *Shulker* is Mojang's coinage. A
+    /// container that **keeps what is inside it when broken**: the contents
+    /// travel on the item, not with the place it stood.
+    ///
+    /// Plain first, then the sixteen dyes in the usual order, so the colour is
+    /// one subtraction here as it is for every other dyed family.
+    Stowbox,
+    StowboxDyedFirst,
+    StowboxDyedLast = StowboxDyedFirst + 15,
+
+    /// **Redstone.** Everything from here down carries or answers a signal.
+    ///
+    /// Wire keeps its strength in the id the way water keeps its level, which
+    /// is what the reference does too: Bedrock gives `redstone_wire` a single
+    /// `redstone_signal` state of 0-15 and **derives the shape from the
+    /// neighbours at draw time**, where Java stores a direction per side and
+    /// pays 1296 states for it. Sixteen ids and a shape function is the whole
+    /// of it.
+    RedstoneWireFirst,
+    RedstoneWireLast = RedstoneWireFirst + 15,
+
+    /// The torch off, and on or off against any of the four walls. The lit
+    /// floor torch stays `RedstoneTorch` up in run three because it is already
+    /// on disk - the project's own "a legacy id is family zero" rule.
+    RedstoneTorchOff,
+    RedstoneTorchWallFirst,
+    RedstoneTorchWallLast = RedstoneTorchWallFirst + 3,
+    RedstoneTorchOffWallFirst,
+    RedstoneTorchOffWallLast = RedstoneTorchOffWallFirst + 3,
+
+    /// `on<<3 | attachment`, where the attachment is floor-across, floor-along,
+    /// ceiling-across, ceiling-along, then the four walls. Eight positions is
+    /// the reference's own count: a lever on the floor still has to say which
+    /// way the handle throws, which a wall lever does not.
+    LeverRunFirst,
+    LeverRunLast = LeverRunFirst + 15,
+
+    /// Twelve materials at twelve states each - `pressed<<3 | attachment`, over
+    /// floor, ceiling and the four walls.
+    ButtonRunFirst,
+    ButtonRunLast = ButtonRunFirst + kButtonFamilyCount * 12 - 1,
+
+    /// Fourteen materials at sixteen states each. Wood and stone only ever use
+    /// 0 and 15, but the two weighted plates genuinely count entities, so one
+    /// uniform run of sixteen costs nothing and keeps the arithmetic single.
+    PressurePlateRunFirst,
+    PressurePlateRunLast = PressurePlateRunFirst + kPressurePlateFamilyCount * 16 - 1,
+
+    /// `locked<<5 | powered<<4 | delay<<2 | facing`. The facing is the way the
+    /// signal *leaves*, which is the reference's own convention read the useful
+    /// way round.
+    RepeaterRunFirst,
+    RepeaterRunLast = RepeaterRunFirst + 63,
+
+    /// `subtract<<3 | powered<<2 | facing`.
+    ComparatorRunFirst,
+    ComparatorRunLast = ComparatorRunFirst + 15,
+
+    /// `sticky<<4 | extended<<3 | facing`, six facings including up and down.
+    PistonRunFirst,
+    PistonRunLast = PistonRunFirst + 23,
+    /// The head an extended piston pushes out in front of itself.
+    PistonHeadRunFirst,
+    PistonHeadRunLast = PistonHeadRunFirst + 11,
+
+    /// `powered<<3 | facing`. The facing is the **watching** face; the pulse
+    /// leaves from the opposite side.
+    ObserverRunFirst,
+    ObserverRunLast = ObserverRunFirst + 11,
+
+    /// Six facings each. Which way they act, not which way they were placed.
+    DispenserRunFirst,
+    DispenserRunLast = DispenserRunFirst + 5,
+    DropperRunFirst,
+    DropperRunLast = DropperRunFirst + 5,
+
+    /// `inverted<<4 | level`.
+    DaylightDetectorRunFirst,
+    DaylightDetectorRunLast = DaylightDetectorRunFirst + 31,
+
+    /// The other fifteen strengths a struck target holds. Strength zero is
+    /// `Target` in run five and stays there.
+    TargetRunFirst,
+    TargetRunLast = TargetRunFirst + 14,
+
+    /// The other twenty-four pitches. Note zero is `NoteBlock` in run five.
+    /// **The instrument is not stored** - it is read off the block underneath,
+    /// exactly as the reference does.
+    NoteBlockRunFirst,
+    NoteBlockRunLast = NoteBlockRunFirst + 23,
+
+    /// `powered<<3 | facing`, six facings.
+    LightningRodRunFirst,
+    LightningRodRunLast = LightningRodRunFirst + 11,
+
+    /// `powered<<3 | attached<<2 | facing`.
+    TripwireHookRunFirst,
+    TripwireHookRunLast = TripwireHookRunFirst + 15,
+    /// The string itself: `powered<<1 | attached`.
+    TripwireRunFirst,
+    TripwireRunLast = TripwireRunFirst + 3,
+
+    /// Ten shapes for the plain rail - two flat, four sloped, four curved - and
+    /// six shapes times powered for the three that cannot curve.
+    RailRunFirst,
+    RailRunLast = RailRunFirst + 9,
+    PoweredRailRunFirst,
+    PoweredRailRunLast = PoweredRailRunFirst + 11,
+    DetectorRailRunFirst,
+    DetectorRailRunLast = DetectorRailRunFirst + 11,
+    ActivatorRailRunFirst,
+    ActivatorRailRunLast = ActivatorRailRunFirst + 11,
+
+    /// **Signs, hanging signs and banners.** Each spends twenty ids on where it
+    /// is: sixteen rotations standing on the ground, then four facings for the
+    /// form that hangs off a wall.
+    SignRunFirst,
+    SignRunLast = SignRunFirst + kSignFamilyCount * kSignStates - 1,
+    HangingSignRunFirst,
+    HangingSignRunLast = HangingSignRunFirst + kSignFamilyCount * kSignStates - 1,
+    BannerRunFirst,
+    BannerRunLast = BannerRunFirst + kBannerFamilyCount * kSignStates - 1,
 };
 
 /// The highest id in use. Anything that walks every block reads this rather
 /// than naming whichever block happens to be last, which is how the catalogue
 /// silently stopped one short of the newest one.
-constexpr BlockId kLastBlock = BlockId::SnowLayerLast;
+constexpr BlockId kLastBlock = BlockId::BannerRunLast;
 
 /// How many block ids exist, for anything that wants an array with one slot per
 /// block. Derived, so it cannot fall behind the enum the way a literal 256 did.
@@ -679,6 +1160,23 @@ constexpr BlockId kLastExtraBlock2 = BlockId::StrippedBambooBlock;
 constexpr BlockId kFirstExtraBlock3 = BlockId::WhiteStainedGlass;
 constexpr BlockId kLastExtraBlock3 = BlockId::EndRod;
 
+/// And a fourth: the farm.
+constexpr BlockId kFirstExtraBlock4 = BlockId::Farmland;
+constexpr BlockId kLastExtraBlock4 = BlockId::ComposterLast;
+
+/// And a fifth: the decorative batch, which is almost entirely plain cubes.
+constexpr BlockId kFirstExtraBlock5 = BlockId::OakWood;
+constexpr BlockId kLastExtraBlock5 = BlockId::RespawnAnchor;
+
+/// And a sixth: the candles and the last few oddments.
+constexpr BlockId kFirstExtraBlock6 = BlockId::Candle;
+constexpr BlockId kLastExtraBlock6 = BlockId::BlastFurnaceExtraLast;
+
+/// And a seventh. It is separate from the sixth only because the doors,
+/// trapdoors and beds sit between them, and none of those is a table block.
+constexpr BlockId kFirstExtraBlock7 = BlockId::EnderChest;
+constexpr BlockId kLastExtraBlock7 = BlockId::StowboxDyedLast;
+
 /// How many rows the first run occupies, which is where the second run's rows
 /// begin in the table.
 constexpr int kExtraRun1Count =
@@ -687,6 +1185,225 @@ constexpr int kExtraRun2Count =
     static_cast<int>(kLastExtraBlock2) - static_cast<int>(kFirstExtraBlock2) + 1;
 constexpr int kExtraRun3Count =
     static_cast<int>(kLastExtraBlock3) - static_cast<int>(kFirstExtraBlock3) + 1;
+constexpr int kExtraRun4Count =
+    static_cast<int>(kLastExtraBlock4) - static_cast<int>(kFirstExtraBlock4) + 1;
+constexpr int kExtraRun5Count =
+    static_cast<int>(kLastExtraBlock5) - static_cast<int>(kFirstExtraBlock5) + 1;
+constexpr int kExtraRun6Count =
+    static_cast<int>(kLastExtraBlock6) - static_cast<int>(kFirstExtraBlock6) + 1;
+constexpr int kExtraRun7Count =
+    static_cast<int>(kLastExtraBlock7) - static_cast<int>(kFirstExtraBlock7) + 1;
+
+/// A candle, plain or dyed. Seventeen contiguous ids, plain first.
+constexpr bool isCandle(BlockId id) {
+    return (id >= BlockId::Candle && id <= BlockId::BlackCandle) ||
+           (id >= BlockId::CandleExtraFirst && id <= BlockId::CandleExtraLast);
+}
+
+/// Which colour, 0 plain then white through black - the same order every dyed
+/// family in the game uses, so a candle's dye is one offset here too.
+constexpr int candleColour(BlockId id) {
+    if (id <= BlockId::BlackCandle) {
+        return static_cast<int>(id) - static_cast<int>(BlockId::Candle);
+    }
+    return (static_cast<int>(id) - static_cast<int>(BlockId::CandleExtraFirst)) / 7;
+}
+
+/// Where in a colour's seven appended states this one sits, or -1 for the
+/// original single lit candle.
+constexpr int candleVariant(BlockId id) {
+    if (id <= BlockId::BlackCandle) {
+        return -1;
+    }
+    return (static_cast<int>(id) - static_cast<int>(BlockId::CandleExtraFirst)) % 7;
+}
+
+constexpr bool isCandleLit(BlockId id) { return candleVariant(id) < 3; }
+
+/// How many candles stand in the cell, one to four.
+constexpr int candleCount(BlockId id) {
+    const int variant = candleVariant(id);
+    if (variant < 0) {
+        return 1;
+    }
+    return variant < 3 ? variant + 2 : variant - 2;
+}
+
+constexpr BlockId candleAt(int colour, int count, bool lit) {
+    const int clamped = count < 1 ? 1 : (count > 4 ? 4 : count);
+    if (lit && clamped == 1) {
+        return static_cast<BlockId>(static_cast<int>(BlockId::Candle) + colour);
+    }
+    const int variant = lit ? clamped - 2 : clamped + 2;
+    return static_cast<BlockId>(static_cast<int>(BlockId::CandleExtraFirst) + colour * 7 + variant);
+}
+
+// The mapping has to survive a round trip in both directions, or a candle lit
+// with a flint and steel would come back a different colour or a different
+// count. Cheaper to prove than to find out.
+static_assert(candleAt(0, 1, true) == BlockId::Candle);
+static_assert(candleAt(16, 1, true) == BlockId::BlackCandle);
+static_assert(candleColour(candleAt(5, 3, false)) == 5);
+static_assert(candleCount(candleAt(5, 3, false)) == 3);
+static_assert(!isCandleLit(candleAt(5, 3, false)));
+static_assert(candleColour(candleAt(12, 4, true)) == 12);
+static_assert(candleCount(candleAt(12, 4, true)) == 4);
+static_assert(isCandleLit(candleAt(12, 4, true)));
+static_assert(candleCount(BlockId::Candle) == 1 && isCandleLit(BlockId::Candle));
+
+/// The five corals, in the one order every family of them uses: tube, brain,
+/// bubble, fire, horn, live before dead. Everything about coral is one offset
+/// from these, which is why there is no per-species table anywhere.
+constexpr bool isCoralPlant(BlockId id) {
+    return id >= BlockId::TubeCoral && id <= BlockId::DeadHornCoral;
+}
+
+constexpr bool isCoralFan(BlockId id) {
+    return id >= BlockId::TubeCoralFan && id <= BlockId::DeadHornCoralFan;
+}
+
+constexpr bool isCoralBlock(BlockId id) {
+    return (id >= BlockId::TubeCoralBlock && id <= BlockId::HornCoralBlock) ||
+           (id >= BlockId::DeadTubeCoralBlock && id <= BlockId::DeadHornCoralBlock);
+}
+
+/// Whether this coral is already dead, in any of its three forms.
+constexpr bool isDeadCoral(BlockId id) {
+    return (id >= BlockId::DeadTubeCoralBlock && id <= BlockId::DeadHornCoralBlock) ||
+           (id >= BlockId::DeadTubeCoral && id <= BlockId::DeadHornCoral) ||
+           (id >= BlockId::DeadTubeCoralFan && id <= BlockId::DeadHornCoralFan);
+}
+
+/// What a live coral becomes when it is left out of water. **One offset per
+/// family**, so the rule is arithmetic rather than fifteen cases - which is
+/// also what stops a new coral species needing an edit here.
+constexpr BlockId deadCoralFor(BlockId id) {
+    if (id >= BlockId::TubeCoralBlock && id <= BlockId::HornCoralBlock) {
+        return static_cast<BlockId>(static_cast<int>(BlockId::DeadTubeCoralBlock) +
+                                    static_cast<int>(id) -
+                                    static_cast<int>(BlockId::TubeCoralBlock));
+    }
+    if (id >= BlockId::TubeCoral && id <= BlockId::HornCoral) {
+        return static_cast<BlockId>(static_cast<int>(BlockId::DeadTubeCoral) +
+                                    static_cast<int>(id) - static_cast<int>(BlockId::TubeCoral));
+    }
+    if (id >= BlockId::TubeCoralFan && id <= BlockId::HornCoralFan) {
+        return static_cast<BlockId>(static_cast<int>(BlockId::DeadTubeCoralFan) +
+                                    static_cast<int>(id) - static_cast<int>(BlockId::TubeCoralFan));
+    }
+    return id;
+}
+
+/// The two-block flowers, and which half this is. Bottom then top for each, so
+/// the pair is one offset apart.
+constexpr bool isTallFlower(BlockId id) {
+    return id >= BlockId::SunflowerLower && id <= BlockId::PeonyUpper;
+}
+
+constexpr bool isTallFlowerUpper(BlockId id) {
+    return isTallFlower(id) &&
+           ((static_cast<int>(id) - static_cast<int>(BlockId::SunflowerLower)) % 2) == 1;
+}
+
+/// A copper bulb, and whether it is lit. Four oxidation stages, unlit then lit.
+constexpr bool isCopperBulb(BlockId id) {
+    return id >= BlockId::CopperBulb && id <= BlockId::OxidizedCopperBulbLit;
+}
+
+constexpr bool isCopperBulbLit(BlockId id) {
+    return isCopperBulb(id) &&
+           ((static_cast<int>(id) - static_cast<int>(BlockId::CopperBulb)) % 2) == 1;
+}
+
+/// Farmland, wet or dry. Two ids for one block, so the mesher and the crop
+/// rules can both ask one question.
+constexpr bool isFarmland(BlockId id) {
+    return id == BlockId::Farmland || id == BlockId::FarmlandMoist;
+}
+
+/// Anything that grows through ages on farmland. **Stems are deliberately not
+/// in here** - they grow the same way but they fruit rather than being
+/// harvested, so every caller that means "a crop I can break for food" would
+/// have to exclude them again.
+constexpr bool isCropBlock(BlockId id) {
+    return id >= BlockId::WheatCrop0 && id <= BlockId::BeetrootCropLast;
+}
+
+/// Which crop family a block belongs to, as the id of that family's age 0.
+/// One subtraction away from the age, which is why nothing else stores one.
+constexpr BlockId cropFamily(BlockId id) {
+    if (id >= BlockId::WheatCrop0 && id <= BlockId::WheatCropLast) return BlockId::WheatCrop0;
+    if (id >= BlockId::CarrotCrop0 && id <= BlockId::CarrotCropLast) return BlockId::CarrotCrop0;
+    if (id >= BlockId::PotatoCrop0 && id <= BlockId::PotatoCropLast) return BlockId::PotatoCrop0;
+    return BlockId::BeetrootCrop0;
+}
+
+constexpr int cropAge(BlockId id) {
+    return static_cast<int>(id) - static_cast<int>(cropFamily(id));
+}
+
+constexpr BlockId cropAt(BlockId family, int age) {
+    return static_cast<BlockId>(static_cast<int>(family) + (age < 0 ? 0 : (age > 7 ? 7 : age)));
+}
+
+/// Ages 0-7 of either stem, before it has fruited.
+constexpr bool isGrowingStem(BlockId id) {
+    return (id >= BlockId::MelonStem0 && id <= BlockId::MelonStemLast) ||
+           (id >= BlockId::PumpkinStem0 && id <= BlockId::PumpkinStemLast);
+}
+
+/// A stem that has already put a fruit down and is pointing at it.
+constexpr bool isAttachedStem(BlockId id) {
+    return (id >= BlockId::MelonStemAttachedFirst && id <= BlockId::MelonStemAttachedLast) ||
+           (id >= BlockId::PumpkinStemAttachedFirst && id <= BlockId::PumpkinStemAttachedLast);
+}
+
+constexpr bool isStemBlock(BlockId id) { return isGrowingStem(id) || isAttachedStem(id); }
+
+/// True for the melon half of either run, false for the pumpkin half.
+constexpr bool stemGrowsMelon(BlockId id) {
+    return (id >= BlockId::MelonStem0 && id <= BlockId::MelonStemLast) ||
+           (id >= BlockId::MelonStemAttachedFirst && id <= BlockId::MelonStemAttachedLast);
+}
+
+constexpr int stemAge(BlockId id) {
+    if (id >= BlockId::PumpkinStem0 && id <= BlockId::PumpkinStemLast) {
+        return static_cast<int>(id) - static_cast<int>(BlockId::PumpkinStem0);
+    }
+    if (id >= BlockId::MelonStem0 && id <= BlockId::MelonStemLast) {
+        return static_cast<int>(id) - static_cast<int>(BlockId::MelonStem0);
+    }
+    return 7;
+}
+
+constexpr bool isNetherWart(BlockId id) {
+    return id >= BlockId::NetherWart0 && id <= BlockId::NetherWartLast;
+}
+
+constexpr int netherWartAge(BlockId id) {
+    return static_cast<int>(id) - static_cast<int>(BlockId::NetherWart0);
+}
+
+constexpr bool isCarvedPumpkin(BlockId id) {
+    return id >= BlockId::CarvedPumpkinFirst && id <= BlockId::CarvedPumpkinLast;
+}
+
+constexpr bool isJackOLantern(BlockId id) {
+    return id >= BlockId::JackOLanternFirst && id <= BlockId::JackOLanternLast;
+}
+
+constexpr bool isComposter(BlockId id) {
+    return id >= BlockId::Composter0 && id <= BlockId::ComposterLast;
+}
+
+constexpr int composterLevel(BlockId id) {
+    return static_cast<int>(id) - static_cast<int>(BlockId::Composter0);
+}
+
+constexpr BlockId composterAt(int level) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::Composter0) +
+                                (level < 0 ? 0 : (level > 8 ? 8 : level)));
+}
 
 /// A bee's home: four facings, empty then full of honey.
 constexpr bool isBeehive(BlockId id) {
@@ -727,12 +1444,27 @@ constexpr bool beehiveHasHoney(BlockId id) {
 /// `id >= kFirstCrossExtra` range test, which quietly required plants to be the
 /// last thing in the enum forever.
 constexpr bool isCrossBlock(BlockId id) {
-    return id == BlockId::TallGrass || id == BlockId::Torch || id == BlockId::Dandelion ||
+    return id == BlockId::TallGrass || id == BlockId::Dandelion ||
            id == BlockId::Poppy || id == BlockId::DeadBush ||
-           id == BlockId::SoulTorch || id == BlockId::RedstoneTorch ||
            (id >= BlockId::Cornflower && id <= BlockId::Seagrass) ||
            (id >= BlockId::BlueOrchid && id <= BlockId::Cobweb) ||
-           (id >= BlockId::Bamboo && id <= BlockId::LargeFern);
+           (id >= BlockId::Bamboo && id <= BlockId::LargeFern) ||
+           // Everything that grows on tilled ground. Taking the plant shape
+           // brings four correct behaviours with it and costs no rules of its
+           // own: no collision, washed away by a flow, dying when what is under
+           // it goes, and drawn as two crossed cutout blades.
+           isCropBlock(id) || isStemBlock(id) || isNetherWart(id) ||
+           // The fifth run's plants. Coral and its fans, the two-block flowers,
+           // the amethyst buds, the dripleaves and the cave vines all want the
+           // same four behaviours for the same reason.
+           isCoralPlant(id) || isCoralFan(id) || isTallFlower(id) ||
+           id == BlockId::WitherRose ||
+           (id >= BlockId::SmallAmethystBud && id <= BlockId::LargeAmethystBud) ||
+           id == BlockId::BigDripleaf || id == BlockId::SmallDripleaf ||
+           id == BlockId::CaveVines || id == BlockId::CaveVinesBerries ||
+           id == BlockId::ChorusPlant || id == BlockId::ChorusFlower ||
+           isCandle(id) ||
+           id == BlockId::Conduit;
 }
 
 /// The flowers alone, which is a narrower question than `isCrossBlock` and the
@@ -761,7 +1493,8 @@ constexpr bool isLeafBlock(BlockId id) {
     return id == BlockId::Leaves || id == BlockId::SpruceLeaves || id == BlockId::BirchLeaves ||
            id == BlockId::JungleLeaves || id == BlockId::AcaciaLeaves ||
            id == BlockId::DarkOakLeaves || id == BlockId::CherryLeaves ||
-           id == BlockId::MangroveLeaves;
+           id == BlockId::MangroveLeaves || id == BlockId::AzaleaLeaves ||
+           id == BlockId::FloweringAzaleaLeaves;
 }
 
 /// Every log that has already been stripped. Named rather than written as a
@@ -796,6 +1529,31 @@ enum class FaceDirection : std::int8_t {
     NegZ = 3,
 };
 
+/// A quarter turn about the vertical. `Unknown` stays unknown, which is what
+/// keeps every faceless block's icon exactly as it was.
+///
+/// **Declared here, beside the enum it turns**, rather than beside its first
+/// caller - the door leaf needs it three hundred lines earlier than the icon
+/// code does.
+constexpr FaceDirection quarterTurn(FaceDirection direction) {
+    switch (direction) {
+    case FaceDirection::PosX:
+        return FaceDirection::PosZ;
+    case FaceDirection::PosZ:
+        return FaceDirection::NegX;
+    case FaceDirection::NegX:
+        return FaceDirection::NegZ;
+    case FaceDirection::NegZ:
+        return FaceDirection::PosX;
+    default:
+        return FaceDirection::Unknown;
+    }
+}
+
+constexpr FaceDirection oppositeDirection(FaceDirection direction) {
+    return quarterTurn(quarterTurn(direction));
+}
+
 /// Which sides a neighbour-aware block reaches toward.
 enum ConnectionBits : std::uint8_t {
     ConnectNorth = 1, // -Z
@@ -805,18 +1563,666 @@ enum ConnectionBits : std::uint8_t {
     ConnectAll = 15,
 };
 
+// ---------------------------------------------------------------------------
+// Redstone
+//
+// A signal is a number from 0 to 15. Sources make it, wire carries it and loses
+// one per block, and a machine does something whenever what it sees is above
+// zero - strength never changes *what* a machine does, only how far the wire
+// carrying it reaches.
+//
+// Everything here is Bedrock's arrangement, which is markedly simpler than
+// Java's and is the one worth copying: no quasi-connectivity, no scheduled-tick
+// ordering to expose, and wire that stores a strength rather than a shape.
+// ---------------------------------------------------------------------------
+
+/// The strongest a signal can be, and the length of the longest wire run.
+constexpr int kMaxSignal = 15;
+
+/// Six faces, as an index. **The order is ours and is used by every six-way
+/// redstone block**, so a piston, an observer, a dispenser and a lightning rod
+/// all pack their facing the same way.
+///
+/// Down first because that is where a hopper, a dropper and a piston most often
+/// point, and it makes `facing6 & 1` mean "vertical, pointing up".
+enum Facing6 : std::uint8_t {
+    Facing6Down = 0,
+    Facing6Up = 1,
+    Facing6North = 2, // -Z
+    Facing6South = 3, // +Z
+    Facing6West = 4,  // -X
+    Facing6East = 5,
+};
+
+/// **Block.hpp must never gain a glm include** - that is a documented build
+/// break - so a direction hands back its three components one at a time.
+constexpr int facing6Dx(int facing) { return facing == Facing6West ? -1 : (facing == Facing6East ? 1 : 0); }
+constexpr int facing6Dy(int facing) { return facing == Facing6Down ? -1 : (facing == Facing6Up ? 1 : 0); }
+constexpr int facing6Dz(int facing) {
+    return facing == Facing6North ? -1 : (facing == Facing6South ? 1 : 0);
+}
+
+constexpr int oppositeFacing6(int facing) { return facing ^ 1; }
+
+/// The same six directions written as a `FaceDirection`, or `Unknown` for the
+/// two that have no horizontal sense.
+constexpr FaceDirection facing6AsDirection(int facing) {
+    switch (facing) {
+    case Facing6East:
+        return FaceDirection::PosX;
+    case Facing6West:
+        return FaceDirection::NegX;
+    case Facing6South:
+        return FaceDirection::PosZ;
+    case Facing6North:
+        return FaceDirection::NegZ;
+    default:
+        return FaceDirection::Unknown;
+    }
+}
+
+constexpr int directionAsFacing6(FaceDirection direction) {
+    switch (direction) {
+    case FaceDirection::PosX:
+        return Facing6East;
+    case FaceDirection::NegX:
+        return Facing6West;
+    case FaceDirection::PosZ:
+        return Facing6South;
+    default:
+        return Facing6North;
+    }
+}
+
+/// Redstone wire, one id per strength.
+constexpr bool isRedstoneWire(BlockId id) {
+    return id >= BlockId::RedstoneWireFirst && id <= BlockId::RedstoneWireLast;
+}
+
+constexpr int wireSignal(BlockId id) {
+    return static_cast<int>(id) - static_cast<int>(BlockId::RedstoneWireFirst);
+}
+
+constexpr BlockId wireWithSignal(int signal) {
+    const int clamped = signal < 0 ? 0 : (signal > kMaxSignal ? kMaxSignal : signal);
+    return static_cast<BlockId>(static_cast<int>(BlockId::RedstoneWireFirst) + clamped);
+}
+
+/// A redstone torch in any of its ten states.
+///
+/// **Three ranges rather than one**, because the lit floor torch is
+/// `BlockId::RedstoneTorch` from the third table run and is already written
+/// into saved chunks. Moving it to sit beside the other nine would have made
+/// every existing world come back with something else in its place.
+constexpr bool isRedstoneTorch(BlockId id) {
+    return id == BlockId::RedstoneTorch || id == BlockId::RedstoneTorchOff ||
+           (id >= BlockId::RedstoneTorchWallFirst && id <= BlockId::RedstoneTorchOffWallLast);
+}
+
+constexpr bool redstoneTorchLit(BlockId id) {
+    return id == BlockId::RedstoneTorch ||
+           (id >= BlockId::RedstoneTorchWallFirst && id <= BlockId::RedstoneTorchWallLast);
+}
+
+/// Which wall it hangs on, or `Unknown` when it stands on the floor.
+constexpr FaceDirection redstoneTorchWall(BlockId id) {
+    if (id >= BlockId::RedstoneTorchWallFirst && id <= BlockId::RedstoneTorchWallLast) {
+        return static_cast<FaceDirection>(static_cast<int>(id) -
+                                          static_cast<int>(BlockId::RedstoneTorchWallFirst));
+    }
+    if (id >= BlockId::RedstoneTorchOffWallFirst && id <= BlockId::RedstoneTorchOffWallLast) {
+        return static_cast<FaceDirection>(static_cast<int>(id) -
+                                          static_cast<int>(BlockId::RedstoneTorchOffWallFirst));
+    }
+    return FaceDirection::Unknown;
+}
+
+/// The single owner of putting a torch's two facts back together. Writing
+/// `lit ? RedstoneTorch : RedstoneTorchOff` at a call site is what turns a wall
+/// torch into a floor one the moment it is toggled.
+constexpr BlockId redstoneTorchAt(FaceDirection wall, bool lit) {
+    if (wall == FaceDirection::Unknown) {
+        return lit ? BlockId::RedstoneTorch : BlockId::RedstoneTorchOff;
+    }
+    const int base = static_cast<int>(lit ? BlockId::RedstoneTorchWallFirst
+                                          : BlockId::RedstoneTorchOffWallFirst);
+    return static_cast<BlockId>(base + static_cast<int>(wall));
+}
+
+/// A lever, in any of its sixteen states.
+constexpr bool isLever(BlockId id) {
+    return id >= BlockId::LeverRunFirst && id <= BlockId::LeverRunLast;
+}
+
+/// Where a lever or button hangs, and for the floor and ceiling which way round.
+enum LeverMount : std::uint8_t {
+    /// On the floor, handle throwing along X.
+    LeverFloorX = 0,
+    /// On the floor, handle throwing along Z.
+    LeverFloorZ = 1,
+    LeverCeilingX = 2,
+    LeverCeilingZ = 3,
+    /// Against the wall to the +X, -X, +Z, -Z - the `FaceDirection` order,
+    /// offset by four so the two families share one field.
+    LeverWallFirst = 4,
+};
+
+constexpr int leverMount(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::LeverRunFirst)) & 7;
+}
+
+constexpr bool leverOn(BlockId id) {
+    return ((static_cast<int>(id) - static_cast<int>(BlockId::LeverRunFirst)) & 8) != 0;
+}
+
+constexpr BlockId leverAt(int mount, bool on) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::LeverRunFirst) + (on ? 8 : 0) + mount);
+}
+
+/// A button of any material.
+constexpr bool isButton(BlockId id) {
+    return id >= BlockId::ButtonRunFirst && id <= BlockId::ButtonRunLast;
+}
+
+constexpr int buttonFamily(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::ButtonRunFirst)) / 12;
+}
+
+/// Floor, ceiling, then the four walls in `FaceDirection` order.
+constexpr int buttonMount(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::ButtonRunFirst)) % 6;
+}
+
+constexpr bool buttonPressed(BlockId id) {
+    return ((static_cast<int>(id) - static_cast<int>(BlockId::ButtonRunFirst)) % 12) >= 6;
+}
+
+constexpr BlockId buttonAt(int family, int mount, bool pressed) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::ButtonRunFirst) + family * 12 +
+                                (pressed ? 6 : 0) + mount);
+}
+
+/// A pressure plate of any material.
+constexpr bool isPressurePlate(BlockId id) {
+    return id >= BlockId::PressurePlateRunFirst && id <= BlockId::PressurePlateRunLast;
+}
+
+constexpr int pressurePlateFamily(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PressurePlateRunFirst)) / 16;
+}
+
+constexpr int pressurePlateSignal(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PressurePlateRunFirst)) % 16;
+}
+
+constexpr BlockId pressurePlateAt(int family, int signal) {
+    const int clamped = signal < 0 ? 0 : (signal > kMaxSignal ? kMaxSignal : signal);
+    return static_cast<BlockId>(static_cast<int>(BlockId::PressurePlateRunFirst) + family * 16 +
+                                clamped);
+}
+
+/// The two plates that count what stands on them rather than answering yes.
+/// They are the last two families, so this is one comparison.
+constexpr bool isWeightedPlate(BlockId id) {
+    return isPressurePlate(id) && pressurePlateFamily(id) >= kPressurePlateFamilyCount - 2;
+}
+
+/// Only wood answers to a dropped item or a loose arrow; stone wants something
+/// that walks. Wood is families 0-10, stone is 11.
+constexpr bool plateAnswersToItems(BlockId id) {
+    return isPressurePlate(id) && pressurePlateFamily(id) != 11;
+}
+
+constexpr bool isRepeater(BlockId id) {
+    return id >= BlockId::RepeaterRunFirst && id <= BlockId::RepeaterRunLast;
+}
+
+/// Which way the signal **leaves**. The reference stores the opposite and every
+/// description of it has to say so twice; storing the useful end means the
+/// block in front is `facing` and the block behind is `opposite`.
+constexpr FaceDirection repeaterFacing(BlockId id) {
+    return static_cast<FaceDirection>((static_cast<int>(id) -
+                                       static_cast<int>(BlockId::RepeaterRunFirst)) &
+                                      3);
+}
+
+/// One to four, as shown on the block. The stored value is one less.
+constexpr int repeaterDelay(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::RepeaterRunFirst)) >> 2) & 3) + 1;
+}
+
+constexpr bool repeaterPowered(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::RepeaterRunFirst)) >> 4) & 1) != 0;
+}
+
+constexpr bool repeaterLocked(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::RepeaterRunFirst)) >> 5) & 1) != 0;
+}
+
+constexpr BlockId repeaterAt(FaceDirection facing, int delay, bool powered, bool locked) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::RepeaterRunFirst) +
+                                (locked ? 32 : 0) + (powered ? 16 : 0) + ((delay - 1) << 2) +
+                                static_cast<int>(facing));
+}
+
+constexpr bool isComparator(BlockId id) {
+    return id >= BlockId::ComparatorRunFirst && id <= BlockId::ComparatorRunLast;
+}
+
+constexpr FaceDirection comparatorFacing(BlockId id) {
+    return static_cast<FaceDirection>((static_cast<int>(id) -
+                                       static_cast<int>(BlockId::ComparatorRunFirst)) &
+                                      3);
+}
+
+constexpr bool comparatorPowered(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::ComparatorRunFirst)) >> 2) & 1) != 0;
+}
+
+/// Subtract mode - the front torch stands up and lit. The other mode compares.
+constexpr bool comparatorSubtracts(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::ComparatorRunFirst)) >> 3) & 1) != 0;
+}
+
+constexpr BlockId comparatorAt(FaceDirection facing, bool powered, bool subtract) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::ComparatorRunFirst) +
+                                (subtract ? 8 : 0) + (powered ? 4 : 0) +
+                                static_cast<int>(facing));
+}
+
+constexpr bool isPiston(BlockId id) {
+    return id >= BlockId::PistonRunFirst && id <= BlockId::PistonRunLast;
+}
+
+constexpr int pistonFacing(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PistonRunFirst)) % 6;
+}
+
+constexpr bool pistonExtended(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::PistonRunFirst)) / 6) & 1) != 0;
+}
+
+constexpr bool pistonSticky(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PistonRunFirst)) >= 12;
+}
+
+constexpr BlockId pistonAt(int facing, bool extended, bool sticky) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::PistonRunFirst) + (sticky ? 12 : 0) +
+                                (extended ? 6 : 0) + facing);
+}
+
+constexpr bool isPistonHead(BlockId id) {
+    return id >= BlockId::PistonHeadRunFirst && id <= BlockId::PistonHeadRunLast;
+}
+
+constexpr int pistonHeadFacing(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PistonHeadRunFirst)) % 6;
+}
+
+constexpr bool pistonHeadSticky(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::PistonHeadRunFirst)) >= 6;
+}
+
+constexpr BlockId pistonHeadAt(int facing, bool sticky) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::PistonHeadRunFirst) + (sticky ? 6 : 0) +
+                                facing);
+}
+
+constexpr bool isObserver(BlockId id) {
+    return id >= BlockId::ObserverRunFirst && id <= BlockId::ObserverRunLast;
+}
+
+/// The face it **watches**. Its pulse comes out of the opposite side, which is
+/// the one convention here that is worth restating every time it is used.
+constexpr int observerFacing(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::ObserverRunFirst)) % 6;
+}
+
+constexpr bool observerPowered(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::ObserverRunFirst)) >= 6;
+}
+
+constexpr BlockId observerAt(int facing, bool powered) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::ObserverRunFirst) + (powered ? 6 : 0) +
+                                facing);
+}
+
+constexpr bool isDispenser(BlockId id) {
+    return id >= BlockId::DispenserRunFirst && id <= BlockId::DispenserRunLast;
+}
+
+constexpr bool isDropper(BlockId id) {
+    return id >= BlockId::DropperRunFirst && id <= BlockId::DropperRunLast;
+}
+
+/// Either of the two nine-slot machines that fire on a rising edge. They differ
+/// only in what they do with the item, which is why almost everything about
+/// them - the screen, the block entity, the facing, the spill on break - is one
+/// code path asking this.
+constexpr bool isDispenserLike(BlockId id) { return isDispenser(id) || isDropper(id); }
+
+constexpr int dispenserFacing(BlockId id) {
+    return isDropper(id) ? static_cast<int>(id) - static_cast<int>(BlockId::DropperRunFirst)
+                         : static_cast<int>(id) - static_cast<int>(BlockId::DispenserRunFirst);
+}
+
+constexpr BlockId dispenserAt(int facing, bool dropper) {
+    return static_cast<BlockId>(static_cast<int>(dropper ? BlockId::DropperRunFirst
+                                                         : BlockId::DispenserRunFirst) +
+                                facing);
+}
+
+constexpr bool isDaylightDetector(BlockId id) {
+    return id >= BlockId::DaylightDetectorRunFirst && id <= BlockId::DaylightDetectorRunLast;
+}
+
+constexpr int daylightDetectorSignal(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::DaylightDetectorRunFirst)) & 15;
+}
+
+constexpr bool daylightDetectorInverted(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::DaylightDetectorRunFirst)) >= 16;
+}
+
+constexpr BlockId daylightDetectorAt(int signal, bool inverted) {
+    const int clamped = signal < 0 ? 0 : (signal > kMaxSignal ? kMaxSignal : signal);
+    return static_cast<BlockId>(static_cast<int>(BlockId::DaylightDetectorRunFirst) +
+                                (inverted ? 16 : 0) + clamped);
+}
+
+/// A target block, struck or quiet. **Two ranges** - strength zero is the
+/// decorative `Target` that already sits in the fifth table run and on disk.
+constexpr bool isTarget(BlockId id) {
+    return id == BlockId::Target ||
+           (id >= BlockId::TargetRunFirst && id <= BlockId::TargetRunLast);
+}
+
+constexpr int targetSignal(BlockId id) {
+    return id == BlockId::Target
+               ? 0
+               : static_cast<int>(id) - static_cast<int>(BlockId::TargetRunFirst) + 1;
+}
+
+constexpr BlockId targetAt(int signal) {
+    const int clamped = signal < 1 ? 0 : (signal > kMaxSignal ? kMaxSignal : signal);
+    return clamped == 0
+               ? BlockId::Target
+               : static_cast<BlockId>(static_cast<int>(BlockId::TargetRunFirst) + clamped - 1);
+}
+
+/// A note block at any of its twenty-five pitches. **The instrument is not in
+/// here** - it is read off whatever the block is standing on, so retuning a
+/// note block never has to know what it is sitting above.
+constexpr bool isNoteBlock(BlockId id) {
+    return id == BlockId::NoteBlock ||
+           (id >= BlockId::NoteBlockRunFirst && id <= BlockId::NoteBlockRunLast);
+}
+
+constexpr int noteBlockPitch(BlockId id) {
+    return id == BlockId::NoteBlock
+               ? 0
+               : static_cast<int>(id) - static_cast<int>(BlockId::NoteBlockRunFirst) + 1;
+}
+
+constexpr BlockId noteBlockAt(int pitch) {
+    const int wrapped = ((pitch % 25) + 25) % 25;
+    return wrapped == 0
+               ? BlockId::NoteBlock
+               : static_cast<BlockId>(static_cast<int>(BlockId::NoteBlockRunFirst) + wrapped - 1);
+}
+
+constexpr bool isLightningRod(BlockId id) {
+    return id >= BlockId::LightningRodRunFirst && id <= BlockId::LightningRodRunLast;
+}
+
+constexpr int lightningRodFacing(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::LightningRodRunFirst)) % 6;
+}
+
+constexpr bool lightningRodPowered(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::LightningRodRunFirst)) >= 6;
+}
+
+constexpr BlockId lightningRodAt(int facing, bool powered) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::LightningRodRunFirst) +
+                                (powered ? 6 : 0) + facing);
+}
+
+constexpr bool isTripwireHook(BlockId id) {
+    return id >= BlockId::TripwireHookRunFirst && id <= BlockId::TripwireHookRunLast;
+}
+
+/// The wall the hook is screwed to; the wire runs away from it.
+constexpr FaceDirection tripwireHookFacing(BlockId id) {
+    return static_cast<FaceDirection>((static_cast<int>(id) -
+                                       static_cast<int>(BlockId::TripwireHookRunFirst)) &
+                                      3);
+}
+
+constexpr bool tripwireHookAttached(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::TripwireHookRunFirst)) >> 2) & 1) !=
+           0;
+}
+
+constexpr bool tripwireHookPowered(BlockId id) {
+    return (((static_cast<int>(id) - static_cast<int>(BlockId::TripwireHookRunFirst)) >> 3) & 1) !=
+           0;
+}
+
+constexpr BlockId tripwireHookAt(FaceDirection facing, bool attached, bool powered) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::TripwireHookRunFirst) +
+                                (powered ? 8 : 0) + (attached ? 4 : 0) + static_cast<int>(facing));
+}
+
+constexpr bool isTripwire(BlockId id) {
+    return id >= BlockId::TripwireRunFirst && id <= BlockId::TripwireRunLast;
+}
+
+constexpr bool tripwireAttached(BlockId id) {
+    return ((static_cast<int>(id) - static_cast<int>(BlockId::TripwireRunFirst)) & 1) != 0;
+}
+
+constexpr bool tripwirePowered(BlockId id) {
+    return ((static_cast<int>(id) - static_cast<int>(BlockId::TripwireRunFirst)) & 2) != 0;
+}
+
+constexpr BlockId tripwireAt(bool attached, bool powered) {
+    return static_cast<BlockId>(static_cast<int>(BlockId::TripwireRunFirst) + (powered ? 2 : 0) +
+                                (attached ? 1 : 0));
+}
+
+constexpr bool isRedstoneLamp(BlockId id) {
+    return id == BlockId::RedstoneLamp || id == BlockId::RedstoneLampLit;
+}
+
+/// Which of the four rail families this is, or -1 for anything else. Ordering
+/// matters and is the same everywhere: plain, powered, detector, activator.
+constexpr int railFamily(BlockId id) {
+    if (id >= BlockId::RailRunFirst && id <= BlockId::RailRunLast) {
+        return 0;
+    }
+    if (id >= BlockId::PoweredRailRunFirst && id <= BlockId::PoweredRailRunLast) {
+        return 1;
+    }
+    if (id >= BlockId::DetectorRailRunFirst && id <= BlockId::DetectorRailRunLast) {
+        return 2;
+    }
+    if (id >= BlockId::ActivatorRailRunFirst && id <= BlockId::ActivatorRailRunLast) {
+        return 3;
+    }
+    return -1;
+}
+
+constexpr bool isRail(BlockId id) { return railFamily(id) >= 0; }
+
+/// Which of the first ids in the four runs a family starts at.
+constexpr BlockId railRunFirst(int family) {
+    switch (family) {
+    case 1:
+        return BlockId::PoweredRailRunFirst;
+    case 2:
+        return BlockId::DetectorRailRunFirst;
+    case 3:
+        return BlockId::ActivatorRailRunFirst;
+    default:
+        return BlockId::RailRunFirst;
+    }
+}
+
+/// Track shape. 0/1 are the two flat runs, 2-5 the four slopes, 6-9 the four
+/// curves - **and only the plain rail may curve**, which is why the other three
+/// families are six shapes wide rather than ten.
+constexpr int railShape(BlockId id) {
+    const int family = railFamily(id);
+    const int offset = static_cast<int>(id) - static_cast<int>(railRunFirst(family));
+    return family == 0 ? offset : offset % 6;
+}
+
+constexpr bool railPowered(BlockId id) {
+    const int family = railFamily(id);
+    if (family <= 0) {
+        return false;
+    }
+    return (static_cast<int>(id) - static_cast<int>(railRunFirst(family))) >= 6;
+}
+
+constexpr BlockId railAt(int family, int shape, bool powered) {
+    if (family == 0) {
+        return static_cast<BlockId>(static_cast<int>(BlockId::RailRunFirst) + shape);
+    }
+    const int flat = shape > 5 ? 0 : shape;
+    return static_cast<BlockId>(static_cast<int>(railRunFirst(family)) + (powered ? 6 : 0) + flat);
+}
+
+/// Whether a rail shape climbs, and toward which of the four horizontal sides.
+/// Shapes two to five are the slopes, in `FaceDirection` order.
+constexpr bool railSlopes(int shape) { return shape >= 2 && shape <= 5; }
+constexpr FaceDirection railSlopeToward(int shape) {
+    return railSlopes(shape) ? static_cast<FaceDirection>(shape - 2) : FaceDirection::Unknown;
+}
+
+/// Everything that carries or answers a signal, in one question.
+///
+/// **Its own predicate rather than a widening of an existing one.** The
+/// temptation is to route redstone through `isOpaque`, and the two disagree on
+/// about fifteen blocks - glass, slabs, leaves, the redstone block itself - so
+/// sharing them produces exactly the class of bug that compiles, validates and
+/// is only ever found by playing.
+constexpr bool isRedstoneComponent(BlockId id) {
+    return isRedstoneWire(id) || isRedstoneTorch(id) || isLever(id) || isButton(id) ||
+           isPressurePlate(id) || isRepeater(id) || isComparator(id) || isPiston(id) ||
+           isPistonHead(id) || isObserver(id) || isDispenserLike(id) || isDaylightDetector(id) ||
+           isTarget(id) || isLightningRod(id) || isTripwireHook(id) || isTripwire(id) ||
+           isRedstoneLamp(id) || isRail(id) || id == BlockId::RedstoneBlock;
+}
+
+/// Every torch. **A box standing in its cell, not two crossed sheets** — which
+/// is what the reference draws and what stops the crosshair claiming the whole
+/// cell one stands in.
+///
+/// **Declared here rather than three hundred lines up, beside the other
+/// cross-shaped plants, because it has to be able to ask `isRedstoneTorch`.**
+/// Writing the redstone torch's three id ranges out a second time would be the
+/// project's own commonest bug — a value derived somewhere other than the one
+/// place that owns it — and every one of this function's eleven callers sits
+/// well below here.
+constexpr bool isTorchBlock(BlockId id) {
+    return id == BlockId::Torch || id == BlockId::SoulTorch || isRedstoneTorch(id);
+}
+
+/// A torch hanging off a wall rather than standing on the floor. Only the
+/// redstone torch has one today; the plain and soul torches are floor-only.
+constexpr bool isWallTorch(BlockId id) {
+    return isTorchBlock(id) && redstoneTorchWall(id) != FaceDirection::Unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Signs, hanging signs and banners
+//
+// Three families, one shape of state. Each stands on the ground at any of
+// **sixteen** rotations - the reference's own count, and what lets a sign face
+// a path that does not run north - or hangs off a wall at one of four.
+// ---------------------------------------------------------------------------
+
+constexpr bool isSign(BlockId id) {
+    return id >= BlockId::SignRunFirst && id <= BlockId::SignRunLast;
+}
+
+constexpr bool isHangingSign(BlockId id) {
+    return id >= BlockId::HangingSignRunFirst && id <= BlockId::HangingSignRunLast;
+}
+
+constexpr bool isBanner(BlockId id) {
+    return id >= BlockId::BannerRunFirst && id <= BlockId::BannerRunLast;
+}
+
+/// True for all three, which is how every rule they share is asked.
+constexpr bool isSignLike(BlockId id) {
+    return isSign(id) || isHangingSign(id) || isBanner(id);
+}
+
+/// 0 a sign, 1 a hanging sign, 2 a banner.
+constexpr int signKind(BlockId id) {
+    return isSign(id) ? 0 : (isHangingSign(id) ? 1 : 2);
+}
+
+constexpr BlockId signRunFirst(int kind) {
+    switch (kind) {
+    case 1:
+        return BlockId::HangingSignRunFirst;
+    case 2:
+        return BlockId::BannerRunFirst;
+    default:
+        return BlockId::SignRunFirst;
+    }
+}
+
+constexpr int signFamily(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(signRunFirst(signKind(id)))) / kSignStates;
+}
+
+/// Zero to fifteen standing, sixteen to nineteen against a wall.
+constexpr int signState(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(signRunFirst(signKind(id)))) % kSignStates;
+}
+
+constexpr bool signOnWall(BlockId id) { return signState(id) >= 4; }
+
+/// Which way its face looks, standing or hung. One accessor for both, because
+/// every reader wants the same answer and only the geometry differs.
+constexpr FaceDirection signFacing(BlockId id) {
+    return static_cast<FaceDirection>(signState(id) & 3);
+}
+
+constexpr BlockId signAt(int kind, int family, FaceDirection facing, bool onWall) {
+    return static_cast<BlockId>(static_cast<int>(signRunFirst(kind)) + family * kSignStates +
+                                (onWall ? 4 : 0) + static_cast<int>(facing));
+}
+
 constexpr bool isSmoker(BlockId id) {
     return id >= BlockId::Smoker && id <= BlockId::SmokerWestLit;
 }
 
-constexpr bool isChest(BlockId id) {
-    return id >= BlockId::Chest && id <= BlockId::ChestWest;
+/// A blast furnace, in any of its eight states. **Two ranges**, because the
+/// north-facing unlit one was placed in the table run before the other seven
+/// existed and is already on disk.
+constexpr bool isBlastFurnace(BlockId id) {
+    return id == BlockId::BlastFurnace ||
+           (id >= BlockId::BlastFurnaceExtraFirst && id <= BlockId::BlastFurnaceExtraLast);
 }
 
-/// Which way this chest's lid faces, and the chest that faces that way. Four
-/// ids in the order of `FaceDirection`'s own compass, so both are arithmetic.
-constexpr FaceDirection chestFacing(BlockId id) {
-    switch (static_cast<int>(id) - static_cast<int>(BlockId::Chest)) {
+/// Where in the appended seven a state sits: east, south, west, then lit.
+constexpr int blastFurnaceStep(BlockId id) {
+    return id == BlockId::BlastFurnace
+               ? -1
+               : static_cast<int>(id) - static_cast<int>(BlockId::BlastFurnaceExtraFirst);
+}
+
+constexpr bool isBlastFurnaceLit(BlockId id) { return blastFurnaceStep(id) >= 3; }
+
+constexpr FaceDirection blastFurnaceFacing(BlockId id) {
+    const int step = blastFurnaceStep(id);
+    switch (step < 0 ? 0 : (step >= 3 ? step - 3 : step + 1)) {
     case 1:
         return FaceDirection::PosX;
     case 2:
@@ -828,6 +2234,113 @@ constexpr FaceDirection chestFacing(BlockId id) {
     }
 }
 
+constexpr BlockId blastFurnaceAt(FaceDirection facing, bool lit) {
+    int quarter = 0;
+    switch (facing) {
+    case FaceDirection::PosX:
+        quarter = 1;
+        break;
+    case FaceDirection::PosZ:
+        quarter = 2;
+        break;
+    case FaceDirection::NegX:
+        quarter = 3;
+        break;
+    default:
+        break;
+    }
+    if (!lit && quarter == 0) {
+        return BlockId::BlastFurnace;
+    }
+    const int step = lit ? 3 + quarter : quarter - 1;
+    return static_cast<BlockId>(static_cast<int>(BlockId::BlastFurnaceExtraFirst) + step);
+}
+
+constexpr bool isTrappedChest(BlockId id) {
+    return id >= BlockId::TrappedChest && id <= BlockId::TrappedChestWest;
+}
+
+constexpr bool isEnderChest(BlockId id) {
+    return id >= BlockId::EnderChest && id <= BlockId::EnderChestWest;
+}
+
+/// A cauldron and how full it is, nought to six. Two ranges, because the empty
+/// one was placed in the table run before the other six existed.
+constexpr bool isCauldron(BlockId id) {
+    return id == BlockId::Cauldron ||
+           (id >= BlockId::CauldronExtraFirst && id <= BlockId::CauldronExtraLast);
+}
+
+constexpr int cauldronLevel(BlockId id) {
+    return id == BlockId::Cauldron
+               ? 0
+               : 1 + static_cast<int>(id) - static_cast<int>(BlockId::CauldronExtraFirst);
+}
+
+constexpr BlockId cauldronAt(int level) {
+    const int clamped = level < 0 ? 0 : (level > 6 ? 6 : level);
+    return clamped == 0 ? BlockId::Cauldron
+                        : static_cast<BlockId>(static_cast<int>(BlockId::CauldronExtraFirst) +
+                                               clamped - 1);
+}
+
+static_assert(cauldronLevel(cauldronAt(0)) == 0 && cauldronLevel(cauldronAt(6)) == 6 &&
+                  cauldronLevel(cauldronAt(3)) == 3,
+              "a cauldron's level has to survive a round trip through its id");
+
+/// Every block that opens the twenty-seven slot panel. **The barrel and the
+/// trapped chest are chests as far as everything downstream is concerned** -
+/// the same screen, the same block entity, the same spill on break - which is
+/// why widening this one predicate is the whole of what they cost.
+///
+/// Mojang's own interface does exactly this: `barrel_panel`, `shulker_box_panel`
+/// and `ender_chest_panel` are all aliases of `small_chest_panel`.
+/// A stowbox, plain or dyed.
+constexpr bool isStowbox(BlockId id) {
+    return id == BlockId::Stowbox ||
+           (id >= BlockId::StowboxDyedFirst && id <= BlockId::StowboxDyedLast);
+}
+
+constexpr bool isChest(BlockId id) {
+    return (id >= BlockId::Chest && id <= BlockId::ChestWest) || id == BlockId::Barrel ||
+           isTrappedChest(id) || isEnderChest(id) || isStowbox(id);
+}
+
+/// Whether two of these standing side by side join into a fifty-four slot
+/// container. **Neither a barrel nor an ender chest ever does** - the reference
+/// says so outright, and without this the pairing walk would happily join two
+/// of either, because its only test is that the neighbour is the same id.
+constexpr bool chestPairs(BlockId id) {
+    return id != BlockId::Barrel && !isEnderChest(id) && !isStowbox(id);
+}
+
+/// Which way this chest's lid faces, and the chest that faces that way. Four
+/// ids in the order of `FaceDirection`'s own compass, so both are arithmetic.
+constexpr FaceDirection chestFacing(BlockId id) {
+    // A barrel opens upward and a stowbox opens whichever way it was set down,
+    // so neither has a lid facing to give; answering with a fixed side keeps
+    // `chestJoinsAlongX` total without inventing a front.
+    if (id == BlockId::Barrel || isStowbox(id)) {
+        return FaceDirection::NegZ;
+    }
+    const int base = isTrappedChest(id)  ? static_cast<int>(BlockId::TrappedChest)
+                     : isEnderChest(id)  ? static_cast<int>(BlockId::EnderChest)
+                                         : static_cast<int>(BlockId::Chest);
+    switch (static_cast<int>(id) - base) {
+    case 1:
+        return FaceDirection::PosX;
+    case 2:
+        return FaceDirection::PosZ;
+    case 3:
+        return FaceDirection::NegX;
+    default:
+        return FaceDirection::NegZ;
+    }
+}
+
+/// The plain chest facing a given way. Trapped chests get their own accessor
+/// rather than a defaulted parameter, because every caller does know which
+/// family it is placing.
 constexpr BlockId chestFacing(FaceDirection facing) {
     switch (facing) {
     case FaceDirection::PosX:
@@ -841,6 +2354,85 @@ constexpr BlockId chestFacing(FaceDirection facing) {
     }
 }
 
+constexpr BlockId trappedChestFacing(FaceDirection facing) {
+    switch (facing) {
+    case FaceDirection::PosX:
+        return BlockId::TrappedChestEast;
+    case FaceDirection::PosZ:
+        return BlockId::TrappedChestSouth;
+    case FaceDirection::NegX:
+        return BlockId::TrappedChestWest;
+    default:
+        return BlockId::TrappedChest;
+    }
+}
+
+constexpr BlockId enderChestFacing(FaceDirection facing) {
+    switch (facing) {
+    case FaceDirection::PosX:
+        return BlockId::EnderChestEast;
+    case FaceDirection::PosZ:
+        return BlockId::EnderChestSouth;
+    case FaceDirection::NegX:
+        return BlockId::EnderChestWest;
+    default:
+        return BlockId::EnderChest;
+    }
+}
+
+/// A hopper, whichever way its spout points.
+constexpr bool isHopper(BlockId id) {
+    return id >= BlockId::Hopper && id <= BlockId::HopperWest;
+}
+
+/// Which way this hopper's spout points sideways, or `Unknown` when it pours
+/// straight down.
+///
+/// **`FaceDirection` has no vertical**, deliberately - it names the four
+/// compass faces a chest, gate or door can front. Rather than widen it for one
+/// block, a hopper's fifth state is the absence of a sideways one, which is
+/// exactly what `Unknown` already means everywhere else.
+constexpr FaceDirection hopperSideSpout(BlockId id) {
+    switch (static_cast<int>(id) - static_cast<int>(BlockId::Hopper)) {
+    case 1:
+        return FaceDirection::NegZ;
+    case 2:
+        return FaceDirection::PosZ;
+    case 3:
+        return FaceDirection::PosX;
+    case 4:
+        return FaceDirection::NegX;
+    default:
+        return FaceDirection::Unknown;
+    }
+}
+
+/// The hopper pouring a given way. **Anything that is not one of the four
+/// compass directions folds to down**, which is what makes a hopper placed on
+/// a floor behave: the face you clicked is up, there is no upward state in the
+/// reference either, and pointing it down is what it does instead of refusing.
+constexpr BlockId hopperWithSideSpout(FaceDirection spout) {
+    switch (spout) {
+    case FaceDirection::NegZ:
+        return BlockId::HopperNorth;
+    case FaceDirection::PosZ:
+        return BlockId::HopperSouth;
+    case FaceDirection::PosX:
+        return BlockId::HopperEast;
+    case FaceDirection::NegX:
+        return BlockId::HopperWest;
+    default:
+        return BlockId::Hopper;
+    }
+}
+
+static_assert(hopperSideSpout(hopperWithSideSpout(FaceDirection::PosX)) == FaceDirection::PosX &&
+                  hopperSideSpout(hopperWithSideSpout(FaceDirection::NegZ)) ==
+                      FaceDirection::NegZ &&
+                  hopperSideSpout(hopperWithSideSpout(FaceDirection::Unknown)) ==
+                      FaceDirection::Unknown,
+              "a hopper's spout has to survive a round trip through its id");
+
 /// Which axis two chests join along - across the latch, never through it, so
 /// they stand shoulder to shoulder rather than nose to tail. A bool rather
 /// than a vector because this header deliberately knows nothing about glm.
@@ -848,6 +2440,189 @@ constexpr bool chestJoinsAlongX(BlockId id) {
     const FaceDirection facing = chestFacing(id);
     return facing == FaceDirection::PosZ || facing == FaceDirection::NegZ;
 }
+
+/// One door or trapdoor material: what it is called, and the two pictures a
+/// door needs. A trapdoor uses `lowerLayer` alone.
+struct OpeningFamily {
+    const char* name;
+    int lowerLayer;
+    int upperLayer;
+    /// Iron answers to nothing but a signal in the reference. We have no
+    /// redstone, so ours opens by hand and this only decides the tool and the
+    /// hardness - a door nobody could open would be worse than a divergence.
+    bool metal = false;
+};
+
+/// Where the door and trapdoor pictures begin in the table's sprite run.
+constexpr int kDoorFirstLayer = 585;
+constexpr int kTrapdoorFirstLayer = kDoorFirstLayer + kDoorFamilyCount * 2;
+
+/// **Declared in `kWoods` order** - oak, spruce, birch, jungle, acacia, dark
+/// oak, cherry, mangrove, crimson, warped, bamboo, then iron. That is not
+/// cosmetic: the recipe loop walks the woods and indexes straight into these,
+/// so a different order here would quietly give a cherry door a mangrove recipe.
+constexpr std::array<OpeningFamily, kDoorFamilyCount> kDoorFamilies{{
+    {"Oak Door", kDoorFirstLayer + 0, kDoorFirstLayer + 1},
+    {"Spruce Door", kDoorFirstLayer + 2, kDoorFirstLayer + 3},
+    {"Birch Door", kDoorFirstLayer + 4, kDoorFirstLayer + 5},
+    {"Jungle Door", kDoorFirstLayer + 6, kDoorFirstLayer + 7},
+    {"Acacia Door", kDoorFirstLayer + 8, kDoorFirstLayer + 9},
+    {"Dark Oak Door", kDoorFirstLayer + 10, kDoorFirstLayer + 11},
+    {"Cherry Door", kDoorFirstLayer + 12, kDoorFirstLayer + 13},
+    {"Mangrove Door", kDoorFirstLayer + 14, kDoorFirstLayer + 15},
+    {"Crimson Door", kDoorFirstLayer + 16, kDoorFirstLayer + 17},
+    {"Warped Door", kDoorFirstLayer + 18, kDoorFirstLayer + 19},
+    {"Bamboo Door", kDoorFirstLayer + 20, kDoorFirstLayer + 21},
+    {"Iron Door", kDoorFirstLayer + 22, kDoorFirstLayer + 23, true},
+}};
+
+constexpr std::array<OpeningFamily, kTrapdoorFamilyCount> kTrapdoorFamilies{{
+    {"Oak Trapdoor", kTrapdoorFirstLayer + 0, -1},
+    {"Spruce Trapdoor", kTrapdoorFirstLayer + 1, -1},
+    {"Birch Trapdoor", kTrapdoorFirstLayer + 2, -1},
+    {"Jungle Trapdoor", kTrapdoorFirstLayer + 3, -1},
+    {"Acacia Trapdoor", kTrapdoorFirstLayer + 4, -1},
+    {"Dark Oak Trapdoor", kTrapdoorFirstLayer + 5, -1},
+    {"Cherry Trapdoor", kTrapdoorFirstLayer + 6, -1},
+    {"Mangrove Trapdoor", kTrapdoorFirstLayer + 7, -1},
+    {"Crimson Trapdoor", kTrapdoorFirstLayer + 8, -1},
+    {"Warped Trapdoor", kTrapdoorFirstLayer + 9, -1},
+    {"Bamboo Trapdoor", kTrapdoorFirstLayer + 10, -1},
+    {"Iron Trapdoor", kTrapdoorFirstLayer + 11, -1, true},
+}};
+
+constexpr bool isDoor(BlockId id) {
+    return id >= BlockId::DoorRunFirst && id <= BlockId::DoorRunLast;
+}
+
+constexpr bool isTrapdoor(BlockId id) {
+    return id >= BlockId::TrapdoorRunFirst && id <= BlockId::TrapdoorRunLast;
+}
+
+constexpr int doorOffset(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::DoorRunFirst)) % 32;
+}
+
+constexpr int doorFamily(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::DoorRunFirst)) / 32;
+}
+
+constexpr FaceDirection doorFacing(BlockId id) {
+    return static_cast<FaceDirection>(doorOffset(id) & 3);
+}
+
+constexpr bool doorHingeRight(BlockId id) { return (doorOffset(id) & 4) != 0; }
+constexpr bool doorOpen(BlockId id) { return (doorOffset(id) & 8) != 0; }
+constexpr bool doorIsUpper(BlockId id) { return (doorOffset(id) & 16) != 0; }
+
+constexpr BlockId doorAt(int family, FaceDirection facing, bool hingeRight, bool open, bool upper) {
+    const int offset = (upper ? 16 : 0) | (open ? 8 : 0) | (hingeRight ? 4 : 0) |
+                       (static_cast<int>(facing) & 3);
+    return static_cast<BlockId>(static_cast<int>(BlockId::DoorRunFirst) + family * 32 + offset);
+}
+
+constexpr int trapdoorOffset(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::TrapdoorRunFirst)) % 16;
+}
+
+constexpr int trapdoorFamily(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::TrapdoorRunFirst)) / 16;
+}
+
+constexpr FaceDirection trapdoorFacing(BlockId id) {
+    return static_cast<FaceDirection>(trapdoorOffset(id) & 3);
+}
+
+constexpr bool trapdoorOpen(BlockId id) { return (trapdoorOffset(id) & 4) != 0; }
+constexpr bool trapdoorIsTop(BlockId id) { return (trapdoorOffset(id) & 8) != 0; }
+
+constexpr BlockId trapdoorAt(int family, FaceDirection facing, bool open, bool top) {
+    const int offset = (top ? 8 : 0) | (open ? 4 : 0) | (static_cast<int>(facing) & 3);
+    return static_cast<BlockId>(static_cast<int>(BlockId::TrapdoorRunFirst) + family * 16 + offset);
+}
+
+/// The form of each that belongs in a catalogue: shut, bottom half, left hinge,
+/// facing north.
+constexpr BlockId doorCanonical(int family) {
+    return doorAt(family, FaceDirection::NegZ, false, false, false);
+}
+
+constexpr BlockId trapdoorCanonical(int family) {
+    return trapdoorAt(family, FaceDirection::NegZ, false, false);
+}
+
+// Every one of the five facts about a door has to survive a round trip, or
+// opening one would silently move it, turn it round or swap which half is which.
+static_assert(doorFamily(doorAt(7, FaceDirection::PosX, true, true, true)) == 7);
+static_assert(doorFacing(doorAt(7, FaceDirection::PosX, true, true, true)) == FaceDirection::PosX);
+static_assert(doorHingeRight(doorAt(7, FaceDirection::PosX, true, true, true)));
+static_assert(doorOpen(doorAt(7, FaceDirection::PosX, true, true, true)));
+static_assert(doorIsUpper(doorAt(7, FaceDirection::PosX, true, true, true)));
+static_assert(!doorOpen(doorAt(0, FaceDirection::NegZ, false, false, false)));
+static_assert(isDoor(doorAt(kDoorFamilyCount - 1, FaceDirection::NegX, true, true, true)));
+static_assert(trapdoorFamily(trapdoorAt(3, FaceDirection::PosZ, true, true)) == 3);
+static_assert(trapdoorOpen(trapdoorAt(3, FaceDirection::PosZ, true, true)));
+static_assert(trapdoorIsTop(trapdoorAt(3, FaceDirection::PosZ, true, true)));
+static_assert(isTrapdoor(trapdoorAt(kTrapdoorFamilyCount - 1, FaceDirection::NegX, true, true)));
+
+/// One dyed bed: its name and the four pictures its two halves need.
+struct BedFamily {
+    const char* name;
+    int footTop;
+    int footSide;
+    int headTop;
+    int headSide;
+};
+
+constexpr int kBedFirstLayer = kTrapdoorFirstLayer + kTrapdoorFamilyCount;
+
+/// Four pictures per colour, in the order the staging loop writes them.
+constexpr BedFamily bedFamilyAt(int colour) {
+    constexpr const char* kNames[kBedColours] = {
+        "White Bed",     "Orange Bed", "Magenta Bed", "Light Blue Bed",
+        "Yellow Bed",    "Lime Bed",   "Pink Bed",    "Gray Bed",
+        "Light Gray Bed", "Cyan Bed",  "Purple Bed",  "Blue Bed",
+        "Brown Bed",     "Green Bed",  "Red Bed",     "Black Bed",
+    };
+    const int base = kBedFirstLayer + colour * 4;
+    return BedFamily{kNames[colour], base, base + 1, base + 2, base + 3};
+}
+
+constexpr bool isBed(BlockId id) {
+    return id >= BlockId::BedRunFirst && id <= BlockId::BedRunLast;
+}
+
+constexpr int bedOffset(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::BedRunFirst)) % 8;
+}
+
+constexpr int bedColour(BlockId id) {
+    return (static_cast<int>(id) - static_cast<int>(BlockId::BedRunFirst)) / 8;
+}
+
+/// Which way the head lies from the foot. Both halves carry the same value, so
+/// either one can find the other.
+constexpr FaceDirection bedFacing(BlockId id) {
+    return static_cast<FaceDirection>(bedOffset(id) & 3);
+}
+
+constexpr bool bedIsHead(BlockId id) { return (bedOffset(id) & 4) != 0; }
+
+constexpr BlockId bedAt(int colour, FaceDirection facing, bool head) {
+    const int offset = (head ? 4 : 0) | (static_cast<int>(facing) & 3);
+    return static_cast<BlockId>(static_cast<int>(BlockId::BedRunFirst) + colour * 8 + offset);
+}
+
+/// The form that belongs in a catalogue: the foot, facing north.
+constexpr BlockId bedCanonical(int colour) {
+    return bedAt(colour, FaceDirection::NegZ, false);
+}
+
+static_assert(bedColour(bedAt(9, FaceDirection::PosZ, true)) == 9);
+static_assert(bedFacing(bedAt(9, FaceDirection::PosZ, true)) == FaceDirection::PosZ);
+static_assert(bedIsHead(bedAt(9, FaceDirection::PosZ, true)));
+static_assert(!bedIsHead(bedAt(9, FaceDirection::PosZ, false)));
+static_assert(isBed(bedAt(kBedColours - 1, FaceDirection::NegX, true)));
 
 /// Which half of a double chest a block is, seen by someone facing its front.
 ///
@@ -933,15 +2708,20 @@ static_assert(chestHalfFor(FaceDirection::PosZ, 1, 0) == ChestHalf::Left);
 static_assert(chestHalfFor(FaceDirection::PosX, 0, 1) == ChestHalf::Right);
 static_assert(chestHalfFor(FaceDirection::NegX, 0, -1) == ChestHalf::Right);
 
-/// **Every cooker, both families.** The block entity, the screen, opening it,
-/// breaking it and spilling its contents all ask this and none of them care
-/// which kind it is - which is the whole reason a smoker cost no new screen.
+/// **Every cooker, all three families.** The block entity, the screen, opening
+/// it, breaking it and spilling its contents all ask this and none of them care
+/// which kind it is - which is the whole reason a smoker cost no new screen and
+/// a blast furnace cost none either.
 constexpr bool isFurnace(BlockId id) {
     return id == BlockId::Furnace || id == BlockId::FurnaceLit ||
-           (id >= BlockId::FurnaceEast && id <= BlockId::FurnaceWestLit) || isSmoker(id);
+           (id >= BlockId::FurnaceEast && id <= BlockId::FurnaceWestLit) || isSmoker(id) ||
+           isBlastFurnace(id);
 }
 
 constexpr bool isFurnaceLit(BlockId id) {
+    if (isBlastFurnace(id)) {
+        return isBlastFurnaceLit(id);
+    }
     if (isSmoker(id)) {
         // Unlit then lit, in pairs, so the low bit of the offset is the state.
         return ((static_cast<int>(id) - static_cast<int>(BlockId::Smoker)) & 1) != 0;
@@ -952,6 +2732,9 @@ constexpr bool isFurnaceLit(BlockId id) {
 
 /// Which way this cooker's mouth points.
 constexpr FaceDirection furnaceFacing(BlockId id) {
+    if (isBlastFurnace(id)) {
+        return blastFurnaceFacing(id);
+    }
     if (isSmoker(id)) {
         switch ((static_cast<int>(id) - static_cast<int>(BlockId::Smoker)) / 2) {
         case 1:
@@ -1018,14 +2801,31 @@ constexpr BlockId furnaceFacing(FaceDirection facing, bool lit, bool smoker) {
 /// How much faster than a furnace this cooker works. The reference's smoker
 /// cooks in five seconds instead of ten **and burns its fuel twice as fast**, so
 /// the items per fuel are unchanged - which is exactly one multiplier on the
-/// whole tick rather than two separate rates to keep in step.
+/// whole tick rather than two separate rates to keep in step. A blast furnace
+/// is the same doubling, for ore rather than food.
 constexpr float cookSpeed(BlockId id) {
-    return isSmoker(id) ? 2.0f : 1.0f;
+    return (isSmoker(id) || isBlastFurnace(id)) ? 2.0f : 1.0f;
+}
+
+/// The cooker of `like`'s own family, facing this way and in this state.
+///
+/// **One owner for all three families.** `furnaceFacing`'s `smoker` bool was
+/// fine while there were two, and would have silently turned a blast furnace
+/// into a plain one the moment there were three - the exact shape of bug that
+/// the lit-furnace facing already caused once.
+constexpr BlockId cookerAt(BlockId like, FaceDirection facing, bool lit) {
+    if (isBlastFurnace(like)) {
+        return blastFurnaceAt(facing, lit);
+    }
+    return furnaceFacing(facing, lit, isSmoker(like));
 }
 
 /// Opens a screen when it is right-clicked, rather than being placed against.
 constexpr bool isInteractive(BlockId id) {
-    return id == BlockId::CraftingTable || id == BlockId::SmithingTable || isFurnace(id) || isChest(id);
+    return id == BlockId::CraftingTable || id == BlockId::SmithingTable || isFurnace(id) ||
+           isChest(id) || isHopper(id) || id == BlockId::Grindstone || id == BlockId::Anvil ||
+           id == BlockId::Stonecutter ||
+           id == BlockId::ChippedAnvil || id == BlockId::DamagedAnvil;
 }
 
 /// Highest flowing level. Water at this depth cannot spread any further, which
@@ -1127,19 +2927,59 @@ static_assert(!isFluid(BlockId::Fire), "fire is not a fluid, however much it spr
 /// Drawn in the *opaque* pass, but with its fully transparent pixels thrown
 /// away by the shader. Not the same thing as translucent: nothing is blended,
 /// depth is still written, and so no sorting is needed.
-constexpr bool isCutout(BlockId id) {
-    // The cactus art carries the reference model's inset as transparency: a
+/// Plain glass and the sixteen coloured ones.
+///
+/// **One owner for a range that was written out inline**, so a new colour cannot
+/// be added to the cutout list and forgotten by everything else that has to know
+/// a block is glass.
+constexpr bool isGlassBlock(BlockId id) {
+    return id == BlockId::Glass || id == BlockId::TintedGlass ||
+           (id >= BlockId::WhiteStainedGlass && id <= BlockId::BlackStainedGlass);
+}
+
+/// The eight copper grates, which are a lattice and nothing else.
+constexpr bool isCopperGrate(BlockId id) {
+    return id >= BlockId::CopperGrate && id <= BlockId::WaxedOxidizedCopperGrate;
+}
+
+/// The anvil and its two damaged forms, which share one shape and differ only
+/// in the picture on top.
+constexpr bool isAnvil(BlockId id) {
+    return id >= BlockId::Anvil && id <= BlockId::DamagedAnvil;
+}
+
+constexpr bool isCutout(BlockId id) {    // The cactus art carries the reference model's inset as transparency: a
     // one-texel border on the end caps and a column down each side.
     //
     // The coloured glass is here rather than in the blended pass on purpose:
     // ours has no sorted transparency, and a cutout at least draws in the right
     // order. What it costs is that stained glass is see-through only where its
     // art is, which for the reference's own textures is the border alone.
-    return isLeafBlock(id) || isCrossBlock(id) || id == BlockId::Glass || id == BlockId::Fire ||
+    return isLeafBlock(id) || isCrossBlock(id) || isGlassBlock(id) || id == BlockId::Fire ||
+           isDoor(id) || isTrapdoor(id) ||
+           // Everything drawn as a model. **Their art is transparent where the
+           // model is hollow** - a cauldron's rim, a bell's frame, the gap
+           // between a grindstone's legs - so without this the empty texels
+           // draw as opaque black instead of being thrown away.
+           isTorchBlock(id) || isCauldron(id) || isComposter(id) || id == BlockId::Bell ||
+           id == BlockId::Grindstone || id == BlockId::Stonecutter ||
+           id == BlockId::BrewingStand ||
            id == BlockId::Azalea || id == BlockId::FloweringAzalea || id == BlockId::Cactus ||
            id == BlockId::LilyPad || id == BlockId::IronBars || id == BlockId::EndRod ||
            id == BlockId::Lantern || id == BlockId::SoulLantern ||
-           (id >= BlockId::WhiteStainedGlass && id <= BlockId::BlackStainedGlass) ||
+           // Seventeen blocks whose art has real holes in it while they were
+           // drawn as solid cubes: a grate is a lattice, an anvil and a
+           // campfire and the sculk pair are shorter than their cell, and
+           // scaffolding and the enchanting table are open frames. Without
+           // this their empty texels draw as opaque black *and* they cull the
+           // faces of everything they touch. Found by a table sweep, not by
+           // looking - the same shape as the cactus.
+           isCopperGrate(id) || isAnvil(id) ||
+           id == BlockId::EnchantingTable || id == BlockId::Scaffolding ||
+           id == BlockId::SculkSensor || id == BlockId::SculkShrieker ||
+           id == BlockId::Campfire || id == BlockId::SoulCampfire ||
+           id == BlockId::MonsterSpawner || id == BlockId::EndPortalFrame ||
+           isHopper(id) || id == BlockId::FlowerPot ||
            (id >= BlockId::LadderNorth && id <= BlockId::PaneRunLast) ||
            (id >= BlockId::VineFirst && id <= BlockId::CocoaLast);
 }
@@ -1658,6 +3498,113 @@ constexpr BlockId gateAt(int family, FaceDirection facing, bool open) {
                                 (open ? 4 : 0));
 }
 
+/// Every material a button comes in. **Declared in `kWoods` order with stone
+/// last**, exactly as the door and trapdoor tables are, because the recipe loop
+/// walks the woods and indexes straight across all three.
+constexpr std::array<ShapedFamily, kButtonFamilyCount> kButtonFamilies{{
+    {BlockId::Planks, "Oak Button"},
+    {BlockId::SprucePlanks, "Spruce Button"},
+    {BlockId::BirchPlanks, "Birch Button"},
+    {BlockId::JunglePlanks, "Jungle Button"},
+    {BlockId::AcaciaPlanks, "Acacia Button"},
+    {BlockId::DarkOakPlanks, "Dark Oak Button"},
+    {BlockId::CherryPlanks, "Cherry Button"},
+    {BlockId::MangrovePlanks, "Mangrove Button"},
+    {BlockId::CrimsonPlanks, "Crimson Button"},
+    {BlockId::WarpedPlanks, "Warped Button"},
+    {BlockId::BambooPlanks, "Bamboo Button"},
+    {BlockId::Stone, "Stone Button"},
+}};
+
+/// The same twelve and then the two weighted plates, which are cut from gold
+/// and iron and so borrow their pictures the same way everything else here does.
+constexpr std::array<ShapedFamily, kPressurePlateFamilyCount> kPressurePlateFamilies{{
+    {BlockId::Planks, "Oak Pressure Plate"},
+    {BlockId::SprucePlanks, "Spruce Pressure Plate"},
+    {BlockId::BirchPlanks, "Birch Pressure Plate"},
+    {BlockId::JunglePlanks, "Jungle Pressure Plate"},
+    {BlockId::AcaciaPlanks, "Acacia Pressure Plate"},
+    {BlockId::DarkOakPlanks, "Dark Oak Pressure Plate"},
+    {BlockId::CherryPlanks, "Cherry Pressure Plate"},
+    {BlockId::MangrovePlanks, "Mangrove Pressure Plate"},
+    {BlockId::CrimsonPlanks, "Crimson Pressure Plate"},
+    {BlockId::WarpedPlanks, "Warped Pressure Plate"},
+    {BlockId::BambooPlanks, "Bamboo Pressure Plate"},
+    {BlockId::Stone, "Stone Pressure Plate"},
+    {BlockId::GoldBlock, "Light Weighted Pressure Plate"},
+    {BlockId::IronBlock, "Heavy Weighted Pressure Plate"},
+}};
+
+static_assert(kPressurePlateFamilies[kPressurePlateFamilyCount - 2].parent == BlockId::GoldBlock &&
+                  kPressurePlateFamilies[kPressurePlateFamilyCount - 1].parent ==
+                      BlockId::IronBlock,
+              "isWeightedPlate names the last two families; keep gold and iron there");
+static_assert(kPressurePlateFamilies[11].parent == BlockId::Stone,
+              "plateAnswersToItems names family 11 as the stone one");
+
+/// A sign is a board of its own planks on a post of the same.
+///
+/// > **Named divergence: a sign wears its wood's planks, not the reference's
+/// > own sign texture.** Those ship at 32x32 - every wood's does - and this
+/// > game's texture array is 16x16 throughout. The honest options were a second
+/// > array at twice the size or a downscale, and a downscale is exactly the
+/// > thing `make-reference-blocks.ps1` refuses to do. Planks are what a sign is
+/// > made of, and they cost no art at all.
+constexpr std::array<ShapedFamily, kSignFamilyCount> kSignFamilies{{
+    {BlockId::Planks, "Oak Sign"},
+    {BlockId::SprucePlanks, "Spruce Sign"},
+    {BlockId::BirchPlanks, "Birch Sign"},
+    {BlockId::JunglePlanks, "Jungle Sign"},
+    {BlockId::AcaciaPlanks, "Acacia Sign"},
+    {BlockId::DarkOakPlanks, "Dark Oak Sign"},
+    {BlockId::CherryPlanks, "Cherry Sign"},
+    {BlockId::MangrovePlanks, "Mangrove Sign"},
+    {BlockId::CrimsonPlanks, "Crimson Sign"},
+    {BlockId::WarpedPlanks, "Warped Sign"},
+    {BlockId::BambooPlanks, "Bamboo Sign"},
+}};
+
+constexpr std::array<ShapedFamily, kSignFamilyCount> kHangingSignFamilies{{
+    {BlockId::Planks, "Oak Hanging Sign"},
+    {BlockId::SprucePlanks, "Spruce Hanging Sign"},
+    {BlockId::BirchPlanks, "Birch Hanging Sign"},
+    {BlockId::JunglePlanks, "Jungle Hanging Sign"},
+    {BlockId::AcaciaPlanks, "Acacia Hanging Sign"},
+    {BlockId::DarkOakPlanks, "Dark Oak Hanging Sign"},
+    {BlockId::CherryPlanks, "Cherry Hanging Sign"},
+    {BlockId::MangrovePlanks, "Mangrove Hanging Sign"},
+    {BlockId::CrimsonPlanks, "Crimson Hanging Sign"},
+    {BlockId::WarpedPlanks, "Warped Hanging Sign"},
+    {BlockId::BambooPlanks, "Bamboo Hanging Sign"},
+}};
+
+/// A banner is a sheet of its own wool on a post.
+///
+/// > **Named divergence, and a bigger one: a banner carries no pattern.** The
+/// > reference has no block model for one at all - it is drawn by a block-entity
+/// > renderer that composites up to six tinted masks out of
+/// > `textures/entity/banner/`. Patterns need the loom, a per-banner payload and
+/// > a compositing pass; the cloth is what a banner *is*, and it is what this
+/// > ships.
+constexpr std::array<ShapedFamily, kBannerFamilyCount> kBannerFamilies{{
+    {BlockId::WhiteWool, "White Banner"},
+    {BlockId::OrangeWool, "Orange Banner"},
+    {BlockId::MagentaWool, "Magenta Banner"},
+    {BlockId::LightBlueWool, "Light Blue Banner"},
+    {BlockId::YellowWool, "Yellow Banner"},
+    {BlockId::LimeWool, "Lime Banner"},
+    {BlockId::PinkWool, "Pink Banner"},
+    {BlockId::GrayWool, "Gray Banner"},
+    {BlockId::LightGrayWool, "Light Gray Banner"},
+    {BlockId::CyanWool, "Cyan Banner"},
+    {BlockId::PurpleWool, "Purple Banner"},
+    {BlockId::BlueWool, "Blue Banner"},
+    {BlockId::BrownWool, "Brown Banner"},
+    {BlockId::GreenWool, "Green Banner"},
+    {BlockId::RedWool, "Red Banner"},
+    {BlockId::BlackWool, "Black Banner"},
+}};
+
 /// The block a cut shape is made of, or the block itself for everything else.
 ///
 /// **This is the single reason six hundred and forty blocks needed no entry in
@@ -1686,13 +3633,78 @@ constexpr BlockId shapedParent(BlockId id) {
     if (isPane(id)) {
         return kPaneFamilies[static_cast<std::size_t>(paneFamily(id))].parent;
     }
+    if (isButton(id)) {
+        return kButtonFamilies[static_cast<std::size_t>(buttonFamily(id))].parent;
+    }
+    if (isPressurePlate(id)) {
+        return kPressurePlateFamilies[static_cast<std::size_t>(pressurePlateFamily(id))].parent;
+    }
+    if (isSign(id)) {
+        return kSignFamilies[static_cast<std::size_t>(signFamily(id))].parent;
+    }
+    if (isHangingSign(id)) {
+        return kHangingSignFamilies[static_cast<std::size_t>(signFamily(id))].parent;
+    }
+    if (isBanner(id)) {
+        return kBannerFamilies[static_cast<std::size_t>(signFamily(id))].parent;
+    }
     return id;
 }
+
+/// How many cuts a stonecutter offers for one block, at most. Stairs, two slabs
+/// and a wall, which is every shaped family a stone can belong to.
+constexpr int kStonecutterOptions = 3;
+
+/// One cut of `parent`, or `Air` past the last one it has.
+///
+/// **A reverse lookup over the family tables rather than a table of its own.**
+/// Which cuts a block has is already stated by the families naming it as their
+/// parent, and a second list could only fall out of step with the first - a new
+/// stair material would silently offer nothing here.
+constexpr BlockId stonecutterOption(BlockId parent, int option) {
+    if (parent == BlockId::Air || shapedParent(parent) != parent) {
+        return BlockId::Air;
+    }
+    if (option == 0) {
+        for (int family = 0; family < kStairFamilyCount; ++family) {
+            if (kStairFamilies[static_cast<std::size_t>(family)].parent == parent) {
+                return stairsAt(family, Facing::North, false);
+            }
+        }
+        return BlockId::Air;
+    }
+    if (option == 1) {
+        for (int family = 0; family < kSlabFamilyCount; ++family) {
+            if (kSlabFamilies[static_cast<std::size_t>(family)].parent == parent) {
+                return slabAt(family, false);
+            }
+        }
+        return BlockId::Air;
+    }
+    for (int family = 0; family < kWallFamilyCount; ++family) {
+        if (kWallFamilies[static_cast<std::size_t>(family)].parent == parent) {
+            return wallAt(family);
+        }
+    }
+    return BlockId::Air;
+}
+
+/// How many of a cut one block yields. The reference's own: two slabs, one of
+/// everything else.
+constexpr int stonecutterYield(int option) {
+    return option == 1 ? 2 : 1;
+}
+
+static_assert(stonecutterOption(BlockId::Stone, 0) != BlockId::Air &&
+                  stonecutterOption(BlockId::Stone, 1) != BlockId::Air,
+              "stone must cut into stairs and slabs, or the stonecutter offers nothing");
+static_assert(stonecutterOption(stonecutterOption(BlockId::Stone, 0), 0) == BlockId::Air,
+              "a cut block cannot be cut again");
 
 /// True for anything cut from another block.
 constexpr bool isShapedBlock(BlockId id) {
     return isStairs(id) || isSlab(id) || isWall(id) || isFence(id) || isFenceGate(id) ||
-           isCarpet(id) || isPane(id);
+           isCarpet(id) || isPane(id) || isButton(id) || isPressurePlate(id) || isSignLike(id);
 }
 
 /// The id an item of this family turns back into: the one a recipe produces and
@@ -1706,6 +3718,20 @@ constexpr BlockId shapedCanonical(BlockId id) {
     }
     if (isFenceGate(id)) {
         return gateAt(gateFamily(id), FaceDirection::NegZ, false);
+    }
+    // A button and a plate spend most of their ids on where they hang and
+    // whether they are down; only the quiet floor-mounted one is an item.
+    if (isButton(id)) {
+        return buttonAt(buttonFamily(id), 0, false);
+    }
+    if (isPressurePlate(id)) {
+        return pressurePlateAt(pressurePlateFamily(id), 0);
+    }
+    // Which way a sign points is placement, not an item: every rotation and
+    // every wall it could be nailed to gives back the one that stands facing
+    // south.
+    if (isSignLike(id)) {
+        return signAt(signKind(id), signFamily(id), FaceDirection::NegZ, false);
     }
     return id;
 }
@@ -1762,8 +3788,18 @@ enum class BlockShape : std::uint8_t {
     /// A sheet two texels thick that grows toward its neighbours. Glass panes
     /// and iron bars.
     Pane,
-    /// A small box standing in the middle of its cell: a lantern, an end rod.
-    Post,
+    /// An assembly of small boxes, each carrying **its own rectangle of the
+    /// texture and optionally its own layer**. A lantern, an end rod, a torch,
+    /// a bell in its frame, a cauldron, a composter, a grindstone, a
+    /// stonecutter and a brewing stand.
+    ///
+    /// Everything else here is *cut out of a cube*, so where a box sits is also
+    /// where it samples from. These are not, which is the whole distinction —
+    /// and it is also what stops them occluding their neighbours' faces, since
+    /// only a `Full` shape does that. Left as a full cube, a cauldron culled
+    /// the faces of everything touching it and you could see through the world
+    /// around it.
+    Model,
     /// A rung ladder flat against one wall, with no collision at all - what it
     /// gives you is a way *up*, not a floor.
     Ladder,
@@ -1778,15 +3814,66 @@ enum class BlockShape : std::uint8_t {
     /// A slightly shrunken cube lifted just clear of the floor. Lit TNT, which
     /// the reference turns into an entity the moment it is struck.
     Hovering,
+    /// A door leaf: a thin slab standing against one wall of its cell, which
+    /// swings a quarter turn to the wall beside it when opened.
+    Door,
+    /// The same leaf lying flat, in the top or bottom of its cell, which swings
+    /// up to stand against one wall.
+    Trapdoor,
+    /// A full-width plate nine sixteenths tall. A bed, which you stand on and
+    /// sleep in and which is a sixteenth under a slab's height.
+    Bed,
+    /// A full-width block one texel short of the ceiling. Tilled ground and a
+    /// trodden path, which the reference sinks by a sixteenth - that step is
+    /// what makes a field read as worked rather than painted, and it is also
+    /// why a torch will not stand on one.
+    Tilled,
     /// A full-width plate lying on the floor of its cell. The lily pad, which
     /// **rests on** the water rather than standing in it - the one support in
     /// the game that is not solid.
     Flat,
+    /// A small nub on whichever face it was stuck to, and a sixteenth shallower
+    /// once it is pushed in. Cut out of its material like a stair is, so where
+    /// the box sits is also where it samples from.
+    Button,
+    /// A fourteen-wide plate a texel thick, half that when something stands on
+    /// it. Cut out of its material for the same reason.
+    Plate,
+    /// A board on a post, a board on a wall, a board hung off a ceiling, or a
+    /// sheet of cloth. Cut out of its material like the two above, which is why
+    /// a sign wears its own planks and a banner its own wool.
+    Sign,
 };
 
 constexpr BlockShape blockShape(BlockId id) {
     if (id == BlockId::Air || isFluid(id)) {
         return BlockShape::Empty;
+    }
+    // Redstone first, because several of these are cut out of a material whose
+    // own shape would otherwise answer for them, and because the wire has to be
+    // reached before anything asks whether it is a plant.
+    if (isButton(id)) {
+        return BlockShape::Button;
+    }
+    if (isPressurePlate(id)) {
+        return BlockShape::Plate;
+    }
+    if (isSignLike(id)) {
+        return BlockShape::Sign;
+    }
+    // Wire, rails and a tripwire are all a sheet lying on the floor; only their
+    // heights differ, and `flatHeight` owns those.
+    if (isRedstoneWire(id) || isRail(id) || isTripwire(id)) {
+        return BlockShape::Flat;
+    }
+    if (isLever(id) || isRepeater(id) || isComparator(id) || isPistonHead(id) ||
+        isDaylightDetector(id) || isLightningRod(id) || isTripwireHook(id)) {
+        return BlockShape::Model;
+    }
+    // An observer, a dispenser, a dropper, a target, a note block and a piston
+    // are all ordinary cubes; only which picture goes on which face differs.
+    if (isObserver(id) || isDispenserLike(id) || isPiston(id)) {
+        return BlockShape::Full;
     }
     // Fire takes the plant shape without being a plant: two crossed blades, no
     // collision, swept away by water and needing something under it. All four
@@ -1799,6 +3886,18 @@ constexpr BlockShape blockShape(BlockId id) {
     }
     if (isSnowLayer(id)) {
         return BlockShape::Flat;
+    }
+    if (isFarmland(id) || id == BlockId::DirtPath) {
+        return BlockShape::Tilled;
+    }
+    if (isDoor(id)) {
+        return BlockShape::Door;
+    }
+    if (isTrapdoor(id)) {
+        return BlockShape::Trapdoor;
+    }
+    if (isBed(id)) {
+        return BlockShape::Bed;
     }
     if (isSlab(id)) {
         return BlockShape::Slab;
@@ -1816,7 +3915,25 @@ constexpr BlockShape blockShape(BlockId id) {
         return BlockShape::Pane;
     }
     if (id == BlockId::Lantern || id == BlockId::SoulLantern || id == BlockId::EndRod) {
-        return BlockShape::Post;
+        return BlockShape::Model;
+    }
+    // Everything that used to fall through to `Full` and come out as a cube
+    // wearing a lid, plus the brewing stand, which was drawn as a flower.
+    if (isTorchBlock(id) || isCauldron(id) || isComposter(id) || id == BlockId::Bell ||
+        id == BlockId::Grindstone || id == BlockId::Stonecutter ||
+        id == BlockId::BrewingStand) {
+        return BlockShape::Model;
+    }
+    // Ten more that are shorter than their cell or not a box at all. Marking
+    // them cutout stopped their art drawing as opaque black and immediately
+    // showed the real fault underneath: a cube's worth of nothing above a
+    // thirteen-texel frame reads as a gap. The reference's own
+    // `models/block/*.json` gives every one of these box for box.
+    if (isAnvil(id) || id == BlockId::EndPortalFrame || id == BlockId::EnchantingTable ||
+        id == BlockId::SculkSensor || id == BlockId::SculkShrieker ||
+        id == BlockId::Campfire || id == BlockId::SoulCampfire || id == BlockId::Scaffolding ||
+        id == BlockId::FlowerPot || isHopper(id)) {
+        return BlockShape::Model;
     }
     if (isLadder(id)) {
         return BlockShape::Ladder;
@@ -1830,6 +3947,12 @@ constexpr BlockShape blockShape(BlockId id) {
     if (isCarpet(id)) {
         return BlockShape::Flat;
     }
+    // Two more that lie on the floor rather than standing in the cell. Named
+    // rather than folded into `isCarpet`, which is a material family the
+    // recipes read - widening it would give both of these a wool's recipe.
+    if (id == BlockId::MossCarpet || id == BlockId::SculkVein) {
+        return BlockShape::Flat;
+    }
     if (isFenceGate(id)) {
         return BlockShape::Gate;
     }
@@ -1839,8 +3962,10 @@ constexpr BlockShape blockShape(BlockId id) {
     if (id == BlockId::TntPrimed) {
         return BlockShape::Hovering;
     }
-    // A pad lies on the water. Answered before the cross test because it used to
-    // be one, and standing it up in the cell is what made it fight the water.
+    // A pad lies on the water. **Answered last on purpose**, not before the
+    // cross test as an older comment claimed: it used to be a cross block, and
+    // standing it up in the cell is what made it fight the water. Reaching here
+    // at all depends on `isCrossBlock` not naming it, which it does not.
     if (id == BlockId::LilyPad) {
         return BlockShape::Flat;
     }
@@ -2012,12 +4137,81 @@ constexpr BlockBoxes gateBoxes(FaceDirection facing, bool open) {
 /// The lily pad's plate, the reference model's 1.5 of sixteen.
 constexpr float kFlatHeight = 0.09375f;
 
+/// How thick a door leaf is. The reference's three sixteenths, and the single
+/// owner of it - the collision box, the selection box and the mesher all read
+/// this rather than writing 0.1875 out three times.
+constexpr float kDoorThickness = 3.0f / 16.0f;
+
+/// Which wall a door leaf stands against, as a box.
+///
+/// A shut door fills the side it faces. Opening it swings the leaf a quarter
+/// turn - **which way depends on the hinge**, and that is the whole reason the
+/// hinge has to be stored rather than derived: the same neighbourhood can carry
+/// either hand, depending on what stood there when the door was hung.
+constexpr BlockBoxes doorLeafBoxes(FaceDirection facing, bool hingeRight, bool open) {
+    FaceDirection side = facing;
+    if (open) {
+        side = hingeRight ? quarterTurn(facing) : quarterTurn(quarterTurn(quarterTurn(facing)));
+    }
+    BlockBoxes result;
+    switch (side) {
+    case FaceDirection::PosX:
+        result.boxes[0] = {1.0f - kDoorThickness, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+        break;
+    case FaceDirection::NegX:
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, kDoorThickness, 1.0f, 1.0f};
+        break;
+    case FaceDirection::PosZ:
+        result.boxes[0] = {0.0f, 0.0f, 1.0f - kDoorThickness, 1.0f, 1.0f, 1.0f};
+        break;
+    default:
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, kDoorThickness};
+        break;
+    }
+    result.count = 1;
+    return result;
+}
+
+/// A trapdoor lies flat when shut and stands against a wall when open.
+constexpr BlockBoxes trapdoorLeafBoxes(FaceDirection facing, bool open, bool top) {
+    BlockBoxes result;
+    if (!open) {
+        result.boxes[0] = top ? BlockBox{0.0f, 1.0f - kDoorThickness, 0.0f, 1.0f, 1.0f, 1.0f}
+                              : BlockBox{0.0f, 0.0f, 0.0f, 1.0f, kDoorThickness, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    // Open, it stands against the wall it is hinged to, which is the one it
+    // faces - so the shut door's own box is exactly the shape wanted.
+    return doorLeafBoxes(facing, false, false);
+}
+
+/// How far short of the ceiling tilled ground stops. The reference's own one
+/// texel, and the single owner of it - the mesher, the collision box and the
+/// selection box all read this rather than writing 0.9375 out three times.
+constexpr float kTilledHeight = 15.0f / 16.0f;
+
+/// How tall a bed lies. The reference's nine sixteenths.
+constexpr float kBedHeight = 9.0f / 16.0f;
+
 /// How tall a flat block lies. A carpet is a single texel; the lily pad is the
 /// reference's one and a half; settled snow is two texels per layer, which is
 /// the reference's own step.
 constexpr float flatHeight(BlockId id) {
     if (isSnowLayer(id)) {
         return static_cast<float>(snowLayerDepth(id)) * 2.0f / 16.0f;
+    }
+    // The reference's own `redstone_dust_dot` sits at y = 0.25 of a texel - a
+    // quarter of one, not a quarter of a block. A rail is a texel up and a
+    // tripwire a texel and a half.
+    if (isRedstoneWire(id)) {
+        return 0.25f / 16.0f;
+    }
+    if (isRail(id)) {
+        return 1.0f / 16.0f;
+    }
+    if (isTripwire(id)) {
+        return 1.5f / 16.0f;
     }
     return isCarpet(id) ? 1.0f / 16.0f : kFlatHeight;
 }
@@ -2052,6 +4246,74 @@ constexpr BlockBoxes paneBoxes(std::uint8_t connections) {
 /// across and the full height.
 constexpr BlockBoxes postBoxes(BlockId id) {
     BlockBoxes result;
+    constexpr float t = 1.0f / 16.0f;
+    if (isTorchBlock(id)) {
+        // The reference's own two-by-ten stick. What this replaces is the plant
+        // hitbox, which was 12 texels across and 13 tall - so aiming anywhere
+        // near a torch claimed the whole cell.
+        result.boxes[0] = {7 * t, 0.0f, 7 * t, 9 * t, 10 * t, 9 * t};
+        result.count = 1;
+        return result;
+    }
+    if (isCauldron(id) || isComposter(id)) {
+        // Walked into as a solid cube even though it is drawn hollow, which is
+        // the reference's own collision shape: you cannot stand inside one.
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::Bell) {
+        result.boxes[0] = {0.0f, 0.0f, 4 * t, 1.0f, 1.0f, 12 * t};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::Grindstone) {
+        result.boxes[0] = {2 * t, 0.0f, 2 * t, 14 * t, 1.0f, 14 * t};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::Stonecutter) {
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, 9 * t, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    // The ten that stopped being cubes on 2026-08-10. Each is a single solid
+    // box the height the reference gives it, because what you bump into and
+    // what you aim at want the outline of the thing, not every plinth of it -
+    // the anvil, the campfire and the scaffold all reduce to one.
+    if (isAnvil(id)) {
+        result.boxes[0] = {2 * t, 0.0f, 2 * t, 14 * t, 1.0f, 14 * t};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::EndPortalFrame || id == BlockId::EnchantingTable ||
+        id == BlockId::SculkSensor || id == BlockId::SculkShrieker ||
+        id == BlockId::Campfire || id == BlockId::SoulCampfire) {
+        const float top = id == BlockId::EndPortalFrame    ? 13 * t
+                          : id == BlockId::EnchantingTable ? 12 * t
+                          : id == BlockId::SculkShrieker   ? 15 * t
+                          : id == BlockId::SculkSensor     ? 8 * t
+                                                           : 7 * t;
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, top, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::FlowerPot) {
+        result.boxes[0] = {5 * t, 0.0f, 5 * t, 11 * t, 6 * t, 11 * t};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::Scaffolding || isHopper(id)) {
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    if (id == BlockId::BrewingStand) {
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, 2 * t, 1.0f};
+        result.boxes[1] = {7 * t, 0.0f, 7 * t, 9 * t, 14 * t, 9 * t};
+        result.count = 2;
+        return result;
+    }
     const bool rod = id == BlockId::EndRod;
     const float half = rod ? 0.125f : 0.1875f;
     result.boxes[0] = {0.5f - half, 0.0f, 0.5f - half, 0.5f + half, rod ? 1.0f : 0.4375f, 0.5f + half};
@@ -2075,12 +4337,190 @@ struct ModelBox {
     /// separately - reusing the side rect is what put the lantern's glass on
     /// its lid and squashed the cap's plate into a two-texel sliver.
     float topUMin, topVMin, topUMax, topVMax;
+    /// Which texture layer this box samples, or **-1 to take the block's own**.
+    ///
+    /// A bell is a wooden frame round a gold bell and a grindstone is a stone
+    /// wheel between two posts: parts of one block painted from different
+    /// images. Without this a model could pick its rectangle but not its
+    /// picture, and every post came out gold.
+    float sideLayer = -1.0f;
+    float lidLayer = -1.0f;
+    /// Quarter turns applied to the **lid**, clockwise.
+    ///
+    /// The reference rotates a whole block model to face a direction; ours has
+    /// no rotation, so a lid that is not symmetric needs to say which way round
+    /// it goes. A bed is the case that needs it: its pillow is painted along
+    /// one edge of the head half's top texture, and without a turn it lands
+    /// against the join for three of the four facings instead of at the end of
+    /// the bed.
+    unsigned char lidTurns = 0;
+    /// One side face whose automatic mirroring is to be undone.
+    ///
+    /// The mesher flips U on half the faces so a texture reads the same way
+    /// from every side, which is what a word or a furnace front wants. A bed's
+    /// side marks a *world* direction - red mattress at the join, white pillow
+    /// at the head - so the flip puts the pillow at the wrong end on exactly
+    /// one of the two long sides.
+    FaceDirection unmirror = FaceDirection::Unknown;
 };
 
 struct ModelBoxes {
-    ModelBox boxes[4]{};
+    ModelBox boxes[10]{};
     int count = 0;
 };
+
+/// Texture layers a model box borrows from a *different* face of its own block.
+///
+/// **Written as numbers here and cross-checked against the table below with
+/// `static_assert`s**, because `blockTextureLayer` is defined three thousand
+/// lines further down and a model cannot call it. The asserts are what stop
+/// this being a second copy that quietly rots: change a row and the build
+/// fails rather than the bell turning gold.
+///
+/// ⚠️ **`ExtraBlockInfo::layer` is an offset into the appended run, not a layer
+/// index.** `blockTextureLayer` adds `kTableSpritesFirst` to it. Writing the
+/// row's number here on its own pointed every one of these at a nether plant -
+/// a lily pad for the brewing stand's rod, weeping vines for the bell - and the
+/// asserts still passed, because they compared the *offset* against the offset
+/// and never once checked the sum. So the base is stated once, asserted once,
+/// and every constant below is derived from it.
+constexpr float kTableLayerBase = 215.0f;
+constexpr float kComposterTopLayer = kTableLayerBase + 395.0f;
+constexpr float kComposterSideLayer = kTableLayerBase + 396.0f;
+constexpr float kWaterLayer = 12.0f;
+constexpr float kComposterReadyLayer = kTableLayerBase + 397.0f;
+constexpr float kStonecutterTopLayer = kTableLayerBase + 472.0f;
+constexpr float kGrindstoneRoundLayer = kTableLayerBase + 474.0f;
+constexpr float kBellSideLayer = kTableLayerBase + 477.0f;
+constexpr float kBellTopLayer = kTableLayerBase + 478.0f;
+constexpr float kCauldronSideLayer = kTableLayerBase + 479.0f;
+constexpr float kBrewingStandBaseLayer = kTableLayerBase + 481.0f;
+constexpr float kBrewingStandRodLayer = kTableLayerBase + 482.0f;
+/// The lit redstone torch, which is an ordinary table row from the third run.
+/// The unlit one is a staged layer of its own, because there was no row to put
+/// it in without moving every id behind it.
+constexpr float kRedstoneTorchLayer = kTableLayerBase + 357.0f;
+
+/// **The redstone run, appended after every existing layer.** Same rule as the
+/// moon and the saw blade: anything inserted in the middle silently slides every
+/// layer behind it and mistextures the lot.
+///
+/// **Stated as a literal and asserted where the run that computes it is
+/// declared**, for exactly the reason `kTableLayerBase` above is: `postModel`
+/// needs these numbers and is defined two thousand lines before anything could
+/// work them out. The assert is what stops the literal being a second copy that
+/// quietly rots.
+constexpr int kRedstoneSpritesFirst = 1157;
+
+/// Sixteen copies of the reference's own dust art, **tinted at staging time by
+/// the strength they stand for** - the reference tints them at draw time, and we
+/// have no per-block tint, so the colour is baked into sixteen layers instead.
+/// One subtraction turns a wire's id into its picture.
+constexpr int kWireFirstSprite = kRedstoneSpritesFirst;
+constexpr int kWireSprites = 16;
+
+constexpr int kRedstoneTorchOffSprite = kWireFirstSprite + kWireSprites;
+constexpr int kLeverSprite = kRedstoneTorchOffSprite + 1;
+constexpr int kRepeaterSprite = kLeverSprite + 1;
+constexpr int kRepeaterOnSprite = kRepeaterSprite + 1;
+constexpr int kComparatorSprite = kRepeaterOnSprite + 1;
+constexpr int kComparatorOnSprite = kComparatorSprite + 1;
+/// The bench both a repeater and a comparator stand on. A second copy of smooth
+/// stone rather than a lookup into the table run, so a model box can name it as
+/// a plain number the way every other one does.
+constexpr int kRedstoneSlabSprite = kComparatorOnSprite + 1;
+constexpr int kObserverFrontSprite = kRedstoneSlabSprite + 1;
+constexpr int kObserverBackSprite = kObserverFrontSprite + 1;
+constexpr int kObserverBackOnSprite = kObserverBackSprite + 1;
+constexpr int kObserverSideSprite = kObserverBackOnSprite + 1;
+constexpr int kObserverTopSprite = kObserverSideSprite + 1;
+constexpr int kPistonTopSprite = kObserverTopSprite + 1;
+constexpr int kPistonTopStickySprite = kPistonTopSprite + 1;
+constexpr int kPistonSideSprite = kPistonTopStickySprite + 1;
+constexpr int kPistonBottomSprite = kPistonSideSprite + 1;
+constexpr int kPistonInnerSprite = kPistonBottomSprite + 1;
+constexpr int kDispenserFrontSprite = kPistonInnerSprite + 1;
+constexpr int kDispenserFrontVerticalSprite = kDispenserFrontSprite + 1;
+constexpr int kDropperFrontSprite = kDispenserFrontVerticalSprite + 1;
+constexpr int kDropperFrontVerticalSprite = kDropperFrontSprite + 1;
+/// The sides and back a dispenser and a dropper share with a furnace. Staged
+/// again here rather than reached for in the first sixty-seven, because those
+/// are `TextureLayer` enumerators and a model wants a plain number.
+constexpr int kMachineSideSprite = kDropperFrontVerticalSprite + 1;
+constexpr int kMachineTopSprite = kMachineSideSprite + 1;
+constexpr int kDaylightSideSprite = kMachineTopSprite + 1;
+constexpr int kDaylightTopSprite = kDaylightSideSprite + 1;
+constexpr int kDaylightInvertedTopSprite = kDaylightTopSprite + 1;
+constexpr int kLightningRodSprite = kDaylightInvertedTopSprite + 1;
+constexpr int kLightningRodOnSprite = kLightningRodSprite + 1;
+constexpr int kTripwireHookSprite = kLightningRodOnSprite + 1;
+constexpr int kTripwireSprite = kTripwireHookSprite + 1;
+/// The four rail families, quiet then live. The plain rail has no live form and
+/// spends its second slot on the corner piece instead.
+constexpr int kRailFirstSprite = kTripwireSprite + 1;
+constexpr int kRailSprites = 8;
+constexpr int kRedstoneLampOnSprite = kRailFirstSprite + kRailSprites;
+constexpr int kRedstoneSprites = kRedstoneLampOnSprite + 1 - kRedstoneSpritesFirst;
+
+/// **The brewing run, appended after the redstone one.** Eight ingredients, then
+/// every potion three ways - drunk, thrown and on the end of an arrow.
+///
+/// The forty-one potion pictures are the reference's own bottle with its
+/// overlay **tinted at staging time by the effect's colour**, exactly as the
+/// redstone wire is: the reference tints at draw time and nothing here can.
+constexpr int kBrewingSpritesFirst = kRedstoneSpritesFirst + kRedstoneSprites;
+constexpr int kBrewingSprites = 5;
+constexpr int kPotionSpritesFirst = kBrewingSpritesFirst + kBrewingSprites;
+/// Stated here and `static_assert`ed against `kPotionTypes` in `Item.hpp`,
+/// which is where the potions themselves are described and which this header
+/// cannot see.
+constexpr int kPotionSpriteTypes = 41;
+constexpr int kSplashPotionSpritesFirst = kPotionSpritesFirst + kPotionSpriteTypes;
+constexpr int kTippedArrowSpritesFirst = kSplashPotionSpritesFirst + kPotionSpriteTypes;
+constexpr int kTippedArrowSprites = 37;
+constexpr int kLingeringPotionSpritesFirst = kTippedArrowSpritesFirst + kTippedArrowSprites;
+constexpr int kPotionSpritesEnd = kLingeringPotionSpritesFirst + kPotionSpriteTypes;
+
+/// **Collectibles**: the twenty-three pottery sherds, the goat horn and the
+/// twenty-two music discs.
+///
+/// One sprite for all eight horns, because the reference draws them from one
+/// picture too - what differs between them is the note, not the horn.
+constexpr int kSherdSpritesFirst = kPotionSpritesEnd;
+constexpr int kSherdSprites = 23;
+constexpr int kGoatHornSprite = kSherdSpritesFirst + kSherdSprites;
+constexpr int kMusicDiscSpritesFirst = kGoatHornSprite + 1;
+constexpr int kMusicDiscSprites = 22;
+constexpr int kCollectibleSpritesEnd = kMusicDiscSpritesFirst + kMusicDiscSprites;
+
+/// The sixteen firework stars, one tint apiece.
+constexpr int kFireworkStarSpritesFirst = kCollectibleSpritesEnd;
+constexpr int kFireworkStarSprites = 16;
+constexpr int kFireworkStarSpritesEnd = kFireworkStarSpritesFirst + kFireworkStarSprites;
+/// Four more that a model box needs by name rather than by face, because these
+/// blocks paint a *lid* from their side image: an anvil's plinths, a campfire's
+/// logs, a scaffold's posts and a hopper's funnel are all the same picture all
+/// the way round.
+constexpr float kAnvilBodyLayer = kTableLayerBase + 483.0f;
+constexpr float kScaffoldSideLayer = kTableLayerBase + 487.0f;
+constexpr float kCampfireLogLayer = kTableLayerBase + 534.0f;
+constexpr float kHopperSideLayer = kTableLayerBase + 687.0f;
+/// The two plain materials a bell's frame is made of. The reference builds it
+/// from `block/stone` posts and a `block/dark_oak_planks` bar, and paints the
+/// bell itself from an entity texture we do not have - so the gold comes off
+/// `bell_side`/`bell_top` and the frame off the two ordinary layers.
+constexpr float kStoneLayer = 0.0f;
+constexpr float kDirtLayer = 1.0f;
+constexpr float kPlanksLayer = 9.0f;
+constexpr float kLogSideLayer = 13.0f;
+/// The saw blade, which is the last layer of all.
+constexpr float kStonecutterSawLayer = 1154.0f;
+/// The compost inside a composter. **The tub's own top texture is a rim with a
+/// transparent middle**, and that middle is exactly the rectangle the contents
+/// plate samples - so a composter filled to anything below level eight drew
+/// nothing at all and read as broken. The reference has this image; it simply
+/// had not been staged.
+constexpr float kComposterCompostLayer = 1156.0f;
 
 /// The reference hangs its ladder on a **zero-thickness plane 0.8 texels off
 /// the wall**. Ours is drawn as a box, so it is a half-texel plate held a texel
@@ -2176,8 +4616,130 @@ constexpr BlockBoxes cocoaBoxes(FaceDirection facing, int age) {
     return result;
 }
 
+/// A button's box, read straight out of the reference's `button.json`.
+///
+/// The reference authors one model lying on the floor - `5,0,6` to `11,2,10` -
+/// and lets the blockstate turn it onto a wall or a ceiling. We have no model
+/// rotation, so the turn is done here: the **six-texel run is always
+/// perpendicular to the face it is stuck to**, the four-texel one is the other
+/// horizontal, and the two-texel thickness stands off the face. A pressed
+/// button is `1.02` thick rather than `1`, which is the reference's own number
+/// and not a rounding of it.
+constexpr BlockBoxes buttonBoxes(int mount, bool pressed) {
+    constexpr float t = 1.0f / 16.0f;
+    const float thick = (pressed ? 1.02f : 2.0f) * t;
+    BlockBoxes result;
+    result.count = 1;
+    switch (mount) {
+    case 0: // Floor.
+        result.boxes[0] = {5 * t, 0.0f, 6 * t, 11 * t, thick, 10 * t};
+        break;
+    case 1: // Ceiling.
+        result.boxes[0] = {5 * t, 1.0f - thick, 6 * t, 11 * t, 1.0f, 10 * t};
+        break;
+    case 2 + static_cast<int>(FaceDirection::PosX):
+        result.boxes[0] = {1.0f - thick, 6 * t, 5 * t, 1.0f, 10 * t, 11 * t};
+        break;
+    case 2 + static_cast<int>(FaceDirection::NegX):
+        result.boxes[0] = {0.0f, 6 * t, 5 * t, thick, 10 * t, 11 * t};
+        break;
+    case 2 + static_cast<int>(FaceDirection::PosZ):
+        result.boxes[0] = {5 * t, 6 * t, 1.0f - thick, 11 * t, 10 * t, 1.0f};
+        break;
+    default:
+        result.boxes[0] = {5 * t, 6 * t, 0.0f, 11 * t, 10 * t, thick};
+        break;
+    }
+    return result;
+}
+
+/// A pressure plate's box: the reference's `1,0,1` to `15,1,15`, and half a
+/// texel thick once something is standing on it.
+constexpr BlockBoxes plateBoxes(bool pressed) {
+    constexpr float t = 1.0f / 16.0f;
+    BlockBoxes result;
+    result.count = 1;
+    result.boxes[0] = {t, 0.0f, t, 15 * t, (pressed ? 0.5f : 1.0f) * t, 15 * t};
+    return result;
+}
+
+/// A sign, a hanging sign or a banner, from the reference's own models.
+///
+/// `template_sign_rot_0` is a post `7.33,0,7.33` to `8.67,9.33,8.67` under a
+/// board `0,9.33,7.33` to `16,17.33,8.67`; `template_wall_sign` is one board at
+/// `0,4.33,0.33` to `16,12.33,1.67`; `template_hanging_sign_rot_0` is a board
+/// `1,0,7` to `15,10,9` on two chains. **The standing board's top reaches
+/// outside its own cell in the reference and is clipped to it here**, because
+/// nothing else in this game draws past a cell wall.
+///
+/// A banner has no reference model at all - it is a block entity there - so its
+/// post and cloth are ours, and that is recorded at `kBannerFamilies`.
+constexpr BlockBoxes signBoxes(int kind, FaceDirection facing, bool onWall) {
+    constexpr float t = 1.0f / 16.0f;
+    constexpr float postLo = 7.33333f / 16.0f;
+    constexpr float postHi = 8.66667f / 16.0f;
+    const bool alongX = facing == FaceDirection::PosZ || facing == FaceDirection::NegZ;
+    BlockBoxes result;
+
+    // How thick the board is and where it sits along the axis it faces.
+    const auto board = [&](float lo, float hi, float faceLo, float faceHi) {
+        return alongX ? BlockBox{lo, faceLo, postLo, hi, faceHi, postHi}
+                      : BlockBox{postLo, faceLo, lo, postHi, faceHi, hi};
+    };
+
+    if (onWall) {
+        // Against the wall behind it, a texel and a third clear of it.
+        constexpr float near = 0.33333f / 16.0f;
+        constexpr float far = 1.66667f / 16.0f;
+        const float lo = kind == 1 ? 1 * t : 0.0f;
+        const float hi = kind == 1 ? 15 * t : 1.0f;
+        const float bottom = kind == 1 ? 2 * t : 4.33333f / 16.0f;
+        const float top = kind == 1 ? 12 * t : 12.33333f / 16.0f;
+        switch (facing) {
+        case FaceDirection::PosX:
+            result.boxes[0] = {near, bottom, lo, far, top, hi};
+            break;
+        case FaceDirection::NegX:
+            result.boxes[0] = {1.0f - far, bottom, lo, 1.0f - near, top, hi};
+            break;
+        case FaceDirection::PosZ:
+            result.boxes[0] = {lo, bottom, near, hi, top, far};
+            break;
+        default:
+            result.boxes[0] = {lo, bottom, 1.0f - far, hi, top, 1.0f - near};
+            break;
+        }
+        result.count = 1;
+        return result;
+    }
+
+    if (kind == 1) {
+        // Hung from the ceiling: the board low in the cell, two chains above it.
+        result.boxes[0] = board(1 * t, 15 * t, 0.0f, 10 * t);
+        result.boxes[1] = board(3 * t, 4 * t, 10 * t, 1.0f);
+        result.boxes[2] = board(12 * t, 13 * t, 10 * t, 1.0f);
+        result.count = 3;
+        return result;
+    }
+
+    if (kind == 2) {
+        // A banner: a post the height of the cell with the cloth hung across it.
+        result.boxes[0] = {postLo, 0.0f, postLo, postHi, 1.0f, postHi};
+        result.boxes[1] = board(1 * t, 15 * t, 3 * t, 1.0f);
+        result.count = 2;
+        return result;
+    }
+
+    result.boxes[0] = {postLo, 0.0f, postLo, postHi, 9.33333f / 16.0f, postHi};
+    result.boxes[1] = board(0.0f, 1.0f, 9.33333f / 16.0f, 1.0f);
+    result.count = 2;
+    return result;
+}
+
 /// The reference's own `template_lantern`, `end_rod` and `cocoa_stage2`
-/// models, in sixteenths, face rectangles and all.
+/// models, in sixteenths, face rectangles and all - and, since the redstone
+/// round, the lever, the repeater, the comparator, the piston head, the
+/// daylight detector, the lightning rod and the tripwire hook.
 ///
 /// The lantern's handle is the reference's two quads crossed through the middle
 /// of the cell. Ours are a texel thick and **cross at a right angle where the
@@ -2192,11 +4754,663 @@ constexpr BlockBoxes cocoaBoxes(FaceDirection facing, int age) {
 constexpr ModelBoxes postModel(BlockId id) {
     constexpr float t = 1.0f / 16.0f;
     ModelBoxes result;
+    // ---- Redstone. Every box below is the reference's own model JSON. ----
+    //
+    // **Named divergence, and it covers this whole family: none of these tilts.**
+    // The reference turns a lever's handle 45 degrees, leans a wall torch back
+    // 22.5 and hangs a tripwire hook at 45, and the box mesher has no rotation
+    // at all. Where a tilt is what reads as state - a lever thrown one way or
+    // the other - the box slides instead, which is legible from every angle a
+    // player will look at it from.
+    if (isLever(id)) {
+        // `lever.json`: base `5,-0.02,4` to `11,2.98,12` in cobblestone, handle
+        // `7,1,7` to `9,11,9`. The base deliberately pokes two hundredths of a
+        // texel into whatever it is screwed to, which is the reference stopping
+        // two faces sharing a plane - the same rule the lantern's handle taught
+        // us. Ours is smooth stone rather than cobblestone, because a model box
+        // names its layer as a number and the redstone run has a stone in it.
+        const int mount = leverMount(id);
+        const bool on = leverOn(id);
+        const float lean = on ? 2 * t : -2 * t;
+        const bool ceiling = mount == LeverCeilingX || mount == LeverCeilingZ;
+        const bool floorOrCeiling = mount <= LeverCeilingZ;
+        // The throw runs along X for the "X" mounts and along Z for the others;
+        // a wall lever always throws up and down.
+        const bool alongX = mount == LeverFloorX || mount == LeverCeilingX;
+        if (floorOrCeiling) {
+            const float baseLo = ceiling ? 13 * t : 0.0f;
+            const float baseHi = ceiling ? 1.0f : 3 * t;
+            result.boxes[0] = {alongX ? BlockBox{5 * t, baseLo, 4 * t, 11 * t, baseHi, 12 * t}
+                                      : BlockBox{4 * t, baseLo, 5 * t, 12 * t, baseHi, 11 * t},
+                               0.0f, 13 * t, 1.0f, 1.0f,
+                               0.0f, 0.0f, 1.0f, 1.0f,
+                               static_cast<float>(kRedstoneSlabSprite),
+                               static_cast<float>(kRedstoneSlabSprite)};
+            const float lo = ceiling ? 5 * t : t;
+            const float hi = ceiling ? 15 * t : 11 * t;
+            const float slide = ceiling ? -lean : lean;
+            result.boxes[1] = {alongX ? BlockBox{7 * t + slide, lo, 7 * t, 9 * t + slide, hi, 9 * t}
+                                      : BlockBox{7 * t, lo, 7 * t + slide, 9 * t, hi, 9 * t + slide},
+                               7 * t, 6 * t, 9 * t, 1.0f,
+                               7 * t, 6 * t, 9 * t, 8 * t};
+        } else {
+            const FaceDirection wall = static_cast<FaceDirection>(mount - LeverWallFirst);
+            const float near = 0.0f;
+            const float far = 3 * t;
+            // Standing against the wall: six texels across it, eight up it.
+            switch (wall) {
+            case FaceDirection::PosX:
+                result.boxes[0] = {1.0f - far, 4 * t, 5 * t, 1.0f - near, 12 * t, 11 * t,
+                                   0.0f, 13 * t, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f,
+                                   static_cast<float>(kRedstoneSlabSprite),
+                                   static_cast<float>(kRedstoneSlabSprite)};
+                result.boxes[1] = {1.0f - 11 * t, 7 * t + lean, 7 * t,
+                                   1.0f - t,      9 * t + lean, 9 * t,
+                                   7 * t, 6 * t, 9 * t, 1.0f, 7 * t, 6 * t, 9 * t, 8 * t};
+                break;
+            case FaceDirection::NegX:
+                result.boxes[0] = {near, 4 * t, 5 * t, far, 12 * t, 11 * t,
+                                   0.0f, 13 * t, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f,
+                                   static_cast<float>(kRedstoneSlabSprite),
+                                   static_cast<float>(kRedstoneSlabSprite)};
+                result.boxes[1] = {t, 7 * t + lean, 7 * t, 11 * t, 9 * t + lean, 9 * t,
+                                   7 * t, 6 * t, 9 * t, 1.0f, 7 * t, 6 * t, 9 * t, 8 * t};
+                break;
+            case FaceDirection::PosZ:
+                result.boxes[0] = {5 * t, 4 * t, 1.0f - far, 11 * t, 12 * t, 1.0f - near,
+                                   0.0f, 13 * t, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f,
+                                   static_cast<float>(kRedstoneSlabSprite),
+                                   static_cast<float>(kRedstoneSlabSprite)};
+                result.boxes[1] = {7 * t, 7 * t + lean, 1.0f - 11 * t,
+                                   9 * t, 9 * t + lean, 1.0f - t,
+                                   7 * t, 6 * t, 9 * t, 1.0f, 7 * t, 6 * t, 9 * t, 8 * t};
+                break;
+            default:
+                result.boxes[0] = {5 * t, 4 * t, near, 11 * t, 12 * t, far,
+                                   0.0f, 13 * t, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f,
+                                   static_cast<float>(kRedstoneSlabSprite),
+                                   static_cast<float>(kRedstoneSlabSprite)};
+                result.boxes[1] = {7 * t, 7 * t + lean, t, 9 * t, 9 * t + lean, 11 * t,
+                                   7 * t, 6 * t, 9 * t, 1.0f, 7 * t, 6 * t, 9 * t, 8 * t};
+                break;
+            }
+        }
+        result.count = 2;
+        return result;
+    }
+    // A torch on a wall. The reference's `template_redstone_torch_wall` is the
+    // floor stick leaned back 22.5 degrees out of the wall; ours stands upright
+    // three texels clear of it, raised so the flame sits at the same height.
+    if (isWallTorch(id)) {
+        const float layer = redstoneTorchLit(id) ? kRedstoneTorchLayer
+                                                 : static_cast<float>(kRedstoneTorchOffSprite);
+        switch (redstoneTorchWall(id)) {
+        case FaceDirection::PosX:
+            result.boxes[0] = {12 * t, 3 * t, 7 * t, 14 * t, 13 * t, 9 * t};
+            break;
+        case FaceDirection::NegX:
+            result.boxes[0] = {2 * t, 3 * t, 7 * t, 4 * t, 13 * t, 9 * t};
+            break;
+        case FaceDirection::PosZ:
+            result.boxes[0] = {7 * t, 3 * t, 12 * t, 9 * t, 13 * t, 14 * t};
+            break;
+        default:
+            result.boxes[0] = {7 * t, 3 * t, 2 * t, 9 * t, 13 * t, 4 * t};
+            break;
+        }
+        result.boxes[0].uMin = 7 * t;
+        result.boxes[0].vMin = 6 * t;
+        result.boxes[0].uMax = 9 * t;
+        result.boxes[0].vMax = 1.0f;
+        result.boxes[0].topUMin = 7 * t;
+        result.boxes[0].topVMin = 6 * t;
+        result.boxes[0].topUMax = 9 * t;
+        result.boxes[0].topVMax = 8 * t;
+        result.boxes[0].sideLayer = layer;
+        result.boxes[0].lidLayer = layer;
+        result.count = 1;
+        return result;
+    }
+    if (isRepeater(id) || isComparator(id)) {
+        // Both stand on the same bench: `0,0,0` to `16,2,16`, smooth stone all
+        // round with the block's own picture on top.
+        const bool repeater = isRepeater(id);
+        const float top = repeater
+                              ? static_cast<float>(repeaterPowered(id) ? kRepeaterOnSprite
+                                                                      : kRepeaterSprite)
+                              : static_cast<float>(comparatorPowered(id) || comparatorSubtracts(id)
+                                                       ? kComparatorOnSprite
+                                                       : kComparatorSprite);
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, 2 * t, 1.0f},
+                           0.0f, 14 * t, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f,
+                           static_cast<float>(kRedstoneSlabSprite), top};
+        result.count = 1;
+        // A torch two texels wide, standing on the bench. `along` measures from
+        // the **output** end, which is the end the facing points at.
+        const FaceDirection facing = repeater ? repeaterFacing(id) : comparatorFacing(id);
+        const auto torch = [&](float along, float across, float height, bool lit) {
+            const float layer = lit ? kRedstoneTorchLayer
+                                    : static_cast<float>(kRedstoneTorchOffSprite);
+            const float a0 = along;
+            const float a1 = along + 2 * t;
+            const float c0 = across;
+            const float c1 = across + 2 * t;
+            BlockBox box{};
+            switch (facing) {
+            case FaceDirection::NegZ:
+                box = {c0, 2 * t, a0, c1, 2 * t + height, a1};
+                break;
+            case FaceDirection::PosZ:
+                box = {1.0f - c1, 2 * t, 1.0f - a1, 1.0f - c0, 2 * t + height, 1.0f - a0};
+                break;
+            case FaceDirection::NegX:
+                box = {a0, 2 * t, 1.0f - c1, a1, 2 * t + height, 1.0f - c0};
+                break;
+            default:
+                box = {1.0f - a1, 2 * t, c0, 1.0f - a0, 2 * t + height, c1};
+                break;
+            }
+            result.boxes[result.count++] = {box,
+                                            7 * t, 6 * t, 9 * t, 11 * t,
+                                            7 * t, 6 * t, 9 * t, 8 * t,
+                                            layer, layer};
+        };
+        if (repeater) {
+            // The fixed torch sits two texels in from the output end; the one
+            // that moves is the delay, and it steps two texels per setting.
+            torch(2 * t, 7 * t, 5 * t, repeaterPowered(id));
+            torch(static_cast<float>(4 + 2 * repeaterDelay(id)) * t, 7 * t, 5 * t,
+                  repeaterPowered(id));
+        } else {
+            // A pair at the output end, five tall, and a single one at the back
+            // three tall - which is the comparator's only asymmetry, and is the
+            // same in both modes. The mode is told by which torch is lit, never
+            // by its height.
+            torch(11 * t, 4 * t, 5 * t, comparatorPowered(id));
+            torch(11 * t, 10 * t, 5 * t, comparatorPowered(id));
+            torch(2 * t, 7 * t, 3 * t, comparatorSubtracts(id));
+        }
+        return result;
+    }
+    if (isPistonHead(id)) {
+        // `template_piston_head`: a plate `0,0,0` to `16,16,4` and an arm
+        // `6,6,4` to `10,10,20`. **The reference's arm runs four texels outside
+        // its own cell**, back into the piston that pushed it; ours stops at the
+        // cell wall, which is the short head the reference also ships.
+        const int facing = pistonHeadFacing(id);
+        const float plate = static_cast<float>(pistonHeadSticky(id) ? kPistonTopStickySprite
+                                                                    : kPistonTopSprite);
+        const float side = static_cast<float>(kPistonSideSprite);
+        const auto along = [&](float lo, float hi, float half) {
+            switch (facing) {
+            case Facing6Up:
+                return BlockBox{0.5f - half, 1.0f - hi, 0.5f - half, 0.5f + half, 1.0f - lo,
+                                0.5f + half};
+            case Facing6Down:
+                return BlockBox{0.5f - half, lo, 0.5f - half, 0.5f + half, hi, 0.5f + half};
+            case Facing6South:
+                return BlockBox{0.5f - half, 0.5f - half, 1.0f - hi, 0.5f + half, 0.5f + half,
+                                1.0f - lo};
+            case Facing6North:
+                return BlockBox{0.5f - half, 0.5f - half, lo, 0.5f + half, 0.5f + half, hi};
+            case Facing6East:
+                return BlockBox{1.0f - hi, 0.5f - half, 0.5f - half, 1.0f - lo, 0.5f + half,
+                                0.5f + half};
+            default:
+                return BlockBox{lo, 0.5f - half, 0.5f - half, hi, 0.5f + half, 0.5f + half};
+            }
+        };
+        result.boxes[0] = {along(0.0f, 4 * t, 0.5f), 0.0f, 0.0f, 1.0f, 4 * t,
+                           0.0f, 0.0f, 1.0f, 1.0f, side, plate};
+        result.boxes[1] = {along(4 * t, 1.0f, 2 * t), 0.0f, 0.0f, 1.0f, 12 * t,
+                           0.0f, 0.0f, 4 * t, 4 * t, side, side};
+        result.count = 2;
+        return result;
+    }
+    if (isDaylightDetector(id)) {
+        // `template_daylight_detector`: `0,0,0` to `16,6,16`, sides sampling
+        // rows 10 to 16 of the side texture.
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, 6 * t, 1.0f},
+                           0.0f, 10 * t, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f,
+                           static_cast<float>(kDaylightSideSprite),
+                           static_cast<float>(daylightDetectorInverted(id)
+                                                  ? kDaylightInvertedTopSprite
+                                                  : kDaylightTopSprite)};
+        result.count = 1;
+        return result;
+    }
+    if (isLightningRod(id)) {
+        // `template_lightning_rod`: head `6,12,6` to `10,16,10` sampling the
+        // top-left 4x4 of the sheet, shaft `7,0,7` to `9,12,9` sampling a
+        // two-texel column of rows 4 to 16. **Every one of its eleven faces
+        // needs an explicit rectangle** - this model is cut out of a corner of
+        // its texture rather than out of a cube, which is exactly the case
+        // `ModelBox` exists for.
+        const float layer = static_cast<float>(lightningRodPowered(id) ? kLightningRodOnSprite
+                                                                       : kLightningRodSprite);
+        const int facing = lightningRodFacing(id);
+        // The rod stands along whichever axis it was stuck to, tip outward.
+        const auto rod = [&](float lo, float hi, float half) {
+            switch (facing) {
+            case Facing6Down:
+                return BlockBox{0.5f - half, 1.0f - hi, 0.5f - half, 0.5f + half, 1.0f - lo,
+                                0.5f + half};
+            case Facing6North:
+                return BlockBox{0.5f - half, 0.5f - half, 1.0f - hi, 0.5f + half, 0.5f + half,
+                                1.0f - lo};
+            case Facing6South:
+                return BlockBox{0.5f - half, 0.5f - half, lo, 0.5f + half, 0.5f + half, hi};
+            case Facing6West:
+                return BlockBox{1.0f - hi, 0.5f - half, 0.5f - half, 1.0f - lo, 0.5f + half,
+                                0.5f + half};
+            case Facing6East:
+                return BlockBox{lo, 0.5f - half, 0.5f - half, hi, 0.5f + half, 0.5f + half};
+            default:
+                return BlockBox{0.5f - half, lo, 0.5f - half, 0.5f + half, hi, 0.5f + half};
+            }
+        };
+        result.boxes[0] = {rod(0.0f, 12 * t, t), 0.0f, 4 * t, 2 * t, 1.0f,
+                           0.0f, 4 * t, 2 * t, 6 * t, layer, layer};
+        result.boxes[1] = {rod(12 * t, 1.0f, 2 * t), 0.0f, 0.0f, 4 * t, 4 * t,
+                           0.0f, 0.0f, 4 * t, 4 * t, layer, layer};
+        result.count = 2;
+        return result;
+    }
+    if (isTripwireHook(id)) {
+        // `tripwire_hook.json`, reduced to the two boxes that read: the post
+        // against the wall, `6,1,14` to `10,9,16`, and the hook plate in front
+        // of it. The reference's four one-texel slivers round the hook are left
+        // out, as the redstone torch's glow shell is.
+        const float layer = static_cast<float>(kTripwireHookSprite);
+        const FaceDirection wall = tripwireHookFacing(id);
+        const bool tripped = tripwireHookPowered(id);
+        const float hookY = tripped ? 4 * t : 5 * t;
+        const auto place = [&](float lo, float hi, float halfX, float y0, float y1) {
+            switch (wall) {
+            case FaceDirection::PosX:
+                return BlockBox{1.0f - hi, y0, 0.5f - halfX, 1.0f - lo, y1, 0.5f + halfX};
+            case FaceDirection::NegX:
+                return BlockBox{lo, y0, 0.5f - halfX, hi, y1, 0.5f + halfX};
+            case FaceDirection::PosZ:
+                return BlockBox{0.5f - halfX, y0, 1.0f - hi, 0.5f + halfX, y1, 1.0f - lo};
+            default:
+                return BlockBox{0.5f - halfX, y0, lo, 0.5f + halfX, y1, hi};
+            }
+        };
+        result.boxes[0] = {place(0.0f, 2 * t, 2 * t, t, 9 * t),
+                           6 * t, 7 * t, 10 * t, 15 * t,
+                           6 * t, 0.0f, 10 * t, 2 * t, layer, layer};
+        result.boxes[1] = {place(2 * t, 6 * t, 2 * t, hookY, hookY + t),
+                           5 * t, 3 * t, 11 * t, 9 * t,
+                           5 * t, 3 * t, 11 * t, 9 * t, layer, layer};
+        result.count = 2;
+        return result;
+    }
+    // A mattress on legs, which is what the side texture is drawn for: rows 0-6
+    // are transparent, rows 7-13 are the mattress side and its frame, and rows
+    // 13-16 hold three 3x3 leg faces packed side by side. Sampling from row 0
+    // therefore drew mostly nothing and no legs at all.
+    //
+    // The lid needs turning as well. The top face's u runs along +X and its v
+    // along +Z, so an unturned head texture puts the pillow at -Z whichever way
+    // the bed lies, and three of the four facings had the pillow against the
+    // join in the middle instead of at the end.
+    if (isBed(id)) {
+        const FaceDirection lie = bedFacing(id);
+        const unsigned char turns = lie == FaceDirection::NegZ   ? 0
+                                    : lie == FaceDirection::PosX ? 1
+                                    : lie == FaceDirection::PosZ ? 2
+                                                                 : 3;
+        // The long side a quarter turn to the left of the head, which is the
+        // one the automatic mirror gets backwards.
+        const FaceDirection unmirror = lie == FaceDirection::NegZ   ? FaceDirection::NegX
+                                       : lie == FaceDirection::PosX ? FaceDirection::NegZ
+                                       : lie == FaceDirection::PosZ ? FaceDirection::PosX
+                                                                    : FaceDirection::PosZ;
+        // The top is one whole face, not a net: the reference's
+        // `template_bed_head` samples `up` at uv 0,0-16,16 over the whole cell,
+        // and the head texture's rows 0-7 are the pillow, row 8 the shadow it
+        // casts and rows 9-15 the blanket. Cropping to the pillow stretched it
+        // over the entire head half and left the blanket nowhere, so the red
+        // began at the join instead of covering the middle of the bed.
+        result.boxes[0] = {{0.0f, 3 * t, 0.0f, 1.0f, kBedHeight, 1.0f},
+                           0.0f, 7 * t, 1.0f, 13 * t,
+                           0.0f, 0.0f, 1.0f, 1.0f, -1.0f, -1.0f, turns, unmirror};
+        // Two legs per half, at the end of the bed that faces away from the
+        // other half - so the pair meets in the middle and the whole bed stands
+        // on four.
+        //
+        // The two halves keep their leg faces at opposite ends of the net: the
+        // foot's are u 0-9 and the head's u 7-16, because we stage one side
+        // image per half and the reference's are mirrors of each other. Reading
+        // the foot's corner for both left the head's legs sampling empty
+        // texture, so a bed stood on two.
+        const float legU = bedIsHead(id) ? 13 * t : 0.0f;
+        const bool alongX = lie == FaceDirection::PosX || lie == FaceDirection::NegX;
+        const bool positive = lie == FaceDirection::PosX || lie == FaceDirection::PosZ;
+        const bool outerHigh = bedIsHead(id) == positive;
+        const float outerMin = outerHigh ? 13 * t : 0.0f;
+        const float outerMax = outerHigh ? 1.0f : 3 * t;
+        for (int side = 0; side < 2; ++side) {
+            const float acrossMin = side == 0 ? 0.0f : 13 * t;
+            const float acrossMax = side == 0 ? 3 * t : 1.0f;
+            const BlockBox leg =
+                alongX ? BlockBox{outerMin, 0.0f, acrossMin, outerMax, 3 * t, acrossMax}
+                       : BlockBox{acrossMin, 0.0f, outerMin, acrossMax, 3 * t, outerMax};
+            result.boxes[1 + side] = {leg,
+                                      legU, 13 * t, legU + 3 * t, 1.0f,
+                                      legU, 13 * t, legU + 3 * t, 1.0f};
+        }
+        result.count = 3;
+        return result;
+    }
+    // Four walls round a plug of soil, six texels tall - the reference's own
+    // `flower_pot`. It had been a `Cross`, so a pot drew as a full-height
+    // crossed sheet like a flower: ten texels of block that is not there.
+    if (id == BlockId::FlowerPot) {
+        result.boxes[0] = {{5 * t, 0.0f, 5 * t, 6 * t, 6 * t, 11 * t},
+                           5 * t, 10 * t, 11 * t, 1.0f,
+                           5 * t, 5 * t, 11 * t, 11 * t};
+        result.boxes[1] = {{10 * t, 0.0f, 5 * t, 11 * t, 6 * t, 11 * t},
+                           5 * t, 10 * t, 11 * t, 1.0f,
+                           5 * t, 5 * t, 11 * t, 11 * t};
+        result.boxes[2] = {{6 * t, 0.0f, 5 * t, 10 * t, 6 * t, 6 * t},
+                           6 * t, 10 * t, 10 * t, 1.0f,
+                           6 * t, 5 * t, 10 * t, 6 * t};
+        result.boxes[3] = {{6 * t, 0.0f, 10 * t, 10 * t, 6 * t, 11 * t},
+                           6 * t, 10 * t, 10 * t, 1.0f,
+                           6 * t, 10 * t, 10 * t, 11 * t};
+        // The soil in it, which is the one part painted from another block.
+        result.boxes[4] = {{6 * t, 0.0f, 6 * t, 10 * t, 4 * t, 10 * t},
+                           6 * t, 12 * t, 10 * t, 1.0f,
+                           6 * t, 6 * t, 10 * t, 10 * t, -1.0f, kDirtLayer};
+        result.count = 5;
+        return result;
+    }
     if (isCocoa(id)) {
         result.boxes[0] = {cocoaBoxes(cocoaFacing(id), cocoaAge(id)).boxes[0],
                            8 * t, 4 * t, 16 * t, 13 * t,
                            8 * t, 4 * t, 16 * t, 13 * t};
         result.count = 1;
+        return result;
+    }
+    // The reference's `template_anvil`, box for box: a 12-wide plinth, two
+    // narrowing waists and a top that overhangs the lot. Only the top's lid is
+    // painted from `anvil_top`; everything else is the body picture, which is
+    // why the three plinths name their own lid layer.
+    if (isAnvil(id)) {
+        constexpr float body = kAnvilBodyLayer;
+        result.boxes[0] = {{2 * t, 0.0f, 2 * t, 14 * t, 4 * t, 14 * t},
+                           2 * t, 12 * t, 14 * t, 1.0f,
+                           2 * t, 2 * t, 14 * t, 14 * t, body, body};
+        result.boxes[1] = {{4 * t, 4 * t, 3 * t, 12 * t, 5 * t, 13 * t},
+                           4 * t, 11 * t, 12 * t, 12 * t,
+                           4 * t, 3 * t, 12 * t, 13 * t, body, body};
+        result.boxes[2] = {{6 * t, 5 * t, 4 * t, 10 * t, 10 * t, 12 * t},
+                           6 * t, 6 * t, 10 * t, 11 * t,
+                           6 * t, 4 * t, 10 * t, 12 * t, body, body};
+        result.boxes[3] = {{3 * t, 10 * t, 0.0f, 13 * t, 1.0f, 1.0f},
+                           3 * t, 0.0f, 13 * t, 6 * t,
+                           3 * t, 0.0f, 13 * t, 1.0f};
+        result.count = 4;
+        return result;
+    }
+    // Three that are simply shorter than their cell. Their side art is painted
+    // in the *lower* rows, so the rectangle starts where the block does - the
+    // whole reason a full-height cube left a gap once the empty texels above
+    // stopped drawing as black.
+    if (id == BlockId::EndPortalFrame || id == BlockId::EnchantingTable ||
+        id == BlockId::SculkSensor) {
+        const float top = id == BlockId::EndPortalFrame  ? 13 * t
+                          : id == BlockId::EnchantingTable ? 12 * t
+                                                           : 8 * t;
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, top, 1.0f},
+                           0.0f, 1.0f - top, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f};
+        result.count = 1;
+        return result;
+    }
+    // A half-height base with a narrower drum standing on it.
+    if (id == BlockId::SculkShrieker) {
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, 8 * t, 1.0f},
+                           0.0f, 8 * t, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f};
+        result.boxes[1] = {{1 * t, 8 * t, 1 * t, 15 * t, 15 * t, 15 * t},
+                           1 * t, 1 * t, 15 * t, 8 * t,
+                           1 * t, 1 * t, 15 * t, 15 * t};
+        result.count = 2;
+        return result;
+    }
+    // Four logs in a square, the reference's own arrangement. The fire itself
+    // is a pair of animated quads there and is left out here.
+    if (id == BlockId::Campfire || id == BlockId::SoulCampfire) {
+        constexpr float log = kCampfireLogLayer;
+        result.boxes[0] = {{1 * t, 0.0f, 0.0f, 5 * t, 4 * t, 1.0f},
+                           0.0f, 0.0f, 1.0f, 4 * t,
+                           0.0f, 0.0f, 1.0f, 4 * t, log, log};
+        result.boxes[1] = {{11 * t, 0.0f, 0.0f, 15 * t, 4 * t, 1.0f},
+                           0.0f, 0.0f, 1.0f, 4 * t,
+                           0.0f, 0.0f, 1.0f, 4 * t, log, log};
+        result.boxes[2] = {{0.0f, 3 * t, 1 * t, 1.0f, 7 * t, 5 * t},
+                           0.0f, 4 * t, 1.0f, 8 * t,
+                           0.0f, 4 * t, 1.0f, 8 * t, log, log};
+        result.boxes[3] = {{0.0f, 3 * t, 11 * t, 1.0f, 7 * t, 15 * t},
+                           0.0f, 4 * t, 1.0f, 8 * t,
+                           0.0f, 4 * t, 1.0f, 8 * t, log, log};
+        result.count = 4;
+        return result;
+    }
+    // Four corner posts under a thin deck. The posts stop a hundredth short of
+    // the deck rather than reaching it, because two boxes that share a plane
+    // put two quads on it.
+    if (id == BlockId::Scaffolding) {
+        constexpr float side = kScaffoldSideLayer;
+        constexpr float deck = 15.99f * t;
+        result.boxes[0] = {{0.0f, deck, 0.0f, 1.0f, 1.0f, 1.0f},
+                           0.0f, 0.0f, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f};
+        for (int i = 0; i < 4; ++i) {
+            const float x = (i & 1) != 0 ? 14 * t : 0.0f;
+            const float z = (i & 2) != 0 ? 14 * t : 0.0f;
+            result.boxes[1 + i] = {{x, 0.0f, z, x + 2 * t, deck, z + 2 * t},
+                                   0.0f, 0.0f, 2 * t, 1.0f,
+                                   x, z, x + 2 * t, z + 2 * t, side, side};
+        }
+        result.count = 5;
+        return result;
+    }
+    // A rim, four walls round it, then the funnel and its spout. The reference
+    // moves the spout to whichever side the hopper faces; ours keeps it under
+    // the middle for all five, which is a named simplification.
+    if (isHopper(id)) {
+        constexpr float side = kHopperSideLayer;
+        result.boxes[0] = {{0.0f, 10 * t, 0.0f, 1.0f, 11 * t, 1.0f},
+                           0.0f, 5 * t, 1.0f, 6 * t,
+                           0.0f, 0.0f, 1.0f, 1.0f, side, side};
+        result.boxes[1] = {{0.0f, 11 * t, 0.0f, 2 * t, 1.0f, 1.0f},
+                           0.0f, 0.0f, 2 * t, 5 * t,
+                           0.0f, 0.0f, 2 * t, 1.0f};
+        result.boxes[2] = {{14 * t, 11 * t, 0.0f, 1.0f, 1.0f, 1.0f},
+                           14 * t, 0.0f, 1.0f, 5 * t,
+                           14 * t, 0.0f, 1.0f, 1.0f};
+        result.boxes[3] = {{2 * t, 11 * t, 0.0f, 14 * t, 1.0f, 2 * t},
+                           2 * t, 0.0f, 14 * t, 5 * t,
+                           2 * t, 0.0f, 14 * t, 2 * t};
+        result.boxes[4] = {{2 * t, 11 * t, 14 * t, 14 * t, 1.0f, 1.0f},
+                           2 * t, 0.0f, 14 * t, 5 * t,
+                           2 * t, 14 * t, 14 * t, 1.0f};
+        result.boxes[5] = {{4 * t, 4 * t, 4 * t, 12 * t, 10 * t, 12 * t},
+                           4 * t, 6 * t, 12 * t, 12 * t,
+                           4 * t, 4 * t, 12 * t, 12 * t, side, side};
+        result.boxes[6] = {{6 * t, 0.0f, 6 * t, 10 * t, 4 * t, 10 * t},
+                           6 * t, 12 * t, 10 * t, 1.0f,
+                           6 * t, 6 * t, 10 * t, 10 * t, side, side};
+        result.count = 7;
+        return result;
+    }
+    // The reference's `template_torch`: one 2x10x2 stick, its sides sampling
+    // the lower ten rows of the image and its lid the two rows the flame sits
+    // on. Two crossed sheets is what a *plant* is; a torch is a stick.
+    if (isTorchBlock(id)) {
+        result.boxes[0] = {{7 * t, 0.0f, 7 * t, 9 * t, 10 * t, 9 * t},
+                           7 * t, 6 * t, 9 * t, 16 * t,
+                           7 * t, 6 * t, 9 * t, 8 * t};
+        result.count = 1;
+        return result;
+    }
+    // A hollow tub: four walls and a floor. **Drawn hollow is the whole point**
+    // - as a full cube its lid showed the rim texture's transparent middle with
+    // nothing behind it, and being opaque it culled the faces of everything it
+    // touched, so a small window opened through the world around it.
+    if (isCauldron(id) || isComposter(id)) {
+        const bool tub = isCauldron(id);
+        const float floorTop = tub ? 3 * t : 2 * t;
+        const float wall = 2 * t;
+        const float inner = tub ? kCauldronSideLayer : kComposterSideLayer;
+        // The rim is always the rim. A composter's own top layer changes to the
+        // bone-meal picture at level eight, and that one is painted only in its
+        // middle twelve texels - so the four walls' top faces, which sample the
+        // outer ring, drew nothing at all on a composter that was ready.
+        const float rim = tub ? -1.0f : kComposterTopLayer;
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, floorTop, 1.0f},
+                           0.0f, 1.0f - floorTop, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f, -1.0f, inner};
+        result.boxes[1] = {{0.0f, floorTop, 0.0f, 1.0f, 1.0f, wall},
+                           0.0f, 0.0f, 1.0f, 1.0f - floorTop,
+                           0.0f, 0.0f, 1.0f, wall, -1.0f, rim};
+        result.boxes[2] = {{0.0f, floorTop, 1.0f - wall, 1.0f, 1.0f, 1.0f},
+                           0.0f, 0.0f, 1.0f, 1.0f - floorTop,
+                           0.0f, 1.0f - wall, 1.0f, 1.0f, -1.0f, rim};
+        result.boxes[3] = {{0.0f, floorTop, wall, wall, 1.0f, 1.0f - wall},
+                           0.0f, 0.0f, 1.0f, 1.0f - floorTop,
+                           0.0f, wall, wall, 1.0f - wall, -1.0f, rim};
+        result.boxes[4] = {{1.0f - wall, floorTop, wall, 1.0f, 1.0f, 1.0f - wall},
+                           0.0f, 0.0f, 1.0f, 1.0f - floorTop,
+                           1.0f - wall, wall, 1.0f, 1.0f - wall, -1.0f, rim};
+        result.count = 5;
+        // What is in it, which is the only reason nine composter levels and
+        // seven cauldron levels are separate blocks at all.
+        const int level = tub ? cauldronLevel(id) : composterLevel(id);
+        if (level > 0) {
+            const float fill = tub ? floorTop + static_cast<float>(level) * 2.0f * t
+                                   : floorTop + static_cast<float>(level) * 1.5f * t;
+            // A full cauldron is water; a ready composter is bone meal and
+            // everything below it is compost, which has a texture of its own -
+            // the tub's top is a rim with a transparent middle and drew nothing.
+            const float surface = tub ? kWaterLayer
+                                      : (level >= 8 ? kComposterReadyLayer : kComposterCompostLayer);
+            result.boxes[5] = {{wall, fill - 0.5f * t, wall, 1.0f - wall, fill, 1.0f - wall},
+                               wall, 1.0f - fill, 1.0f - wall, 1.0f - fill + 0.5f * t,
+                               wall, wall, 1.0f - wall, 1.0f - wall,
+                               surface, surface};
+            result.count = 6;
+        }
+        return result;
+    }
+    // Two posts and a crossbar, which is the whole of the reference's
+    // `bell_floor`: `block/stone` posts at x 0-2 and 14-16, and a
+    // `block/dark_oak_planks` bar at y 13-15. **The bell itself is not in that
+    // file** - the reference draws it as a block entity - so its geometry is
+    // read off the art instead, and `bell_side.png` states it plainly: a
+    // six-wide body seven texels tall painted at u 1-7, and an eight-wide lip
+    // two texels tall at u 0-8 under it. A model box has to be able to name its
+    // own layer for any of this; before it could, every post came out gold.
+    if (id == BlockId::Bell) {
+        constexpr float post = kStoneLayer;
+        constexpr float bar = kPlanksLayer;
+        result.boxes[0] = {{0.0f, 0.0f, 6 * t, 2 * t, 1.0f, 10 * t},
+                           0.0f, 1 * t, 2 * t, 1.0f,
+                           0.0f, 0.0f, 2 * t, 4 * t, post, post};
+        result.boxes[1] = {{14 * t, 0.0f, 6 * t, 1.0f, 1.0f, 10 * t},
+                           0.0f, 1 * t, 2 * t, 1.0f,
+                           0.0f, 0.0f, 2 * t, 4 * t, post, post};
+        result.boxes[2] = {{2 * t, 13 * t, 7 * t, 14 * t, 15 * t, 9 * t},
+                           2 * t, 3 * t, 14 * t, 5 * t,
+                           2 * t, 3 * t, 14 * t, 5 * t, bar, bar};
+        // The body hangs from the underside of the bar, and reaches a hair into
+        // it so the two never share a plane. Sampling from u 0 was drawing the
+        // transparent column beside the artwork as a stripe down the bell.
+        result.boxes[3] = {{5 * t, 6 * t, 5 * t, 11 * t, 13 * t + 0.004f, 11 * t},
+                           1 * t, 0.0f, 7 * t, 7 * t,
+                           1 * t, 1 * t, 7 * t, 7 * t, kBellSideLayer, kBellTopLayer};
+        // The flared lip: eight across, two deep, sitting under the body.
+        result.boxes[4] = {{4 * t, 4 * t, 4 * t, 12 * t, 6 * t, 12 * t},
+                           0.0f, 7 * t, 8 * t, 9 * t,
+                           0.0f, 0.0f, 8 * t, 8 * t, kBellSideLayer, kBellTopLayer};
+        result.count = 5;
+        return result;
+    }
+    // A wheel between two legs, which is what a grindstone is and what a full
+    // cube could never be. The reference's own geometry: log legs at x 2-4 and
+    // 12-14, stone pivots above them, and a wheel filling x 4-12 all the way to
+    // the top.
+    if (id == BlockId::Grindstone) {
+        constexpr float wheel = kGrindstoneRoundLayer;
+        constexpr float pivot = kGrindstoneRoundLayer - 1.0f; // grindstone_side
+        constexpr float leg = kLogSideLayer;
+        result.boxes[0] = {{2 * t, 0.0f, 6 * t, 4 * t, 7 * t, 10 * t},
+                           2 * t, 9 * t, 4 * t, 16 * t,
+                           2 * t, 6 * t, 4 * t, 10 * t, leg, leg};
+        result.boxes[1] = {{12 * t, 0.0f, 6 * t, 14 * t, 7 * t, 10 * t},
+                           12 * t, 9 * t, 14 * t, 16 * t,
+                           12 * t, 6 * t, 14 * t, 10 * t, leg, leg};
+        result.boxes[2] = {{2 * t, 7 * t, 5 * t, 4 * t, 13 * t, 11 * t},
+                           0.0f, 0.0f, 2 * t, 6 * t,
+                           0.0f, 0.0f, 2 * t, 6 * t, pivot, pivot};
+        result.boxes[3] = {{12 * t, 7 * t, 5 * t, 14 * t, 13 * t, 11 * t},
+                           0.0f, 0.0f, 2 * t, 6 * t,
+                           0.0f, 0.0f, 2 * t, 6 * t, pivot, pivot};
+        result.boxes[4] = {{4 * t, 4 * t, 2 * t, 12 * t, 1.0f, 14 * t},
+                           0.0f, 0.0f, 8 * t, 12 * t,
+                           0.0f, 0.0f, 8 * t, 12 * t, wheel, wheel};
+        result.count = 5;
+        return result;
+    }
+    // A bench with a saw standing out of it. The blade has its own texture -
+    // borrowing the bench top drew a grey plate with the bench's slot on it.
+    if (id == BlockId::Stonecutter) {
+        constexpr float saw = kStonecutterSawLayer;
+        result.boxes[0] = {{0.0f, 0.0f, 0.0f, 1.0f, 9 * t, 1.0f},
+                           0.0f, 7 * t, 1.0f, 1.0f,
+                           0.0f, 0.0f, 1.0f, 1.0f};
+        result.boxes[1] = {{1 * t, 9 * t, 7.5f * t, 15 * t, 1.0f, 8.5f * t},
+                           1 * t, 9 * t, 15 * t, 1.0f,
+                           1 * t, 9 * t, 15 * t, 10 * t, saw, saw};
+        result.count = 2;
+        return result;
+    }
+    // A rod standing in three separate base plates, with three blades near the
+    // top - the reference's own arrangement. It was drawn as two crossed
+    // sheets, like a flower, and then as one solid plate with no blades.
+    if (id == BlockId::BrewingStand) {
+        constexpr float base = kBrewingStandBaseLayer;
+        constexpr float rod = kBrewingStandRodLayer;
+        result.boxes[0] = {{7 * t, 0.0f, 7 * t, 9 * t, 14 * t, 9 * t},
+                           7 * t, 2 * t, 9 * t, 16 * t,
+                           7 * t, 7 * t, 9 * t, 9 * t, rod, rod};
+        result.boxes[1] = {{9 * t, 0.0f, 5 * t, 15 * t, 2 * t, 11 * t},
+                           9 * t, 14 * t, 15 * t, 16 * t,
+                           9 * t, 5 * t, 15 * t, 11 * t, base, base};
+        result.boxes[2] = {{1 * t, 0.0f, 1 * t, 7 * t, 2 * t, 7 * t},
+                           1 * t, 14 * t, 7 * t, 16 * t,
+                           1 * t, 1 * t, 7 * t, 7 * t, base, base};
+        result.boxes[3] = {{1 * t, 0.0f, 9 * t, 7 * t, 2 * t, 15 * t},
+                           1 * t, 14 * t, 7 * t, 16 * t,
+                           1 * t, 9 * t, 7 * t, 15 * t, base, base};
+        // The blades, one over each plate. Painted from the band the texture
+        // carries at rows 2-4, which nothing else samples.
+        result.boxes[4] = {{9 * t, 11 * t, 7 * t, 14 * t, 12 * t, 9 * t},
+                           9 * t, 2 * t, 14 * t, 4 * t,
+                           9 * t, 2 * t, 14 * t, 4 * t, rod, rod};
+        result.boxes[5] = {{2 * t, 11 * t, 3 * t, 7 * t, 12 * t, 5 * t},
+                           2 * t, 2 * t, 7 * t, 4 * t,
+                           2 * t, 2 * t, 7 * t, 4 * t, rod, rod};
+        result.boxes[6] = {{2 * t, 11 * t, 11 * t, 7 * t, 12 * t, 13 * t},
+                           2 * t, 2 * t, 7 * t, 4 * t,
+                           2 * t, 2 * t, 7 * t, 4 * t, rod, rod};
+        result.count = 7;
         return result;
     }
     if (id == BlockId::EndRod) {
@@ -2218,10 +5432,42 @@ constexpr ModelBoxes postModel(BlockId id) {
     result.boxes[2] = {{6.5f * t, 9 * t, 7.5f * t, 9.5f * t, 11 * t, 8.5f * t},
                        11 * t, 1 * t, 14 * t, 3 * t,
                        11 * t, 1 * t, 14 * t, 2 * t};
-    result.boxes[3] = {{7.5f * t, 9 * t, 6.5f * t, 8.5f * t, 11 * t, 9.5f * t},
+    // A hair shorter than the one it crosses, because two quads that share a
+    // top plane put two coincident faces on it and flicker where they meet.
+    result.boxes[3] = {{7.5f * t, 9 * t + 0.004f, 6.5f * t, 8.5f * t, 11 * t - 0.004f, 9.5f * t},
                        11 * t, 10 * t, 14 * t, 12 * t,
                        11 * t, 10 * t, 14 * t, 11 * t};
     result.count = 4;
+    return result;
+}
+
+/// The one box a model-shaped block is bumped into and aimed at: **the union of
+/// everything it draws**, worked out from `postModel` rather than written down
+/// again beside it.
+///
+/// The older models here each carry a hand-written silhouette in `postBoxes`
+/// that is deliberately simpler than their geometry - one box for an anvil's
+/// four, one for a campfire's logs. The redstone family has no such shorthand
+/// to write, and a second copy of a lever's or a lightning rod's extents is
+/// exactly the shape of mistake this project keeps paying for.
+constexpr BlockBoxes modelSilhouette(BlockId id) {
+    const ModelBoxes model = postModel(id);
+    BlockBoxes result;
+    if (model.count == 0) {
+        return result;
+    }
+    BlockBox box = model.boxes[0].box;
+    for (int i = 1; i < model.count; ++i) {
+        const BlockBox& next = model.boxes[i].box;
+        box.minX = next.minX < box.minX ? next.minX : box.minX;
+        box.minY = next.minY < box.minY ? next.minY : box.minY;
+        box.minZ = next.minZ < box.minZ ? next.minZ : box.minZ;
+        box.maxX = next.maxX > box.maxX ? next.maxX : box.maxX;
+        box.maxY = next.maxY > box.maxY ? next.maxY : box.maxY;
+        box.maxZ = next.maxZ > box.maxZ ? next.maxZ : box.maxZ;
+    }
+    result.boxes[0] = box;
+    result.count = 1;
     return result;
 }
 
@@ -2238,6 +5484,18 @@ constexpr BlockBoxes collisionBoxes(BlockId id) {
     case BlockShape::Slab:
         result.boxes[0] = isUpperHalf(id) ? BlockBox{0.0f, 0.5f, 0.0f, 1.0f, 1.0f, 1.0f}
                                           : BlockBox{0.0f, 0.0f, 0.0f, 1.0f, 0.5f, 1.0f};
+        result.count = 1;
+        break;
+    case BlockShape::Tilled:
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, kTilledHeight, 1.0f};
+        result.count = 1;
+        break;
+    case BlockShape::Door:
+        return doorLeafBoxes(doorFacing(id), doorHingeRight(id), doorOpen(id));
+    case BlockShape::Trapdoor:
+        return trapdoorLeafBoxes(trapdoorFacing(id), trapdoorOpen(id), trapdoorIsTop(id));
+    case BlockShape::Bed:
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, kBedHeight, 1.0f};
         result.count = 1;
         break;
     case BlockShape::Stairs: {
@@ -2274,7 +5532,15 @@ constexpr BlockBoxes collisionBoxes(BlockId id) {
         return wallBoxes(ConnectAll);
     case BlockShape::Pane:
         return paneBoxes(ConnectAll);
-    case BlockShape::Post:
+    case BlockShape::Model:
+        // A redstone model is bumped into and aimed at as **the union of what
+        // it draws**, worked out from `postModel` rather than written down a
+        // second time. The older models above keep their hand-written
+        // silhouettes, which are deliberately simpler than their geometry - one
+        // box for an anvil's four, one for a campfire's logs.
+        if (isRedstoneComponent(id) || isWallTorch(id)) {
+            return modelSilhouette(id);
+        }
         return postBoxes(id);
     case BlockShape::Ladder:
         // **No collision at all.** A ladder you bump into is a ladder you
@@ -2295,8 +5561,22 @@ constexpr BlockBoxes collisionBoxes(BlockId id) {
         result.count = 1;
         break;
     case BlockShape::Flat:
+        // Wire, a rail and a tripwire lie on the floor and are walked straight
+        // over - they are the flat shapes with no collision at all, where a
+        // carpet, a snow layer and a lily pad are all stood on.
+        if (isRedstoneWire(id) || isRail(id) || isTripwire(id)) {
+            break;
+        }
         result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, flatHeight(id), 1.0f};
         result.count = 1;
+        break;
+    case BlockShape::Button:
+    case BlockShape::Plate:
+    case BlockShape::Sign:
+        // None of these is bumped into. A button you could walk into would stop
+        // you reaching a door, a plate has to be **stood on** so the floor under
+        // it is what holds you up, and the reference lets you walk through a
+        // sign and a banner alike.
         break;
     default:
         break;
@@ -2307,7 +5587,39 @@ constexpr BlockBoxes collisionBoxes(BlockId id) {
 /// Height a shape reaches, as a fraction of the block. Stairs reach the top of
 /// their step, which is what the targeting outline needs to enclose.
 constexpr float shapeHeight(BlockShape shape) {
-    return shape == BlockShape::Slab ? 0.5f : 1.0f;
+    if (shape == BlockShape::Slab) {
+        return 0.5f;
+    }
+    return shape == BlockShape::Tilled ? kTilledHeight : 1.0f;
+}
+
+/// The boxes a block that collides with **nothing** is nonetheless drawn as.
+///
+/// A button, a pressure plate, redstone wire, a rail and a tripwire are all
+/// walked straight through, so `collisionBoxes` answers empty for every one of
+/// them - and the mesher starts from that. Without one owner for this, the
+/// mesher and the targeting outline each grow their own copy, and the two
+/// disagree the first time a number changes.
+constexpr BlockBoxes uncollidableDrawnBoxes(BlockId id) {
+    BlockBoxes result;
+    if (isButton(id)) {
+        return buttonBoxes(buttonMount(id), buttonPressed(id));
+    }
+    if (isPressurePlate(id)) {
+        return plateBoxes(pressurePlateSignal(id) > 0);
+    }
+    if (isSignLike(id)) {
+        return signBoxes(signKind(id), signFacing(id), signOnWall(id));
+    }
+    result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, flatHeight(id), 1.0f};
+    result.count = 1;
+    return result;
+}
+
+/// Whether `uncollidableDrawnBoxes` is the right question for this block.
+constexpr bool drawsWithoutColliding(BlockId id) {
+    return isButton(id) || isPressurePlate(id) || isRedstoneWire(id) || isRail(id) ||
+           isTripwire(id) || isSignLike(id);
 }
 
 /// What the crosshair can pick out.
@@ -2335,17 +5647,31 @@ constexpr BlockBoxes selectionBoxes(BlockId id) {
         // can see is one you can aim at through its sides.
         return vineBoxes(vineSides(id) == 0 ? ConnectAll : vineSides(id), false);
     }
+    // The five that collide with nothing and would otherwise be unbreakable:
+    // you would aim straight through them at whatever they are stuck to.
+    if (drawsWithoutColliding(id)) {
+        return uncollidableDrawnBoxes(id);
+    }
     return collisionBoxes(id);
 }
 
-/// Blocks movement. Water does not â€” you sink into it, and neither does a plant
+/// Blocks movement. Water does not - you sink into it, and neither does a plant
 /// you walk straight through.
 constexpr bool isSolid(BlockId id) {
+    // A torch is drawn as a box and walked straight through, which is the one
+    // place a `Model` is not solid. Named here rather than given a shape of its
+    // own, because everything else about it - the box, its own texture
+    // rectangle, not occluding a neighbour - is exactly what a model already is.
+    if (isTorchBlock(id)) {
+        return false;
+    }
     const BlockShape shape = blockShape(id);
     return shape == BlockShape::Full || shape == BlockShape::Slab || shape == BlockShape::Stairs ||
            shape == BlockShape::Fence || shape == BlockShape::Wall || shape == BlockShape::Gate ||
-           shape == BlockShape::Pane || shape == BlockShape::Post ||
-           shape == BlockShape::Hovering || shape == BlockShape::Flat;
+           shape == BlockShape::Pane || shape == BlockShape::Model ||
+           shape == BlockShape::Hovering || shape == BlockShape::Flat ||
+           shape == BlockShape::Tilled || shape == BlockShape::Door ||
+           shape == BlockShape::Trapdoor || shape == BlockShape::Bed;
 }
 
 // A struck charge is off the floor but still something you bump into and still
@@ -2426,6 +5752,66 @@ constexpr bool usesFlatIcon(BlockShape shape) {
            shape == BlockShape::Vine || shape == BlockShape::Pane;
 }
 
+/// Whether a slot picture and a dropped item are built from `postModel` rather
+/// than from boxes cut out of a cube.
+constexpr bool usesModelIcon(BlockShape shape) {
+    return shape == BlockShape::Model || shape == BlockShape::Cocoa || shape == BlockShape::Bed;
+}
+
+/// The boxes an icon and a dropped item draw this block as, for every shape
+/// that is neither flat nor a model.
+///
+/// **One owner, because the hotbar and the floor have to agree.** The slot
+/// picture had this switch written inside it and a dropped block had no
+/// equivalent at all - it was one cube wearing the block's side texture, so a
+/// dropped bell was a gold brick and a dropped fence was a plank.
+///
+/// **Two arms rather than four** for the connecting shapes, matching the
+/// reference's own `*_inventory` models: what you are holding is a section of
+/// fence, not a crossroads.
+constexpr BlockBoxes iconBoxes(BlockId id) {
+    const BlockShape shape = blockShape(id);
+    BlockBoxes result;
+    switch (shape) {
+    case BlockShape::Fence:
+        return fenceRailBoxes(ConnectWest | ConnectEast);
+    case BlockShape::Wall:
+        return wallBoxes(ConnectWest | ConnectEast);
+    case BlockShape::Gate:
+        return gateBoxes(gateFacing(id), false);
+    case BlockShape::Stairs:
+    case BlockShape::Door:
+    case BlockShape::Trapdoor:
+        // Drawn as the real thing rather than as one cube, which is what made a
+        // stair's slot picture indistinguishable from plain cobblestone.
+        return collisionBoxes(id);
+    case BlockShape::Button: {
+        // **The reference has a model just for this**: `button_inventory.json`
+        // lifts the nub into the middle of the cell, `5,6,6` to `11,10,10`,
+        // rather than leaving it stuck to the floor of the slot where it reads
+        // as a smear along the bottom edge.
+        constexpr float t = 1.0f / 16.0f;
+        result.boxes[0] = {5 * t, 6 * t, 6 * t, 11 * t, 10 * t, 10 * t};
+        result.count = 1;
+        return result;
+    }
+    case BlockShape::Plate:
+        // A plate has no inventory model of its own; it is drawn lying down,
+        // which is what it looks like. The boxes have to come from the drawn
+        // set rather than from collision, because it collides with nothing.
+        return uncollidableDrawnBoxes(id);
+    case BlockShape::Sign:
+        // The same, and for the same reason.
+        return uncollidableDrawnBoxes(id);
+    default:
+        // A slab stands at the height it actually is, so the picture matches
+        // the block rather than implying a full cube.
+        result.boxes[0] = {0.0f, 0.0f, 0.0f, 1.0f, shapeHeight(shape), 1.0f};
+        result.count = 1;
+        return result;
+    }
+}
+
 // A lone pane is a two-texel post you walk past on either side, and only a
 // joined one fills its cell. Asking `collisionBoxes` alone gave every pane in
 // the game the full cross, which is an invisible shell round a sheet of glass.
@@ -2457,6 +5843,10 @@ constexpr bool occludesFace(BlockId neighbour, int offsetY) {
     case BlockShape::Slab:
         // A half block only hides the boundary its solid half is flush against.
         return isUpperHalf(neighbour) ? offsetY == -1 : offsetY == 1;
+    case BlockShape::Tilled:
+        // Flush at the bottom and a texel short at the top, so it hides the
+        // face beneath it and nothing else.
+        return offsetY == 1;
     case BlockShape::Stairs:
         return stairIsTop(neighbour) ? offsetY == -1 : offsetY == 1;
     default:
@@ -2490,6 +5880,52 @@ constexpr int blockLightEmission(BlockId id) {
     // Lava lights at full strength whatever its depth, and so does fire.
     if (isLava(id) || id == BlockId::Fire) {
         return kMaxLight;
+    }
+    if (isJackOLantern(id)) {
+        return kMaxLight;
+    }
+    // A lit candle is the reference's three per candle, so a stack of four
+    // lights as well as a torch.
+    if (isCandle(id)) {
+        return isCandleLit(id) ? 3 * candleCount(id) : 0;
+    }
+    // The fifth run's emitters, in the reference's own levels. **A copper bulb
+    // dims as it oxidises** - 15, 12, 8, 4 - which is a table rather than a
+    // formula, so it is written as one.
+    if (isCopperBulb(id)) {
+        if (!isCopperBulbLit(id)) {
+            return 0;
+        }
+        constexpr int kBulbLight[4] = {15, 12, 8, 4};
+        return kBulbLight[(static_cast<int>(id) - static_cast<int>(BlockId::CopperBulb)) / 2];
+    }
+    switch (id) {
+    case BlockId::RedstoneLampLit:
+    case BlockId::Campfire:
+        return kMaxLight;
+    case BlockId::Beacon:
+    case BlockId::Conduit:
+        return kMaxLight;
+    case BlockId::CaveVinesBerries:
+        return 14;
+    case BlockId::CryingObsidian:
+    case BlockId::SoulCampfire:
+        return 10;
+    case BlockId::LargeAmethystBud:
+        return 4;
+    case BlockId::MediumAmethystBud:
+        return 2;
+    case BlockId::SmallAmethystBud:
+    case BlockId::SculkSensor:
+    case BlockId::BrewingStand:
+        return 1;
+    case BlockId::EnchantingTable:
+        return 7;
+    default:
+        break;
+    }
+    if (isEnderChest(id)) {
+        return 7;
     }
     if (id == BlockId::MagmaBlock) {
         return 3;
@@ -2537,11 +5973,46 @@ constexpr int blockLightEmission(BlockId id) {
     return id == BlockId::Glowstone ? 14 : 0;
 }
 
-/// Falls if whatever it was standing on goes away. True for the flat things
-/// that have nothing to hold themselves up with.
-constexpr bool needsSupportBelow(BlockId id) {
-    return blockShape(id) == BlockShape::Cross || blockShape(id) == BlockShape::Flat;
+/// Whether a chunk far from the player may leave this block's geometry out.
+///
+/// **A rendering tier, not a simulation one.** The block is still in the world:
+/// it still breaks, drops, burns, gets washed away and is still saved. Only its
+/// triangles are skipped, and they come back the moment the chunk is re-meshed
+/// at full detail.
+///
+/// Plants and vines are the whole of the set, because they are the only
+/// geometry that neither occupies a cell you can walk into nor contributes
+/// anything to the world's silhouette - a hillside with its grass left out has
+/// exactly the same outline as one with it. Leaves are deliberately **not** in
+/// here: they are full cubes and a forest without them is a forest of bare
+/// trunks.
+///
+/// A light source is kept whatever its shape, or a torch on a distant hillside
+/// would go out while its light stayed baked into the ground around it.
+constexpr bool isDistantDecoration(BlockId id) {
+    const BlockShape shape = blockShape(id);
+    return (shape == BlockShape::Cross || shape == BlockShape::Vine) && blockLightEmission(id) == 0;
 }
+
+/// Falls if whatever it was standing on goes away. True for the flat things
+/// that have nothing to hold themselves up with, and for a torch, which used to
+/// get this free from being cross-shaped.
+constexpr bool needsSupportBelow(BlockId id) {
+    // A sign or a banner standing on the ground falls over without one; the
+    // wall-mounted form is held by the wall and the hanging form by the ceiling,
+    // so neither of those asks.
+    if (isSignLike(id)) {
+        return !signOnWall(id) && signKind(id) != 1;
+    }
+    return blockShape(id) == BlockShape::Cross || blockShape(id) == BlockShape::Flat ||
+           isTorchBlock(id);
+}
+
+static_assert(blockShape(BlockId::Farmland) == BlockShape::Tilled &&
+                  blockShape(BlockId::DirtPath) == BlockShape::Tilled,
+              "tilled ground is a sixteenth short, not a full cube");
+static_assert(isSolid(BlockId::Farmland) && !needsSupportBelow(BlockId::Farmland),
+              "tilled ground is stood on, and holds itself up");
 /// Held up by the water itself rather than by anything solid. **The lily pad is
 /// the only one**, and it is why support is a question with two answers rather
 /// than a single `isSolid` test: a pad that demanded solid ground could not be
@@ -2553,9 +6024,10 @@ constexpr bool restsOnWater(BlockId id) {
 
 /// Destroyed and dropped when water spreads into it, rather than damming the
 /// flow. The reference's list is plants, snow, torches, carpets and redstone;
-/// ours is everything cross-shaped, which is exactly that set today.
+/// the torch is named outright because it stopped being cross-shaped when it
+/// gained a real model.
 constexpr bool isWashedAway(BlockId id) {
-    return blockShape(id) == BlockShape::Cross || isVine(id);
+    return blockShape(id) == BlockShape::Cross || isVine(id) || isTorchBlock(id);
 }
 
 /// The sixteen powders, and the set block each one becomes on contact with
@@ -2748,12 +6220,24 @@ constexpr float slipperiness(BlockId id) {
 constexpr bool isSkyTransparent(BlockId id) {
     // Glass is the one full cube that does not dim what is under it, which is
     // the whole point of building with it - and its coloured forms are glass.
+    //
+    // **A fence, a wall and a gate belong here too**, and leaving them out is
+    // what made every fence line cast a hard shadow along itself: sky light
+    // stopped falling at full strength the moment it met one, so the ground
+    // under a paddock rail and the blocks beside it dimmed a level for no
+    // visible reason. They are a post and two thin rails - almost entirely air.
+    //
+    // **A trapdoor belongs here for the same reason and was missed by the same
+    // pass**: it is a three-texel plate, and 192 of them stopped sky light dead
+    // wherever one was hung in a roof or a doorway.
     return id == BlockId::Air || id == BlockId::Glass || isFluid(id) || id == BlockId::Fire ||
            (id >= BlockId::WhiteStainedGlass && id <= BlockId::BlackStainedGlass) ||
            blockShape(id) == BlockShape::Cross || blockShape(id) == BlockShape::Flat ||
-           blockShape(id) == BlockShape::Pane || blockShape(id) == BlockShape::Post ||
+           blockShape(id) == BlockShape::Pane || blockShape(id) == BlockShape::Model ||
            blockShape(id) == BlockShape::Ladder || blockShape(id) == BlockShape::Vine ||
-           blockShape(id) == BlockShape::Cocoa;
+           blockShape(id) == BlockShape::Cocoa || blockShape(id) == BlockShape::Fence ||
+           blockShape(id) == BlockShape::Wall || blockShape(id) == BlockShape::Gate ||
+           blockShape(id) == BlockShape::Trapdoor;
 }
 
 /// The sixteen dyed wools, which several rules ask about as a family.
@@ -2952,7 +6436,7 @@ constexpr float kWaterFrameSeconds = 0.1f;
 /// things. `Creature.hpp` static-asserts that the two runs together cover every
 /// species.
 constexpr int kExtraSpawnEggFirst = kWaterFrameFirst + kWaterFrames;
-constexpr int kExtraSpawnEggLayers = 21;
+constexpr int kExtraSpawnEggLayers = 22;
 
 /// The iron, diamond and Emberite tools, the two Emberite resources, and the
 /// two blocks that come with them.
@@ -3024,7 +6508,7 @@ constexpr int kTableSpritesFirst = kExtraBlockSpritesFirst + kExtraBlockSprites;
 /// field on an old row would have meant restating everything before it, which
 /// is the highest-risk edit there is. Fields must appear in declaration order,
 /// so the struct above is the checklist.
-constexpr std::array<ExtraBlockInfo, 309> kExtraBlocks{{
+constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Cobbled Deepslate", .layer = 0},
     {.name = "Ice", .layer = 1, .natural = true},
     {.name = "Blue Ice", .layer = 2, .natural = true},
@@ -3360,14 +6844,353 @@ constexpr std::array<ExtraBlockInfo, 309> kExtraBlocks{{
     {.name = "Soul Torch", .layer = 356},
     {.name = "Redstone Torch", .layer = 357},
     {.name = "End Rod", .layer = 358},
+
+    // ---- The fourth run: the farm. ----
+    // Farmland keeps dirt on its sides, which is why it is the one pair of rows
+    // that shares a `layer` and differs only in `topLayer`.
+    {.name = "Farmland", .layer = 359, .topLayer = 360, .natural = true},
+    {.name = "Farmland", .layer = 359, .topLayer = 361, .natural = true},
+    {.name = "Dirt Path", .layer = 362, .topLayer = 363, .natural = true},
+
+    // Wheat is the one crop with a picture per age.
+    {.name = "Wheat Crop", .layer = 364, .natural = true},
+    {.name = "Wheat Crop", .layer = 365, .natural = true},
+    {.name = "Wheat Crop", .layer = 366, .natural = true},
+    {.name = "Wheat Crop", .layer = 367, .natural = true},
+    {.name = "Wheat Crop", .layer = 368, .natural = true},
+    {.name = "Wheat Crop", .layer = 369, .natural = true},
+    {.name = "Wheat Crop", .layer = 370, .natural = true},
+    {.name = "Wheat Crop", .layer = 371, .natural = true},
+
+    // Four pictures over eight ages: 0-1, 2-3, 4-6, 7. The repeats below are
+    // that mapping, written where the texture is chosen rather than in a rule
+    // somewhere else that could disagree with it.
+    {.name = "Carrot Crop", .layer = 372, .natural = true},
+    {.name = "Carrot Crop", .layer = 372, .natural = true},
+    {.name = "Carrot Crop", .layer = 373, .natural = true},
+    {.name = "Carrot Crop", .layer = 373, .natural = true},
+    {.name = "Carrot Crop", .layer = 374, .natural = true},
+    {.name = "Carrot Crop", .layer = 374, .natural = true},
+    {.name = "Carrot Crop", .layer = 374, .natural = true},
+    {.name = "Carrot Crop", .layer = 375, .natural = true},
+
+    {.name = "Potato Crop", .layer = 376, .natural = true},
+    {.name = "Potato Crop", .layer = 376, .natural = true},
+    {.name = "Potato Crop", .layer = 377, .natural = true},
+    {.name = "Potato Crop", .layer = 377, .natural = true},
+    {.name = "Potato Crop", .layer = 378, .natural = true},
+    {.name = "Potato Crop", .layer = 378, .natural = true},
+    {.name = "Potato Crop", .layer = 378, .natural = true},
+    {.name = "Potato Crop", .layer = 379, .natural = true},
+
+    {.name = "Beetroot Crop", .layer = 380, .natural = true},
+    {.name = "Beetroot Crop", .layer = 380, .natural = true},
+    {.name = "Beetroot Crop", .layer = 381, .natural = true},
+    {.name = "Beetroot Crop", .layer = 381, .natural = true},
+    {.name = "Beetroot Crop", .layer = 382, .natural = true},
+    {.name = "Beetroot Crop", .layer = 382, .natural = true},
+    {.name = "Beetroot Crop", .layer = 382, .natural = true},
+    {.name = "Beetroot Crop", .layer = 383, .natural = true},
+
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 384, .natural = true},
+    {.name = "Melon Stem", .layer = 385, .natural = true},
+    {.name = "Melon Stem", .layer = 385, .natural = true},
+    {.name = "Melon Stem", .layer = 385, .natural = true},
+    {.name = "Melon Stem", .layer = 385, .natural = true},
+
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 386, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 387, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 387, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 387, .natural = true},
+    {.name = "Pumpkin Stem", .layer = 387, .natural = true},
+
+    {.name = "Nether Wart", .layer = 388, .natural = true},
+    {.name = "Nether Wart", .layer = 389, .natural = true},
+    {.name = "Nether Wart", .layer = 390, .natural = true},
+    {.name = "Nether Wart", .layer = 390, .natural = true},
+
+    // Four facings each. The carved face itself is chosen in
+    // `blockTextureLayer`, because a table row has no column for a front.
+    {.name = "Carved Pumpkin", .layer = 391, .topLayer = 392},
+    {.name = "Carved Pumpkin", .layer = 391, .topLayer = 392},
+    {.name = "Carved Pumpkin", .layer = 391, .topLayer = 392},
+    {.name = "Carved Pumpkin", .layer = 391, .topLayer = 392},
+    {.name = "Jack o'Lantern", .layer = 391, .topLayer = 392},
+    {.name = "Jack o'Lantern", .layer = 391, .topLayer = 392},
+    {.name = "Jack o'Lantern", .layer = 391, .topLayer = 392},
+    {.name = "Jack o'Lantern", .layer = 391, .topLayer = 392},
+
+    // Levels 0-7 wear the plain lid; level 8 is the reference's separate
+    // "ready" picture, which is the whole visual cue that there is bone meal
+    // waiting in it.
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 395},
+    {.name = "Composter", .layer = 396, .topLayer = 397},
+
+    // ---- The fifth run: bark, coral, copper and the decoratives. ----
+    // Bark blocks point straight at the log sides their own family already
+    // staged, so twenty blocks arrive here with **no new art at all**.
+    {.name = "Oak Wood", .layer = 398, .natural = true},
+    {.name = "Spruce Wood", .layer = 399, .natural = true},
+    {.name = "Birch Wood", .layer = 400, .natural = true},
+    {.name = "Jungle Wood", .layer = 401, .natural = true},
+    {.name = "Acacia Wood", .layer = 402, .natural = true},
+    {.name = "Dark Oak Wood", .layer = 403, .natural = true},
+    {.name = "Cherry Wood", .layer = 404, .natural = true},
+    {.name = "Mangrove Wood", .layer = 405, .natural = true},
+    {.name = "Crimson Hyphae", .layer = 406, .natural = true},
+    {.name = "Warped Hyphae", .layer = 407, .natural = true},
+    {.name = "Stripped Oak Wood", .layer = 408, .natural = true},
+    {.name = "Stripped Spruce Wood", .layer = 409, .natural = true},
+    {.name = "Stripped Birch Wood", .layer = 410, .natural = true},
+    {.name = "Stripped Jungle Wood", .layer = 411, .natural = true},
+    {.name = "Stripped Acacia Wood", .layer = 412, .natural = true},
+    {.name = "Stripped Dark Oak Wood", .layer = 413, .natural = true},
+    {.name = "Stripped Cherry Wood", .layer = 414, .natural = true},
+    {.name = "Stripped Mangrove Wood", .layer = 415, .natural = true},
+    {.name = "Stripped Crimson Hyphae", .layer = 416, .natural = true},
+    {.name = "Stripped Warped Hyphae", .layer = 417, .natural = true},
+
+    {.name = "Brown Mushroom Block", .layer = 418, .natural = true},
+    {.name = "Red Mushroom Block", .layer = 419, .natural = true},
+    {.name = "Mushroom Stem", .layer = 420, .natural = true},
+
+    {.name = "Dead Tube Coral Block", .layer = 421, .natural = true},
+    {.name = "Dead Brain Coral Block", .layer = 422, .natural = true},
+    {.name = "Dead Bubble Coral Block", .layer = 423, .natural = true},
+    {.name = "Dead Fire Coral Block", .layer = 424, .natural = true},
+    {.name = "Dead Horn Coral Block", .layer = 425, .natural = true},
+
+    // Waxed copper wears the same face as unwaxed copper - wax is a promise,
+    // not a picture - so these nine reuse the run's existing layers.
+    {.name = "Waxed Block of Copper", .layer = 426},
+    {.name = "Waxed Exposed Copper", .layer = 427},
+    {.name = "Waxed Weathered Copper", .layer = 428},
+    {.name = "Waxed Oxidized Copper", .layer = 429},
+    {.name = "Waxed Cut Copper", .layer = 430},
+    {.name = "Waxed Exposed Cut Copper", .layer = 431},
+    {.name = "Waxed Weathered Cut Copper", .layer = 432},
+    {.name = "Waxed Oxidized Cut Copper", .layer = 433},
+    {.name = "Waxed Chiseled Copper", .layer = 434},
+
+    {.name = "Copper Grate", .layer = 435},
+    {.name = "Exposed Copper Grate", .layer = 436},
+    {.name = "Weathered Copper Grate", .layer = 437},
+    {.name = "Oxidized Copper Grate", .layer = 438},
+    {.name = "Waxed Copper Grate", .layer = 435},
+    {.name = "Waxed Exposed Copper Grate", .layer = 436},
+    {.name = "Waxed Weathered Copper Grate", .layer = 437},
+    {.name = "Waxed Oxidized Copper Grate", .layer = 438},
+
+    {.name = "Copper Bulb", .layer = 439},
+    {.name = "Copper Bulb", .layer = 440},
+    {.name = "Exposed Copper Bulb", .layer = 441},
+    {.name = "Exposed Copper Bulb", .layer = 442},
+    {.name = "Weathered Copper Bulb", .layer = 443},
+    {.name = "Weathered Copper Bulb", .layer = 444},
+    {.name = "Oxidized Copper Bulb", .layer = 445},
+    {.name = "Oxidized Copper Bulb", .layer = 446},
+
+    {.name = "Crying Obsidian", .layer = 447},
+    {.name = "Powder Snow", .layer = 448, .natural = true},
+    {.name = "Suspicious Sand", .layer = 449, .natural = true},
+    {.name = "Suspicious Gravel", .layer = 450, .natural = true},
+    {.name = "Azalea Leaves", .layer = 451, .natural = true},
+    {.name = "Flowering Azalea Leaves", .layer = 452, .natural = true},
+    {.name = "Redstone Lamp", .layer = 453},
+    {.name = "Redstone Lamp", .layer = 454},
+    {.name = "Lodestone", .layer = 455, .topLayer = 456},
+    {.name = "Enchanting Table", .layer = 457, .topLayer = 458},
+    {.name = "Chiseled Bookshelf", .layer = 459, .topLayer = 460},
+    {.name = "Cartography Table", .layer = 461, .topLayer = 462},
+    {.name = "Fletching Table", .layer = 463, .topLayer = 464},
+    {.name = "Barrel", .layer = 465, .topLayer = 466},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Loom", .layer = 469, .topLayer = 470},
+    {.name = "Stonecutter", .layer = 471, .topLayer = 472},
+    {.name = "Grindstone", .layer = 473, .topLayer = 474},
+    {.name = "Lectern", .layer = 475, .topLayer = 476},
+    {.name = "Bell", .layer = 477, .topLayer = 478},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Brewing Stand", .layer = 481, .topLayer = 482},
+    {.name = "Anvil", .layer = 483, .topLayer = 484},
+    {.name = "Chipped Anvil", .layer = 483, .topLayer = 485},
+    {.name = "Damaged Anvil", .layer = 483, .topLayer = 486},
+    {.name = "Scaffolding", .layer = 487, .topLayer = 488},
+    {.name = "Flower Pot", .layer = 489, .natural = true},
+
+    {.name = "Sculk Vein", .layer = 490, .natural = true},
+    {.name = "Sculk Sensor", .layer = 491, .topLayer = 492, .natural = true},
+    {.name = "Sculk Shrieker", .layer = 493, .topLayer = 494, .natural = true},
+    {.name = "Small Amethyst Bud", .layer = 495, .natural = true},
+    {.name = "Medium Amethyst Bud", .layer = 496, .natural = true},
+    {.name = "Large Amethyst Bud", .layer = 497, .natural = true},
+    {.name = "Big Dripleaf", .layer = 498, .natural = true},
+    {.name = "Small Dripleaf", .layer = 499, .natural = true},
+    {.name = "Cave Vines", .layer = 500, .natural = true},
+    {.name = "Glow Berries", .layer = 501, .natural = true},
+    {.name = "Moss Carpet", .layer = 502, .natural = true},
+    {.name = "Chorus Plant", .layer = 503, .natural = true},
+    {.name = "Chorus Flower", .layer = 504, .natural = true},
+
+    {.name = "Tube Coral", .layer = 505, .natural = true},
+    {.name = "Brain Coral", .layer = 506, .natural = true},
+    {.name = "Bubble Coral", .layer = 507, .natural = true},
+    {.name = "Fire Coral", .layer = 508, .natural = true},
+    {.name = "Horn Coral", .layer = 509, .natural = true},
+    {.name = "Dead Tube Coral", .layer = 510, .natural = true},
+    {.name = "Dead Brain Coral", .layer = 511, .natural = true},
+    {.name = "Dead Bubble Coral", .layer = 512, .natural = true},
+    {.name = "Dead Fire Coral", .layer = 513, .natural = true},
+    {.name = "Dead Horn Coral", .layer = 514, .natural = true},
+    {.name = "Tube Coral Fan", .layer = 515, .natural = true},
+    {.name = "Brain Coral Fan", .layer = 516, .natural = true},
+    {.name = "Bubble Coral Fan", .layer = 517, .natural = true},
+    {.name = "Fire Coral Fan", .layer = 518, .natural = true},
+    {.name = "Horn Coral Fan", .layer = 519, .natural = true},
+    {.name = "Dead Tube Coral Fan", .layer = 520, .natural = true},
+    {.name = "Dead Brain Coral Fan", .layer = 521, .natural = true},
+    {.name = "Dead Bubble Coral Fan", .layer = 522, .natural = true},
+    {.name = "Dead Fire Coral Fan", .layer = 523, .natural = true},
+    {.name = "Dead Horn Coral Fan", .layer = 524, .natural = true},
+
+    {.name = "Sunflower", .layer = 525, .natural = true},
+    {.name = "Sunflower", .layer = 526, .natural = true},
+    {.name = "Lilac", .layer = 527, .natural = true},
+    {.name = "Lilac", .layer = 528, .natural = true},
+    {.name = "Rose Bush", .layer = 529, .natural = true},
+    {.name = "Rose Bush", .layer = 530, .natural = true},
+    {.name = "Peony", .layer = 531, .natural = true},
+    {.name = "Peony", .layer = 532, .natural = true},
+    {.name = "Wither Rose", .layer = 533, .natural = true},
+
+    {.name = "Campfire", .layer = 534, .topLayer = 535},
+    {.name = "Soul Campfire", .layer = 534, .topLayer = 536},
+    {.name = "Respawn Anchor", .layer = 537, .topLayer = 538},
+
+    // ---- The sixth run: the candles, and the last few oddments. ----
+    {.name = "Candle", .layer = 539},
+    {.name = "White Candle", .layer = 540},
+    {.name = "Orange Candle", .layer = 541},
+    {.name = "Magenta Candle", .layer = 542},
+    {.name = "Light Blue Candle", .layer = 543},
+    {.name = "Yellow Candle", .layer = 544},
+    {.name = "Lime Candle", .layer = 545},
+    {.name = "Pink Candle", .layer = 546},
+    {.name = "Gray Candle", .layer = 547},
+    {.name = "Light Gray Candle", .layer = 548},
+    {.name = "Cyan Candle", .layer = 549},
+    {.name = "Purple Candle", .layer = 550},
+    {.name = "Blue Candle", .layer = 551},
+    {.name = "Brown Candle", .layer = 552},
+    {.name = "Green Candle", .layer = 553},
+    {.name = "Red Candle", .layer = 554},
+    {.name = "Black Candle", .layer = 555},
+    {.name = "Tinted Glass", .layer = 556},
+    {.name = "Beacon", .layer = 557},
+    {.name = "Conduit", .layer = 558},
+    {.name = "Dragon Egg", .layer = 559, .natural = true},
+    {.name = "End Portal Frame", .layer = 560, .topLayer = 561},
+    {.name = "Monster Spawner", .layer = 562},
+    {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
+    {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
+    {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
+    {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
+    // The blast furnace's other seven states, sharing the row the first one
+    // already has: the mouth is chosen in `blockTextureLayer`, not here.
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
+    {.name = "Ender Chest", .layer = 685, .topLayer = 686},
+    {.name = "Ender Chest", .layer = 685, .topLayer = 686},
+    {.name = "Ender Chest", .layer = 685, .topLayer = 686},
+    {.name = "Ender Chest", .layer = 685, .topLayer = 686},
+    // The cauldron's six filled levels share the empty one's row: how full it
+    // is shows in the lid, which the model does not draw yet.
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    {.name = "Cauldron", .layer = 479, .topLayer = 480},
+    // Five spouts, one row each. Which way it points is not in the texture -
+    // the reference's hopper model is the same funnel whichever way the spout
+    // hangs, and only the spout itself moves.
+    {.name = "Hopper", .layer = 687, .topLayer = 688},
+    {.name = "Hopper", .layer = 687, .topLayer = 688},
+    {.name = "Hopper", .layer = 687, .topLayer = 688},
+    {.name = "Hopper", .layer = 687, .topLayer = 688},
+    {.name = "Hopper", .layer = 687, .topLayer = 688},
+    // Seventeen stowboxes, one sprite each on every face. Plain first, then
+    // the sixteen dyes in the order every other dyed family here uses.
+    {.name = "Stowbox", .layer = 689, .topLayer = 689},
+    {.name = "White Stowbox", .layer = 690, .topLayer = 690},
+    {.name = "Orange Stowbox", .layer = 691, .topLayer = 691},
+    {.name = "Magenta Stowbox", .layer = 692, .topLayer = 692},
+    {.name = "Light Blue Stowbox", .layer = 693, .topLayer = 693},
+    {.name = "Yellow Stowbox", .layer = 694, .topLayer = 694},
+    {.name = "Lime Stowbox", .layer = 695, .topLayer = 695},
+    {.name = "Pink Stowbox", .layer = 696, .topLayer = 696},
+    {.name = "Gray Stowbox", .layer = 697, .topLayer = 697},
+    {.name = "Light Gray Stowbox", .layer = 698, .topLayer = 698},
+    {.name = "Cyan Stowbox", .layer = 699, .topLayer = 699},
+    {.name = "Purple Stowbox", .layer = 700, .topLayer = 700},
+    {.name = "Blue Stowbox", .layer = 701, .topLayer = 701},
+    {.name = "Brown Stowbox", .layer = 702, .topLayer = 702},
+    {.name = "Green Stowbox", .layer = 703, .topLayer = 703},
+    {.name = "Red Stowbox", .layer = 704, .topLayer = 704},
+    {.name = "Black Stowbox", .layer = 705, .topLayer = 705},
 }};
 
-/// One more than the highest `.layer` any row uses. **Derived rather than
-/// written down**, because nothing else asserts it: too small and the last few
-/// blocks silently sample whatever run follows this one, which is a wrong
-/// texture with no error anywhere.
+/// The faces a table row cannot carry. Both pumpkins and the trapped chest are
+/// ordinary rows for five of their six faces and differ only on the front, so
+/// the front lives here - beside the run it indexes - rather than as a bare
+/// number inside `blockTextureLayer`.
+constexpr int kCarvedPumpkinFaceLayer = 393;
+constexpr int kJackOLanternFaceLayer = 394;
+constexpr int kTrappedChestFaceLayer = 565;
+/// The blast furnace's mouth, unlit and lit.
+constexpr int kBlastFurnaceFaceLayer = 566;
+constexpr int kBlastFurnaceLitFaceLayer = 567;
+/// The seventeen unlit candles. The lit ones are ordinary table rows at 539
+/// through 555, so a colour's two pictures are one subtraction apart.
+constexpr int kUnlitCandleFirstLayer = 568;
+constexpr int kLitCandleFirstLayer = 539;
+
+/// One more than the highest layer the run uses. **Derived rather than written
+/// down**, because nothing else asserts it: too small and the last few blocks
+/// silently sample whatever run follows this one, which is a wrong texture with
+/// no error anywhere.
+///
+/// It has to consider the face layers above as well as the rows, because those
+/// are reached only from code - and a layer nothing in the table mentions is
+/// exactly the one a row-only scan would leave off the end.
 constexpr int maxTableLayer() {
-    int highest = 0;
+    int highest = kBedFirstLayer + kBedColours * 4 + 1;
     for (const ExtraBlockInfo& info : kExtraBlocks) {
         highest = info.layer > highest ? info.layer : highest;
         highest = info.topLayer > highest ? info.topLayer : highest;
@@ -3376,11 +7199,13 @@ constexpr int maxTableLayer() {
 }
 
 constexpr int kTableSprites = maxTableLayer() + 1;
-static_assert(kTableSprites == 359, "the table's sprite run changed size; update Main.cpp's list");
+static_assert(kTableSprites == 706, "the table's sprite run changed size; update Main.cpp's list");
 
 static_assert(kExtraBlocks.size() == static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count +
-                                                             kExtraRun3Count),
-              "kExtraBlocks must have exactly one row per id across all three table-driven runs");
+                                                             kExtraRun3Count + kExtraRun4Count +
+                                                             kExtraRun5Count + kExtraRun6Count +
+                                                             kExtraRun7Count),
+              "kExtraBlocks must have exactly one row per id across all seven table-driven runs");
 
 /// The double chest, three faces per half, right at the very end of the run so
 /// not one existing layer moves.
@@ -3407,7 +7232,7 @@ constexpr int kChestHalfSprites = 6;
 /// one contiguous run in `ItemId` order, so an icon is arithmetic rather than a
 /// case per item.
 constexpr int kExtraItemSpritesFirst = kChestHalfSpritesFirst + kChestHalfSprites;
-constexpr int kExtraItemSprites = 90;
+constexpr int kExtraItemSprites = 166;
 
 /// The beehive: front, its full-of-honey form, the sides and the end caps.
 constexpr int kBeehiveSpritesFirst = kExtraItemSpritesFirst + kExtraItemSprites;
@@ -3475,14 +7300,36 @@ constexpr int kProjectileSprites = 9;
 constexpr int kMoonPhaseFirst = kProjectileSpritesFirst + kProjectileSprites;
 constexpr int kMoonPhases = 8;
 
-/// True for anything in either table-driven run.
+/// The stonecutter's saw blade. Appended after every existing run, for the same
+/// reason the moon was: the blade is a plane standing out of the bench, not one
+/// of the bench's own faces, so it cannot come off the block's side or top.
+constexpr int kStonecutterSawSprite = kMoonPhaseFirst + kMoonPhases;
+
+/// The end face of a bed's head - the pillow's own end, white across the whole
+/// mattress band, and one image for all sixteen colours because the reference
+/// shares it too. The side texture is half pillow and half blanket, so standing
+/// it in painted the headboard red down one half.
+constexpr int kBedHeadNorthSprite = kStonecutterSawSprite + 1;
+
+/// The compost inside a composter, at every level below a ready one.
+constexpr int kComposterCompostSprite = kBedHeadNorthSprite + 1;
+
+static_assert(kRedstoneSprites == 55, "the redstone sprite run changed size; update Main.cpp");
+static_assert(kRedstoneSpritesFirst == kComposterCompostSprite + 1,
+              "the redstone run must start immediately after the last appended layer");
+
+/// True for anything in any table-driven run.
 constexpr bool isExtraBlock(BlockId id) {
     return (id >= kFirstExtraBlock && id <= kLastExtraBlock) ||
            (id >= kFirstExtraBlock2 && id <= kLastExtraBlock2) ||
-           (id >= kFirstExtraBlock3 && id <= kLastExtraBlock3);
+           (id >= kFirstExtraBlock3 && id <= kLastExtraBlock3) ||
+           (id >= kFirstExtraBlock4 && id <= kLastExtraBlock4) ||
+           (id >= kFirstExtraBlock5 && id <= kLastExtraBlock5) ||
+           (id >= kFirstExtraBlock6 && id <= kLastExtraBlock6) ||
+           (id >= kFirstExtraBlock7 && id <= kLastExtraBlock7);
 }
 
-/// All three runs index one table, each continuing where the last left off.
+/// All seven runs index one table, each continuing where the last left off.
 constexpr std::size_t extraBlockIndex(BlockId id) {
     if (id <= kLastExtraBlock) {
         return static_cast<std::size_t>(static_cast<int>(id) - static_cast<int>(kFirstExtraBlock));
@@ -3491,8 +7338,28 @@ constexpr std::size_t extraBlockIndex(BlockId id) {
         return static_cast<std::size_t>(kExtraRun1Count + static_cast<int>(id) -
                                         static_cast<int>(kFirstExtraBlock2));
     }
-    return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + static_cast<int>(id) -
-                                    static_cast<int>(kFirstExtraBlock3));
+    if (id <= kLastExtraBlock3) {
+        return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + static_cast<int>(id) -
+                                        static_cast<int>(kFirstExtraBlock3));
+    }
+    if (id <= kLastExtraBlock4) {
+        return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + kExtraRun3Count +
+                                        static_cast<int>(id) -
+                                        static_cast<int>(kFirstExtraBlock4));
+    }
+    if (id <= kLastExtraBlock5) {
+        return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + kExtraRun3Count +
+                                        kExtraRun4Count + static_cast<int>(id) -
+                                        static_cast<int>(kFirstExtraBlock5));
+    }
+    if (id <= kLastExtraBlock6) {
+        return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + kExtraRun3Count +
+                                        kExtraRun4Count + kExtraRun5Count + static_cast<int>(id) -
+                                        static_cast<int>(kFirstExtraBlock6));
+    }
+    return static_cast<std::size_t>(kExtraRun1Count + kExtraRun2Count + kExtraRun3Count +
+                                    kExtraRun4Count + kExtraRun5Count + kExtraRun6Count +
+                                    static_cast<int>(id) - static_cast<int>(kFirstExtraBlock7));
 }
 
 constexpr const ExtraBlockInfo& extraBlockInfo(BlockId id) {
@@ -3523,31 +7390,71 @@ constexpr FaceDirection blockFacing(BlockId id) {
     if (isLadder(id)) {
         return ladderFacing(id);
     }
+    if (isCarvedPumpkin(id)) {
+        return static_cast<FaceDirection>(static_cast<int>(id) -
+                                          static_cast<int>(BlockId::CarvedPumpkinFirst));
+    }
+    if (isJackOLantern(id)) {
+        return static_cast<FaceDirection>(static_cast<int>(id) -
+                                          static_cast<int>(BlockId::JackOLanternFirst));
+    }
     if (id == BlockId::CraftingTable || id == BlockId::SmithingTable) {
         return FaceDirection::NegZ;
+    }
+    // The six-way machines. **A miss here renders perfectly in the world and
+    // wrong in every inventory slot**, because the mesher hands the face a real
+    // direction and an icon has none to give - so both of an icon's visible
+    // side quads come back as the identifying face, and a sticky piston wears
+    // its plate on all of them.
+    //
+    // `facing6AsDirection` answers `Unknown` for a machine pointing straight up
+    // or down, which is right: neither of an icon's two side quads is its front,
+    // and `machineFaceRole` reads that same `Unknown` as "show me a side".
+    if (isPiston(id)) {
+        return facing6AsDirection(pistonFacing(id));
+    }
+    if (isPistonHead(id)) {
+        return facing6AsDirection(pistonHeadFacing(id));
+    }
+    if (isObserver(id)) {
+        return facing6AsDirection(observerFacing(id));
+    }
+    if (isDispenserLike(id)) {
+        return facing6AsDirection(dispenserFacing(id));
+    }
+    if (isLightningRod(id)) {
+        return facing6AsDirection(lightningRodFacing(id));
+    }
+    if (isRepeater(id)) {
+        return repeaterFacing(id);
+    }
+    if (isComparator(id)) {
+        return comparatorFacing(id);
+    }
+    if (isSignLike(id)) {
+        return signFacing(id);
     }
     return FaceDirection::Unknown;
 }
 
-/// A quarter turn about the vertical. `Unknown` stays unknown, which is what
-/// keeps every faceless block's icon exactly as it was.
-constexpr FaceDirection quarterTurn(FaceDirection direction) {
-    switch (direction) {
-    case FaceDirection::PosX:
-        return FaceDirection::PosZ;
-    case FaceDirection::PosZ:
-        return FaceDirection::NegX;
-    case FaceDirection::NegX:
-        return FaceDirection::NegZ;
-    case FaceDirection::NegZ:
-        return FaceDirection::PosX;
-    default:
-        return FaceDirection::Unknown;
-    }
-}
 
-constexpr FaceDirection oppositeDirection(FaceDirection direction) {
-    return quarterTurn(quarterTurn(direction));
+/// Which way a block's front should point when someone puts it down: **toward
+/// the placer**, so the identifying face is the one they can see.
+///
+/// The expression was written out at four separate placement sites - the stair,
+/// the gate, the furnace and the chest - which is exactly the shape of bug this
+/// project keeps paying for. One owner, and the sign is stated once: a camera
+/// looking along +X is west of the block, so the block faces -X.
+///
+/// **Two floats rather than a vector**, because `Block.hpp` deliberately has no
+/// glm include and adding one has broken the build here before.
+constexpr FaceDirection facingToward(float aimX, float aimZ) {
+    const float ax = aimX < 0.0f ? -aimX : aimX;
+    const float az = aimZ < 0.0f ? -aimZ : aimZ;
+    if (ax > az) {
+        return aimX > 0.0f ? FaceDirection::NegX : FaceDirection::PosX;
+    }
+    return aimZ > 0.0f ? FaceDirection::NegZ : FaceDirection::PosZ;
 }
 
 /// Picks between a single chest's sprite and the two halves', in the one place
@@ -3570,6 +7477,63 @@ constexpr int chestHalfSprite(ChestHalf half, int single, int left, int right) {
 /// icons, the drop mesh, the hotbar - keeps working untouched. `half` is the
 /// same arrangement for the double chest: an icon has no neighbours, so it
 /// draws the single-chest art.
+/// Which of a six-way machine's three kinds of face is being drawn: **0 the
+/// front, 1 the back, 2 one of the four sides**.
+///
+/// A furnace only ever faces one of four ways, so `BlockFace` plus a horizontal
+/// `FaceDirection` was enough for it. A piston, an observer, a dispenser and a
+/// dropper can all point straight up or straight down, and for those the top
+/// and bottom faces are what carries the front - so the drawn face has to be
+/// recovered as one of six before it can be compared with the facing.
+///
+/// An icon has no direction to give, and answers **front**, which is the same
+/// rule the furnace follows: show the face that identifies the block.
+constexpr int machineFaceRole(int facing, BlockFace face, FaceDirection direction) {
+    if (face == BlockFace::Side && direction == FaceDirection::Unknown) {
+        return facing == Facing6Up || facing == Facing6Down ? 2 : 0;
+    }
+    const int drawn = face == BlockFace::Top      ? Facing6Up
+                      : face == BlockFace::Bottom ? Facing6Down
+                                                  : directionAsFacing6(direction);
+    if (drawn == facing) {
+        return 0;
+    }
+    return drawn == oppositeFacing6(facing) ? 1 : 2;
+}
+
+// **An icon draws two side quads at once**, one at the block's facing and one a
+// quarter turn from it. If `blockFacing` has nothing to say, both come back as
+// the front - which is how a sticky piston came to wear its plate all the way
+// round in the slot while looking perfectly right in the world, where the mesher
+// hands every face a real direction.
+//
+// Written against the whole expression an icon actually evaluates, `blockFacing`
+// and all, rather than against one half of it: an assert that compares a
+// derivation with itself proves nothing.
+static_assert(
+    machineFaceRole(pistonFacing(pistonAt(Facing6North, false, true)), BlockFace::Side,
+                    blockFacing(pistonAt(Facing6North, false, true))) == 0 &&
+        machineFaceRole(pistonFacing(pistonAt(Facing6North, false, true)), BlockFace::Side,
+                        quarterTurn(blockFacing(pistonAt(Facing6North, false, true)))) == 2,
+    "a sticky piston's icon must show its plate on one side quad and a plain side on the other");
+static_assert(
+    machineFaceRole(observerFacing(observerAt(Facing6North, false)), BlockFace::Side,
+                    blockFacing(observerAt(Facing6North, false))) == 0 &&
+        machineFaceRole(observerFacing(observerAt(Facing6North, false)), BlockFace::Side,
+                        quarterTurn(blockFacing(observerAt(Facing6North, false)))) == 2,
+    "an observer's icon must show its face on one side quad and a plain side on the other");
+static_assert(
+    machineFaceRole(dispenserFacing(dispenserAt(Facing6North, false)), BlockFace::Side,
+                    blockFacing(dispenserAt(Facing6North, false))) == 0 &&
+        machineFaceRole(dispenserFacing(dispenserAt(Facing6North, false)), BlockFace::Side,
+                        quarterTurn(blockFacing(dispenserAt(Facing6North, false)))) == 2,
+    "a dispenser's icon must show its mouth on one side quad and a plain side on the other");
+// A machine pointing straight up has no front an icon can show from the side, so
+// both quads must fall back to a plain side rather than to the plate.
+static_assert(machineFaceRole(Facing6Up, BlockFace::Side,
+                              blockFacing(pistonAt(Facing6Up, false, true))) == 2,
+              "a piston pointing up shows no plate on either of an icon's side quads");
+
 inline float blockTextureLayer(BlockId id, BlockFace face,
                                FaceDirection direction = FaceDirection::Unknown,
                                ChestHalf half = ChestHalf::Single) {
@@ -3613,6 +7577,119 @@ inline float blockTextureLayer(BlockId id, BlockFace face,
         default:
             return static_cast<float>(lit ? kTntPrimedSideSprite : kTntSideSprite);
         }
+    }
+    // Redstone. Everything here is answered before the switch for the same
+    // reason the fluids are: each covers a run of ids rather than a single one.
+    if (isRedstoneWire(id)) {
+        return static_cast<float>(kWireFirstSprite + wireSignal(id));
+    }
+    if (isRedstoneTorch(id)) {
+        return redstoneTorchLit(id) ? kRedstoneTorchLayer
+                                    : static_cast<float>(kRedstoneTorchOffSprite);
+    }
+    if (isLever(id)) {
+        return static_cast<float>(kLeverSprite);
+    }
+    if (isRepeater(id) || isComparator(id)) {
+        // Only the top carries the block's own picture; every other face is the
+        // smooth stone bench it stands on.
+        if (face != BlockFace::Top) {
+            return static_cast<float>(kRedstoneSlabSprite);
+        }
+        if (isRepeater(id)) {
+            return static_cast<float>(repeaterPowered(id) ? kRepeaterOnSprite : kRepeaterSprite);
+        }
+        return static_cast<float>(comparatorPowered(id) || comparatorSubtracts(id)
+                                      ? kComparatorOnSprite
+                                      : kComparatorSprite);
+    }
+    if (isObserver(id)) {
+        switch (machineFaceRole(observerFacing(id), face, direction)) {
+        case 0:
+            return static_cast<float>(kObserverFrontSprite);
+        case 1:
+            return static_cast<float>(observerPowered(id) ? kObserverBackOnSprite
+                                                          : kObserverBackSprite);
+        default:
+            // The reference paints `observer_top` on both the up and down faces
+            // and `observer_side` on the four round the middle.
+            return static_cast<float>(face == BlockFace::Side ? kObserverSideSprite
+                                                              : kObserverTopSprite);
+        }
+    }
+    if (isPiston(id) || isPistonHead(id)) {
+        const bool head = isPistonHead(id);
+        const int facing = head ? pistonHeadFacing(id) : pistonFacing(id);
+        const bool sticky = head ? pistonHeadSticky(id) : pistonSticky(id);
+        switch (machineFaceRole(facing, face, direction)) {
+        case 0:
+            // An extended body shows the hollow it left behind; anything else
+            // shows the plate, sticky or plain.
+            if (!head && pistonExtended(id)) {
+                return static_cast<float>(kPistonInnerSprite);
+            }
+            return static_cast<float>(sticky ? kPistonTopStickySprite : kPistonTopSprite);
+        case 1:
+            return static_cast<float>(head ? kPistonSideSprite : kPistonBottomSprite);
+        default:
+            return static_cast<float>(kPistonSideSprite);
+        }
+    }
+    if (isDispenserLike(id)) {
+        const bool dropper = isDropper(id);
+        const int facing = dispenserFacing(id);
+        const bool vertical = facing == Facing6Up || facing == Facing6Down;
+        switch (machineFaceRole(facing, face, direction)) {
+        case 0:
+            if (vertical) {
+                return static_cast<float>(dropper ? kDropperFrontVerticalSprite
+                                                  : kDispenserFrontVerticalSprite);
+            }
+            return static_cast<float>(dropper ? kDropperFrontSprite : kDispenserFrontSprite);
+        default:
+            return static_cast<float>(face == BlockFace::Side ? kMachineSideSprite
+                                                              : kMachineTopSprite);
+        }
+    }
+    if (isDaylightDetector(id)) {
+        if (face != BlockFace::Top) {
+            return static_cast<float>(kDaylightSideSprite);
+        }
+        return static_cast<float>(daylightDetectorInverted(id) ? kDaylightInvertedTopSprite
+                                                               : kDaylightTopSprite);
+    }
+    if (isLightningRod(id)) {
+        return static_cast<float>(lightningRodPowered(id) ? kLightningRodOnSprite
+                                                          : kLightningRodSprite);
+    }
+    if (isTripwireHook(id)) {
+        return static_cast<float>(kTripwireHookSprite);
+    }
+    if (isTripwire(id)) {
+        return static_cast<float>(kTripwireSprite);
+    }
+    if (isRail(id)) {
+        const int family = railFamily(id);
+        if (family == 0) {
+            // The plain rail is the one that can bend, and its second picture is
+            // the corner rather than a live form it does not have.
+            return static_cast<float>(kRailFirstSprite + (railShape(id) >= 6 ? 1 : 0));
+        }
+        return static_cast<float>(kRailFirstSprite + family * 2 + (railPowered(id) ? 1 : 0));
+    }
+    if (id == BlockId::RedstoneLampLit) {
+        return static_cast<float>(kRedstoneLampOnSprite);
+    }
+    // A struck target and a retuned note block wear the same picture as the
+    // quiet ones they were appended after - the strength and the pitch are
+    // state, not a different block. **Without these two the appended runs fall
+    // through to the switch's default and draw as stone**, which is invisible
+    // until the material table reports one layer claimed by two families.
+    if (isTarget(id)) {
+        return static_cast<float>(kTableSpritesFirst + extraBlockInfo(BlockId::Target).layer);
+    }
+    if (isNoteBlock(id)) {
+        return static_cast<float>(kTableSpritesFirst + extraBlockInfo(BlockId::NoteBlock).layer);
     }
     switch (id) {
     case BlockId::Stone:
@@ -3775,7 +7852,59 @@ inline float blockTextureLayer(BlockId id, BlockFace face,
         break;
     }
 
+    // Every state of a candle picks between its colour's two pictures, lit and
+    // unlit. **Asked before the table**, because the appended states sit
+    // outside every run and would otherwise index off the end of it.
+    if (isCandle(id)) {
+        const int base = isCandleLit(id) ? kLitCandleFirstLayer : kUnlitCandleFirstLayer;
+        return static_cast<float>(kTableSpritesFirst + base + candleColour(id));
+    }
+
+    // A door wears its upper picture on the top half and its lower on the
+    // bottom; a trapdoor has only the one.
+    if (isDoor(id)) {
+        const OpeningFamily& family = kDoorFamilies[static_cast<std::size_t>(doorFamily(id))];
+        return static_cast<float>(kTableSpritesFirst +
+                                  (doorIsUpper(id) ? family.upperLayer : family.lowerLayer));
+    }
+    if (isTrapdoor(id)) {
+        return static_cast<float>(
+            kTableSpritesFirst +
+            kTrapdoorFamilies[static_cast<std::size_t>(trapdoorFamily(id))].lowerLayer);
+    }
+    if (isBed(id)) {
+        const BedFamily family = bedFamilyAt(bedColour(id));
+        const bool cap = (face == BlockFace::Top || face == BlockFace::Bottom);
+        // The head's outward end is the pillow's own end face. The side
+        // texture is half pillow and half blanket, so standing it in there
+        // painted half the headboard red.
+        if (!cap && bedIsHead(id) && direction == bedFacing(id)) {
+            return static_cast<float>(kBedHeadNorthSprite);
+        }
+        const int layer = bedIsHead(id) ? (cap ? family.headTop : family.headSide)
+                                        : (cap ? family.footTop : family.footSide);
+        return static_cast<float>(kTableSpritesFirst + layer);
+    }
+
     if (isExtraBlock(id)) {
+        // no column for a front - so the front is answered here, the way the
+        // furnace's is, before the row's own layer is reached for.
+        if ((isCarvedPumpkin(id) || isJackOLantern(id)) && face == BlockFace::Side &&
+            (direction == blockFacing(id) || direction == FaceDirection::Unknown)) {
+            return static_cast<float>(kTableSpritesFirst + (isJackOLantern(id)
+                                                                ? kJackOLanternFaceLayer
+                                                                : kCarvedPumpkinFaceLayer));
+        }
+        if (isTrappedChest(id) && face == BlockFace::Side &&
+            (direction == chestFacing(id) || direction == FaceDirection::Unknown)) {
+            return static_cast<float>(kTableSpritesFirst + kTrappedChestFaceLayer);
+        }
+        if (isBlastFurnace(id) && face == BlockFace::Side &&
+            (direction == blastFurnaceFacing(id) || direction == FaceDirection::Unknown)) {
+            return static_cast<float>(kTableSpritesFirst + (isBlastFurnaceLit(id)
+                                                                ? kBlastFurnaceLitFaceLayer
+                                                                : kBlastFurnaceFaceLayer));
+        }
         const ExtraBlockInfo& info = extraBlockInfo(id);
         const bool cap = (face == BlockFace::Top || face == BlockFace::Bottom);
         return static_cast<float>(kTableSpritesFirst +
@@ -3785,8 +7914,7 @@ inline float blockTextureLayer(BlockId id, BlockFace face,
     if (isBeehive(id)) {
         if (face != BlockFace::Side) {
             return static_cast<float>(kBeehiveEndSprite);
-        }
-        if (direction == beehiveFacing(id) || direction == FaceDirection::Unknown) {
+        }        if (direction == beehiveFacing(id) || direction == FaceDirection::Unknown) {
             return static_cast<float>(beehiveHasHoney(id) ? kBeehiveFrontHoneySprite
                                                           : kBeehiveFrontSprite);
         }
@@ -3875,13 +8003,88 @@ inline float blockTextureLayer(BlockId id, BlockFace face,
     return static_cast<float>(TextureLayer::Stone);
 }
 
+// The layer numbers a model box borrows are written out beside the models,
+// three thousand lines above the table that owns them - so they are checked
+// against it here. **This is what stops them being a second copy that rots**:
+// move a row and the build fails rather than the bell quietly turning gold.
+// Checked against `extraBlockInfo` rather than `blockTextureLayer`, which is
+// `inline` and not `constexpr` - so the base `blockTextureLayer` would have
+// added has to be checked too, and is, on the first line. Without that line
+// every assert below passed while pointing at a nether plant.
+static_assert(static_cast<int>(kTableLayerBase) == kTableSpritesFirst,
+              "the appended run has moved - every model layer below is off by the difference");
+static_assert(kStoneLayer == static_cast<float>(TextureLayer::Stone));
+static_assert(kDirtLayer == static_cast<float>(TextureLayer::Dirt));
+static_assert(kPlanksLayer == static_cast<float>(TextureLayer::Planks));
+static_assert(kLogSideLayer == static_cast<float>(TextureLayer::LogSide));
+static_assert(kStonecutterSawLayer == static_cast<float>(kStonecutterSawSprite));
+static_assert(kComposterCompostLayer == static_cast<float>(kComposterCompostSprite));
+static_assert(kAnvilBodyLayer == kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Anvil).layer));
+static_assert(kScaffoldSideLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Scaffolding).layer));
+static_assert(kCampfireLogLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Campfire).layer));
+static_assert(kHopperSideLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Hopper).layer));
+static_assert(kWaterLayer == static_cast<float>(TextureLayer::Water));
+static_assert(kComposterTopLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(composterAt(0)).topLayer));
+static_assert(kComposterSideLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(composterAt(0)).layer));
+static_assert(kComposterReadyLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(composterAt(8)).topLayer));
+static_assert(kStonecutterTopLayer ==
+              kTableLayerBase +
+                  static_cast<float>(extraBlockInfo(BlockId::Stonecutter).topLayer));
+static_assert(kGrindstoneRoundLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Grindstone).topLayer));
+static_assert(kBellSideLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Bell).layer));
+static_assert(kRedstoneTorchLayer ==
+                  kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::RedstoneTorch).layer),
+              "the lit redstone torch must still be the table row it was placed in");
+static_assert(kBellTopLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Bell).topLayer));
+static_assert(kCauldronSideLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::Cauldron).layer));
+static_assert(kBrewingStandBaseLayer ==
+              kTableLayerBase + static_cast<float>(extraBlockInfo(BlockId::BrewingStand).layer));
+static_assert(kBrewingStandRodLayer ==
+              kTableLayerBase +
+                  static_cast<float>(extraBlockInfo(BlockId::BrewingStand).topLayer));
+
+// Nothing drawn as a model may be a full cube, or it goes back to culling the
+// faces of everything it touches - which is what let you see through the world
+// around a cauldron.
+static_assert(blockShape(BlockId::Cauldron) == BlockShape::Model &&
+                  blockShape(BlockId::Bell) == BlockShape::Model &&
+                  blockShape(BlockId::Grindstone) == BlockShape::Model &&
+                  blockShape(BlockId::Stonecutter) == BlockShape::Model &&
+                  blockShape(BlockId::BrewingStand) == BlockShape::Model &&
+                  blockShape(composterAt(4)) == BlockShape::Model &&
+                  blockShape(BlockId::Torch) == BlockShape::Model,
+              "the seven blocks that used to draw as cubes or as flowers are models now");
+static_assert(!occludesFace(BlockId::Cauldron, 1) && !occludesFace(BlockId::Bell, 1) &&
+                  !occludesFace(composterAt(0), -1),
+              "a model must never occlude its neighbour's face");
+static_assert(!isSolid(BlockId::Torch) && isSolid(BlockId::Cauldron),
+              "a torch is walked through; a cauldron is not");
+static_assert(postBoxes(BlockId::Torch).boxes[0].maxY < 0.7f &&
+                  postBoxes(BlockId::Torch).boxes[0].minX > 0.4f,
+              "a torch is aimed at as a stick, not as the cell it stands in");
+
 /// What a block is called, for the HUD and for logs.
 ///
 /// Lives beside the block definition rather than in whichever screen happens to
 /// need it, so a new block is named once.
 constexpr const char* blockName(BlockId id) {
+    // **Bedrock's name, and it has to differ from the cube's.** Both were called
+    // "Snow", so the catalogue showed two entries with one name and no way to
+    // tell which was the thin layer. Java calls the layer "Snow" and the cube
+    // "Snow Block"; Bedrock is the reference here and does it the other way
+    // round, which also leaves the cube's existing name alone.
     if (isSnowLayer(id)) {
-        return "Snow";
+        return "Top Snow";
     }
     // Every cut shape, in one branch. **The legacy `case` labels for the stone
     // slab and the oak fence were removed with it**: a family test placed above
@@ -3907,6 +8110,85 @@ constexpr const char* blockName(BlockId id) {
     }
     if (isPane(id)) {
         return kPaneFamilies[static_cast<std::size_t>(paneFamily(id))].name;
+    }
+    if (isButton(id)) {
+        return kButtonFamilies[static_cast<std::size_t>(buttonFamily(id))].name;
+    }
+    if (isPressurePlate(id)) {
+        return kPressurePlateFamilies[static_cast<std::size_t>(pressurePlateFamily(id))].name;
+    }
+    if (isSign(id)) {
+        return kSignFamilies[static_cast<std::size_t>(signFamily(id))].name;
+    }
+    if (isHangingSign(id)) {
+        return kHangingSignFamilies[static_cast<std::size_t>(signFamily(id))].name;
+    }
+    if (isBanner(id)) {
+        return kBannerFamilies[static_cast<std::size_t>(signFamily(id))].name;
+    }    // Redstone. Every one of these spends most of its ids on a state - a
+    // strength, a facing, a delay - and every state shares the one name, so
+    // seven hundred ids cost eighteen strings.
+    if (isRedstoneWire(id)) {
+        return "Redstone Dust";
+    }
+    if (isRedstoneTorch(id)) {
+        return "Redstone Torch";
+    }
+    if (isLever(id)) {
+        return "Lever";
+    }
+    if (isRepeater(id)) {
+        return "Redstone Repeater";
+    }
+    if (isComparator(id)) {
+        return "Redstone Comparator";
+    }
+    if (isPiston(id)) {
+        return pistonSticky(id) ? "Sticky Piston" : "Piston";
+    }
+    if (isPistonHead(id)) {
+        return "Piston Head";
+    }
+    if (isObserver(id)) {
+        return "Observer";
+    }
+    if (isDropper(id)) {
+        return "Dropper";
+    }
+    if (isDispenser(id)) {
+        return "Dispenser";
+    }
+    if (isDaylightDetector(id)) {
+        return "Daylight Detector";
+    }
+    if (isLightningRod(id)) {
+        return "Lightning Rod";
+    }
+    if (isTripwireHook(id)) {
+        return "Tripwire Hook";
+    }
+    if (isTripwire(id)) {
+        return "Tripwire";
+    }
+    if (isRail(id)) {
+        switch (railFamily(id)) {
+        case 1:
+            return "Powered Rail";
+        case 2:
+            return "Detector Rail";
+        case 3:
+            return "Activator Rail";
+        default:
+            return "Rail";
+        }
+    }
+    // Both answered before the switch, which still holds their quiet forms as
+    // ordinary table rows - and would otherwise name the lit ones nothing.
+    if (isTarget(id)) {
+        return "Target";
+    }
+    if (isNoteBlock(id)) {
+        return "Note Block";
     }
     if (isLadder(id)) {
         return "Ladder";
@@ -3935,12 +8217,33 @@ constexpr const char* blockName(BlockId id) {
     if (id == BlockId::Tnt || id == BlockId::TntPrimed) {
         return "TNT";
     }
-    // Before `isFurnace`, which answers true for smokers too.
+    // Before `isFurnace`, which answers true for both of the other cookers too.
     if (isSmoker(id)) {
         return "Smoker";
     }
+    if (isBlastFurnace(id)) {
+        return "Blast Furnace";
+    }
     if (isFurnace(id)) {
         return "Furnace";
+    }
+    // Every state of a candle borrows the name from its colour's own row, so
+    // the seventeen names are written down exactly once.
+    if (isCandle(id)) {
+        return extraBlockInfo(static_cast<BlockId>(static_cast<int>(BlockId::Candle) +
+                                                  candleColour(id)))
+            .name;
+    }
+    // Both halves of a door and both halves of a trapdoor read their family's
+    // one name, so twelve names cover three hundred and eighty-four ids.
+    if (isDoor(id)) {
+        return kDoorFamilies[static_cast<std::size_t>(doorFamily(id))].name;
+    }
+    if (isTrapdoor(id)) {
+        return kTrapdoorFamilies[static_cast<std::size_t>(trapdoorFamily(id))].name;
+    }
+    if (isBed(id)) {
+        return bedFamilyAt(bedColour(id)).name;
     }
     switch (id) {
     case BlockId::Stone:

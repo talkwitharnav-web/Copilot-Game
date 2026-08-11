@@ -51,9 +51,11 @@ if (-not (Test-Path $outputDir)) { New-Item -ItemType Directory -Path $outputDir
 
 $skinWidth = 128
 $skinHeight = 32
-# Must match kCreatureSheetHeight in game/src/world/Creature.hpp. The last 128
-# rows are the bee and its angry twin.
-$sheetHeight = 3680
+# Must match kCreatureSheetHeight in game/src/world/Creature.hpp. The last 1024
+# rows are the iron golem's own 128 and the fourteen villager trade outfits at
+# 64 apiece; none of them is painted here, so they are transparent in our own
+# sheet and come entirely from the staged reference atlas.
+$sheetHeight = 4704
 
 function ConvertTo-Color {
     param([string]$Hex)

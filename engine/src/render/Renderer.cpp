@@ -242,7 +242,12 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
 
     m_hudPipeline = std::make_unique<GraphicsPipeline>(
         context.device(), PipelineDesc{
-                              .vertexSpirv = executableDirectory() / "shaders" / "triangle.vert.spv",
+                              // **Its own vertex stage, not the world's.** The
+                              // interface reads three varyings; `triangle.vert`
+                              // emits seven and runs the water wave and the
+                              // wind sway on the way, neither of which a screen
+                              // quad can ever want.
+                              .vertexSpirv = executableDirectory() / "shaders" / "hud.vert.spv",
                               .fragmentSpirv = executableDirectory() / "shaders" / "hud.frag.spv",
                               .colorFormats = {m_swapchain.imageFormat()},
                               // No depth attachment at all: order decides what
@@ -2314,6 +2319,11 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     // Recording is const, so the counters it fills are published here.
     m_stats.drawCalls = m_frameDrawCalls;
     m_stats.triangles = m_frameTriangles;
+    m_stats.deviceAllocations = liveDeviceAllocations();
+    m_stats.deviceAllocationLimit = m_maxMemoryAllocations;
+    constexpr VkDeviceSize kMegabyte = 1024u * 1024u;
+    m_stats.pooledMegabytesUsed = static_cast<std::uint32_t>(pooledBytesInUse() / kMegabyte);
+    m_stats.pooledMegabytesHeld = static_cast<std::uint32_t>(pooledBytesReserved() / kMegabyte);
     if (m_timestampsSupported) {
         m_timestampsPending[m_currentFrame] = true;
     }

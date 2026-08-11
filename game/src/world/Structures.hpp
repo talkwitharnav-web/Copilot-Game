@@ -2,6 +2,7 @@
 
 #include "world/Chunk.hpp"
 #include "world/TerrainGenerator.hpp"
+#include "world/Village.hpp"
 
 #include <cstdint>
 
@@ -36,7 +37,12 @@ constexpr int kCellSize = 8;
 constexpr int kReach = 6;
 
 /// Writes every structure overlapping this chunk into it.
-void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord);
+///
+/// `villages` is passed in rather than looked up because the caller has already
+/// solved it, and a tree cell asking for itself would rebuild the same village
+/// plan once per candidate cell.
+void generateInto(Chunk& chunk, std::uint32_t seed, ChunkCoord coord,
+                  const village::Nearby& villages);
 
 } // namespace structures
 } // namespace game

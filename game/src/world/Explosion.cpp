@@ -96,6 +96,34 @@ float blastResistance(BlockId block) {
         // same figure in the reference.
         return 100.0f;
     }
+    // ---- Redstone, asked before the cut-shape forwarding. ----
+    // A button and a plate would otherwise inherit a plank's three, and every
+    // one of these is fragile in the reference. Without the branch they all
+    // reach the stone default at the bottom, which is the exact shape of bug
+    // that once left two whole table runs proof against any explosion.
+    if (isRedstoneWire(block) || isRedstoneTorch(block) || isRepeater(block) ||
+        isComparator(block) || isTripwireHook(block) || isTripwire(block)) {
+        return 0.0f;
+    }
+    if (isDaylightDetector(block)) {
+        return 0.2f;
+    }
+    if (isButton(block) || isPressurePlate(block) || isLever(block) || isTarget(block) ||
+        isPiston(block) || isPistonHead(block)) {
+        return 0.5f;
+    }
+    if (isRail(block)) {
+        return 0.7f;
+    }
+    if (isNoteBlock(block)) {
+        return 0.8f;
+    }
+    if (isObserver(block) || isLightningRod(block)) {
+        return 3.0f;
+    }
+    if (isDispenserLike(block)) {
+        return 3.5f;
+    }
     // A cut shape resists exactly as the block it came from does, so an obsidian
     // stair is as blast-proof as obsidian and an oak fence is not.
     {
@@ -116,6 +144,130 @@ float blastResistance(BlockId block) {
     // Snow, which the stone default at the bottom would make blast-proof.
     if (isSnowLayer(block)) {
         return 0.1f;
+    }
+    if (isDoor(block) || isTrapdoor(block)) {
+        const bool metal = isDoor(block)
+                               ? kDoorFamilies[static_cast<std::size_t>(doorFamily(block))].metal
+                               : kTrapdoorFamilies[static_cast<std::size_t>(
+                                     trapdoorFamily(block))].metal;
+        return metal ? 5.0f : 3.0f;
+    }
+    if (isBed(block)) {
+        return 0.2f;
+    }
+    // **Above the run tests below, not after them.** A plant, a torch or a
+    // carpet offers a blast nothing at all, and each table run has its own
+    // catch-all that would otherwise answer 6.0 for the ones nobody named -
+    // which is what made bamboo, sweet berries, glow lichen, sea pickles and
+    // the four nether plants blast-proof.
+    if (blockShape(block) == BlockShape::Cross || blockShape(block) == BlockShape::Flat) {
+        return 0.0f;
+    }
+    // The farm, above the run tests for the same reason: the fourth run has no
+    // catch-all of its own, and soil is not rock.
+    if (isFarmland(block)) {
+        return 0.6f;
+    }
+    if (block == BlockId::DirtPath) {
+        return 0.65f;
+    }
+    if (isComposter(block)) {
+        return 0.6f;
+    }
+    if (isCarvedPumpkin(block) || isJackOLantern(block)) {
+        return 1.0f;
+    }
+    // The fifth run. **A branch of its own rather than the rock default at the
+    // bottom**, which is what made two whole table runs blast-proof last time.
+    if (block >= kFirstExtraBlock5 && block <= kLastExtraBlock5) {
+        if (block >= BlockId::OakWood && block <= BlockId::StrippedWarpedHyphae) {
+            return 2.0f;
+        }
+        if (isCoralBlock(block) ||
+            (block >= BlockId::WaxedCopperBlock && block <= BlockId::WaxedOxidizedCopperGrate) ||
+            isCopperBulb(block)) {
+            return 6.0f;
+        }
+        switch (block) {
+        case BlockId::CryingObsidian:
+        case BlockId::RespawnAnchor:
+        case BlockId::EnchantingTable:
+        case BlockId::Anvil:
+        case BlockId::ChippedAnvil:
+        case BlockId::DamagedAnvil:
+            return 1200.0f;
+        case BlockId::Grindstone:
+        case BlockId::Bell:
+            return 5.0f;
+        case BlockId::Lodestone:
+        case BlockId::BlastFurnace:
+        case BlockId::Stonecutter:
+            return 3.5f;
+        case BlockId::CartographyTable:
+        case BlockId::FletchingTable:
+        case BlockId::Loom:
+        case BlockId::Barrel:
+        case BlockId::Lectern:
+        case BlockId::Cauldron:
+        case BlockId::Campfire:
+        case BlockId::SoulCampfire:
+            return 2.5f;
+        case BlockId::ChiseledBookshelf:
+            return 1.5f;
+        case BlockId::SculkShrieker:
+        case BlockId::SculkSensor:
+            return 3.0f;
+        case BlockId::BrownMushroomBlock:
+        case BlockId::RedMushroomBlock:
+        case BlockId::MushroomStem:
+        case BlockId::SculkVein:
+        case BlockId::MossCarpet:
+            return 0.2f;
+        case BlockId::PowderSnow:
+        case BlockId::SuspiciousSand:
+        case BlockId::SuspiciousGravel:
+        case BlockId::RedstoneLamp:
+        case BlockId::RedstoneLampLit:
+            return 0.3f;
+        default:
+            return 1.0f;
+        }
+    }
+    // The sixth run. Named rather than left to the rock default below.
+    if (block >= kFirstExtraBlock6 && block <= kLastExtraBlock6) {
+        switch (block) {
+        case BlockId::EndPortalFrame:
+            return 3600.0f;
+        case BlockId::DragonEgg:
+            return 9.0f;
+        case BlockId::Beacon:
+        case BlockId::Conduit:
+            return 3.0f;
+        case BlockId::MonsterSpawner:
+            return 5.0f;
+        case BlockId::TintedGlass:
+            return 0.3f;
+        default:
+            return 1.0f;
+        }
+    }
+    // The sixth run. Named rather than left to the rock default at the bottom.
+    if (block >= kFirstExtraBlock6 && block <= kLastExtraBlock6) {
+        switch (block) {
+        case BlockId::EndPortalFrame:
+            return 3600.0f;
+        case BlockId::DragonEgg:
+            return 9.0f;
+        case BlockId::Beacon:
+        case BlockId::Conduit:
+            return 3.0f;
+        case BlockId::MonsterSpawner:
+            return 5.0f;
+        case BlockId::TintedGlass:
+            return 0.3f;
+        default:
+            return 1.0f;
+        }
     }
     // The second table run. Almost all of it is rock at 6; the exceptions are
     // named and the rest falls through, which is what stops this needing an
@@ -178,7 +330,13 @@ float blastResistance(BlockId block) {
         default:
             break;
         }
-        return isConcretePowder(block) ? 0.5f : 6.0f;
+        if (isConcretePowder(block)) {
+            return 0.5f;
+        }
+        // **Falls through to the family rules at the bottom rather than
+        // answering 6.0 here.** A second copy of the rock default is a second
+        // place for a leaf block or a stripped log to be quietly declared
+        // blast-proof, which is exactly what happened to six of them.
     }
     switch (block) {
     case BlockId::Air:
@@ -253,6 +411,31 @@ float blastResistance(BlockId block) {
         return 3.0f;
     default:
         break;
+    }
+    // **Everything above is a named answer; everything below this line used to
+    // be rock.** Only the second table run was range-handled, so all of run one
+    // and all of run three fell through to 6.0 - sixteen stained glass blocks
+    // blast-proof against the reference's 0.3, every flower in run one at 6.0
+    // against 0, an end rod and two torches at 6.0 against 0. That is the same
+    // shape as `harvestTier`'s wood-tier default, which left two hundred blocks
+    // dropping nothing: **a `default:` that returns a real value hides every
+    // entry nobody wrote.**
+    //
+    // So the fall-through now asks the block what it is rather than assuming.
+    // Each rule is the reference's own figure for that family. The cross and
+    // flat shapes are answered further up, before the per-run catch-alls.
+    if (isPane(block) || isGlassBlock(block)) {
+        return 0.3f;
+    }
+    if (isLeafBlock(block)) {
+        return 0.2f;
+    }
+    if (isWoolBlock(block)) {
+        return 0.8f;
+    }
+    if (isFlammable(block)) {
+        // The woods, which is what is left once the leaves and wool are gone.
+        return 2.0f;
     }
     // Stone, cobblestone and everything cut from them - slabs and stairs
     // inherit their material's resistance, and the march ignores shape anyway.

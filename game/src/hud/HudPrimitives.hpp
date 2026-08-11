@@ -23,7 +23,7 @@ constexpr float kHudLayer = -1.0f;
 /// it has to follow the image. It lives here rather than in each screen because
 /// the sheet grows whenever a panel is added, and a stale copy silently skews
 /// every sprite that reads from it.
-constexpr glm::vec2 kSheetSize{185.0f, 1355.0f};
+constexpr glm::vec2 kSheetSize{185.0f, 1687.0f};
 
 /// Layer value selecting the font atlas.
 constexpr float kFontLayer = -2.0f;

@@ -5,6 +5,7 @@
 #include "world/Explosion.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
+#include "world/Village.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
@@ -129,6 +130,21 @@ constexpr float kZombieSkin = 1152.0f;
 constexpr float kSkeletonSkin = 1216.0f;
 constexpr float kCaveSpiderSkin = 1248.0f;
 constexpr float kVillagerSkin = 1280.0f;
+
+/// Which row a villager's outfit sits on.
+///
+/// Profession 0 keeps the plain skin the sheet has always carried, and the
+/// fourteen trades are composited copies of it further up. **That is what makes
+/// taking a job visible**: an unemployed villager and a librarian differ by one
+/// number here and by nothing else in the rig.
+float villagerSkinRow(std::uint8_t profession) {
+    return profession == 0
+               ? kVillagerSkin
+               : static_cast<float>(kVillagerProfessionSkinRow + (profession - 1) * 64);
+}
+
+/// The golem's own hundred-and-twenty-eight rows.
+constexpr float kIronGolemSkin = static_cast<float>(kIronGolemSkinRow);
 constexpr float kHuskSkin = 1344.0f;
 constexpr float kSilverfishSkin = 1408.0f;
 constexpr float kBlackboneSkin = 1440.0f;
@@ -364,9 +380,9 @@ constexpr float kDeflateRate = 1.0f;
 /// is the reference's own doubling and takes point-blank damage from 27.5 to
 /// well past anything on the roster.
 constexpr float kChargedPowerScale = 2.0f;
-/// How many Brambles arrive already charged. A stand-in: the reference makes
-/// them with lightning and we have no weather until M27, so without this the
-/// whole thing would be unreachable outside the debug key.
+/// How many Brambles arrive already charged. **A second source, not the only
+/// one**: a lightning strike charges one, which is where the reference gets
+/// them from and what M27 built. This keeps a few in the world between storms.
 constexpr float kChargedChance = 0.05f;
 /// The shove a blow carries. Enough to break your footing, not enough to throw
 /// you somewhere you cannot recognise.
@@ -803,7 +819,7 @@ constexpr CreatureSpecies kSpecies[] = {
      .modelScale = 0.92f, .health = 20, .walkSpeed = 0.9f, .runSpeed = 1.6f, .senseRange = 8.0f,
      .maxBlockLight = 15, .weight = 0.5f, .avoids = tagMask(CreatureTag::Undead),
      .avoidRange = 8.0f, .avoidsWater = true, .alertRange = kHerdAlertRange,
-     .panicSpeedScale = 1.0f},
+     .panicSpeedScale = 1.0f, .keepsHouse = true},
     // The zombie's rig verbatim - the two reference skins have byte-identical
     // alpha - and the one thing that makes it a different animal is that it
     // does **not** burn off at dawn. So the desert is the one region where
@@ -1120,6 +1136,25 @@ constexpr CreatureSpecies kSpecies[] = {
      .maxBlockLight = 15, .weight = 0.6f, .groupSize = 3, .stepHeight = 0.0f, .jumpHeight = 0.0f,
      .floats = false, .sinks = false, .flies = true, .maxLoaded = 12, .angerSeconds = 25.0f,
      .alertRange = 20.0f},
+
+    // The village's guard. Neutral, never spawns on its own, and every number
+    // here is Bedrock's except the two speeds — **those are authored natively**,
+    // because our roster runs at about a third of the reference's and porting
+    // its `movement 0.25` into a metres-per-second field is the wrong-unit trap.
+    // 0.25 sits beside the zombie's 0.23, which is 1.0/2.2 here.
+    //
+    // `sinks`, `amphibious` and `breathesWater` together are the drowned's own
+    // combination: it walks the bottom rather than swimming, and it does not
+    // drown. There is no anger timer because Bedrock's golem has no
+    // `minecraft:angry` component at all — `angerSeconds` is set long, like the
+    // silverfish's, to mean "never forgets".
+    {.name = "Iron Golem", .halfWidth = 0.70f, .height = 2.90f, .gaitRate = 2.60f,
+     .gaitSwing = 0.66f, .modelScale = 1.00f, .health = 100, .walkSpeed = 1.0f, .runSpeed = 1.9f,
+     .senseRange = 24.0f, .attackDamage = 7, .maxBlockLight = 15, .weight = 0.0f,
+     .burnsInDay = false, .hunts = tagMask(CreatureTag::Monster), .stepHeight = 1.0f,
+     .jumpHeight = 0.0f, .floats = false, .amphibious = true, .breathesWater = true,
+     .avoidsWater = true, .angerSeconds = 600.0f, .swingsArms = true, .attackDamageMax = 21,
+     .knockbackScale = 3.15f, .knockbackLiftScale = 3.71f},
 };
 
 static_assert(std::size(kSpecies) == static_cast<std::size_t>(CreatureKind::Count),
@@ -1402,6 +1437,23 @@ struct BehaviourContext {
     /// target, but **only while acquiring** - see `nearestTargetContinue`.
     bool playerSneaking;
 
+    /// What hour of the day it is, and therefore what a villager should be
+    /// doing. **The phase sits above the behaviour table rather than inside
+    /// it**: in the reference it is a `minecraft:scheduler` component that
+    /// swaps whole component groups, which has no equivalent here, so it is
+    /// computed once per tick beside the other per-tick world facts and each
+    /// row's `canStart` reads it.
+    VillagerPhase phase;
+
+    /// The whole population, for the one question that genuinely needs it:
+    /// whether a bed or a job block already belongs to somebody.
+    ///
+    /// **Derived, never stored.** A `cell -> creature` map on `Creatures` would
+    /// be a second copy of a fact the creatures already hold, would have to be
+    /// saved, and would need repairing every time a bed was broken - which is
+    /// exactly the argument the double chest's pairing already settled.
+    const std::vector<Creature>& population;
+
     /// Bearing to the nearest thing this species runs from, and whether there
     /// is one at all. Measured once per tick alongside everything else, and
     /// only for a species that actually fears something.
@@ -1580,6 +1632,14 @@ bool walkTo(const BehaviourContext& ctx, const glm::vec3& goal) {
 /// them apart - `attackDamage` already does.
 bool hurtByTargetStart(const BehaviourContext& ctx) {
     if (ctx.self.provokedTimer <= 0.0f || ctx.species.attackDamage <= 0) {
+        return false;
+    }
+    // **A golem you built yourself never turns on you, and there is no timer on
+    // that.** Bedrock gives a player-made golem its own `hurt_by_target` row
+    // with the player filtered out — it carries no `minecraft:angry` component
+    // at all, so this is structural rather than an anger duration set to zero.
+    // `threatId == 0` means the player did it.
+    if (ctx.self.playerBuilt && ctx.self.threatId == 0) {
         return false;
     }
     // A predator that is passive toward people still fights whatever bit it.
@@ -1900,16 +1960,28 @@ void meleeAttackTick(const BehaviourContext& ctx) {
     self.attackTimer = kAttackInterval;
     self.swingTimer = kAttackSwingSeconds;
 
-    const glm::vec3 push = -out * kKnockbackSpeed + glm::vec3{0.0f, kKnockbackLift, 0.0f};
+    // A blow is a range where a species states one, and exactly `attackDamage`
+    // where it does not. **Defaulting the top of the range to zero is what
+    // leaves every existing row provably untouched** rather than requiring
+    // fifty-seven of them to restate a number they already carry.
+    int damage = ctx.species.attackDamage;
+    if (ctx.species.attackDamageMax > damage) {
+        damage += static_cast<int>(nextRandom(ctx.random) *
+                                   static_cast<float>(ctx.species.attackDamageMax - damage + 1));
+        damage = std::min(damage, ctx.species.attackDamageMax);
+    }
+
+    const glm::vec3 push = -out * (kKnockbackSpeed * ctx.species.knockbackScale) +
+                           glm::vec3{0.0f, kKnockbackLift * ctx.species.knockbackLiftScale, 0.0f};
     if (onCreature) {
         // Reported rather than applied: the population is being walked right
         // now, and writing into a neighbour mid-walk leaves half of it reading
         // this tick and half the last one.
-        ctx.hits.push_back({ctx.foe->id, self.id, ctx.species.attackDamage, push});
+        ctx.hits.push_back({ctx.foe->id, self.id, damage, push});
         return;
     }
 
-    ctx.attack.damage += ctx.species.attackDamage;
+    ctx.attack.damage += damage;
     // Only the hardest blow moves you. Summing them lets a pack launch the
     // player clear across the world in one frame, which is what emptied the map
     // on the first night the hostiles worked.
@@ -2326,6 +2398,240 @@ void eatBlockTick(const BehaviourContext& ctx) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The villager's day
+// ---------------------------------------------------------------------------
+
+/// Bedrock's `dweller` scan: sixteen blocks out, four up and down.
+constexpr int kPoiReach = 16;
+constexpr int kPoiHeight = 4;
+/// `update_interval_base` 60 ticks, `variant` 40, so three to five seconds.
+constexpr float kPoiScanMin = 3.0f;
+constexpr float kPoiScanSpan = 2.0f;
+/// `behavior.work`: 250 ticks standing at the block, 200 ticks of cooldown.
+constexpr float kWorkSeconds = 12.5f;
+constexpr float kWorkCooldown = 10.0f;
+/// How close counts as arriving at a claimed cell.
+constexpr float kClaimArrival = 1.8f;
+
+/// The scheduler's `max_delay_secs`, as a fraction of a day.
+///
+/// Bedrock staggers every schedule change by 0 to 10 seconds per villager,
+/// which is one line and is the whole of why a village does not change shift in
+/// lockstep. Ten seconds against our default ten-minute day is this fraction;
+/// it is deliberately not read from the day-length setting, because it is a
+/// scatter rather than a duration and a longer day should scatter no wider.
+constexpr float kSchedulePhaseStagger = 0.017f;
+
+glm::vec3 cellCentre(const glm::ivec3& cell) {
+    return {static_cast<float>(cell.x) + 0.5f, static_cast<float>(cell.y),
+            static_cast<float>(cell.z) + 0.5f};
+}
+
+/// Whether somebody else already owns this cell. Linear over a population that
+/// is measured in tens, and it is the *only* record of a claim — see the note
+/// on `BehaviourContext::population`.
+bool alreadyClaimed(const BehaviourContext& ctx, const glm::ivec3& cell) {
+    for (const Creature& other : ctx.population) {
+        if (other.id == ctx.self.id || other.health <= 0) {
+            continue;
+        }
+        if (other.bedCell == cell || other.jobCell == cell) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Claiming a bed, a job site and a bell.
+///
+/// **A producer, exactly like the targeting rows**: it claims no controller, so
+/// it always runs and never argues with whatever the villager is doing. Taking
+/// a job *is* gaining a profession — there is no separate application step,
+/// which is the reference's own arrangement and the reason a freshly generated
+/// village has no professionals in it at all.
+bool claimPoiStart(const BehaviourContext& ctx) {
+    if (!ctx.species.keepsHouse) {
+        return false;
+    }
+    const Creature& self = ctx.self;
+    // Once everything is claimed there is nothing to scan for, and the scan is
+    // ten thousand block reads.
+    return self.bedCell.y < 0 || self.meetCell.y < 0 ||
+           (self.jobCell.y < 0 && self.profession == 0);
+}
+
+void claimPoiTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    self.poiTimer -= ctx.deltaSeconds;
+    if (self.poiTimer > 0.0f) {
+        return;
+    }
+    self.poiTimer = kPoiScanMin + nextRandom(ctx.random) * kPoiScanSpan;
+
+    const int cx = static_cast<int>(std::floor(self.position.x));
+    const int cy = static_cast<int>(std::floor(self.position.y));
+    const int cz = static_cast<int>(std::floor(self.position.z));
+
+    glm::ivec3 bestBed{0, -1, 0};
+    glm::ivec3 bestJob{0, -1, 0};
+    glm::ivec3 bestBell{0, -1, 0};
+    int bedDistance = 0;
+    int jobDistance = 0;
+    int bellDistance = 0;
+
+    for (int dy = -kPoiHeight; dy <= kPoiHeight; ++dy) {
+        for (int dz = -kPoiReach; dz <= kPoiReach; ++dz) {
+            for (int dx = -kPoiReach; dx <= kPoiReach; ++dx) {
+                const glm::ivec3 cell{cx + dx, cy + dy, cz + dz};
+                const BlockId block = ctx.world.blockAt(cell.x, cell.y, cell.z);
+                const int reach = dx * dx + dy * dy + dz * dz;
+
+                // **A bed is two blocks and only the head end is claimable**,
+                // so two villagers cannot end up owning the same bed through
+                // its two halves.
+                if (self.bedCell.y < 0 && isBed(block) && bedIsHead(block) &&
+                    (bestBed.y < 0 || reach < bedDistance) && !alreadyClaimed(ctx, cell)) {
+                    bestBed = cell;
+                    bedDistance = reach;
+                    continue;
+                }
+                if (self.jobCell.y < 0 && self.profession == 0 &&
+                    professionForJobSite(block) != 0 &&
+                    (bestJob.y < 0 || reach < jobDistance) && !alreadyClaimed(ctx, cell)) {
+                    bestJob = cell;
+                    jobDistance = reach;
+                    continue;
+                }
+                if (self.meetCell.y < 0 && block == BlockId::Bell &&
+                    (bestBell.y < 0 || reach < bellDistance)) {
+                    bestBell = cell;
+                    bellDistance = reach;
+                }
+            }
+        }
+    }
+
+    if (bestBed.y >= 0) {
+        self.bedCell = bestBed;
+    }
+    if (bestBell.y >= 0) {
+        self.meetCell = bestBell;
+    }
+    // **The bed comes first, and that gate is Bedrock's own.** A villager with
+    // nowhere to sleep will not take a job, which is what stops a lone lectern
+    // in a field turning a passing villager into a librarian.
+    if (bestJob.y >= 0 && self.bedCell.y >= 0 && self.profession == 0) {
+        self.jobCell = bestJob;
+        self.profession = professionForJobSite(
+            ctx.world.blockAt(bestJob.x, bestJob.y, bestJob.z));
+    }
+
+    // A claim that no longer answers is dropped, which is the whole of "break
+    // the block and the villager loses its trade". Nothing has to be repaired
+    // because nothing else records it.
+    if (self.bedCell.y >= 0 &&
+        !isBed(ctx.world.blockAt(self.bedCell.x, self.bedCell.y, self.bedCell.z))) {
+        self.bedCell = {0, -1, 0};
+    }
+    if (self.jobCell.y >= 0 &&
+        professionForJobSite(ctx.world.blockAt(self.jobCell.x, self.jobCell.y, self.jobCell.z)) ==
+            0) {
+        self.jobCell = {0, -1, 0};
+        self.profession = 0;
+    }
+}
+
+/// Going home, and staying there.
+///
+/// Sits at priority 3 **above** `Avoid`, which is not an accident: the reference
+/// gives `sleep` priority 3 and `avoid_mob_type` priority 4, so a sleeping
+/// villager does not bolt from a zombie standing over it. That is real,
+/// observable reference behaviour and the ordering is what produces it.
+bool sleepStart(const BehaviourContext& ctx) {
+    return ctx.species.keepsHouse && ctx.self.bedCell.y >= 0 &&
+           (ctx.phase == VillagerPhase::Sleep || ctx.phase == VillagerPhase::Home);
+}
+
+void sleepTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    const glm::vec3 goal = cellCentre(self.bedCell);
+    if (flatDistance(self.position, goal) <= kClaimArrival) {
+        // Arrived. **Said outright**, because `walking` is sticky and the trap
+        // has already been paid for by a swelling Bramble and a charging zombie.
+        self.walking = false;
+        self.route.clear();
+        self.targetHeadPitch = 0.0f;
+        return;
+    }
+    if (!walkTo(ctx, goal)) {
+        self.walking = false;
+        self.route.clear();
+    }
+}
+
+/// Standing at the job block for twelve and a half seconds, then a ten-second
+/// cooldown. There is nothing to restock yet, so the standing *is* the feature:
+/// a librarian at its lectern all morning is what makes a profession legible.
+bool workStart(const BehaviourContext& ctx) {
+    return ctx.species.keepsHouse && ctx.phase == VillagerPhase::Work &&
+           ctx.self.jobCell.y >= 0 && ctx.self.workTimer <= 0.0f;
+}
+
+bool workContinue(const BehaviourContext& ctx) {
+    return ctx.species.keepsHouse && ctx.phase == VillagerPhase::Work && ctx.self.jobCell.y >= 0;
+}
+
+void workTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    const glm::vec3 goal = cellCentre(self.jobCell);
+    if (flatDistance(self.position, goal) > kClaimArrival) {
+        if (!walkTo(ctx, goal)) {
+            self.walking = false;
+            self.route.clear();
+        }
+        return;
+    }
+
+    self.walking = false;
+    self.route.clear();
+    self.targetHeadYaw = yawTo(self, goal);
+    self.targetHeadPitch = 0.4f;
+
+    if (self.workTimer <= 0.0f) {
+        self.workTimer = kWorkSeconds;
+    }
+    self.workTimer -= ctx.deltaSeconds;
+    if (self.workTimer <= 0.0f) {
+        // Negative through the cooldown, so `canStart` reads false until it
+        // climbs back to zero. One field rather than two.
+        self.workTimer = -kWorkCooldown;
+    }
+}
+
+/// The two hours of the afternoon a village spends round its bell.
+bool mingleStart(const BehaviourContext& ctx) {
+    return ctx.species.keepsHouse && ctx.phase == VillagerPhase::Gather &&
+           ctx.self.meetCell.y >= 0;
+}
+
+void mingleTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    const glm::vec3 goal = cellCentre(self.meetCell);
+    // Three blocks rather than the bell itself, or a dozen villagers try to
+    // stand in the same cell and shove each other across the square.
+    if (flatDistance(self.position, goal) <= 3.5f) {
+        self.walking = false;
+        self.route.clear();
+        self.targetHeadYaw = yawTo(self, goal);
+        return;
+    }
+    if (!walkTo(ctx, goal)) {
+        self.walking = false;
+        self.route.clear();
+    }
+}
+
 /// The table. One list shared by every species: the differences between animals
 /// are already in `kSpecies`, and the predicates read them, so a per-species
 /// list would be a second place for a species to disagree with itself.
@@ -2346,6 +2652,14 @@ constexpr Behaviour kBehaviours[] = {
     // Claims nothing, like the targeting rows: a pufferfish inflates while it
     // goes on swimming, and neither behaviour needs to know about the other.
     {"Puff", 2, 0, puffStart, puffTick},
+    // Also a producer claiming nothing. Taking a job *is* gaining a trade, so
+    // this is where every profession in the world comes from.
+    {"ClaimPoi", 2, 0, claimPoiStart, claimPoiTick},
+    // **Above `Avoid` on purpose, and it ties with it.** The reference gives
+    // `sleep` priority 3 and `avoid_mob_type` priority 4, so a villager in bed
+    // does not flee the zombie at the window. Within a tie the array order
+    // decides, so this row must stay above the next one.
+    {"Sleep", 3, ControlMove | ControlLook, sleepStart, sleepTick},
     {"Avoid", 3, ControlMove | ControlLook, avoidStart, avoidTick, avoidContinue},
     // Ties with `MeleeAttack` and must stay above it: an archer keeps its
     // distance where a biter closes, and both want the same two controllers.
@@ -2361,11 +2675,17 @@ constexpr Behaviour kBehaviours[] = {
     // a walker never cruises.
     {"SwimWander", 5, ControlMove, swimWanderStart, swimWanderTick},
     {"FlyWander", 5, ControlMove, flyWanderStart, flyWanderTick},
+    // **Priority 5, not the reference's 7.** Bedrock puts `work` and `mingle`
+    // at 7 and `random_stroll` at 11; ours strolls at 6, so the two schedule
+    // rows have to sit above it or a villager would amble through its own
+    // working day. It is the *order* that is being ported, not the number.
+    {"Work", 5, ControlMove | ControlLook, workStart, workTick, workContinue},
+    {"Mingle", 5, ControlMove | ControlLook, mingleStart, mingleTick},
     {"Wander", 6, ControlMove, wanderStart, wanderTick},
     {"LookAtPlayer", 7, ControlLook, lookAtPlayerStart, lookAtPlayerTick, lookAtPlayerContinue},
 };
 
-static_assert(std::size(kBehaviours) <= 16, "runningBehaviours is a 16-bit mask");
+static_assert(std::size(kBehaviours) <= 32, "runningBehaviours is a 32-bit mask");
 
 constexpr bool behavioursSorted() {
     for (std::size_t i = 1; i < std::size(kBehaviours); ++i) {
@@ -2386,7 +2706,7 @@ static_assert(behavioursSorted(), "kBehaviours must be ordered by priority, lowe
 /// "decide what to attack" and "attack it" from competing.
 void runBehaviours(const BehaviourContext& ctx) {
     std::uint8_t claimed = 0;
-    std::uint16_t running = 0;
+    std::uint32_t running = 0;
 
     for (std::size_t i = 0; i < std::size(kBehaviours); ++i) {
         const Behaviour& behaviour = kBehaviours[i];
@@ -2394,7 +2714,7 @@ void runBehaviours(const BehaviourContext& ctx) {
             continue;
         }
 
-        const auto bit = static_cast<std::uint16_t>(1u << i);
+        const auto bit = static_cast<std::uint32_t>(1u << i);
         const bool wasRunning = (ctx.self.runningBehaviours & bit) != 0;
         const bool allowed = (wasRunning && behaviour.canContinue != nullptr)
                                  ? behaviour.canContinue(ctx)
@@ -2425,17 +2745,25 @@ std::uint32_t creatureTags(CreatureKind kind) {
     // that lumped the two together would buy a divergence rather than save a
     // line.
     switch (kind) {
+    // The rotting humanoids are also what a golem hunts, which is why the two
+    // masks are combined rather than the list being written out twice. **Both
+    // users of this function test a bit rather than the whole word**, so adding
+    // a tag to a species cannot change an existing answer.
     case CreatureKind::Zombie:
     case CreatureKind::Husk:
     case CreatureKind::Drowned:
     case CreatureKind::ZombieVillager:
     case CreatureKind::ZombiePrincepin:
+        return CreatureTag::Undead | CreatureTag::Monster;
+    // The two undead mounts are undead and are not monsters: neither hunts, so
+    // a golem has nothing to answer them for.
     case CreatureKind::ZombieHorse:
         return tagMask(CreatureTag::Undead);
     case CreatureKind::Skeleton:
     case CreatureKind::Stray:
     case CreatureKind::Bogged:
     case CreatureKind::Blackbone:
+        return CreatureTag::Skeletal | CreatureTag::Monster;
     case CreatureKind::SkeletonHorse:
         return tagMask(CreatureTag::Skeletal);
     case CreatureKind::Cat:
@@ -2461,6 +2789,19 @@ std::uint32_t creatureTags(CreatureKind kind) {
     case CreatureKind::Villager:
     case CreatureKind::WanderingTrader:
         return tagMask(CreatureTag::Trader);
+    // What an iron golem hunts. **The Bramble is deliberately absent**: the
+    // reference excludes creepers from every one of the golem's four targeting
+    // rows, and an absent tag says that once where a negative filter would say
+    // it four times. The slimes are absent for the same reason the reference
+    // leaves them out of `monster` - they are hostile without being people.
+    case CreatureKind::Spider:
+    case CreatureKind::CaveSpider:
+    case CreatureKind::Silverfish:
+    case CreatureKind::Voidmite:
+    case CreatureKind::Witch:
+    case CreatureKind::Princepin:
+    case CreatureKind::PrincepinBrute:
+        return tagMask(CreatureTag::Monster);
     default:
         return 0;
     }
@@ -2745,8 +3086,8 @@ bool Creatures::canSpawnAt(const World& world, const CreatureSpecies& species, i
 }
 
 void Creatures::think(const World& world, Creature& creature, const glm::vec3& playerFeet,
-                      float deltaSeconds, bool night, bool playerSneaking, CreatureAttack& attack,
-                      std::vector<CreatureExplosion>& blasts) {
+                      float deltaSeconds, bool night, bool playerSneaking, float timeOfDay,
+                      CreatureAttack& attack, std::vector<CreatureExplosion>& blasts) {
     const CreatureSpecies& species = speciesInfo(creature.kind);
 
     creature.hurtTimer = std::max(0.0f, creature.hurtTimer - deltaSeconds);
@@ -2937,6 +3278,14 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                                    huntsHere,
                                    seesPlayer,
                                    playerSneaking,
+                                   // The scheduler's 0-10 s stagger, added to
+                                   // the clock rather than to a countdown, so a
+                                   // village changes shift raggedly instead of
+                                   // in lockstep. One day is `kDaySeconds`
+                                   // long, so the offset is a fraction of it.
+                                   villagerPhaseAt(std::fmod(
+                                       timeOfDay + creature.phaseDelay + 1.0f, 1.0f)),
+                                   m_creatures,
                                    feared,
                                    fearedNear,
                                    yawFromFeared,
@@ -3499,7 +3848,7 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
 }
 
 CreatureAttack Creatures::update(const World& world, const glm::vec3& playerFeet, float deltaSeconds,
-                                 bool night, bool playerSneaking,
+                                 bool night, bool playerSneaking, float timeOfDay,
                                  std::vector<CreatureExplosion>& blasts) {
     CreatureAttack attack;
     // Refilled once a frame, then spent by whichever creatures ask to search.
@@ -3536,7 +3885,8 @@ CreatureAttack Creatures::update(const World& world, const glm::vec3& playerFeet
             step(world, creature, deltaSeconds);
             continue;
         }
-        think(world, creature, playerFeet, deltaSeconds, night, playerSneaking, attack, blasts);
+        think(world, creature, playerFeet, deltaSeconds, night, playerSneaking, timeOfDay, attack,
+              blasts);
         step(world, creature, deltaSeconds);
     }
     applyHits();
@@ -3675,23 +4025,40 @@ void Creatures::add(Creature creature) {
 }
 
 void Creatures::place(CreatureKind kind, const glm::vec3& feet, float yaw, bool charged,
-                      float puff) {
+                      float puff, bool playerBuilt) {
     Creature creature;
     creature.kind = kind;
     creature.health = speciesInfo(kind).health;
     creature.charged = charged;
+    creature.playerBuilt = playerBuilt;
     creature.puff = puff;
     creature.variant = rollVariant(kind);
     creature.position = feet;
     creature.yaw = yaw;
     creature.targetYaw = yaw;
     creature.headYaw = yaw;
+    creature.phaseDelay = random01() * kSchedulePhaseStagger;
+    pickWanderGoal(creature, m_random);
+    add(creature);
+}
+
+void Creatures::placeVillager(const glm::vec3& feet, float yaw, bool baby, bool nitwit) {
+    Creature creature;
+    creature.kind = CreatureKind::Villager;
+    creature.health = speciesInfo(CreatureKind::Villager).health;
+    creature.position = feet;
+    creature.yaw = yaw;
+    creature.targetYaw = yaw;
+    creature.headYaw = yaw;
+    creature.scale = baby ? kBabyScale : 1.0f;
+    creature.profession = nitwit ? kNitwit : 0;
+    creature.phaseDelay = random01() * kSchedulePhaseStagger;
     pickWanderGoal(creature, m_random);
     add(creature);
 }
 
 void Creatures::restore(CreatureKind kind, const glm::vec3& feet, float yaw, int health, float scale,
-                        bool charged) {
+                        bool charged, bool playerBuilt, std::uint8_t profession) {
     Creature creature;
     creature.kind = kind;
     creature.health = health;
@@ -3702,6 +4069,9 @@ void Creatures::restore(CreatureKind kind, const glm::vec3& feet, float yaw, int
     creature.headYaw = yaw;
     creature.scale = scale;
     creature.charged = charged;
+    creature.playerBuilt = playerBuilt;
+    creature.profession = profession;
+    creature.phaseDelay = random01() * kSchedulePhaseStagger;
     pickWanderGoal(creature, m_random);
     add(creature);
 }
@@ -3736,6 +4106,36 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
                 continue;
             }
             m_populated.insert(key);
+
+            // A generated village comes with its own people. They are placed
+            // here rather than by the generator for the reason everything else
+            // about the population is: only the main thread owns this list, and
+            // a chunk is built on a worker. The layout is a pure function of
+            // the seed, so the same column always produces the same villagers
+            // however you approach it — the same guarantee the herd below has.
+            {
+                const village::Nearby villages = village::plansNear(world.seed(), cx, cz);
+                village::Resident residents[village::kMaxResidents];
+                const int born = village::residentsIn(villages, cx, cz, residents,
+                                                      village::kMaxResidents);
+                for (int i = 0; i < born; ++i) {
+                    const village::Resident& who = residents[i];
+                    placeVillager({static_cast<float>(who.x) + 0.5f, static_cast<float>(who.y),
+                                   static_cast<float>(who.z) + 0.5f},
+                                  hashUnit(chunkHash(world.seed(), who.x, who.z)) * kTwoPi,
+                                  who.baby, who.nitwit);
+                }
+
+                village::Resident guards[2];
+                const int guarding = village::guardsIn(villages, cx, cz, guards, 2);
+                for (int i = 0; i < guarding; ++i) {
+                    const village::Resident& where = guards[i];
+                    place(CreatureKind::IronGolem,
+                          {static_cast<float>(where.x) + 0.5f, static_cast<float>(where.y),
+                           static_cast<float>(where.z) + 0.5f},
+                          0.0f);
+                }
+            }
 
             // Most chunks get nothing at all, which is what keeps a herd worth
             // finding. One hash answers that before any biome work is done.
@@ -3888,6 +4288,12 @@ LootRule lootFor(CreatureKind kind) {
     case CreatureKind::Turtle:
         return {ItemId::Scute, 1, 1};
 
+    // The village guard. Three to five ingots always, and nought to two poppies
+    // — the reference's own two pools, and the only mob whose drop is worth
+    // more than it cost to build.
+    case CreatureKind::IronGolem:
+        return {ItemId::IronIngot, 3, 5, itemForBlock(BlockId::Poppy), 0, 2};
+
     // The hostiles.
     case CreatureKind::Spider:
     case CreatureKind::CaveSpider:
@@ -3982,6 +4388,23 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
                 };
                 leave(loot.item, loot.min, loot.max);
                 leave(loot.extra, loot.extraMin, loot.extraMax);
+                // Chainmail has no recipe in the reference either - it is
+                // armour worn by the undead and taken off them. **This is its
+                // only source**, so without it four catalogue entries would be
+                // unreachable rather than merely rare.
+                if (creature.kind == CreatureKind::Zombie ||
+                    creature.kind == CreatureKind::Skeleton ||
+                    creature.kind == CreatureKind::Husk ||
+                    creature.kind == CreatureKind::Stray) {
+                    if (random01() < 0.04f) {
+                        const int piece = static_cast<int>(random01() * 4.0f);
+                        m_loot.push_back({creature.position,
+                                          static_cast<ItemId>(
+                                              static_cast<int>(ItemId::ChainmailHelmet) +
+                                              std::min(piece, 3)),
+                                          1});
+                    }
+                }
             }
             // Only a kill splits it. Retiring at distance or burning off must
             // not, or walking away from a large slime quietly breeds a swarm
@@ -4333,7 +4756,8 @@ int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float
     return caught;
 }
 
-engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& translucent) const {
+engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& translucent,
+                                      const DrawRange& range) const {
     engine::MeshData mesh;
 
     // Where the next quad goes and how see-through it is. Everything defaults
@@ -4343,6 +4767,9 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
     float quadAlpha = 1.0f;
 
     for (const Creature& creature : m_creatures) {
+        if (!range.contains(creature.position)) {
+            continue;
+        }
         const CreatureSpecies& species = speciesInfo(creature.kind);
 
         // Where the body is *drawn*, which trails the collision box up a step
@@ -6012,12 +6439,68 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             };
 
             if (creature.kind == CreatureKind::Villager) {
-                villagerRig(kVillagerSkin, false);
+                villagerRig(villagerSkinRow(creature.profession), false);
                 continue;
             }
 
             if (creature.kind == CreatureKind::ZombieVillager) {
                 villagerRig(kZombieVillagerSkin, true);
+                continue;
+            }
+
+            if (creature.kind == CreatureKind::IronGolem) {
+                // Its own rig, and it had to be: it shares nothing with the
+                // biped helper. Eight bones at eight distinct net origins, on a
+                // 128x128 sheet of its own — the largest single allocation the
+                // creature sheet has.
+                //
+                // Every number is `iron_golem.geo.json` verbatim, converted the
+                // usual way: Bedrock's origin is a cube's minimum corner with Y
+                // up from the feet and forward at -Z, so a centre is
+                // `origin + size/2` and `alongForward` is that centre's Z
+                // negated.
+                beginHead(0.125f, 1.9375f);
+                uprightBox(place(0.21875f, 2.375f, 0.0f), 8.0f, 10.0f, 8.0f,
+                           0.0f, 0.0f, kIronGolemSkin, 0.006f);
+                // The nose is a 2x4x2 block standing proud of the face, and it
+                // is the whole of the golem's expression.
+                uprightBox(place(0.53125f, 2.125f, 0.0f), 2.0f, 4.0f, 2.0f,
+                           24.0f, 0.0f, kIronGolemSkin, 0.0f);
+                endHead();
+
+                uprightBox(place(0.03125f, 1.6875f, 0.0f), 18.0f, 12.0f, 11.0f,
+                           0.0f, 40.0f, kIronGolemSkin, 0.0f);
+                // **The waist bridges a real gap.** The legs stop at 16 texels
+                // and the chest starts at 21, so leaving this out puts a
+                // five-texel hole straight through the middle of the animal.
+                // The reference inflates it by half a texel, which is exactly
+                // what closes the join at both ends.
+                uprightBox(place(0.0f, 1.15625f, 0.0f), 9.0f, 5.0f, 6.0f,
+                           0.0f, 70.0f, kIronGolemSkin, 0.5f * kTexel);
+
+                // The two thirty-texel arms. **Named divergence:** the
+                // reference hangs both from the body's own centreline at
+                // (0, 31), so the fists sweep from ankle height up past the
+                // head. `legBox` derives a joint from the top of the box it is
+                // given, which puts the hinge at the shoulder instead — the
+                // rest pose is identical and the arc of a blow is smaller.
+                //
+                // Both arms swing **together and in the same sense**, which is
+                // the golem's signature: `animation.iron_golem.attack` gives
+                // them one expression with no sign flip, so it is a two-handed
+                // overhead heave rather than a punch. The walk keeps them in
+                // opposition, at a third of the legs' amplitude, because the
+                // reference's `move` animation does.
+                const float golemHeave = humanoidRaise * 1.6f;
+                legBox(place(0.0f, 1.15625f, -0.6875f), 4.0f, 30.0f, 6.0f,
+                       60.0f, 21.0f, kIronGolemSkin, 0.0f, -swing * 0.34f - golemHeave);
+                legBox(place(0.0f, 1.15625f, 0.6875f), 4.0f, 30.0f, 6.0f,
+                       60.0f, 58.0f, kIronGolemSkin, 0.0f, swing * 0.34f - golemHeave);
+
+                legBox(place(0.03125f, 0.5f, -0.28125f), 6.0f, 16.0f, 5.0f,
+                       37.0f, 0.0f, kIronGolemSkin, 0.0f, swing);
+                legBox(place(0.03125f, 0.5f, 0.28125f), 6.0f, 16.0f, 5.0f,
+                       60.0f, 0.0f, kIronGolemSkin, 0.0f, -swing);
                 continue;
             }
 

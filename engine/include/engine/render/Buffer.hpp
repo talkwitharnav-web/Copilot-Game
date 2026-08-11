@@ -12,8 +12,10 @@ class VulkanContext;
 /// neither, so they are kept in one object that releases both. Copy and move are
 /// deleted: two objects owning one allocation is how double-frees happen.
 ///
-/// One allocation per buffer is fine at this scale. Once there are many small
-/// buffers this should move to a sub-allocator (see TIMELINE.md, VMA at M4+).
+/// The memory is a **slice of a shared block**, not an allocation of its own -
+/// see `GpuMemory.hpp`. Vulkan caps the number of live allocations at a spec
+/// floor of 4096, and a buffer each reached three thousand of them at render
+/// distance 12.
 class Buffer {
 public:
     Buffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFlags usage,
@@ -28,11 +30,13 @@ public:
     /// Copies `bytes` of `data` in at `offset`. Only valid on host-visible memory.
     void writeFromHost(const void* data, VkDeviceSize bytes, VkDeviceSize offset = 0);
 
-    /// Maps the whole buffer and keeps it mapped until destruction.
+    /// A pointer to this buffer's own bytes, or null if the memory is not host
+    /// visible.
     ///
-    /// Staging memory is written constantly, and mapping is not free; a buffer
-    /// that exists to be written every frame should be mapped once. Only valid
-    /// on host-visible memory.
+    /// **The mapping belongs to the whole block and is made once when the block
+    /// is created**, because Vulkan forbids mapping one `VkDeviceMemory` twice
+    /// and a block is shared. That is also what this wanted anyway: staging
+    /// memory is written every frame and mapping is not free.
     void* persistentMap();
 
     VkBuffer handle() const { return m_buffer; }
@@ -42,7 +46,13 @@ private:
     const VulkanContext& m_context;
     VkDeviceSize m_size = 0;
     VkBuffer m_buffer = VK_NULL_HANDLE;
+    // Where this buffer's bytes live inside a shared block. Kept as plain
+    // fields rather than as a copy of `MemoryRange`, which is defined in a
+    // private header: a second definition of the same four values is exactly the
+    // shape of bug this project keeps paying for.
     VkDeviceMemory m_memory = VK_NULL_HANDLE;
+    VkDeviceSize m_memoryOffset = 0;
+    VkDeviceSize m_memorySize = 0;
     void* m_mapped = nullptr;
 };
 

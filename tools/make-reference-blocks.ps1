@@ -651,6 +651,316 @@ $sources = @(
     @{ Name = 'soul_torch.png';               Path = 'block\soul_torch' }
     @{ Name = 'redstone_torch.png';           Path = 'block\redstone_torch' }
     @{ Name = 'end_rod.png';                  Path = 'block\end_rod' }
+
+    # ---- The fourth table run: the farm. ----
+    @{ Name = 'farmland.png';                 Path = 'block\farmland' }
+    @{ Name = 'farmland_moist.png';           Path = 'block\farmland_moist' }
+    @{ Name = 'dirt_path_side.png';           Path = 'block\dirt_path_side' }
+    @{ Name = 'dirt_path_top.png';            Path = 'block\dirt_path_top' }
+    @{ Name = 'melon_stem.png';               Path = 'block\melon_stem' }
+    @{ Name = 'attached_melon_stem.png';      Path = 'block\attached_melon_stem' }
+    @{ Name = 'pumpkin_stem.png';             Path = 'block\pumpkin_stem' }
+    @{ Name = 'attached_pumpkin_stem.png';    Path = 'block\attached_pumpkin_stem' }
+    @{ Name = 'carved_pumpkin.png';           Path = 'block\carved_pumpkin' }
+    @{ Name = 'jack_o_lantern.png';           Path = 'block\jack_o_lantern' }
+    @{ Name = 'composter_top.png';            Path = 'block\composter_top' }
+    @{ Name = 'composter_side.png';           Path = 'block\composter_side' }
+    @{ Name = 'composter_ready.png';          Path = 'block\composter_ready' }
+)
+
+# The crops, one picture per growth stage. Written as loops rather than
+# thirty-odd rows because the reference's own names are already `<crop>_stageN`
+# - so the loop *is* the mapping, and there is no second list to drift from it.
+$sources += 0..7 | ForEach-Object {
+    @{ Name = ('wheat_stage{0}.png' -f $_); Path = ('block\wheat_stage{0}' -f $_) }
+}
+$sources += 0..3 | ForEach-Object {
+    @{ Name = ('carrots_stage{0}.png' -f $_); Path = ('block\carrots_stage{0}' -f $_) }
+}
+$sources += 0..3 | ForEach-Object {
+    @{ Name = ('potatoes_stage{0}.png' -f $_); Path = ('block\potatoes_stage{0}' -f $_) }
+}
+$sources += 0..3 | ForEach-Object {
+    @{ Name = ('beetroots_stage{0}.png' -f $_); Path = ('block\beetroots_stage{0}' -f $_) }
+}
+$sources += 0..2 | ForEach-Object {
+    @{ Name = ('nether_wart_stage{0}.png' -f $_); Path = ('block\nether_wart_stage{0}' -f $_) }
+}
+
+# ---- The fifth table run: mushroom blocks, coral, copper and decoratives. ----
+# The twenty bark blocks are absent on purpose: they point at log sides this
+# script already stages, so they need no row of their own.
+$sources += @(
+    @{ Name = 'brown_mushroom_block.png';     Path = 'block\brown_mushroom_block' }
+    @{ Name = 'red_mushroom_block.png';       Path = 'block\red_mushroom_block' }
+    @{ Name = 'mushroom_stem.png';            Path = 'block\mushroom_stem' }
+    @{ Name = 'copper_grate.png';             Path = 'block\copper_grate' }
+    @{ Name = 'exposed_copper_grate.png';     Path = 'block\exposed_copper_grate' }
+    @{ Name = 'weathered_copper_grate.png';   Path = 'block\weathered_copper_grate' }
+    @{ Name = 'oxidized_copper_grate.png';    Path = 'block\oxidized_copper_grate' }
+    @{ Name = 'copper_bulb.png';              Path = 'block\copper_bulb' }
+    @{ Name = 'copper_bulb_lit.png';          Path = 'block\copper_bulb_lit' }
+    @{ Name = 'exposed_copper_bulb.png';      Path = 'block\exposed_copper_bulb' }
+    @{ Name = 'exposed_copper_bulb_lit.png';  Path = 'block\exposed_copper_bulb_lit' }
+    @{ Name = 'weathered_copper_bulb.png';    Path = 'block\weathered_copper_bulb' }
+    @{ Name = 'weathered_copper_bulb_lit.png'; Path = 'block\weathered_copper_bulb_lit' }
+    @{ Name = 'oxidized_copper_bulb.png';     Path = 'block\oxidized_copper_bulb' }
+    @{ Name = 'oxidized_copper_bulb_lit.png'; Path = 'block\oxidized_copper_bulb_lit' }
+    @{ Name = 'crying_obsidian.png';          Path = 'block\crying_obsidian' }
+    @{ Name = 'powder_snow.png';              Path = 'block\powder_snow' }
+    @{ Name = 'suspicious_sand.png';          Path = 'block\suspicious_sand_0' }
+    @{ Name = 'suspicious_gravel.png';        Path = 'block\suspicious_gravel_0' }
+    @{ Name = 'azalea_leaves.png';            Path = 'block\azalea_leaves' }
+    @{ Name = 'flowering_azalea_leaves.png';  Path = 'block\flowering_azalea_leaves' }
+    @{ Name = 'redstone_lamp.png';            Path = 'block\redstone_lamp' }
+    @{ Name = 'redstone_lamp_on.png';         Path = 'block\redstone_lamp_on' }
+    @{ Name = 'lodestone_side.png';           Path = 'block\lodestone_side' }
+    @{ Name = 'lodestone_top.png';            Path = 'block\lodestone_top' }
+    @{ Name = 'enchanting_table_side.png';    Path = 'block\enchanting_table_side' }
+    @{ Name = 'enchanting_table_top.png';     Path = 'block\enchanting_table_top' }
+    @{ Name = 'chiseled_bookshelf_side.png';  Path = 'block\chiseled_bookshelf_empty' }
+    @{ Name = 'chiseled_bookshelf_top.png';   Path = 'block\chiseled_bookshelf_top' }
+    @{ Name = 'cartography_table_side.png';   Path = 'block\cartography_table_side1' }
+    @{ Name = 'cartography_table_top.png';    Path = 'block\cartography_table_top' }
+    @{ Name = 'fletching_table_side.png';     Path = 'block\fletching_table_side' }
+    @{ Name = 'fletching_table_top.png';      Path = 'block\fletching_table_top' }
+    @{ Name = 'barrel_side.png';              Path = 'block\barrel_side' }
+    @{ Name = 'barrel_top.png';               Path = 'block\barrel_top' }
+    @{ Name = 'blast_furnace_side.png';       Path = 'block\blast_furnace_side' }
+    @{ Name = 'blast_furnace_top.png';        Path = 'block\blast_furnace_top' }
+    @{ Name = 'blast_furnace_front.png';      Path = 'block\blast_furnace_front' }
+    @{ Name = 'blast_furnace_front_on.png';   Path = 'block\blast_furnace_front_on' }
+    @{ Name = 'loom_side.png';                Path = 'block\loom_side' }
+    @{ Name = 'loom_top.png';                 Path = 'block\loom_top' }
+    @{ Name = 'stonecutter_side.png';         Path = 'block\stonecutter_side' }
+    @{ Name = 'stonecutter_top.png';          Path = 'block\stonecutter_top' }
+    @{ Name = 'grindstone_side.png';          Path = 'block\grindstone_side' }
+    @{ Name = 'grindstone_round.png';         Path = 'block\grindstone_round' }
+    @{ Name = 'lectern_sides.png';            Path = 'block\lectern_sides' }
+    @{ Name = 'lectern_top.png';              Path = 'block\lectern_top' }
+    @{ Name = 'bell_side.png';                Path = 'block\bell_side' }
+    @{ Name = 'bell_top.png';                 Path = 'block\bell_top' }
+    @{ Name = 'cauldron_side.png';            Path = 'block\cauldron_side' }
+    @{ Name = 'cauldron_top.png';             Path = 'block\cauldron_top' }
+    @{ Name = 'hopper_outside.png';           Path = 'block\hopper_outside' }
+    @{ Name = 'hopper_top.png';               Path = 'block\hopper_top' }
+    @{ Name = 'shulker_box.png';              Path = 'block\shulker_box' }
+    @{ Name = 'white_shulker_box.png';        Path = 'block\white_shulker_box' }
+    @{ Name = 'orange_shulker_box.png';       Path = 'block\orange_shulker_box' }
+    @{ Name = 'magenta_shulker_box.png';      Path = 'block\magenta_shulker_box' }
+    @{ Name = 'light_blue_shulker_box.png';   Path = 'block\light_blue_shulker_box' }
+    @{ Name = 'yellow_shulker_box.png';       Path = 'block\yellow_shulker_box' }
+    @{ Name = 'lime_shulker_box.png';         Path = 'block\lime_shulker_box' }
+    @{ Name = 'pink_shulker_box.png';         Path = 'block\pink_shulker_box' }
+    @{ Name = 'gray_shulker_box.png';         Path = 'block\gray_shulker_box' }
+    @{ Name = 'light_gray_shulker_box.png';   Path = 'block\light_gray_shulker_box' }
+    @{ Name = 'cyan_shulker_box.png';         Path = 'block\cyan_shulker_box' }
+    @{ Name = 'purple_shulker_box.png';       Path = 'block\purple_shulker_box' }
+    @{ Name = 'blue_shulker_box.png';         Path = 'block\blue_shulker_box' }
+    @{ Name = 'brown_shulker_box.png';        Path = 'block\brown_shulker_box' }
+    @{ Name = 'green_shulker_box.png';        Path = 'block\green_shulker_box' }
+    @{ Name = 'red_shulker_box.png';          Path = 'block\red_shulker_box' }
+    @{ Name = 'black_shulker_box.png';        Path = 'block\black_shulker_box' }
+    @{ Name = 'brewing_stand_base.png';       Path = 'block\brewing_stand_base' }
+    @{ Name = 'brewing_stand.png';            Path = 'block\brewing_stand' }
+    @{ Name = 'anvil_base.png';               Path = 'block\anvil' }
+    @{ Name = 'anvil_top.png';                Path = 'block\anvil_top' }
+    @{ Name = 'chipped_anvil_top.png';        Path = 'block\chipped_anvil_top' }
+    @{ Name = 'damaged_anvil_top.png';        Path = 'block\damaged_anvil_top' }
+    @{ Name = 'scaffolding_side.png';         Path = 'block\scaffolding_side' }
+    @{ Name = 'scaffolding_top.png';          Path = 'block\scaffolding_top' }
+    @{ Name = 'flower_pot.png';               Path = 'block\flower_pot' }
+    @{ Name = 'sculk_vein.png';               Path = 'block\sculk_vein' }
+    @{ Name = 'sculk_sensor_side.png';        Path = 'block\sculk_sensor_side' }
+    @{ Name = 'sculk_sensor_top.png';         Path = 'block\sculk_sensor_top' }
+    @{ Name = 'sculk_shrieker_side.png';      Path = 'block\sculk_shrieker_side' }
+    @{ Name = 'sculk_shrieker_top.png';       Path = 'block\sculk_shrieker_top' }
+    @{ Name = 'small_amethyst_bud.png';       Path = 'block\small_amethyst_bud' }
+    @{ Name = 'medium_amethyst_bud.png';      Path = 'block\medium_amethyst_bud' }
+    @{ Name = 'large_amethyst_bud.png';       Path = 'block\large_amethyst_bud' }
+    @{ Name = 'big_dripleaf_top.png';         Path = 'block\big_dripleaf_top' }
+    @{ Name = 'small_dripleaf_top.png';       Path = 'block\small_dripleaf_top' }
+    @{ Name = 'cave_vines.png';               Path = 'block\cave_vines' }
+    @{ Name = 'cave_vines_lit.png';           Path = 'block\cave_vines_lit' }
+    @{ Name = 'chorus_plant.png';             Path = 'block\chorus_plant' }
+    @{ Name = 'chorus_flower.png';            Path = 'block\chorus_flower' }
+    @{ Name = 'sunflower_bottom.png';         Path = 'block\sunflower_bottom' }
+    @{ Name = 'sunflower_top.png';            Path = 'block\sunflower_top' }
+    @{ Name = 'lilac_bottom.png';             Path = 'block\lilac_bottom' }
+    @{ Name = 'lilac_top.png';                Path = 'block\lilac_top' }
+    @{ Name = 'rose_bush_bottom.png';         Path = 'block\rose_bush_bottom' }
+    @{ Name = 'rose_bush_top.png';            Path = 'block\rose_bush_top' }
+    @{ Name = 'peony_bottom.png';             Path = 'block\peony_bottom' }
+    @{ Name = 'peony_top.png';                Path = 'block\peony_top' }
+    @{ Name = 'wither_rose.png';              Path = 'block\wither_rose' }
+    @{ Name = 'campfire_log.png';             Path = 'block\campfire_log' }
+    @{ Name = 'campfire_log_lit.png';         Path = 'block\campfire_log_lit' }
+    @{ Name = 'soul_campfire_fire.png';       Path = 'block\soul_campfire_fire';  Frame = 0 }
+    @{ Name = 'respawn_anchor_side.png';      Path = 'block\respawn_anchor_side0' }
+    @{ Name = 'respawn_anchor_top.png';       Path = 'block\respawn_anchor_top' }
+)
+
+# The five corals, in the one order every coral family uses. Written as loops so
+# the order **is** the mapping and there is no second list to drift from it.
+$coralSpecies = @('tube', 'brain', 'bubble', 'fire', 'horn')
+foreach ($species in $coralSpecies) {
+    $sources += @{ Name = "dead_${species}_coral_block.png"; Path = "block\dead_${species}_coral_block" }
+}
+foreach ($species in $coralSpecies) {
+    $sources += @{ Name = "${species}_coral.png"; Path = "block\${species}_coral" }
+}
+foreach ($species in $coralSpecies) {
+    $sources += @{ Name = "dead_${species}_coral.png"; Path = "block\dead_${species}_coral" }
+}
+foreach ($species in $coralSpecies) {
+    $sources += @{ Name = "${species}_coral_fan.png"; Path = "block\${species}_coral_fan" }
+}
+foreach ($species in $coralSpecies) {
+    $sources += @{ Name = "dead_${species}_coral_fan.png"; Path = "block\dead_${species}_coral_fan" }
+}
+
+# The candles, plain then the sixteen dyes. **Staged from the *lit* art**,
+# because ours is always burning - a candle that can be out is four counts times
+# two states times seventeen colours, and this run can be widened later without
+# moving anything.
+$sources += @{ Name = 'candle.png'; Path = 'block\candle_lit' }
+$sources += @{ Name = 'candle_unlit.png'; Path = 'block\candle' }
+$candleColours = @('white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray',
+                   'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black')
+foreach ($colour in $candleColours) {
+    $sources += @{ Name = "${colour}_candle.png"; Path = "block\${colour}_candle_lit" }
+}
+foreach ($colour in $candleColours) {
+    $sources += @{ Name = "${colour}_candle_unlit.png"; Path = "block\${colour}_candle" }
+}
+$sources += @(
+    @{ Name = 'tinted_glass.png';             Path = 'block\tinted_glass' }
+    @{ Name = 'beacon.png';                   Path = 'block\beacon' }
+    @{ Name = 'conduit.png';                  Path = 'block\conduit' }
+    @{ Name = 'dragon_egg.png';               Path = 'block\dragon_egg' }
+    @{ Name = 'end_portal_frame_side.png';    Path = 'block\end_portal_frame_side' }
+    @{ Name = 'end_portal_frame_top.png';     Path = 'block\end_portal_frame_top' }
+    @{ Name = 'spawner.png';                  Path = 'block\spawner' }
+)
+
+# Doors and trapdoors, in the same order as `kDoorFamilies` and
+# `kTrapdoorFamilies` - the loop **is** the mapping, so there is no second list
+# to drift from it. Oak's files are unprefixed in the reference dump.
+$openingWoods = @('oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'cherry', 'mangrove',
+                  'crimson', 'warped', 'bamboo', 'iron')
+foreach ($wood in $openingWoods) {
+    $sources += @{ Name = "${wood}_door_bottom.png"; Path = "block\${wood}_door_bottom" }
+    $sources += @{ Name = "${wood}_door_top.png";    Path = "block\${wood}_door_top" }
+}
+foreach ($wood in $openingWoods) {
+    $trapdoorPath = if ($wood -eq 'oak') { 'block\oak_trapdoor' } else { "block\${wood}_trapdoor" }
+    $sources += @{ Name = "${wood}_trapdoor.png"; Path = $trapdoorPath }
+}
+
+# The sixteen beds, four faces each in the order `bedFamilyAt` reads them:
+# foot top, foot side, head top, head side.
+foreach ($colour in $candleColours) {
+    $sources += @{ Name = "${colour}_bed_foot_top.png";  Path = "block\${colour}_bed_foot_up" }
+    $sources += @{ Name = "${colour}_bed_foot_side.png"; Path = "block\${colour}_bed_foot_east" }
+    $sources += @{ Name = "${colour}_bed_head_top.png";  Path = "block\${colour}_bed_head_up" }
+    $sources += @{ Name = "${colour}_bed_head_side.png"; Path = "block\${colour}_bed_head_east" }
+}
+
+# ---- The appended items. ----
+# Leather armour ships as **two** images: a greyscale layer the game dyes, and
+# an undyed overlay carrying the buckles and trim. The dyeable layer alone has
+# real holes in it where the overlay is meant to show through, so staging it on
+# its own produced a set of rags with gaps punched in them.
+$leatherTint = @(167, 105, 67)
+$sources += @(
+    @{ Name = 'nether_wart.png';              Path = 'item\nether_wart' }
+    @{ Name = 'leather_helmet.png';           Path = 'item\leather_helmet';     Tint = $leatherTint;
+       Overlay = 'item\leather_helmet_overlay' }
+    @{ Name = 'leather_chestplate.png';       Path = 'item\leather_chestplate'; Tint = $leatherTint;
+       Overlay = 'item\leather_chestplate_overlay' }
+    @{ Name = 'leather_leggings.png';         Path = 'item\leather_leggings';   Tint = $leatherTint;
+       Overlay = 'item\leather_leggings_overlay' }
+    @{ Name = 'leather_boots.png';            Path = 'item\leather_boots';      Tint = $leatherTint;
+       Overlay = 'item\leather_boots_overlay' }
+    @{ Name = 'chainmail_helmet.png';         Path = 'item\chainmail_helmet' }
+    @{ Name = 'chainmail_chestplate.png';     Path = 'item\chainmail_chestplate' }
+    @{ Name = 'chainmail_leggings.png';       Path = 'item\chainmail_leggings' }
+    @{ Name = 'chainmail_boots.png';          Path = 'item\chainmail_boots' }
+    @{ Name = 'iron_helmet.png';              Path = 'item\iron_helmet' }
+    @{ Name = 'iron_chestplate.png';          Path = 'item\iron_chestplate' }
+    @{ Name = 'iron_leggings.png';            Path = 'item\iron_leggings' }
+    @{ Name = 'iron_boots.png';               Path = 'item\iron_boots' }
+    @{ Name = 'golden_helmet.png';            Path = 'item\golden_helmet' }
+    @{ Name = 'golden_chestplate.png';        Path = 'item\golden_chestplate' }
+    @{ Name = 'golden_leggings.png';          Path = 'item\golden_leggings' }
+    @{ Name = 'golden_boots.png';             Path = 'item\golden_boots' }
+    @{ Name = 'diamond_helmet.png';           Path = 'item\diamond_helmet' }
+    @{ Name = 'diamond_chestplate.png';       Path = 'item\diamond_chestplate' }
+    @{ Name = 'diamond_leggings.png';         Path = 'item\diamond_leggings' }
+    @{ Name = 'diamond_boots.png';            Path = 'item\diamond_boots' }
+    # Emberite is our name for the reference's dark alloy, so its art is that
+    # alloy's - the same arrangement as every other staged placeholder.
+    @{ Name = 'emberite_helmet.png';          Path = 'item\netherite_helmet' }
+    @{ Name = 'emberite_chestplate.png';      Path = 'item\netherite_chestplate' }
+    @{ Name = 'emberite_leggings.png';        Path = 'item\netherite_leggings' }
+    @{ Name = 'emberite_boots.png';           Path = 'item\netherite_boots' }
+    @{ Name = 'turtle_helmet.png';            Path = 'item\turtle_helmet' }
+    # The shield has no item sprite of its own - it is drawn from a 64x64 entity
+    # net - so the interface's own placeholder is what stands in for the icon.
+    @{ Name = 'shield.png';                   Path = 'gui\sprites\container\slot\shield' }
+    @{ Name = 'music_disc_13.png';            Path = 'item\music_disc_13' }
+    @{ Name = 'music_disc_cat.png';           Path = 'item\music_disc_cat' }
+    @{ Name = 'music_disc_blocks.png';        Path = 'item\music_disc_blocks' }
+    @{ Name = 'music_disc_chirp.png';         Path = 'item\music_disc_chirp' }
+    @{ Name = 'music_disc_far.png';           Path = 'item\music_disc_far' }
+    @{ Name = 'music_disc_mall.png';          Path = 'item\music_disc_mall' }
+    @{ Name = 'music_disc_drift.png';         Path = 'item\music_disc_mellohi' }
+    @{ Name = 'music_disc_ember.png';         Path = 'item\music_disc_stal' }
+    @{ Name = 'music_disc_vale.png';          Path = 'item\music_disc_strad' }
+    @{ Name = 'music_disc_hollow.png';        Path = 'item\music_disc_ward' }
+    @{ Name = 'music_disc_11.png';            Path = 'item\music_disc_11' }
+    @{ Name = 'music_disc_wait.png';          Path = 'item\music_disc_wait' }
+    @{ Name = 'music_disc_hoofbeat.png';      Path = 'item\music_disc_pigstep' }
+    @{ Name = 'music_disc_otherside.png';     Path = 'item\music_disc_otherside' }
+    @{ Name = 'music_disc_5.png';             Path = 'item\music_disc_5' }
+    @{ Name = 'saddle.png';                   Path = 'item\saddle' }
+    @{ Name = 'name_tag.png';                 Path = 'item\name_tag' }
+    @{ Name = 'lead.png';                     Path = 'item\lead' }
+    @{ Name = 'elytra.png';                   Path = 'item\elytra' }
+    @{ Name = 'totem_of_undying.png';         Path = 'item\totem_of_undying' }
+    @{ Name = 'spyglass.png';                 Path = 'item\spyglass' }
+    @{ Name = 'brush.png';                    Path = 'item\brush' }
+    @{ Name = 'trident.png';                  Path = 'item\trident' }
+    @{ Name = 'crossbow.png';                 Path = 'item\crossbow_standby' }
+    @{ Name = 'fishing_rod.png';              Path = 'item\fishing_rod' }
+    # Both dials ship as sixteen and sixty-four frame sets; frame 0 is the one
+    # that reads as a compass rather than a smear.
+    @{ Name = 'compass.png';                  Path = 'item\compass_00' }
+    @{ Name = 'clock.png';                    Path = 'item\clock_00' }
+    @{ Name = 'empty_map.png';                Path = 'item\map' }
+    @{ Name = 'filled_map.png';               Path = 'item\filled_map' }
+    @{ Name = 'recovery_compass.png';         Path = 'item\recovery_compass_00' }
+    @{ Name = 'firework_rocket.png';          Path = 'item\firework_rocket' }
+    @{ Name = 'writable_book.png';            Path = 'item\writable_book' }
+    @{ Name = 'written_book.png';             Path = 'item\written_book' }
+    @{ Name = 'mushroom_stew.png';            Path = 'item\mushroom_stew' }
+    @{ Name = 'beetroot_soup.png';            Path = 'item\beetroot_soup' }
+    @{ Name = 'rabbit_stew.png';              Path = 'item\rabbit_stew' }
+    @{ Name = 'suspicious_stew.png';          Path = 'item\suspicious_stew' }
+    # The enchanted apple has no sprite of its own; the reference draws the
+    # ordinary one with a glint over it, and we have no glint.
+    @{ Name = 'enchanted_golden_apple.png';   Path = 'item\golden_apple' }
+    @{ Name = 'poisonous_potato.png';         Path = 'item\poisonous_potato' }
+    @{ Name = 'golden_carrot.png';            Path = 'item\golden_carrot' }
+    @{ Name = 'glistering_melon_slice.png';   Path = 'item\glistering_melon_slice' }
+    @{ Name = 'powder_snow_bucket.png';       Path = 'item\powder_snow_bucket' }
+    @{ Name = 'cod_bucket.png';               Path = 'item\cod_bucket' }
+    @{ Name = 'salmon_bucket.png';            Path = 'item\salmon_bucket' }
+    @{ Name = 'tropical_fish_bucket.png';     Path = 'item\tropical_fish_bucket' }
+    @{ Name = 'pufferfish_bucket.png';        Path = 'item\pufferfish_bucket' }
+    @{ Name = 'axolotl_bucket.png';           Path = 'item\axolotl_bucket' }
+    @{ Name = 'iron_nugget.png';              Path = 'item\iron_nugget' }
+    @{ Name = 'gold_nugget.png';              Path = 'item\gold_nugget' }
 )
 
 # The water surface is a thirty-two frame strip and the game plays all of it, so
@@ -700,7 +1010,203 @@ $sources += @(
     @{ Name = 'moon_waxing_crescent.png';  Path = 'environment\celestial\moon\waxing_crescent';   Centre = $true }
     @{ Name = 'moon_first_quarter.png';    Path = 'environment\celestial\moon\first_quarter';     Centre = $true }
     @{ Name = 'moon_waxing_gibbous.png';   Path = 'environment\celestial\moon\waxing_gibbous';    Centre = $true }
+    # The stonecutter's saw blade, which is a plane standing out of the bench
+    # rather than one of its faces - so it needs its own layer.
+    @{ Name = 'stonecutter_saw.png';       Path = 'block\stonecutter_saw' }
+    # The end face of a bed's head, which is the pillow's own end and is white
+    # all the way across. It carries no colour in its name because the reference
+    # shares one image across all sixteen beds, and the side texture cannot
+    # stand in for it: that one is half pillow and half blanket, so the
+    # headboard came out half red.
+    @{ Name = 'bed_head_north.png';        Path = 'block\bed_head_north' }
+    # The compost inside a composter. `composter_top` is a rim with a
+    # transparent middle, which is the very rectangle the contents plate
+    # samples, so the tub had to have this one of its own.
+    @{ Name = 'composter_compost.png';     Path = 'block\composter_compost' }
 )
+
+# ---- Redstone. ----
+# Everything here is appended after every existing run, which is the rule for
+# adding layers: anything inserted in the middle slides every layer behind it.
+$sources += @(
+    @{ Name = 'redstone_torch_off.png';    Path = 'block\redstone_torch_off' }
+    @{ Name = 'lever.png';                 Path = 'block\lever' }
+    @{ Name = 'repeater.png';              Path = 'block\repeater' }
+    @{ Name = 'repeater_on.png';           Path = 'block\repeater_on' }
+    @{ Name = 'comparator.png';            Path = 'block\comparator' }
+    @{ Name = 'comparator_on.png';         Path = 'block\comparator_on' }
+    # The bench a repeater and a comparator stand on. Staged again under its own
+    # name so a model box can name it as a plain layer number rather than having
+    # to look up where smooth stone landed in the table run.
+    @{ Name = 'redstone_slab.png';         Path = 'block\smooth_stone' }
+    @{ Name = 'observer_front.png';        Path = 'block\observer_front' }
+    @{ Name = 'observer_back.png';         Path = 'block\observer_back' }
+    @{ Name = 'observer_back_on.png';      Path = 'block\observer_back_on' }
+    @{ Name = 'observer_side.png';         Path = 'block\observer_side' }
+    @{ Name = 'observer_top.png';          Path = 'block\observer_top' }
+    @{ Name = 'piston_top.png';            Path = 'block\piston_top' }
+    @{ Name = 'piston_top_sticky.png';     Path = 'block\piston_top_sticky' }
+    @{ Name = 'piston_side.png';           Path = 'block\piston_side' }
+    @{ Name = 'piston_bottom.png';         Path = 'block\piston_bottom' }
+    @{ Name = 'piston_inner.png';          Path = 'block\piston_inner' }
+    @{ Name = 'dispenser_front.png';          Path = 'block\dispenser_front' }
+    @{ Name = 'dispenser_front_vertical.png'; Path = 'block\dispenser_front_vertical' }
+    @{ Name = 'dropper_front.png';            Path = 'block\dropper_front' }
+    @{ Name = 'dropper_front_vertical.png';   Path = 'block\dropper_front_vertical' }
+    # A dispenser and a dropper wear a furnace's sides and top in the reference
+    # too. Staged again for the same reason the bench is: these are reached from
+    # a model box, not from a `TextureLayer` enumerator.
+    @{ Name = 'machine_side.png';          Path = 'block\furnace_side' }
+    @{ Name = 'machine_top.png';           Path = 'block\furnace_top' }
+    @{ Name = 'daylight_detector_side.png';         Path = 'block\daylight_detector_side' }
+    @{ Name = 'daylight_detector_top.png';          Path = 'block\daylight_detector_top' }
+    @{ Name = 'daylight_detector_inverted_top.png'; Path = 'block\daylight_detector_inverted_top' }
+    @{ Name = 'lightning_rod.png';         Path = 'block\lightning_rod' }
+    @{ Name = 'lightning_rod_on.png';      Path = 'block\lightning_rod_on' }
+    @{ Name = 'tripwire_hook.png';         Path = 'block\tripwire_hook' }
+    @{ Name = 'tripwire.png';              Path = 'block\tripwire' }
+    @{ Name = 'rail.png';                  Path = 'block\rail' }
+    @{ Name = 'rail_corner.png';           Path = 'block\rail_corner' }
+    @{ Name = 'powered_rail.png';          Path = 'block\powered_rail' }
+    @{ Name = 'powered_rail_on.png';       Path = 'block\powered_rail_on' }
+    @{ Name = 'detector_rail.png';         Path = 'block\detector_rail' }
+    @{ Name = 'detector_rail_on.png';      Path = 'block\detector_rail_on' }
+    @{ Name = 'activator_rail.png';        Path = 'block\activator_rail' }
+    @{ Name = 'activator_rail_on.png';     Path = 'block\activator_rail_on' }
+    @{ Name = 'redstone_lamp_on.png';      Path = 'block\redstone_lamp_on' }
+)
+
+# Redstone dust, sixteen times, one per signal strength.
+#
+# **The reference ships this art grey and multiplies a colour in at draw time**,
+# from `power/15`, so a copied-raw wire would be a white cross. We have no
+# per-block tint, so the sixteen colours are baked into sixteen layers and the
+# wire's own id picks one - which is the same trade the grass block already
+# makes, only sixteen times over.
+#
+# The formula is the reference's own: red climbs from 0.3 at rest to 1.0 at full
+# strength while green and blue stay at nothing until the signal is strong, which
+# is what makes a long run fade from orange-red to near-black rather than dimming
+# evenly.
+#
+# `line0` and `line1` are the two halves of a cross - one running each way - so
+# staging one over the other is what gives the unconnected shape the reference
+# itself draws when a wire has no neighbours.
+$sources += 0..15 | ForEach-Object {
+    $f = $_ / 15.0
+    $r = if ($_ -eq 0) { 0.3 } else { $f * 0.6 + 0.4 }
+    $g = [Math]::Max(0.0, [Math]::Min(1.0, $f * $f * 0.7 - 0.5))
+    $b = [Math]::Max(0.0, [Math]::Min(1.0, $f * $f * 0.6 - 0.7))
+    $tint = @([int]($r * 255), [int]($g * 255), [int]($b * 255))
+    @{ Name = ('redstone_dust_{0:d2}.png' -f $_); Path = 'block\redstone_dust_line0';
+       Tint = $tint; Overlay = 'block\redstone_dust_line1'; OverlayTint = $tint }
+}
+
+# ---- Brewing. ----
+# The five reagents that had no item yet. Magma cream, the phantom membrane and
+# the rabbit's foot were already staged with the equipment.
+$sources += @(
+    @{ Name = 'blaze_rod.png';             Path = 'item\blaze_rod' }
+    @{ Name = 'blaze_powder.png';          Path = 'item\blaze_powder' }
+    @{ Name = 'fermented_spider_eye.png';  Path = 'item\fermented_spider_eye' }
+    @{ Name = 'ghast_tear.png';            Path = 'item\ghast_tear' }
+    @{ Name = 'dragon_breath.png';         Path = 'item\dragon_breath' }
+)
+
+# Every potion, three ways.
+#
+# **The reference draws a potion as two layers**: `potion_overlay` is the liquid
+# and is tinted from the effect's own colour, and `potion` is the glass over the
+# top of it with a see-through belly. We have no per-item tint, so each of the
+# forty-one colours is composited once here - the same trade the redstone wire
+# makes, and the reason a potion of swiftness comes out blue without the game
+# knowing anything about it.
+#
+# **The colours are the effect colours from `Effects.hpp`**, and they are the
+# reference's own post-1.19.80 values. The four at the top carry no effect and
+# take the washed blue the reference gives water, mundane, thick and awkward.
+# Keep this list in `kPotions` order; the game indexes straight across.
+$potionTints = @(
+    0x385DC6, 0x385DC6, 0x385DC6, 0x385DC6,
+    0xC2FF66, 0xC2FF66,
+    0xF6F6F6, 0xF6F6F6,
+    0xFDFF84, 0xFDFF84, 0xFDFF84,
+    0xFF9900, 0xFF9900,
+    0x33EBFF, 0x33EBFF, 0x33EBFF,
+    0x8BAFE0, 0x8BAFE0, 0x8BAFE0,
+    0x98DAC0, 0x98DAC0,
+    0xF82423, 0xF82423,
+    0xA9656A, 0xA9656A,
+    0x87A363, 0x87A363, 0x87A363,
+    0xCD5CAB, 0xCD5CAB, 0xCD5CAB,
+    0xFFC700, 0xFFC700, 0xFFC700,
+    0x484D48, 0x484D48,
+    0x9146F0, 0x9146F0, 0x9146F0,
+    0xF3CFB9, 0xF3CFB9
+)
+if ($potionTints.Count -ne 41) {
+    throw "the potion tint list is $($potionTints.Count) long; kPotionTypes says 41"
+}
+
+$sources += 0..40 | ForEach-Object {
+    $c = $potionTints[$_]
+    $tint = @((($c -shr 16) -band 0xFF), (($c -shr 8) -band 0xFF), ($c -band 0xFF))
+    @{ Name = ('potion_{0:d2}.png' -f $_); Path = 'item\potion_overlay'; Tint = $tint;
+       Overlay = 'item\potion' }
+}
+$sources += 0..40 | ForEach-Object {
+    $c = $potionTints[$_]
+    $tint = @((($c -shr 16) -band 0xFF), (($c -shr 8) -band 0xFF), ($c -band 0xFF))
+    @{ Name = ('splash_potion_{0:d2}.png' -f $_); Path = 'item\potion_overlay'; Tint = $tint;
+       Overlay = 'item\splash_potion' }
+}
+# Tipped arrows start at the first potion that carries an effect - there is
+# nothing to tip an arrow with in a water bottle.
+$sources += 4..40 | ForEach-Object {
+    $c = $potionTints[$_]
+    $tint = @((($c -shr 16) -band 0xFF), (($c -shr 8) -band 0xFF), ($c -band 0xFF))
+    @{ Name = ('tipped_arrow_{0:d2}.png' -f $_); Path = 'item\tipped_arrow_base';
+       Overlay = 'item\tipped_arrow_head'; OverlayTint = $tint }
+}
+$sources += 0..40 | ForEach-Object {
+    $c = $potionTints[$_]
+    $tint = @((($c -shr 16) -band 0xFF), (($c -shr 8) -band 0xFF), ($c -band 0xFF))
+    @{ Name = ('lingering_potion_{0:d2}.png' -f $_); Path = 'item\potion_overlay'; Tint = $tint;
+       Overlay = 'item\lingering_potion' }
+}
+
+# ---- Collectibles. ----# Twenty-three sherds, one horn and twenty-two discs. The names here are the
+# reference's file names; what the game calls each one is its own business and
+# lives in Item.hpp.
+$sherds = @('angler', 'archer', 'arms_up', 'blade', 'brewer', 'burn', 'danger', 'explorer',
+            'flow', 'friend', 'guster', 'heart', 'heartbreak', 'howl', 'miner', 'mourner',
+            'plenty', 'prize', 'scrape', 'sheaf', 'shelter', 'skull', 'snort')
+$sources += $sherds | ForEach-Object {
+    @{ Name = ('sherd_{0}.png' -f $_); Path = ('item\{0}_pottery_sherd' -f $_) }
+}
+$sources += @( @{ Name = 'goat_horn.png'; Path = 'item\goat_horn' } )
+# **In the order Item.hpp lists them, not alphabetically.** The two runs are
+# matched index for index, so a different order here quietly hands every disc
+# the wrong picture.
+$discs = @('13', 'cat', 'blocks', 'chirp', 'far', 'mall', 'mellohi', 'stal', 'strad', 'ward',
+           '11', 'wait', 'otherside', 'pigstep', 'relic', '5', 'creator',
+           'creator_music_box', 'precipice', 'tears', 'lava_chicken', 'bounce')
+$sources += 0..($discs.Count - 1) | ForEach-Object {
+    @{ Name = ('music_disc_{0:d2}.png' -f $_); Path = ('item\music_disc_{0}' -f $discs[$_]) }
+}
+
+# ---- Firework stars. ----
+# **Two layers, like the potion**: the star is tinted by the dye and the overlay
+# is the sparkle drawn over it untinted. Sixteen composites here rather than a
+# per-item tint the renderer does not have.
+$dyeColours = @(0xF9FFFE, 0xF9801D, 0xC74EBD, 0x3AB3DA, 0xFED83D, 0x80C71F, 0xF38BAA, 0x474F52,
+                0x9D9D97, 0x169C9C, 0x8932B8, 0x3C44AA, 0x835432, 0x5E7C16, 0xB02E26, 0x1D1D21)
+$sources += 0..15 | ForEach-Object {
+    $c = $dyeColours[$_]
+    $tint = @((($c -shr 16) -band 0xFF), (($c -shr 8) -band 0xFF), ($c -band 0xFF))
+    @{ Name = ('firework_star_{0:d2}.png' -f $_); Path = 'item\firework_star'; Tint = $tint;
+       Overlay = 'item\firework_star_overlay' }
+}
 
 $size = 16
 
@@ -842,6 +1348,43 @@ if (Test-Path $chestNetPath) {
     }
     $chestNet.Dispose()
 
+    # The trapped chest is the same net with a red latch, so it reuses the very
+    # same crop rectangles - only the source file differs.
+    $trappedNetPath = Join-Path $textures "entity\chest\trapped.png"
+    if (Test-Path $trappedNetPath) {
+        $trappedNet = [System.Drawing.Bitmap]::FromFile($trappedNetPath)
+        $trappedFaces = @{
+            'trapped_chest_top.png'   = @{ Upper = @(28, 0, 14, 14); Lower = $null }
+            'trapped_chest_side.png'  = @{ Upper = @(0, 14, 14, 5);  Lower = @(0, 33, 14, 10) }
+            'trapped_chest_front.png' = @{ Upper = @(14, 14, 14, 5); Lower = @(14, 33, 14, 10)
+                                           Decal = @(1, 1, 2, 4);    DecalAt = @(7, 3) }
+        }
+        foreach ($name in $trappedFaces.Keys) {
+            $spec = $trappedFaces[$name]
+            $face = New-ChestFace -Net $trappedNet -Upper $spec.Upper -Lower $spec.Lower `
+                -Decal $spec.Decal -DecalAt $spec.DecalAt
+            $staged += @{ Name = $name; Image = $face }
+        }
+        $trappedNet.Dispose()
+    }
+
+    # The ender chest, from its own net with the very same crop rectangles.
+    $enderNetPath = Join-Path $textures "entity\chest\ender.png"
+    if (Test-Path $enderNetPath) {
+        $enderNet = [System.Drawing.Bitmap]::FromFile($enderNetPath)
+        $enderFaces = @{
+            'ender_chest_top.png'  = @{ Upper = @(28, 0, 14, 14); Lower = $null }
+            'ender_chest_side.png' = @{ Upper = @(0, 14, 14, 5);  Lower = @(0, 33, 14, 10) }
+        }
+        foreach ($name in $enderFaces.Keys) {
+            $spec = $enderFaces[$name]
+            $face = New-ChestFace -Net $enderNet -Upper $spec.Upper -Lower $spec.Lower `
+                -Decal $spec.Decal -DecalAt $spec.DecalAt
+            $staged += @{ Name = $name; Image = $face }
+        }
+        $enderNet.Dispose()
+    }
+
     # The two halves of a double chest. Both nets are 15 wide and 14 deep - one
     # texel wider than a single chest, because the pair overlaps at the seam -
     # with the lid at v0 and the base at v19, exactly as above.
@@ -970,14 +1513,19 @@ foreach ($entry in $sources) {
     }
 
     if ($entry.ContainsKey('Overlay')) {
-        # The grass block's green edge ships as a separate tintable layer over a
-        # plain dirt side. Two images in the reference, one in our texture array.
+        # Two images in the reference, one in our texture array. The grass
+        # block's green edge is a tintable layer over a plain dirt side; leather
+        # armour's buckles and trim are an *untinted* layer over the dyeable
+        # hide. So the tint is applied only where the entry asks for one - it
+        # used to be unconditional, which threw on any overlay without it.
         $overlayPath = Join-Path $textures "$($entry.Overlay).png"
         if (Test-Path $overlayPath) {
             $overlayLoaded = [System.Drawing.Bitmap]::FromFile($overlayPath)
             $overlay = Get-Frame -Source $overlayLoaded -Index 0 -Label $entry.Overlay
             $overlayLoaded.Dispose()
-            Set-Tint -Target $overlay -Tint $entry.OverlayTint
+            if ($entry.ContainsKey('OverlayTint')) {
+                Set-Tint -Target $overlay -Tint $entry.OverlayTint
+            }
             for ($y = 0; $y -lt $size; $y++) {
                 for ($x = 0; $x -lt $size; $x++) {
                     $over = $overlay.GetPixel($x, $y)

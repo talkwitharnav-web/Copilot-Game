@@ -1,5 +1,7 @@
 #include "item/Recipe.hpp"
 
+#include "item/Tool.hpp"
+
 #include "item/Inventory.hpp"
 
 #include <algorithm>
@@ -40,6 +42,18 @@ Recipe square4(ItemId input, ItemId result, int count) {
 
 Recipe square4(BlockId input, BlockId result, int count) {
     return square4(itemForBlock(input), itemForBlock(result), count);
+}
+
+/// Which slab family is cut from a given block, or -1 if none is. Scanned from
+/// the family table rather than written down, so a new slab material needs no
+/// edit here.
+constexpr int slabFamilyOf(BlockId parent) {
+    for (int family = 0; family < kSlabFamilyCount; ++family) {
+        if (kSlabFamilies[static_cast<std::size_t>(family)].parent == parent) {
+            return family;
+        }
+    }
+    return -1;
 }
 
 Recipe square9(ItemId input, ItemId result) {
@@ -307,6 +321,281 @@ const std::vector<Recipe>& recipes() {
             shapeless({itemForBlock(BlockId::EmberiteBlock)}, 1, ItemId::EmberiteIngot, 9),
         };
 
+        // Armour. **Generated from one shape table and one material table**,
+        // because four shapes times six materials written out is twenty-four
+        // chances to put a cell in the wrong place - and the shapes are shared
+        // exactly, which is the whole reason this is a loop.
+        //
+        // Chainmail is deliberately absent: the reference does not craft it
+        // either, and a made-up recipe would be worse than leaving it to loot.
+        // Emberite is absent for the same reason its tools are - it is a
+        // smithing upgrade, not a recipe.
+        {
+            struct ArmourMaterial {
+                ItemId unit;
+                ItemId firstPiece;
+            };
+            const std::array<ArmourMaterial, 4> kArmourMaterials{{
+                {ItemId::Leather, ItemId::LeatherHelmet},
+                {ItemId::IronIngot, ItemId::IronHelmet},
+                {ItemId::GoldIngot, ItemId::GoldenHelmet},
+                {ItemId::Diamond, ItemId::DiamondHelmet},
+            }};
+            for (const ArmourMaterial& material : kArmourMaterials) {
+                const ItemId u = material.unit;
+                const auto piece = [&](int slot) {
+                    return static_cast<ItemId>(static_cast<int>(material.firstPiece) + slot);
+                };
+                // Five across the top and sides.
+                all.push_back(shaped(3, 2, {u, u, u, u, kNone, u}, piece(0), 1));
+                all.push_back(
+                    shaped(3, 3, {u, kNone, u, u, u, u, u, u, u}, piece(1), 1));
+                all.push_back(
+                    shaped(3, 3, {u, u, u, u, kNone, u, u, kNone, u}, piece(2), 1));
+                all.push_back(shaped(3, 2, {u, kNone, u, u, kNone, u}, piece(3), 1));
+            }
+            // The one head that belongs to no set, from the shell an armoured
+            // reptile leaves behind.
+            all.push_back(shaped(3, 2,
+                                 {ItemId::Scute, ItemId::Scute, ItemId::Scute, ItemId::Scute, kNone,
+                                  ItemId::Scute},
+                                 ItemId::TurtleHelmet, 1));
+        }
+
+        // The farm's own blocks and the equipment that came with the batch.
+        all.push_back(shapeless({ItemId::Wheat, ItemId::Wheat, ItemId::Wheat, ItemId::Wheat,
+                                 ItemId::Wheat, ItemId::Wheat, ItemId::Wheat, ItemId::Wheat,
+                                 ItemId::Wheat},
+                                9, itemForBlock(BlockId::HayBlock), 1));
+        all.push_back(shapeless({itemForBlock(BlockId::HayBlock)}, 1, ItemId::Wheat, 9));
+        // A lit pumpkin is the carved one with a light put in it.
+        all.push_back(shapeless({itemForBlock(BlockId::CarvedPumpkinFirst), itemForBlock(BlockId::Torch)},
+                                2, itemForBlock(BlockId::JackOLanternFirst), 1));
+        // Both dials are four ingots in a diamond round one redstone. They had
+        // been written as the cauldron's U of seven, which cost three ingots
+        // too many and, because the compass is declared first, **shadowed the
+        // cauldron's own recipe so it could not be made at all**.
+        all.push_back(shaped(3, 3,
+                             {kNone, ItemId::IronIngot, kNone, ItemId::IronIngot, ItemId::Redstone,
+                              ItemId::IronIngot, kNone, ItemId::IronIngot, kNone},
+                             ItemId::Compass, 1));
+        all.push_back(shaped(3, 3,
+                             {kNone, ItemId::GoldIngot, kNone, ItemId::GoldIngot, ItemId::Redstone,
+                              ItemId::GoldIngot, kNone, ItemId::GoldIngot, kNone},
+                             ItemId::Clock, 1));
+        all.push_back(square9(ItemId::Paper, ItemId::EmptyMap));
+        all.push_back(shaped(3, 3,
+                             {kNone, kNone, ItemId::Stick, kNone, ItemId::Stick, ItemId::String,
+                              ItemId::Stick, kNone, ItemId::String},
+                             ItemId::FishingRod, 1));
+        all.push_back(shaped(3, 3,
+                             {ItemId::Stick, ItemId::IronIngot, ItemId::Stick, ItemId::String,
+                              ItemId::Stick, ItemId::String, kNone, ItemId::Stick, kNone},
+                             ItemId::Crossbow, 1));
+        all.push_back(shaped(1, 3,
+                             {ItemId::CopperIngot, ItemId::CopperIngot, ItemId::AmethystShard},
+                             ItemId::Spyglass, 1));
+        all.push_back(shaped(1, 3, {ItemId::Feather, ItemId::CopperIngot, ItemId::Stick},
+                             ItemId::Brush, 1));
+        all.push_back(shapeless({ItemId::Paper, ItemId::Gunpowder}, 2, ItemId::FireworkRocket, 3));
+        // A star is a dye burst into shape by gunpowder, and a rocket built on
+        // one carries that colour up with it. **The loop reads the dye run**,
+        // so a seventeenth dye would be a seventeenth star without an edit here.
+        for (int colour = 0; colour < kDyeColours; ++colour) {
+            const ItemId dye = static_cast<ItemId>(static_cast<int>(kFirstDye) + colour);
+            const ItemId star =
+                static_cast<ItemId>(static_cast<int>(ItemId::FireworkStarFirst) + colour);
+            all.push_back(shapeless({ItemId::Gunpowder, dye}, 2, star, 1));
+            all.push_back(shapeless({ItemId::Paper, ItemId::Gunpowder, star}, 3,
+                                    ItemId::FireworkRocket, 3));
+        }
+        all.push_back(shapeless({ItemId::Book, ItemId::Feather, ItemId::InkSac}, 3,
+                                ItemId::BookAndQuill, 1));
+        all.push_back(shapeless({ItemId::String, ItemId::String, ItemId::String, ItemId::String,
+                                 ItemId::Slimeball},
+                                5, ItemId::Lead, 2));
+        // The bowls. Every one of them is the reference's own, and all four
+        // reduce to "something in a bowl", which is why they share no shape.
+        all.push_back(shapeless({itemForBlock(BlockId::RedMushroom),
+                                 itemForBlock(BlockId::BrownMushroom), ItemId::Bowl},
+                                3, ItemId::MushroomStew, 1));
+        all.push_back(shapeless({ItemId::Beetroot, ItemId::Beetroot, ItemId::Beetroot,
+                                 ItemId::Beetroot, ItemId::Beetroot, ItemId::Beetroot, ItemId::Bowl},
+                                7, ItemId::BeetrootSoup, 1));
+        all.push_back(shapeless({ItemId::CookedRabbit, ItemId::Carrot, ItemId::BakedPotato,
+                                 itemForBlock(BlockId::BrownMushroom), ItemId::Bowl},
+                                5, ItemId::RabbitStew, 1));
+        all.push_back(shapeless({itemForBlock(BlockId::RedMushroom),
+                                 itemForBlock(BlockId::BrownMushroom), ItemId::Bowl,
+                                 itemForBlock(BlockId::Dandelion)},
+                                4, ItemId::SuspiciousStew, 1));
+        // The gilded pair are built from nuggets, above, which is the
+        // reference's own recipe and a ninth of the cost.
+
+
+        // Candles and waxed copper, both generated because both are one shape
+        // repeated over a colour or an oxidation stage - and both runs are
+        // declared in the same order as the family they index, so the offset
+        // *is* the mapping.
+        all.push_back(shapeless({ItemId::String, ItemId::Honeycomb}, 2,
+                                itemForBlock(BlockId::Candle), 1));
+        // **Named divergence: redstone where the reference wants a tripwire
+        // hook.** There is no hook in the game, and adding one to serve a single
+        // recipe would be a whole block for no other purpose.
+        all.push_back(shapeless({itemForBlock(BlockId::Chest), ItemId::Redstone}, 2,
+                                itemForBlock(BlockId::TrappedChest), 1));
+
+        // **Named divergence: obsidian where the reference wants two shulker
+        // shells.** The shell drops from a mob that belongs to a dimension we
+        // do not have, and adding an item with no other source or use would be
+        // worse than substituting the toughest block we do have.
+        all.push_back(shapeless({itemForBlock(BlockId::Chest), itemForBlock(BlockId::Obsidian),
+                                 itemForBlock(BlockId::Obsidian)},
+                                3, itemForBlock(BlockId::Stowbox), 1));
+        // And the recolour, which *is* the reference's own: any stowbox plus a
+        // dye becomes that colour, so one box can be redyed for ever.
+        for (int colour = 0; colour < kDyeColours; ++colour) {
+            const ItemId became = tinted(BlockId::StowboxDyedFirst, colour);
+            all.push_back(shapeless({itemForBlock(BlockId::Stowbox), dye(colour)}, 2, became, 1));
+            for (int from = 0; from < kDyeColours; ++from) {
+                if (from != colour) {
+                    all.push_back(shapeless(
+                        {tinted(BlockId::StowboxDyedFirst, from), dye(colour)}, 2, became, 1));
+                }
+            }
+        }
+
+        for (int colour = 0; colour < kDyeColours; ++colour) {
+            all.push_back(shapeless({itemForBlock(BlockId::Candle), dye(colour)}, 2,
+                                    itemForBlock(static_cast<BlockId>(
+                                        static_cast<int>(BlockId::WhiteCandle) + colour)),
+                                    1));
+        }
+        // Wax is a promise the block will not oxidise any further, so every
+        // waxed form is its own unwaxed form plus a honeycomb.
+        for (int stage = 0; stage < 9; ++stage) {
+            static constexpr BlockId kUnwaxed[9] = {
+                BlockId::CopperBlock,        BlockId::ExposedCopper,
+                BlockId::WeatheredCopper,    BlockId::OxidizedCopper,
+                BlockId::CutCopper,          BlockId::ExposedCutCopper,
+                BlockId::WeatheredCutCopper, BlockId::OxidizedCutCopper,
+                BlockId::ChiseledCopper,
+            };
+            all.push_back(shapeless({itemForBlock(kUnwaxed[stage]), ItemId::Honeycomb}, 2,
+                                    itemForBlock(static_cast<BlockId>(
+                                        static_cast<int>(BlockId::WaxedCopperBlock) + stage)),
+                                    1));
+        }
+        // Bark blocks: four logs in a square, the reference's own recipe, and
+        // the one thing that made a *wood* block worth having.
+        {
+            static constexpr BlockId kBarkLogs[10] = {
+                BlockId::Log,         BlockId::SpruceLog,   BlockId::BirchLog,
+                BlockId::JungleLog,   BlockId::AcaciaLog,   BlockId::DarkOakLog,
+                BlockId::CherryLog,   BlockId::MangroveLog, BlockId::CrimsonStem,
+                BlockId::WarpedStem,
+            };
+            static constexpr BlockId kStrippedLogs[10] = {
+                BlockId::StrippedOakLog,      BlockId::StrippedSpruceLog,
+                BlockId::StrippedBirchLog,    BlockId::StrippedJungleLog,
+                BlockId::StrippedAcaciaLog,   BlockId::StrippedDarkOakLog,
+                BlockId::StrippedCherryLog,   BlockId::StrippedMangroveLog,
+                BlockId::StrippedCrimsonStem, BlockId::StrippedWarpedStem,
+            };
+            for (int wood = 0; wood < 10; ++wood) {
+                all.push_back(square4(
+                    kBarkLogs[wood],
+                    static_cast<BlockId>(static_cast<int>(BlockId::OakWood) + wood), 3));
+                all.push_back(square4(
+                    kStrippedLogs[wood],
+                    static_cast<BlockId>(static_cast<int>(BlockId::StrippedOakWood) + wood), 3));
+            }
+        }
+
+        // Nuggets, both ways. Nine to an ingot, which is what makes the two
+        // gilded foods below cost a ninth of what whole ingots would.
+        all.push_back(shapeless({ItemId::IronIngot}, 1, ItemId::IronNugget, 9));
+        all.push_back(shapeless({ItemId::GoldIngot}, 1, ItemId::GoldNugget, 9));
+        all.push_back(square9(ItemId::IronNugget, ItemId::IronIngot));
+        all.push_back(square9(ItemId::GoldNugget, ItemId::GoldIngot));
+        all.push_back(ring8Around(ItemId::GoldNugget, ItemId::Carrot, ItemId::GoldenCarrot, 1));
+        all.push_back(
+            ring8Around(ItemId::GoldNugget, ItemId::MelonSlice, ItemId::GlisteringMelonSlice, 1));
+
+        // Doors and trapdoors. **The family index is the wood index** - both
+        // tables are declared in `kWoods` order for exactly this, so there is
+        // no per-wood lookup to get wrong.
+        for (std::size_t wood = 0; wood < kWoods.size(); ++wood) {
+            const ItemId planks = itemForBlock(kWoods[wood].planks);
+            const int family = static_cast<int>(wood);
+            all.push_back(shaped(2, 3, {planks, planks, planks, planks, planks, planks},
+                                 itemForBlock(doorCanonical(family)), 3));
+            all.push_back(shaped(3, 2, {planks, planks, planks, planks, planks, planks},
+                                 itemForBlock(trapdoorCanonical(family)), 2));
+        }
+        // Iron is the last family of each, and is metal rather than a wood.
+        all.push_back(shaped(2, 3,
+                             {ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot,
+                              ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot},
+                             itemForBlock(doorCanonical(kDoorFamilyCount - 1)), 3));
+        all.push_back(shaped(2, 2,
+                             {ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot,
+                              ItemId::IronIngot},
+                             itemForBlock(trapdoorCanonical(kTrapdoorFamilyCount - 1)), 1));
+
+        // Seven iron in a U, and eight obsidian round a pearl. Both the
+        // reference's own shapes; the centre is our pearl because no eye item
+        // exists here.
+        all.push_back(shaped(3, 3,
+                             {ItemId::IronIngot, kNone, ItemId::IronIngot, ItemId::IronIngot, kNone,
+                              ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot,
+                              ItemId::IronIngot},
+                             itemForBlock(BlockId::Cauldron), 1));
+        {
+            const ItemId obsidian = itemForBlock(BlockId::Obsidian);
+            all.push_back(shaped(3, 3,
+                                 {obsidian, obsidian, obsidian, obsidian, ItemId::VoidPearl,
+                                  obsidian, obsidian, obsidian, obsidian},
+                                 itemForBlock(BlockId::EnderChest), 1));
+        }
+
+        // Five iron round a chest, in a V. The reference's own.
+        all.push_back(shaped(3, 3,
+                             {ItemId::IronIngot, kNone, ItemId::IronIngot, ItemId::IronIngot,
+                              itemForBlock(BlockId::Chest), ItemId::IronIngot, kNone,
+                              ItemId::IronIngot, kNone},
+                             itemForBlock(BlockId::Hopper), 1));
+
+        // The three village workstations that had no source at all. All the
+        // reference's own shapes.
+        all.push_back(shaped(3, 2, {kNone, ItemId::IronIngot, kNone,
+                                    itemForBlock(BlockId::Stone), itemForBlock(BlockId::Stone),
+                                    itemForBlock(BlockId::Stone)},
+                             itemForBlock(BlockId::Stonecutter), 1));
+        {
+            const ItemId slab = itemForBlock(BlockId::StoneSlab);
+            all.push_back(shaped(3, 3,
+                                 {slab, slab, slab, kNone, itemForBlock(BlockId::Bookshelf), kNone,
+                                  kNone, slab, kNone},
+                                 itemForBlock(BlockId::Lectern), 1));
+        }
+        all.push_back(shaped(2, 3,
+                             {itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks),
+                              ItemId::Stick, ItemId::Stick, itemForBlock(BlockId::Planks),
+                              itemForBlock(BlockId::Planks)},
+                             itemForBlock(BlockId::Grindstone), 1));
+
+        // Beds: three wool over three planks, the reference's own recipe. The
+        // wool colour picks the bed colour, so this is one loop rather than a
+        // sixteen-row table.
+        for (int colour = 0; colour < kBedColours; ++colour) {
+            const ItemId wool = itemForBlock(
+                static_cast<BlockId>(static_cast<int>(BlockId::WhiteWool) + colour));
+            const ItemId planks = itemForBlock(BlockId::Planks);
+            all.push_back(shaped(3, 2, {wool, wool, wool, planks, planks, planks},
+                                 itemForBlock(bedCanonical(colour)), 1));
+        }
+
         // Everything a wood is the same shape in. Generated rather than written
         // out, because eleven woods times nine recipes is ninety-nine chances
         // to paste the wrong plank into one cell.
@@ -329,6 +618,26 @@ const std::vector<Recipe>& recipes() {
             all.push_back(shaped(2, 3,
                                  {ItemId::IronIngot, ItemId::IronIngot, planks, planks, planks, planks},
                                  itemForBlock(BlockId::SmithingTable), 1));
+            // Six planks round a hollow: the reference's own composter, and a
+            // shield with an iron boss.
+            all.push_back(shaped(3, 3,
+                                 {planks, kNone, planks, planks, kNone, planks, planks, planks,
+                                  planks},
+                                 itemForBlock(BlockId::Composter0), 1));
+            all.push_back(shaped(3, 3,
+                                 {planks, ItemId::IronIngot, planks, planks, planks, planks, kNone,
+                                  planks, kNone},
+                                 ItemId::Shield, 1));
+            // A barrel is planks walled round two slabs of the same wood, which
+            // is the reference's own recipe and the one that makes a slab worth
+            // cutting for something other than stairs.
+            if (const int slabFamily = slabFamilyOf(wood.planks); slabFamily >= 0) {
+                const ItemId slab = itemForBlock(slabAt(slabFamily, false));
+                all.push_back(shaped(3, 3,
+                                     {planks, slab, planks, planks, kNone, planks, planks, slab,
+                                      planks},
+                                     itemForBlock(BlockId::Barrel), 1));
+            }
             // A furnace wrapped in logs. Logs rather than planks because the
             // fuel is the point of the block.
             const ItemId log = itemForBlock(wood.log);
@@ -336,6 +645,132 @@ const std::vector<Recipe>& recipes() {
                                  {kNone, log, kNone, log, itemForBlock(BlockId::Furnace), log, kNone,
                                   log, kNone},
                                  itemForBlock(BlockId::Smoker), 1));
+        }
+
+        // ---- Redstone. ----
+        // The per-wood half first, generated the same way every other plank
+        // recipe here is. `kButtonFamilies` and `kPressurePlateFamilies` are
+        // declared in `kWoods` order on purpose, so this indexes straight
+        // across them - the same arrangement the doors and trapdoors use, and
+        // the same reason: a different order there would quietly give a cherry
+        // button a mangrove recipe.
+        for (std::size_t w = 0; w < kWoods.size(); ++w) {
+            const ItemId planks = itemForBlock(kWoods[w].planks);
+            const int family = static_cast<int>(w);
+            all.push_back(shapeless({planks}, 1, itemForBlock(buttonAt(family, 0, false)), 1));
+            all.push_back(shaped(2, 1, {planks, planks},
+                                 itemForBlock(pressurePlateAt(family, 0)), 1));
+            // A piston: three planks over a stone shell round an iron core.
+            all.push_back(shaped(3, 3,
+                                 {planks, planks, planks, itemForBlock(BlockId::Cobblestone),
+                                  ItemId::IronIngot, itemForBlock(BlockId::Cobblestone),
+                                  itemForBlock(BlockId::Cobblestone), ItemId::Redstone,
+                                  itemForBlock(BlockId::Cobblestone)},
+                                 itemForBlock(pistonAt(Facing6North, false, false)), 1));
+            // A sign is six planks over a stick, and a hanging one swaps the
+            // stick for two iron - the reference uses chains, which we have no
+            // item for.
+            all.push_back(shaped(3, 3,
+                                 {planks, planks, planks, planks, planks, planks, kNone,
+                                  ItemId::Stick, kNone},
+                                 itemForBlock(game::signAt(0, family, FaceDirection::NegZ, false)),
+                                 3));
+            all.push_back(shaped(3, 3,
+                                 {ItemId::IronIngot, kNone, ItemId::IronIngot, planks, planks,
+                                  planks, planks, planks, planks},
+                                 itemForBlock(game::signAt(1, family, FaceDirection::NegZ, false)),
+                                 6));
+            // A detector needs a slab of the same wood, which is what makes a
+            // slab worth cutting for something other than a stair.
+            if (const int slab = slabFamilyOf(kWoods[w].planks); slab >= 0) {
+                const ItemId half = itemForBlock(slabAt(slab, false));
+                all.push_back(shaped(3, 3,
+                                     {itemForBlock(BlockId::Glass), itemForBlock(BlockId::Glass),
+                                      itemForBlock(BlockId::Glass), ItemId::Quartz, ItemId::Quartz,
+                                      ItemId::Quartz, half, half, half},
+                                     itemForBlock(daylightDetectorAt(0, false)), 1));
+            }
+        }
+
+        {
+            const ItemId redstone = ItemId::Redstone;
+            const ItemId stick = ItemId::Stick;
+            const ItemId cobble = itemForBlock(BlockId::Cobblestone);
+            const ItemId stone = itemForBlock(BlockId::Stone);
+            const ItemId iron = ItemId::IronIngot;
+            const ItemId gold = ItemId::GoldIngot;
+            const ItemId torch = itemForBlock(BlockId::RedstoneTorch);
+
+            // Stone answers to the same two shapes the woods do.
+            all.push_back(shapeless({stone}, 1, itemForBlock(buttonAt(11, 0, false)), 1));
+            all.push_back(shaped(2, 1, {stone, stone}, itemForBlock(pressurePlateAt(11, 0)), 1));
+            // The two that weigh what stands on them are cut from the metal
+            // they measure with.
+            all.push_back(shaped(2, 1, {gold, gold}, itemForBlock(pressurePlateAt(12, 0)), 1));
+            all.push_back(shaped(2, 1, {iron, iron}, itemForBlock(pressurePlateAt(13, 0)), 1));
+
+            // A torch is a stick with dust on the end of it.
+            all.push_back(shaped(1, 2, {redstone, stick}, torch, 1));
+            all.push_back(shaped(1, 2, {stick, cobble},
+                                 itemForBlock(leverAt(LeverFloorX, false)), 1));
+            all.push_back(shaped(3, 2, {torch, redstone, torch, stone, stone, stone},
+                                 itemForBlock(repeaterAt(FaceDirection::NegZ, 1, false, false)), 1));
+            all.push_back(shaped(3, 3,
+                                 {kNone, torch, kNone, torch, ItemId::Quartz, torch, stone, stone,
+                                  stone},
+                                 itemForBlock(comparatorAt(FaceDirection::NegZ, false, false)), 1));
+            // A sticky piston is a piston with a slimeball stuck on the plate,
+            // which is why it is shapeless rather than a shape of its own.
+            all.push_back(shapeless({ItemId::Slimeball,
+                                     itemForBlock(pistonAt(Facing6North, false, false))},
+                                    2, itemForBlock(pistonAt(Facing6North, false, true)), 1));
+            all.push_back(shaped(3, 3,
+                                 {cobble, cobble, cobble, redstone, redstone, ItemId::Quartz, cobble,
+                                  cobble, cobble},
+                                 itemForBlock(observerAt(Facing6North, false)), 1));
+            all.push_back(shaped(3, 3,
+                                 {cobble, cobble, cobble, cobble, ItemId::Bow, cobble, cobble,
+                                  redstone, cobble},
+                                 itemForBlock(dispenserAt(Facing6North, false)), 1));
+            all.push_back(shaped(3, 3,
+                                 {cobble, cobble, cobble, cobble, kNone, cobble, cobble, redstone,
+                                  cobble},
+                                 itemForBlock(dispenserAt(Facing6North, true)), 1));
+            all.push_back(shaped(1, 3, {ItemId::CopperIngot, ItemId::CopperIngot,
+                                        ItemId::CopperIngot},
+                                 itemForBlock(lightningRodAt(Facing6Up, false)), 1));
+            all.push_back(shaped(1, 3, {iron, stick, itemForBlock(BlockId::Planks)},
+                                 itemForBlock(tripwireHookAt(FaceDirection::NegZ, false, false)),
+                                 2));
+            all.push_back(ring8Around(redstone, itemForBlock(BlockId::Glowstone),
+                                      itemForBlock(BlockId::RedstoneLamp), 1));
+
+            // The four rails, all six of a metal round a spine. Sixteen plain
+            // ones and six of each of the rest, which is the reference's own
+            // yield and the reason a plain rail is what long track is made of.
+            all.push_back(shaped(3, 3, {iron, kNone, iron, iron, stick, iron, iron, kNone, iron},
+                                 itemForBlock(railAt(0, 0, false)), 16));
+            all.push_back(shaped(3, 3,
+                                 {gold, kNone, gold, gold, stick, gold, gold, redstone, gold},
+                                 itemForBlock(railAt(1, 0, false)), 6));
+            all.push_back(shaped(3, 3,
+                                 {iron, kNone, iron, iron, itemForBlock(pressurePlateAt(11, 0)),
+                                  iron, iron, redstone, iron},
+                                 itemForBlock(railAt(2, 0, false)), 6));
+            all.push_back(shaped(3, 3,
+                                 {iron, stick, iron, iron, redstone, iron, iron, stick, iron},
+                                 itemForBlock(railAt(3, 0, false)), 6));
+        }
+
+        // Sixteen banners, each six of its own wool over a stick. The colour is
+        // read off `kBannerFamilies` rather than assumed contiguous, so this
+        // cannot drift from the blocks it makes.
+        for (int colour = 0; colour < kBannerFamilyCount; ++colour) {
+            const ItemId wool =
+                itemForBlock(kBannerFamilies[static_cast<std::size_t>(colour)].parent);
+            all.push_back(shaped(3, 3,
+                                 {wool, wool, wool, wool, wool, wool, kNone, ItemId::Stick, kNone},
+                                 itemForBlock(signAt(2, colour, FaceDirection::NegZ, false)), 1));
         }
 
         // Every cut shape, for every material it comes in. Generated from the
@@ -781,6 +1216,132 @@ std::unordered_set<ItemId> craftableItems(const Inventory& inventory, int gridSi
     return makeable;
 }
 
+/// One brewing step: what goes in, what is stirred into it, and what comes out.
+/// Indices are into `kPotions`.
+struct Brew {
+    int from;
+    ItemId reagent;
+    int to;
+};
+
+/// Mojang's own brewing tree, transcribed from the shipped `brew_*.json` files.
+///
+/// **The first match wins and the table is read in order**, which matters for
+/// the fermented spider eye: it appears against a dozen different inputs and
+/// means something different against each.
+constexpr std::array<Brew, 53> kBrews{{
+    // Water into the three things that are not junk.
+    {0, ItemId::NetherWart, 3},
+    {0, ItemId::GlowstoneDust, 2},
+    {0, ItemId::FermentedSpiderEye, 34},
+    // Awkward into every effect there is.
+    {3, ItemId::GoldenCarrot, 4},
+    {3, ItemId::RabbitFoot, 8},
+    {3, ItemId::BlazePowder, 31},
+    {3, ItemId::MagmaCream, 11},
+    {3, ItemId::Sugar, 13},
+    // **Named divergence: the reference brews water breathing from a raw
+    // pufferfish, and we have no loose pufferfish item** - only the bucket the
+    // live one swims in. The bucket is what this costs instead.
+    {3, ItemId::PufferfishBucket, 19},
+    {3, ItemId::GlisteringMelonSlice, 21},
+    {3, ItemId::GhastTear, 28},
+    {3, ItemId::SpiderEye, 25},
+    {3, ItemId::PhantomMembrane, 39},
+    {3, ItemId::TurtleHelmet, 36},
+    {3, ItemId::FermentedSpiderEye, 34},
+    // Redstone lengthens. Every row here is a potion that has an extended form,
+    // and it always sits one along from the base one.
+    {4, ItemId::Redstone, 5},
+    {6, ItemId::Redstone, 7},
+    {8, ItemId::Redstone, 9},
+    {11, ItemId::Redstone, 12},
+    {13, ItemId::Redstone, 14},
+    {16, ItemId::Redstone, 17},
+    {19, ItemId::Redstone, 20},
+    {25, ItemId::Redstone, 26},
+    {28, ItemId::Redstone, 29},
+    {31, ItemId::Redstone, 32},
+    {34, ItemId::Redstone, 35},
+    {36, ItemId::Redstone, 37},
+    {39, ItemId::Redstone, 40},
+    // Glowstone strengthens, and always shortens what it strengthens.
+    {8, ItemId::GlowstoneDust, 10},
+    {13, ItemId::GlowstoneDust, 15},
+    {16, ItemId::GlowstoneDust, 18},
+    {21, ItemId::GlowstoneDust, 22},
+    {23, ItemId::GlowstoneDust, 24},
+    {25, ItemId::GlowstoneDust, 27},
+    {28, ItemId::GlowstoneDust, 30},
+    {31, ItemId::GlowstoneDust, 33},
+    {36, ItemId::GlowstoneDust, 38},
+    // The fermented spider eye corrupts, and what it corrupts a thing *into*
+    // depends entirely on what it was. Strong strength becomes plain weakness
+    // rather than a strong one, which is a Bedrock quirk and not a mistake.
+    {1, ItemId::FermentedSpiderEye, 34},
+    {2, ItemId::FermentedSpiderEye, 34},
+    {13, ItemId::FermentedSpiderEye, 16},
+    {14, ItemId::FermentedSpiderEye, 17},
+    {8, ItemId::FermentedSpiderEye, 16},
+    {9, ItemId::FermentedSpiderEye, 17},
+    {4, ItemId::FermentedSpiderEye, 6},
+    {5, ItemId::FermentedSpiderEye, 7},
+    {21, ItemId::FermentedSpiderEye, 23},
+    {22, ItemId::FermentedSpiderEye, 24},
+    {25, ItemId::FermentedSpiderEye, 23},
+    {26, ItemId::FermentedSpiderEye, 23},
+    {27, ItemId::FermentedSpiderEye, 24},
+    {31, ItemId::FermentedSpiderEye, 34},
+    {32, ItemId::FermentedSpiderEye, 35},
+    {33, ItemId::FermentedSpiderEye, 34},
+}};
+
+/// Everything that turns water into a mundane potion - which is to say, every
+/// reagent the reference bothers to have a recipe for that leads nowhere.
+constexpr bool brewsToMundane(ItemId reagent) {
+    return reagent == ItemId::Redstone || reagent == ItemId::Sugar ||
+           reagent == ItemId::SpiderEye || reagent == ItemId::GhastTear ||
+           reagent == ItemId::MagmaCream || reagent == ItemId::BlazePowder ||
+           reagent == ItemId::GlisteringMelonSlice || reagent == ItemId::RabbitFoot;
+}
+
+ItemStack brewingResult(const ItemStack& bottle, const ItemStack& reagent) {
+    if (bottle.empty() || reagent.empty()) {
+        return ItemStack{};
+    }
+    const bool splash = isSplashPotion(bottle.item);
+    // **The water bottle you brew from is the one that was already in the
+    // game**, not a forty-second potion that happens to be water. Two items
+    // with the same name in the catalogue would be the wart, and the filled
+    // bottle predates every potion here.
+    const bool water = bottle.item == ItemId::WaterBottle;
+    if (!water && !isDrinkablePotion(bottle.item) && !splash) {
+        return ItemStack{};
+    }
+    const int index = water ? 0 : potionIndex(bottle.item);
+    // Gunpowder changes the bottle rather than the brew, so it works on every
+    // potion there is - one rule against forty-one, which is how the reference
+    // does it too. Dragon's breath does the same again, one form further on.
+    if (reagent.item == ItemId::Gunpowder) {
+        return splash || isLingeringPotion(bottle.item) ? ItemStack{}
+                                                       : ItemStack{potionAt(index, 1), 1};
+    }
+    if (reagent.item == ItemId::DragonBreath) {
+        return splash ? ItemStack{potionAt(index, 3), 1} : ItemStack{};
+    }
+    for (const Brew& brew : kBrews) {
+        if (brew.from == index && brew.reagent == reagent.item) {
+            return ItemStack{potionAt(brew.to, splash ? 1 : 0), 1};
+        }
+    }
+    // A junk reagent in water is not nothing: it is a mundane potion, and that
+    // is the reference's own answer rather than a refusal.
+    if (index == 0 && brewsToMundane(reagent.item)) {
+        return ItemStack{potionAt(1, splash ? 1 : 0), 1};
+    }
+    return ItemStack{};
+}
+
 ItemStack smithingResult(const ItemStack& base, const ItemStack& addition) {
     if (base.empty() || addition.empty() || addition.item != ItemId::EmberiteIngot) {
         return ItemStack{};
@@ -789,10 +1350,34 @@ ItemStack smithingResult(const ItemStack& base, const ItemStack& addition) {
     // contiguous and in the same order, so this is one range test rather than
     // five cases - the same arithmetic the spawn eggs and the tool sprites use.
     const int step = static_cast<int>(base.item) - static_cast<int>(ItemId::DiamondPickaxe);
-    if (step < 0 || step >= 5) {
+    if (step >= 0 && step < 5) {
+        return ItemStack{static_cast<ItemId>(static_cast<int>(ItemId::EmberitePickaxe) + step), 1};
+    }
+    // And the four diamond armour pieces against theirs, which are contiguous
+    // and in the same slot order for exactly the same reason.
+    const int piece = static_cast<int>(base.item) - static_cast<int>(ItemId::DiamondHelmet);
+    if (piece >= 0 && piece < 4) {
+        return ItemStack{static_cast<ItemId>(static_cast<int>(ItemId::EmberiteHelmet) + piece), 1};
+    }
+    return ItemStack{};
+}
+
+ItemStack repairResult(const ItemStack& left, const ItemStack& right) {
+    if (left.empty() || right.empty() || left.item != right.item) {
         return ItemStack{};
     }
-    return ItemStack{static_cast<ItemId>(static_cast<int>(ItemId::EmberitePickaxe) + step), 1};
+    const ToolProperties properties = toolFor(left.item);
+    const int maximum = properties.durability > 0 ? properties.durability
+                                                  : (left.item == ItemId::Bow ? kBowDurability : 0);
+    if (maximum <= 0) {
+        return ItemStack{};
+    }
+    // Damage counts up from zero, so what is left is the maximum minus it.
+    const int remaining = (maximum - left.damage) + (maximum - right.damage) + maximum / 20;
+    const int repaired = maximum - (remaining > maximum ? maximum : remaining);
+    ItemStack result{left.item, 1};
+    result.damage = static_cast<decltype(result.damage)>(repaired < 0 ? 0 : repaired);
+    return result;
 }
 
 } // namespace game

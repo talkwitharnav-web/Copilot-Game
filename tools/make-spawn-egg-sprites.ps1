@@ -39,7 +39,7 @@ $eggs = @(
     "mooshroom", "skeleton_horse", "zombie_horse", "trader_llama",
     "piglin_brute", "zombified_piglin", "endermite",
     "magma_cube", "magma_cube", "magma_cube",
-    "bee"
+    "bee", "iron_golem"
 )
 
 $resolvedOutputs = foreach ($candidate in $OutputPath) {

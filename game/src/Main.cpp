@@ -32,6 +32,9 @@
 #include "world/Collision.hpp"
 #include "world/Creature.hpp"
 #include "world/Explosion.hpp"
+#include "world/Farming.hpp"
+
+#include <map>
 #include "world/FallingBlock.hpp"
 #include "world/Material.hpp"
 #include "world/Player.hpp"
@@ -39,6 +42,7 @@
 #include "world/Sky.hpp"
 #include "world/TerrainGenerator.hpp"
 #include "world/Particles.hpp"
+#include "world/Village.hpp"
 #include "world/Weather.hpp"
 #include "world/World.hpp"
 
@@ -227,6 +231,102 @@ struct BlockPositionHash {
 // that compiled clean and produced no validation errors.
 // ---------------------------------------------------------------------------
 namespace {
+
+/// Writes what every block actually occupies, so it can be checked against the
+/// reference's own `models/block/*.json` rather than against nobody.
+///
+/// The union of the drawn geometry is the useful number: a model's boxes for
+/// anything that has them, and the collision box otherwise, which for a full
+/// cube is the cell. `tools/check-models.ps1` does the comparing - this side
+/// only has to tell the truth about what we draw.
+void probeBlockShapes() {
+    const auto shapeName = [](game::BlockShape shape) {
+        switch (shape) {
+        case game::BlockShape::Empty: return "Empty";
+        case game::BlockShape::Full: return "Full";
+        case game::BlockShape::Cross: return "Cross";
+        case game::BlockShape::Slab: return "Slab";
+        case game::BlockShape::Stairs: return "Stairs";
+        case game::BlockShape::Fence: return "Fence";
+        case game::BlockShape::Wall: return "Wall";
+        case game::BlockShape::Pane: return "Pane";
+        case game::BlockShape::Model: return "Model";
+        case game::BlockShape::Ladder: return "Ladder";
+        case game::BlockShape::Vine: return "Vine";
+        case game::BlockShape::Cocoa: return "Cocoa";
+        case game::BlockShape::Gate: return "Gate";
+        case game::BlockShape::Hovering: return "Hovering";
+        case game::BlockShape::Door: return "Door";
+        case game::BlockShape::Trapdoor: return "Trapdoor";
+        case game::BlockShape::Bed: return "Bed";
+        case game::BlockShape::Tilled: return "Tilled";
+        case game::BlockShape::Flat: return "Flat";
+        }
+        return "?";
+    };
+
+    std::ofstream out(engine::executableDirectory() / "block-shapes.txt");
+    out << "# id\tname\tshape\tboxes\tminX\tminY\tminZ\tmaxX\tmaxY\tmaxZ\n";
+    for (int raw = 1; raw <= static_cast<int>(game::kLastBlock); ++raw) {
+        const auto id = static_cast<game::BlockId>(raw);
+        const game::BlockShape shape = game::blockShape(id);
+        if (shape == game::BlockShape::Empty) {
+            continue;
+        }
+        float lo[3]{2.0f, 2.0f, 2.0f};
+        float hi[3]{-1.0f, -1.0f, -1.0f};
+        int count = 0;
+        const auto swallow = [&](const game::BlockBox& b) {
+            lo[0] = std::min(lo[0], b.minX);
+            lo[1] = std::min(lo[1], b.minY);
+            lo[2] = std::min(lo[2], b.minZ);
+            hi[0] = std::max(hi[0], b.maxX);
+            hi[1] = std::max(hi[1], b.maxY);
+            hi[2] = std::max(hi[2], b.maxZ);
+            ++count;
+        };
+        if (shape == game::BlockShape::Model) {
+            const game::ModelBoxes model = game::postModel(id);
+            for (int i = 0; i < model.count; ++i) {
+                swallow(model.boxes[i].box);
+            }
+        } else if (shape == game::BlockShape::Full || shape == game::BlockShape::Cross) {
+            swallow({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f});
+        } else if (game::connectsToNeighbours(shape)) {
+            // With no arms, which is the post the reference ships on its own.
+            const game::BlockBoxes boxes = game::collisionBoxesWith(id, 0);
+            for (int i = 0; i < boxes.count; ++i) {
+                swallow(boxes.boxes[i]);
+            }
+        } else if (game::drawsWithoutColliding(id)) {
+            // **A block that collides with nothing has no collision boxes**, so
+            // falling through to `collisionBoxes` below counts zero and drops it
+            // out of the dump entirely - which is how every button, pressure
+            // plate, wire, rail and tripwire went unmeasured for a whole round.
+            const game::BlockBoxes boxes = game::uncollidableDrawnBoxes(id);
+            for (int i = 0; i < boxes.count; ++i) {
+                swallow(boxes.boxes[i]);
+            }
+        } else {
+            const game::BlockBoxes boxes = game::collisionBoxes(id);
+            for (int i = 0; i < boxes.count; ++i) {
+                swallow(boxes.boxes[i]);
+            }
+        }
+        if (count == 0) {
+            continue;
+        }
+        out << raw << '\t' << game::blockName(id) << '\t' << shapeName(shape) << '\t' << count;
+        for (int a = 0; a < 3; ++a) {
+            out << '\t' << lo[a];
+        }
+        for (int a = 0; a < 3; ++a) {
+            out << '\t' << hi[a];
+        }
+        out << '\n';
+    }
+    engine::logInfo("block-shapes.txt written beside the exe");
+}
 
 void probeWorldgen() {
     constexpr int kSpan = 8192;
@@ -485,6 +585,284 @@ void probeWorldgen() {
                                    static_cast<double>(std::max<long long>(1, deepAir + deepSolid))) +
                     "%");
 
+    // Villages. Every number here has to be *counted* rather than reasoned
+    // about: the placement grid, the biome gate and the site test each throw
+    // candidates away, and "the code looks right" says nothing about how many
+    // survive. A run reporting zero villages is the failure this exists to make
+    // impossible to miss.
+    {
+        constexpr int kVillageSpan = 6144;
+        std::array<int, 6> byType{};
+        int found = 0;
+        long long buildings = 0;
+        long long residents = 0;
+        int biggest = 0;
+        std::array<int, static_cast<std::size_t>(game::village::Design::Count)> byDesign{};
+        bool checked = false;
+
+        // Walk grid cells directly rather than chunks: a village belongs to one
+        // cell, so this counts each exactly once.
+        std::array<int, 5> rejects{};
+        const int cells = kVillageSpan / game::village::kCellBlocks + 1;
+        for (int cz = -cells; cz <= cells; ++cz) {
+            for (int cx = -cells; cx <= cells; ++cx) {
+                const game::village::Plan plan = game::village::solveCell(kWorldSeed, cx, cz);
+                if (!plan.valid) {
+                    ++rejects[static_cast<std::size_t>(plan.reject)];
+                    continue;
+                }
+                ++found;
+                ++byType[static_cast<std::size_t>(plan.type)];
+                buildings += plan.buildingCount;
+                residents += plan.residentCount;
+                biggest = std::max(biggest, static_cast<int>(plan.buildingCount));
+                for (int b = 0; b < plan.buildingCount; ++b) {
+                    ++byDesign[static_cast<std::size_t>(plan.buildings[b].design)];
+                }
+            }
+        }
+
+        const int attempts = (2 * cells + 1) * (2 * cells + 1);
+        engine::logInfo("PROBE VILLAGES " + std::to_string(found) + " of " +
+                        std::to_string(attempts) + " grid cells, one per " +
+                        std::to_string(found > 0 ? (attempts / found) * game::village::kCellBlocks *
+                                                       game::village::kCellBlocks / 1000000
+                                                 : 0) +
+                        " million blocks; buildings/village " +
+                        std::to_string(found > 0 ? static_cast<double>(buildings) / found : 0.0) +
+                        " (largest " + std::to_string(biggest) + "), residents/village " +
+                        std::to_string(found > 0 ? static_cast<double>(residents) / found : 0.0));
+        static constexpr const char* kRejectNames[5] = {"-", "biome", "water", "cave", "rough"};
+        for (std::size_t r = 1; r < rejects.size(); ++r) {
+            engine::logInfo(std::string("PROBE village reject ") + kRejectNames[r] + " " +
+                            std::to_string(rejects[r]));
+        }
+        static constexpr const char* kTypeNames[6] = {"none",  "plains", "desert",
+                                                      "savanna", "taiga",  "snowy"};
+        for (std::size_t t = 1; t < byType.size(); ++t) {
+            engine::logInfo(std::string("PROBE village type ") + kTypeNames[t] + " " +
+                            std::to_string(byType[t]));
+        }
+        static constexpr const char* kDesignNames[] = {
+            "town centre", "small house A", "small house B", "small house C",
+            "medium house", "large house",  "workshop",      "library",
+            "temple",      "farm",          "animal pen"};
+        for (std::size_t d = 0; d < byDesign.size(); ++d) {
+            engine::logInfo(std::string("PROBE village piece ") + kDesignNames[d] + " " +
+                            std::to_string(byDesign[d]));
+        }
+
+        // Generate one whole village and read what actually came out of it.
+        //
+        // Counting plans proves the *layout* solver runs. It says nothing about
+        // whether a house has a floor, whether its door can be walked through,
+        // or whether the thing is standing on a plinth over a hole — and every
+        // one of those has to be a number, because none of them fails loudly.
+        //
+        // The village nearest the origin is the one inspected, because that is
+        // also the one worth quoting to whoever is going to go and look at it.
+        int bestCellX = 0;
+        int bestCellZ = 0;
+        long long bestDistance = -1;
+        for (int cz = -cells; cz <= cells; ++cz) {
+            for (int cx = -cells; cx <= cells; ++cx) {
+                const game::village::Plan plan = game::village::solveCell(kWorldSeed, cx, cz);
+                if (!plan.valid) {
+                    continue;
+                }
+                const long long dx = plan.originX;
+                const long long dz = plan.originZ;
+                const long long distance = dx * dx + dz * dz;
+                if (bestDistance < 0 || distance < bestDistance) {
+                    bestDistance = distance;
+                    bestCellX = cx;
+                    bestCellZ = cz;
+                }
+            }
+        }
+
+        if (bestDistance >= 0) {
+            const game::village::Plan plan =
+                game::village::solveCell(kWorldSeed, bestCellX, bestCellZ);
+            checked = true;
+
+                const int firstChunkX = game::floorDivInt(plan.minX, game::Chunk::kSize);
+                const int lastChunkX = game::floorDivInt(plan.maxX, game::Chunk::kSize);
+                const int firstChunkZ = game::floorDivInt(plan.minZ, game::Chunk::kSize);
+                const int lastChunkZ = game::floorDivInt(plan.maxZ, game::Chunk::kSize);
+                const int spanX = lastChunkX - firstChunkX + 1;
+                const int spanZ = lastChunkZ - firstChunkZ + 1;
+
+                auto grid = std::make_unique<std::vector<game::Chunk>>();
+                grid->resize(static_cast<std::size_t>(spanX) * spanZ * game::kWorldHeightChunks);
+                for (int qz = 0; qz < spanZ; ++qz) {
+                    for (int qx = 0; qx < spanX; ++qx) {
+                        for (int qy = 0; qy < game::kWorldHeightChunks; ++qy) {
+                            (*grid)[(static_cast<std::size_t>(qz) * spanX + qx) *
+                                        game::kWorldHeightChunks +
+                                    qy] =
+                                game::generateChunk(kWorldSeed,
+                                                    {firstChunkX + qx, qy, firstChunkZ + qz});
+                        }
+                    }
+                }
+
+                const auto blockAt = [&](int x, int y, int z) {
+                    const int qx = game::floorDivInt(x, game::Chunk::kSize) - firstChunkX;
+                    const int qz = game::floorDivInt(z, game::Chunk::kSize) - firstChunkZ;
+                    const int qy = game::floorDivInt(y, game::Chunk::kSize);
+                    if (qx < 0 || qz < 0 || qx >= spanX || qz >= spanZ || qy < 0 ||
+                        qy >= game::kWorldHeightChunks) {
+                        return game::BlockId::Air;
+                    }
+                    const game::Chunk& chunk =
+                        (*grid)[(static_cast<std::size_t>(qz) * spanX + qx) *
+                                    game::kWorldHeightChunks +
+                                qy];
+                    return chunk.at(x - (firstChunkX + qx) * game::Chunk::kSize,
+                                    y - qy * game::Chunk::kSize,
+                                    z - (firstChunkZ + qz) * game::Chunk::kSize);
+                };
+
+                int floorHoles = 0;
+                int hollowUnder = 0;
+                int blockedDoors = 0;
+                int missingDoors = 0;
+                int beds = 0;
+                int jobSites = 0;
+                int doors = 0;
+                int lights = 0;
+
+                for (int b = 0; b < plan.buildingCount; ++b) {
+                    const game::village::Building& built = plan.buildings[b];
+                    for (int lz = 0; lz < built.depth; ++lz) {
+                        for (int lx = 0; lx < built.width; ++lx) {
+                            const int x = built.minX + lx;
+                            const int z = built.minZ + lz;
+                            if (blockAt(x, built.floorY - 1, z) == game::BlockId::Air) {
+                                ++floorHoles;
+                            }
+                            if (blockAt(x, built.floorY - 2, z) == game::BlockId::Air) {
+                                ++hollowUnder;
+                            }
+                        }
+                    }
+                }
+
+                for (int z = plan.minZ; z <= plan.maxZ; ++z) {
+                    for (int x = plan.minX; x <= plan.maxX; ++x) {
+                        for (int y = std::max(0, plan.minY);
+                             y <= std::min(plan.maxY,
+                                           game::kWorldHeightChunks * game::Chunk::kSize - 1);
+                             ++y) {
+                            const game::BlockId id = blockAt(x, y, z);
+                            if (game::isBed(id)) {
+                                ++beds;
+                            } else if (game::isDoor(id)) {
+                                ++doors;
+                            } else if (id == game::BlockId::Torch ||
+                                       id == game::BlockId::Lantern) {
+                                ++lights;
+                            } else if (game::isFurnace(id) || game::isComposter(id) ||
+                                       id == game::BlockId::Barrel ||
+                                       id == game::BlockId::FletchingTable ||
+                                       id == game::BlockId::Loom ||
+                                       id == game::BlockId::CartographyTable ||
+                                       id == game::BlockId::Lectern ||
+                                       id == game::BlockId::Stonecutter ||
+                                       id == game::BlockId::SmithingTable ||
+                                       id == game::BlockId::Grindstone ||
+                                       game::isCauldron(id) ||
+                                       id == game::BlockId::BrewingStand) {
+                                ++jobSites;
+                            }
+                        }
+                    }
+                }
+
+                // Every dwelling has to be enterable: a door in the wall, and
+                // two clear cells on the step outside it.
+                for (int b = 0; b < plan.buildingCount; ++b) {
+                    const game::village::Building& built = plan.buildings[b];
+                    if (built.design == game::village::Design::TownCentre ||
+                        built.design == game::village::Design::Farm ||
+                        built.design == game::village::Design::AnimalPen) {
+                        continue;
+                    }
+                    const int x1 = built.minX + built.width - 1;
+                    const int z1 = built.minZ + built.depth - 1;
+                    int doorX = built.minX;
+                    int doorZ = built.minZ;
+                    switch (built.facing) {
+                    case game::FaceDirection::NegZ:
+                        doorZ = built.minZ;
+                        doorX = built.minX + built.width / 2;
+                        break;
+                    case game::FaceDirection::PosZ:
+                        doorZ = z1;
+                        doorX = built.minX + built.width / 2;
+                        break;
+                    case game::FaceDirection::NegX:
+                        doorX = built.minX;
+                        doorZ = built.minZ + built.depth / 2;
+                        break;
+                    default:
+                        doorX = x1;
+                        doorZ = built.minZ + built.depth / 2;
+                        break;
+                    }
+                    // The exact slot is a style roll, so scan the wall rather
+                    // than re-deriving it — a second copy of that rule here is
+                    // precisely the bug this codebase keeps paying for.
+                    bool hasDoor = false;
+                    for (int t = -3; t <= 3 && !hasDoor; ++t) {
+                        const int sx = doorX + (built.facing == game::FaceDirection::NegZ ||
+                                                        built.facing == game::FaceDirection::PosZ
+                                                    ? t
+                                                    : 0);
+                        const int sz = doorZ + (built.facing == game::FaceDirection::NegX ||
+                                                        built.facing == game::FaceDirection::PosX
+                                                    ? t
+                                                    : 0);
+                        if (!game::isDoor(blockAt(sx, built.floorY, sz))) {
+                            continue;
+                        }
+                        hasDoor = true;
+                        const int stepX =
+                            sx + (built.facing == game::FaceDirection::PosX    ? 1
+                                  : built.facing == game::FaceDirection::NegX ? -1
+                                                                              : 0);
+                        const int stepZ =
+                            sz + (built.facing == game::FaceDirection::PosZ    ? 1
+                                  : built.facing == game::FaceDirection::NegZ ? -1
+                                                                              : 0);
+                        if (blockAt(stepX, built.floorY, stepZ) != game::BlockId::Air ||
+                            blockAt(stepX, built.floorY + 1, stepZ) != game::BlockId::Air) {
+                            ++blockedDoors;
+                        }
+                    }
+                    if (!hasDoor) {
+                        ++missingDoors;
+                    }
+                }
+
+                engine::logInfo(
+                    "PROBE village at " + std::to_string(plan.originX) + "," +
+                    std::to_string(plan.centreY) + "," + std::to_string(plan.originZ) + " type " +
+                    kTypeNames[static_cast<std::size_t>(plan.type)] + ": " +
+                    std::to_string(static_cast<int>(plan.buildingCount)) + " buildings, " +
+                    std::to_string(doors) + " doors, " + std::to_string(beds) + " beds, " +
+                    std::to_string(jobSites) + " job sites, " + std::to_string(lights) +
+                    " lights");
+                engine::logInfo("PROBE village FLOOR-HOLES " + std::to_string(floorHoles) +
+                                " HOLLOW-UNDER " + std::to_string(hollowUnder) +
+                                " MISSING-DOORS " + std::to_string(missingDoors) +
+                                " BLOCKED-DOORS " + std::to_string(blockedDoors) +
+                                "  (all four must read zero)");
+        }
+        (void)checked;
+    }
+
     // Largest connected run of one ore, which is the whole of the "why is there
     // a coal seam the size of a room" question. A thresholded noise field has no
     // cap on this; a placed vein does, and that difference is only visible as a
@@ -603,6 +981,11 @@ int main() {
 
         if (settings.worldgenProbe) {
             probeWorldgen();
+            return 0;
+        }
+
+        if (settings.blockProbe) {
+            probeBlockShapes();
             return 0;
         }
 
@@ -962,6 +1345,165 @@ int main() {
                   "red_stained_glass.png", "black_stained_glass.png", "iron_bars.png",
                   "lantern.png", "soul_lantern.png", "soul_torch.png", "redstone_torch.png",
                   "end_rod.png",
+                  // The fourth table run: the farm. `dirt.png`, `pumpkin_side`
+                  // and `pumpkin_top` appear a second time on purpose - this is
+                  // a list of files per layer, so naming one twice costs a
+                  // layer and keeps the run's numbering contiguous, which is
+                  // far cheaper than reaching back at an earlier layer index.
+                  "dirt.png", "farmland.png", "farmland_moist.png", "dirt_path_side.png",
+                  "dirt_path_top.png",
+                  "wheat_stage0.png", "wheat_stage1.png", "wheat_stage2.png", "wheat_stage3.png",
+                  "wheat_stage4.png", "wheat_stage5.png", "wheat_stage6.png", "wheat_stage7.png",
+                  "carrots_stage0.png", "carrots_stage1.png", "carrots_stage2.png",
+                  "carrots_stage3.png",
+                  "potatoes_stage0.png", "potatoes_stage1.png", "potatoes_stage2.png",
+                  "potatoes_stage3.png",
+                  "beetroots_stage0.png", "beetroots_stage1.png", "beetroots_stage2.png",
+                  "beetroots_stage3.png",
+                  "melon_stem.png", "attached_melon_stem.png", "pumpkin_stem.png",
+                  "attached_pumpkin_stem.png",
+                  "nether_wart_stage0.png", "nether_wart_stage1.png", "nether_wart_stage2.png",
+                  "pumpkin_side.png", "pumpkin_top.png", "carved_pumpkin.png",
+                  "jack_o_lantern.png", "composter_top.png", "composter_side.png",
+                  "composter_ready.png",
+                  // The fifth table run. The twenty bark blocks name log sides
+                  // this list has already staged - a duplicate here costs one
+                  // layer and keeps the run contiguous, which is far safer than
+                  // reaching back at an earlier index.
+                  "log_side.png", "spruce_log.png", "birch_log.png", "jungle_log.png",
+                  "acacia_log.png", "dark_oak_log.png", "cherry_log.png", "mangrove_log_side.png",
+                  "crimson_stem_side.png", "warped_stem_side.png",
+                  "stripped_oak_log.png", "stripped_spruce_log.png", "stripped_birch_log.png",
+                  "stripped_jungle_log.png", "stripped_acacia_log.png",
+                  "stripped_dark_oak_log.png", "stripped_cherry_log.png",
+                  "stripped_mangrove_log.png", "stripped_crimson_stem.png",
+                  "stripped_warped_stem.png",
+                  "brown_mushroom_block.png", "red_mushroom_block.png", "mushroom_stem.png",
+                  "dead_tube_coral_block.png", "dead_brain_coral_block.png",
+                  "dead_bubble_coral_block.png", "dead_fire_coral_block.png",
+                  "dead_horn_coral_block.png",
+                  // Waxed copper is the unwaxed picture again: wax is a promise
+                  // that the block will not change, not something you can see.
+                  "copper_block.png", "exposed_copper.png", "weathered_copper.png",
+                  "oxidized_copper.png", "cut_copper.png", "exposed_cut_copper.png",
+                  "weathered_cut_copper.png", "oxidized_cut_copper.png", "chiseled_copper.png",
+                  "copper_grate.png", "exposed_copper_grate.png", "weathered_copper_grate.png",
+                  "oxidized_copper_grate.png",
+                  "copper_bulb.png", "copper_bulb_lit.png", "exposed_copper_bulb.png",
+                  "exposed_copper_bulb_lit.png", "weathered_copper_bulb.png",
+                  "weathered_copper_bulb_lit.png", "oxidized_copper_bulb.png",
+                  "oxidized_copper_bulb_lit.png",
+                  "crying_obsidian.png", "powder_snow.png", "suspicious_sand.png",
+                  "suspicious_gravel.png", "azalea_leaves.png", "flowering_azalea_leaves.png",
+                  "redstone_lamp.png", "redstone_lamp_on.png",
+                  "lodestone_side.png", "lodestone_top.png",
+                  "enchanting_table_side.png", "enchanting_table_top.png",
+                  "chiseled_bookshelf_side.png", "chiseled_bookshelf_top.png",
+                  "cartography_table_side.png", "cartography_table_top.png",
+                  "fletching_table_side.png", "fletching_table_top.png",
+                  "barrel_side.png", "barrel_top.png",
+                  "blast_furnace_side.png", "blast_furnace_top.png",
+                  "loom_side.png", "loom_top.png",
+                  "stonecutter_side.png", "stonecutter_top.png",
+                  "grindstone_side.png", "grindstone_round.png",
+                  "lectern_sides.png", "lectern_top.png",
+                  "bell_side.png", "bell_top.png",
+                  "cauldron_side.png", "cauldron_top.png",
+                  "brewing_stand_base.png", "brewing_stand.png",
+                  "anvil_base.png", "anvil_top.png", "chipped_anvil_top.png",
+                  "damaged_anvil_top.png",
+                  "scaffolding_side.png", "scaffolding_top.png", "flower_pot.png",
+                  "sculk_vein.png", "sculk_sensor_side.png", "sculk_sensor_top.png",
+                  "sculk_shrieker_side.png", "sculk_shrieker_top.png",
+                  "small_amethyst_bud.png", "medium_amethyst_bud.png", "large_amethyst_bud.png",
+                  "big_dripleaf_top.png", "small_dripleaf_top.png",
+                  "cave_vines.png", "cave_vines_lit.png", "moss_block.png",
+                  "chorus_plant.png", "chorus_flower.png",
+                  "tube_coral.png", "brain_coral.png", "bubble_coral.png", "fire_coral.png",
+                  "horn_coral.png", "dead_tube_coral.png", "dead_brain_coral.png",
+                  "dead_bubble_coral.png", "dead_fire_coral.png", "dead_horn_coral.png",
+                  "tube_coral_fan.png", "brain_coral_fan.png", "bubble_coral_fan.png",
+                  "fire_coral_fan.png", "horn_coral_fan.png", "dead_tube_coral_fan.png",
+                  "dead_brain_coral_fan.png", "dead_bubble_coral_fan.png",
+                  "dead_fire_coral_fan.png", "dead_horn_coral_fan.png",
+                  "sunflower_bottom.png", "sunflower_top.png", "lilac_bottom.png", "lilac_top.png",
+                  "rose_bush_bottom.png", "rose_bush_top.png", "peony_bottom.png", "peony_top.png",
+                  "wither_rose.png",
+                  "campfire_log.png", "campfire_log_lit.png", "soul_campfire_fire.png",
+                  "respawn_anchor_side.png", "respawn_anchor_top.png",
+                  // The sixth run: the candles, declared white-first after the
+                  // plain one like every other colour family.
+                  "candle.png", "white_candle.png", "orange_candle.png", "magenta_candle.png",
+                  "light_blue_candle.png", "yellow_candle.png", "lime_candle.png",
+                  "pink_candle.png", "gray_candle.png", "light_gray_candle.png",
+                  "cyan_candle.png", "purple_candle.png", "blue_candle.png", "brown_candle.png",
+                  "green_candle.png", "red_candle.png", "black_candle.png",
+                  "tinted_glass.png", "beacon.png", "conduit.png", "dragon_egg.png",
+                  "end_portal_frame_side.png", "end_portal_frame_top.png", "spawner.png",
+                  "trapped_chest_side.png", "trapped_chest_top.png",
+                  "trapped_chest_front.png",
+                  "blast_furnace_front.png", "blast_furnace_front_on.png",
+                  // The seventeen unlit candles, in the same colour order.
+                  "candle_unlit.png", "white_candle_unlit.png", "orange_candle_unlit.png",
+                  "magenta_candle_unlit.png", "light_blue_candle_unlit.png",
+                  "yellow_candle_unlit.png", "lime_candle_unlit.png", "pink_candle_unlit.png",
+                  "gray_candle_unlit.png", "light_gray_candle_unlit.png", "cyan_candle_unlit.png",
+                  "purple_candle_unlit.png", "blue_candle_unlit.png", "brown_candle_unlit.png",
+                  "green_candle_unlit.png", "red_candle_unlit.png", "black_candle_unlit.png",
+                  // Doors then trapdoors, in `kDoorFamilies` order. A door is
+                  // bottom picture then top; a trapdoor has only the one.
+                  "oak_door_bottom.png", "oak_door_top.png", "spruce_door_bottom.png",
+                  "spruce_door_top.png", "birch_door_bottom.png", "birch_door_top.png",
+                  "jungle_door_bottom.png", "jungle_door_top.png", "acacia_door_bottom.png",
+                  "acacia_door_top.png", "dark_oak_door_bottom.png", "dark_oak_door_top.png",
+                  "cherry_door_bottom.png", "cherry_door_top.png", "mangrove_door_bottom.png",
+                  "mangrove_door_top.png", "crimson_door_bottom.png", "crimson_door_top.png",
+                  "warped_door_bottom.png", "warped_door_top.png", "bamboo_door_bottom.png",
+                  "bamboo_door_top.png", "iron_door_bottom.png", "iron_door_top.png",
+                  "oak_trapdoor.png", "spruce_trapdoor.png", "birch_trapdoor.png",
+                  "jungle_trapdoor.png", "acacia_trapdoor.png", "dark_oak_trapdoor.png",
+                  "cherry_trapdoor.png", "mangrove_trapdoor.png", "crimson_trapdoor.png",
+                  "warped_trapdoor.png", "bamboo_trapdoor.png", "iron_trapdoor.png",
+                  // The sixteen beds, four faces each in the order
+                  // `bedFamilyAt` reads them: foot top, foot side, head top,
+                  // head side.
+                  "white_bed_foot_top.png", "white_bed_foot_side.png",
+                  "white_bed_head_top.png", "white_bed_head_side.png",
+                  "orange_bed_foot_top.png", "orange_bed_foot_side.png",
+                  "orange_bed_head_top.png", "orange_bed_head_side.png",
+                  "magenta_bed_foot_top.png", "magenta_bed_foot_side.png",
+                  "magenta_bed_head_top.png", "magenta_bed_head_side.png",
+                  "light_blue_bed_foot_top.png", "light_blue_bed_foot_side.png",
+                  "light_blue_bed_head_top.png", "light_blue_bed_head_side.png",
+                  "yellow_bed_foot_top.png", "yellow_bed_foot_side.png",
+                  "yellow_bed_head_top.png", "yellow_bed_head_side.png",
+                  "lime_bed_foot_top.png", "lime_bed_foot_side.png", "lime_bed_head_top.png",
+                  "lime_bed_head_side.png", "pink_bed_foot_top.png", "pink_bed_foot_side.png",
+                  "pink_bed_head_top.png", "pink_bed_head_side.png", "gray_bed_foot_top.png",
+                  "gray_bed_foot_side.png", "gray_bed_head_top.png", "gray_bed_head_side.png",
+                  "light_gray_bed_foot_top.png", "light_gray_bed_foot_side.png",
+                  "light_gray_bed_head_top.png", "light_gray_bed_head_side.png",
+                  "cyan_bed_foot_top.png", "cyan_bed_foot_side.png", "cyan_bed_head_top.png",
+                  "cyan_bed_head_side.png", "purple_bed_foot_top.png",
+                  "purple_bed_foot_side.png", "purple_bed_head_top.png",
+                  "purple_bed_head_side.png", "blue_bed_foot_top.png",
+                  "blue_bed_foot_side.png", "blue_bed_head_top.png", "blue_bed_head_side.png",
+                  "brown_bed_foot_top.png", "brown_bed_foot_side.png",
+                  "brown_bed_head_top.png", "brown_bed_head_side.png",
+                  "green_bed_foot_top.png", "green_bed_foot_side.png",
+                  "green_bed_head_top.png", "green_bed_head_side.png", "red_bed_foot_top.png",
+                  "red_bed_foot_side.png", "red_bed_head_top.png", "red_bed_head_side.png",
+                  "black_bed_foot_top.png", "black_bed_foot_side.png",
+                  "black_bed_head_top.png", "black_bed_head_side.png",
+                  "ender_chest_side.png", "ender_chest_top.png",
+                  "hopper_outside.png", "hopper_top.png",
+                  // The seventeen stowboxes, plain then the sixteen dyes.
+                  "shulker_box.png", "white_shulker_box.png", "orange_shulker_box.png",
+                  "magenta_shulker_box.png", "light_blue_shulker_box.png",
+                  "yellow_shulker_box.png", "lime_shulker_box.png", "pink_shulker_box.png",
+                  "gray_shulker_box.png", "light_gray_shulker_box.png", "cyan_shulker_box.png",
+                  "purple_shulker_box.png", "blue_shulker_box.png", "brown_shulker_box.png",
+                  "green_shulker_box.png", "red_shulker_box.png", "black_shulker_box.png",
                   // The double chest's two halves, named for the viewer's left
                   // and right - which is the opposite way round from Mojang's
                   // own file names. Right at the end, so nothing above moves.
@@ -993,6 +1535,35 @@ int main() {
                   "chorus_fruit.png", "popped_chorus_fruit.png", "rabbit_hide.png",
                   "rabbit_foot.png", "echo_shard.png", "water_bottle.png", "bow.png", "arrow.png",
                   "shears.png", "cocoa_beans.png",
+                  // The seventy-four appended items, in `ItemId` order. Armour
+                  // runs helmet-chest-legs-boots by rising material, which is
+                  // the order the enum uses, so a piece's icon is one offset.
+                  "nether_wart.png",
+                  "leather_helmet.png", "leather_chestplate.png", "leather_leggings.png",
+                  "leather_boots.png", "chainmail_helmet.png", "chainmail_chestplate.png",
+                  "chainmail_leggings.png", "chainmail_boots.png", "iron_helmet.png",
+                  "iron_chestplate.png", "iron_leggings.png", "iron_boots.png",
+                  "golden_helmet.png", "golden_chestplate.png", "golden_leggings.png",
+                  "golden_boots.png", "diamond_helmet.png", "diamond_chestplate.png",
+                  "diamond_leggings.png", "diamond_boots.png", "emberite_helmet.png",
+                  "emberite_chestplate.png", "emberite_leggings.png", "emberite_boots.png",
+                  "turtle_helmet.png", "shield.png",
+                  "music_disc_13.png", "music_disc_cat.png", "music_disc_blocks.png",
+                  "music_disc_chirp.png", "music_disc_far.png", "music_disc_mall.png",
+                  "music_disc_drift.png", "music_disc_ember.png", "music_disc_vale.png",
+                  "music_disc_hollow.png", "music_disc_11.png", "music_disc_wait.png",
+                  "music_disc_hoofbeat.png", "music_disc_otherside.png", "music_disc_5.png",
+                  "saddle.png", "name_tag.png", "lead.png", "elytra.png", "totem_of_undying.png",
+                  "spyglass.png", "brush.png", "trident.png", "crossbow.png", "fishing_rod.png",
+                  "compass.png", "clock.png", "empty_map.png", "filled_map.png",
+                  "recovery_compass.png", "firework_rocket.png", "writable_book.png",
+                  "written_book.png",
+                  "mushroom_stew.png", "beetroot_soup.png", "rabbit_stew.png",
+                  "suspicious_stew.png", "enchanted_golden_apple.png", "poisonous_potato.png",
+                  "golden_carrot.png", "glistering_melon_slice.png",
+                  "powder_snow_bucket.png", "cod_bucket.png", "salmon_bucket.png",
+                  "tropical_fish_bucket.png", "pufferfish_bucket.png", "axolotl_bucket.png",
+                  "iron_nugget.png", "gold_nugget.png",
                   // The beehive. Its front changes when it fills, which is the
                   // only visible difference between an empty hive and a full one.
                   "beehive_front.png", "beehive_front_honey.png", "beehive_side.png",
@@ -1015,14 +1586,121 @@ int main() {
                   // The moon, in the order it runs through its phases.
                   "moon_full.png", "moon_waning_gibbous.png", "moon_third_quarter.png",
                   "moon_waning_crescent.png", "moon_new.png", "moon_waxing_crescent.png",
-                  "moon_first_quarter.png", "moon_waxing_gibbous.png"}) {
+                  "moon_first_quarter.png", "moon_waxing_gibbous.png",
+                  // The stonecutter's saw blade, appended after every existing
+                  // run so nothing above it moves.
+                  "stonecutter_saw.png",
+                  // The end face of a bed's head, shared by all sixteen colours.
+                  "bed_head_north.png",
+                  // The compost in a composter below its ready level.
+                  "composter_compost.png",
+                  // ---- Redstone, appended after every existing run. ----
+                  // Sixteen copies of the dust, each tinted at staging time by
+                  // the strength it stands for, because the reference tints it
+                  // at draw time and nothing here can.
+                  "redstone_dust_00.png", "redstone_dust_01.png", "redstone_dust_02.png",
+                  "redstone_dust_03.png", "redstone_dust_04.png", "redstone_dust_05.png",
+                  "redstone_dust_06.png", "redstone_dust_07.png", "redstone_dust_08.png",
+                  "redstone_dust_09.png", "redstone_dust_10.png", "redstone_dust_11.png",
+                  "redstone_dust_12.png", "redstone_dust_13.png", "redstone_dust_14.png",
+                  "redstone_dust_15.png",
+                  "redstone_torch_off.png", "lever.png",
+                  "repeater.png", "repeater_on.png", "comparator.png", "comparator_on.png",
+                  "redstone_slab.png",
+                  "observer_front.png", "observer_back.png", "observer_back_on.png",
+                  "observer_side.png", "observer_top.png",
+                  "piston_top.png", "piston_top_sticky.png", "piston_side.png",
+                  "piston_bottom.png", "piston_inner.png",
+                  "dispenser_front.png", "dispenser_front_vertical.png",
+                  "dropper_front.png", "dropper_front_vertical.png",
+                  "machine_side.png", "machine_top.png",
+                  "daylight_detector_side.png", "daylight_detector_top.png",
+                  "daylight_detector_inverted_top.png",
+                  "lightning_rod.png", "lightning_rod_on.png",
+                  "tripwire_hook.png", "tripwire.png",
+                  // The four rail families, quiet then live - except the plain
+                  // one, whose second picture is the corner it alone can bend
+                  // into.
+                  "rail.png", "rail_corner.png", "powered_rail.png", "powered_rail_on.png",
+                  "detector_rail.png", "detector_rail_on.png", "activator_rail.png",
+                  "activator_rail_on.png",
+                  "redstone_lamp_on.png"}) {
                 spriteLayers.push_back(blockTexture(name));
             }
             if (spriteLayers.size() !=
-                static_cast<std::size_t>(game::kMoonPhaseFirst) + game::kMoonPhases) {
+                static_cast<std::size_t>(game::kRedstoneSpritesFirst + game::kRedstoneSprites)) {
                 engine::logError("appended sprites end at " + std::to_string(spriteLayers.size()) +
                                  " but the layer constants say " +
-                                 std::to_string(game::kMoonPhaseFirst + game::kMoonPhases));
+                                 std::to_string(game::kRedstoneSpritesFirst +
+                                                game::kRedstoneSprites));
+            }
+
+            // ---- Brewing. ----
+            // **Loops rather than a hundred and twenty-four more names in that
+            // list.** The potion pictures are generated in the staging script
+            // from one bottle and forty-one tints, so their names are already
+            // arithmetic; writing them out by hand in a fixed order is exactly
+            // where an off-by-one hides, and the bed's sixty-four layers proved
+            // it once already.
+            for (const char* name : {"blaze_rod.png", "blaze_powder.png",
+                                     "fermented_spider_eye.png", "ghast_tear.png",
+                                     "dragon_breath.png"}) {
+                spriteLayers.push_back(blockTexture(name));
+            }
+            {
+                char name[40];
+                for (int i = 0; i < game::kPotionSpriteTypes; ++i) {
+                    std::snprintf(name, sizeof(name), "potion_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+                for (int i = 0; i < game::kPotionSpriteTypes; ++i) {
+                    std::snprintf(name, sizeof(name), "splash_potion_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+                for (int i = game::kFirstTippedPotion; i < game::kPotionSpriteTypes; ++i) {
+                    std::snprintf(name, sizeof(name), "tipped_arrow_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+                for (int i = 0; i < game::kPotionSpriteTypes; ++i) {
+                    std::snprintf(name, sizeof(name), "lingering_potion_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+            }
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kPotionSpritesEnd)) {
+                engine::logError("brewing sprites end at " + std::to_string(spriteLayers.size()) +
+                                 " but the layer constants say " +
+                                 std::to_string(game::kPotionSpritesEnd));
+            }
+
+            // ---- Collectibles. ----
+            // Sherds and discs are loops for the reason the potions are: the
+            // staging script names them by index, so the order lives in one
+            // place rather than in two lists that can drift apart.
+            {
+                char name[32];
+                for (const char* sherd :
+                     {"angler", "archer", "arms_up", "blade", "brewer", "burn", "danger",
+                      "explorer", "flow", "friend", "guster", "heart", "heartbreak", "howl",
+                      "miner", "mourner", "plenty", "prize", "scrape", "sheaf", "shelter", "skull",
+                      "snort"}) {
+                    std::snprintf(name, sizeof(name), "sherd_%s.png", sherd);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+                spriteLayers.push_back(blockTexture("goat_horn.png"));
+                for (int i = 0; i < game::kMusicDiscSprites; ++i) {
+                    std::snprintf(name, sizeof(name), "music_disc_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+                for (int i = 0; i < game::kFireworkStarSprites; ++i) {
+                    std::snprintf(name, sizeof(name), "firework_star_%02d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
+            }
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kFireworkStarSpritesEnd)) {
+                engine::logError("collectible sprites end at " +
+                                 std::to_string(spriteLayers.size()) +
+                                 " but the layer constants say " +
+                                 std::to_string(game::kFireworkStarSpritesEnd));
             }
         }
 
@@ -1140,14 +1818,16 @@ int main() {
             if (materials.conflicts != 0) {
                 engine::logWarn("Material table: " + std::to_string(materials.conflicts) +
                                 " texture layers are claimed by two different material families; one of them "
-                                "is being ignored.");
+                                "is being ignored. First is layer " +
+                                std::to_string(materials.firstConflictLayer) + ", held by family " +
+                                std::to_string(materials.firstConflictHeld) + " and wanted by " +
+                                std::to_string(materials.firstConflictWanted) + ".");
             }
         }
 
         // How wide each glyph actually is, measured off the atlas that loaded
         // rather than written down: the rightmost opaque column of a cell, plus
-        // one texel of spacing. That is the reference's own rule, and it
-        // reproduces its published widths exactly - 'i' 2, 'l' 3, 'I' 4, 'a' 6,
+        // one texel of spacing. That is the reference's own rule, and it        // reproduces its published widths exactly - 'i' 2, 'l' 3, 'I' 4, 'a' 6,
         // '@' 7. A blank cell has no column to measure, so the space is the one
         // advance that has to be a number.
         {
@@ -1211,6 +1891,16 @@ int main() {
         const auto buildStart = std::chrono::steady_clock::now();
         game::World world(kWorldSeed, engine::executableDirectory() / "saves", jobs,
                           static_cast<int>(settings.renderDistance));
+        world.setDetailRadius(static_cast<int>(settings.detailDistance));
+
+        // How far entity geometry is built. Zero means everything, which is
+        // what the tier being off has to mean for creatures and drops as much
+        // as for chunks - one number turns the whole feature off.
+        const auto entityDrawDistance = [&] {
+            return world.detailRadius() >= world.visibleRadius()
+                       ? 0.0f
+                       : static_cast<float>(world.detailRadius() * game::Chunk::kSize);
+        };
 
         // Far enough to reach the diagonal corner of the furthest drawn chunk,
         // or the world visibly clips into a dome at high render distances.
@@ -1406,6 +2096,7 @@ int main() {
         }
         const auto worldReady = std::chrono::steady_clock::now();
 
+
         std::size_t initialTriangles = 0;
         for (const auto& [coord, count] : trianglesPerChunk) {
             initialTriangles += count;
@@ -1589,6 +2280,51 @@ int main() {
         int framesSinceReport = 0;
 
         float placeTimer = 0.0f;
+        /// Which two-input bench is open, so the previewed result can be the
+        /// smithing upgrade or the repair without a second screen kind.
+        game::BlockId openBench = game::BlockId::SmithingTable;
+
+        /// A cloud left by a lingering potion.
+        ///
+        /// **Kept here rather than in the projectile system**, which reads the
+        /// world and never writes it and has no idea a player exists - the same
+        /// hand-off every landing already uses. A handful at a time, so a plain
+        /// vector is the whole of the storage.
+        struct LingeringCloud {
+            glm::vec3 position{0.0f};
+            game::ItemId potion = game::ItemId::None;
+            float secondsLeft = 0.0f;
+            float applyTimer = 0.0f;
+        };
+        std::vector<LingeringCloud> lingeringClouds;
+        /// The reference's own: a cloud lives thirty seconds, starts three
+        /// blocks across and applies once a second at a quarter strength.
+        constexpr float kCloudSeconds = 30.0f;
+        constexpr float kCloudRadius = 3.0f;
+        constexpr float kCloudInterval = 1.0f;
+        constexpr float kLingeringScale = 0.25f;
+        /// A splash reaches four blocks, and what it does falls off linearly to
+        /// nothing at the edge.
+        constexpr float kSplashRadius = 4.0f;
+
+        /// Which jukebox is playing which disc.
+        ///
+        /// **Named divergence: this is not saved.** A disc left in a jukebox
+        /// comes back to you when the world reloads rather than still being in
+        /// there, because the block-entity file has no room for it yet.
+        std::vector<std::pair<glm::ivec3, game::ItemId>> jukeboxDiscs;
+        /// **One inventory for every ender chest in the world.** It belongs to
+        /// the player rather than to any block, which is the whole point of it,
+        /// so it lives here and not in the chest map.
+        game::Chest enderChest;
+        /// Where a bed that has been slept in stands, if any. Not saved yet, so
+        /// it lasts the session - the reference keeps it on the player, which
+        /// would mean a `player.dat` format bump.
+        glm::ivec3 respawnPoint{0};
+        bool hasRespawnPoint = false;
+        /// The composter's own roll. A plain linear generator rather than a
+        /// shared one, so filling a tub cannot perturb worldgen or spawning.
+        std::uint32_t composterRandom = 0x2545F491u;
         float dropTimer = 0.0f;
         float secondsSinceSpacePress = kDoubleTapSeconds;
 
@@ -1614,6 +2350,10 @@ int main() {
         bool wasHurt = false;
         bool wasInWater = false;
         float lastFallDistance = 0.0f;
+        /// Whether the player was standing last frame, so a landing is an edge
+        /// rather than a state - trampling must fire once per fall, not every
+        /// frame you stand on the field afterwards.
+        bool wasOnGround = true;
         float caveTimer = 0.0f;
         constexpr float kStepDistance = 2.1f;
         constexpr float kBigFallDistance = 7.0f;
@@ -1741,6 +2481,69 @@ int main() {
             engine::logWarn("creature_showcase: the roster is frozen and the spawner is off");
         }
 
+        // One of every block whose dropped form is not simply a little cube,
+        // laid out in a row so all of them can be judged in one look. A dropped
+        // item is never saved, so this writes nothing to the world.
+        if (settings.dropShowcase) {
+            const game::BlockId kAwkward[]{
+                game::BlockId::Torch,          game::BlockId::Bell,
+                game::BlockId::Cauldron,       game::BlockId::Anvil,
+                game::BlockId::Hopper,         game::BlockId::Stonecutter,
+                game::BlockId::Grindstone,     game::BlockId::BrewingStand,
+                game::composterAt(4),          game::BlockId::Lantern,
+                game::BlockId::EndRod,         game::BlockId::Campfire,
+                game::BlockId::Scaffolding,    game::BlockId::EnchantingTable,
+                game::BlockId::EndPortalFrame, game::BlockId::SculkShrieker,
+                game::BlockId::PlanksFence,    game::BlockId::CobbleStairs0,
+                game::BlockId::StoneSlab,      game::BlockId::Stone,
+                // The redstone round. Every one of these is a model or a cut
+                // shape whose dropped miniature is the only place its geometry
+                // is drawn at that size, which is exactly where a bell spent
+                // twenty milestones as a gold brick.
+                game::BlockId::RedstoneTorch,
+                game::leverAt(game::LeverFloorX, false),
+                game::buttonAt(0, 0, false),
+                game::pressurePlateAt(0, 0),
+                game::repeaterAt(game::FaceDirection::NegZ, 1, false, false),
+                game::comparatorAt(game::FaceDirection::NegZ, false, false),
+                game::pistonAt(game::Facing6North, false, true),
+                game::pistonHeadAt(game::Facing6North, false),
+                game::observerAt(game::Facing6North, false),
+                game::dispenserAt(game::Facing6North, false),
+                game::daylightDetectorAt(0, false),
+                game::lightningRodAt(game::Facing6Up, false),
+                game::tripwireHookAt(game::FaceDirection::NegZ, false, false),
+            };
+            constexpr int kPerRow = 7;
+            const auto count = static_cast<int>(std::size(kAwkward));
+            for (int i = 0; i < count; ++i) {
+                const float x = player.position.x + static_cast<float>(i % kPerRow - kPerRow / 2) * 0.9f;
+                const float z = player.position.z - 3.0f - static_cast<float>(i / kPerRow) * 1.2f;
+                drops.spawn(glm::vec3{x, player.position.y + 0.6f, z},
+                            game::itemForBlock(kAwkward[i]), 1, glm::vec3{0.0f});
+            }
+            // The 2D sprite path, thrown down beside them: these must stay flat
+            // pictures with thickness and must not have become little cubes.
+            // Redstone dust and a rail belong here rather than above - both are
+            // flat shapes, so both are drawn as the picture their texture is.
+            constexpr game::ItemId kSprites[]{game::ItemId::StonePickaxe, game::ItemId::Coal,
+                                              game::ItemId::Bucket, game::ItemId::Redstone};
+            for (int i = 0; i < static_cast<int>(std::size(kSprites)); ++i) {
+                drops.spawn(glm::vec3{player.position.x + static_cast<float>(i - 1) * 0.9f,
+                                      player.position.y + 0.6f, player.position.z - 6.6f},
+                            kSprites[i], 1, glm::vec3{0.0f});
+            }
+            for (const game::BlockId plant : {game::BlockId::Poppy, game::BlockId::LadderNorth,
+                                              game::BlockId::Glass,
+                                              game::railAt(0, 0, false)}) {
+                drops.spawn(glm::vec3{player.position.x + 3.0f, player.position.y + 0.6f,
+                                      player.position.z - 6.6f},
+                            game::itemForBlock(plant), 1, glm::vec3{0.0f});
+            }
+            engine::logWarn("drop_showcase: " + std::to_string(count) +
+                            " blocks and six sprite drops are on the floor a few paces north");
+        }
+
         float swingTimer = 0.0f;
         // Which panel is up, if any. A crafting table reuses the inventory
         // screen with a wider grid rather than owning a screen of its own.
@@ -1764,6 +2567,22 @@ int main() {
         // A furnace borrows the first two for its input and fuel.
         std::array<game::ItemStack, game::kMaxCraftSlots> craftSlots{};
 
+        // What the stonecutter's nth option would make from whatever is in its
+        // input slot. **The single owner** - the screen draws it, the tooltip
+        // reads it and taking it spends from the same expression.
+        const auto stonecutterCut = [&craftSlots](int option) {
+            const game::ItemStack& input = craftSlots[0];
+            if (input.empty() || !game::isBlockItem(input.item)) {
+                return game::ItemStack{};
+            }
+            const game::BlockId cut =
+                game::stonecutterOption(game::blockForItem(input.item), option);
+            if (cut == game::BlockId::Air) {
+                return game::ItemStack{};
+            }
+            return game::ItemStack{game::itemForBlock(cut), game::stonecutterYield(option)};
+        };
+
         // Every furnace the player has interacted with, by block position.
         //
         // Kept here rather than in `World` on purpose: chunks are loaded and
@@ -1786,6 +2605,64 @@ int main() {
         if (!chests.empty()) {
             engine::logInfo("Restored " + std::to_string(chests.size()) + " chests.");
         }
+
+        // What is inside every stowbox that is currently an item rather than a
+        // block. The key rides in the stack's `damage`, so it survives being
+        // dropped, picked up, saved and reloaded with no new field anywhere.
+        std::unordered_map<int, game::Chest> stowed;
+        int nextStowHandle = 1;
+        for (const game::StowedBox& box : world.store().loadStowboxes()) {
+            stowed.emplace(box.handle, box.contents);
+            nextStowHandle = std::max(nextStowHandle, box.handle + 1);
+        }
+
+        // Where the hopper pass is up to, and the scratch it gathers positions
+        // into. Reused rather than allocated every four hundred milliseconds.
+        float hopperTimer = 0.0f;
+        std::vector<glm::ivec3> hopperCells;
+
+        // How many of a `Chest`'s slots a block actually uses. A hopper stores
+        // its five in the same twenty-seven-slot struct and simply never
+        // touches the rest, so **this is the one place that difference lives**
+        // - reading past it would let a hopper hold items no screen can reach.
+        const auto containerSlots = [](game::BlockId id) -> std::size_t {
+            return game::isHopper(id) ? game::kHopperSlots : game::kChestSlots;
+        };
+
+        // Moves a single item from one container into another, stacking onto a
+        // match before taking an empty slot, which is the same preference the
+        // player's own inventory has.
+        const auto moveOneItem = [](game::Chest& from, std::size_t fromSlots, game::Chest& to,
+                                    std::size_t toSlots) {
+            for (std::size_t i = 0; i < fromSlots; ++i) {
+                game::ItemStack& source = from.slots[i];
+                if (source.empty()) {
+                    continue;
+                }
+                for (int pass = 0; pass < 2; ++pass) {
+                    for (std::size_t j = 0; j < toSlots; ++j) {
+                        game::ItemStack& into = to.slots[j];
+                        const bool usable =
+                            pass == 0 ? (!into.empty() && into.item == source.item &&
+                                         into.space() > 0)
+                                      : into.empty();
+                        if (!usable) {
+                            continue;
+                        }
+                        if (into.empty()) {
+                            into = game::ItemStack{source.item, 1};
+                        } else {
+                            ++into.count;
+                        }
+                        if (--source.count <= 0) {
+                            source = game::ItemStack{};
+                        }
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
 
         // Two chests shoulder to shoulder open as one. **Which of a row pairs
         // with which is worked out from position alone, never remembered** - so
@@ -1813,7 +2690,8 @@ int main() {
                 }
                 creatures.restore(static_cast<game::CreatureKind>(saved.kind),
                                   glm::vec3{saved.x, saved.y, saved.z}, saved.yaw, saved.health,
-                                  saved.scale, saved.charged != 0);
+                                  saved.scale, saved.charged != 0, saved.playerBuilt != 0,
+                                  saved.profession);
                 ++restored;
             }
             if (restored > 0) {
@@ -1957,6 +2835,7 @@ int main() {
                 // A furnace shows what it has actually made; every other screen
                 // shows what its grid *would* make.
                 game::ItemStack shownResult;
+                std::array<game::ItemStack, game::kStonecutterOptions> shownCuts{};
                 game::inventoryScreen::FurnaceProgress progress;
                 if (*openScreen == game::inventoryScreen::Kind::Furnace) {
                     const auto found = furnaces.find(openFurnacePosition);
@@ -1966,14 +2845,26 @@ int main() {
                         progress.cook = found->second.cookFraction();
                     }
                 } else if (*openScreen == game::inventoryScreen::Kind::SmithingTable) {
-                    shownResult = game::smithingResult(craftSlots[0], craftSlots[1]);
+                    shownResult =
+                        openBench == game::BlockId::SmithingTable
+                            ? game::smithingResult(craftSlots[0], craftSlots[1])
+                        : openBench == game::BlockId::BrewingStand
+                            ? game::brewingResult(craftSlots[0], craftSlots[1])
+                            : game::repairResult(craftSlots[0], craftSlots[1]);
+                } else if (*openScreen == game::inventoryScreen::Kind::Stonecutter) {
+                    for (int option = 0; option < game::kStonecutterOptions; ++option) {
+                        shownCuts[static_cast<std::size_t>(option)] = stonecutterCut(option);
+                    }
                 } else {
                     shownResult = game::craftResult(craftSlots.data(),
                                                     game::inventoryScreen::craftSize(*openScreen));
                 }
 
                 append(game::inventoryScreen::build(
-                    *openScreen, inventory, craftSlots.data(), shownResult, heldStack,
+                    *openScreen, inventory, craftSlots.data(),
+                    *openScreen == game::inventoryScreen::Kind::Stonecutter ? shownCuts.data()
+                                                                           : &shownResult,
+                    heldStack,
                     (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight,
                     (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight, renderer.aspectRatio(),
                     catalogue, progress, creative,
@@ -2042,6 +2933,61 @@ int main() {
         const auto hasSupportUnder = [&world](game::BlockId block, int x, int y, int z) {
             return game::restsOnWater(block) ? game::isWaterSource(world.blockAt(x, y - 1, z))
                                              : world.isSolid(x, y - 1, z);
+        };
+
+        // A T of iron blocks with a carved pumpkin on its head becomes an iron
+        // golem. Checked from the pumpkin outward, in all three orientations.
+        //
+        // **The four corner cells must be exactly `Air`, not merely
+        // non-occluding.** That reads like the mistake this codebase keeps
+        // making — asking `== Air` where `occludesFace` is the general
+        // question — but here it is what the reference actually tests: a snow
+        // layer, a flower or a block of water in those cells prevents the
+        // build, and any looser test would let a golem rise out of a snowfield.
+        const auto tryRaiseGolem = [&world, &creatures](const glm::ivec3& head) {
+            struct Frame {
+                glm::ivec3 down;
+                glm::ivec3 across;
+            };
+            // Upright, then lying along each horizontal axis. All three are
+            // accepted, and the golem always faces south whichever was used.
+            const std::array<Frame, 3> frames{{{{0, -1, 0}, {1, 0, 0}},
+                                               {{0, -1, 0}, {0, 0, 1}},
+                                               {{1, 0, 0}, {0, 0, 1}}}};
+
+            for (const Frame& frame : frames) {
+                const glm::ivec3 body = head + frame.down;
+                const glm::ivec3 foot = body + frame.down;
+                const glm::ivec3 left = body - frame.across;
+                const glm::ivec3 right = body + frame.across;
+                const auto isIron = [&](const glm::ivec3& at) {
+                    return world.blockAt(at.x, at.y, at.z) == game::BlockId::IronBlock;
+                };
+                if (!isIron(body) || !isIron(foot) || !isIron(left) || !isIron(right)) {
+                    continue;
+                }
+                const auto isClear = [&](const glm::ivec3& at) {
+                    return world.blockAt(at.x, at.y, at.z) == game::BlockId::Air;
+                };
+                if (!isClear(head - frame.across) || !isClear(head + frame.across) ||
+                    !isClear(foot - frame.across) || !isClear(foot + frame.across)) {
+                    continue;
+                }
+
+                for (const glm::ivec3& cell : {head, body, foot, left, right}) {
+                    world.setBlock(cell.x, cell.y, cell.z, game::BlockId::Air);
+                }
+                // Stood on the lowest of the five cells, so a golem built lying
+                // down does not end up buried.
+                const glm::ivec3 feet{std::min({head.x, foot.x, left.x, right.x}),
+                                      std::min({head.y, foot.y, left.y, right.y}),
+                                      std::min({head.z, foot.z, left.z, right.z})};
+                creatures.place(game::CreatureKind::IronGolem,
+                                glm::vec3{feet} + glm::vec3{0.5f, 0.0f, 0.5f}, 0.0f, false, 0.0f,
+                                true);
+                return true;
+            }
+            return false;
         };
 
         while (!window.shouldClose()) {
@@ -2285,15 +3231,34 @@ int main() {
                 const int craftExtent = game::inventoryScreen::craftSize(*openScreen);
                 const bool furnaceOpen = *openScreen == game::inventoryScreen::Kind::Furnace;
                 const bool smithingOpen = *openScreen == game::inventoryScreen::Kind::SmithingTable;
+                const bool stonecutterOpen =
+                    *openScreen == game::inventoryScreen::Kind::Stonecutter;
+                const bool enderChestOpen =
+                    *openScreen == game::inventoryScreen::Kind::Chest &&
+                    game::isEnderChest(world.blockAt(openChestPosition.x, openChestPosition.y,
+                                                     openChestPosition.z));
                 // What the result slot is currently offering, and what taking it
                 // costs. A smithing table upgrades rather than crafts, so it can
                 // never be a grid pattern - but from here it behaves the same
                 // way, which is what keeps the take path as one piece of code.
-                const auto pendingResult = [&] {
-                    return smithingOpen ? game::smithingResult(craftSlots[0], craftSlots[1])
+                const auto pendingResult = [&](std::size_t option) {
+                    if (stonecutterOpen) {
+                        return stonecutterCut(static_cast<int>(option));
+                    }
+                    return smithingOpen ? (openBench == game::BlockId::SmithingTable
+                                               ? game::smithingResult(craftSlots[0], craftSlots[1])
+                                           : openBench == game::BlockId::BrewingStand
+                                               ? game::brewingResult(craftSlots[0], craftSlots[1])
+                                               : game::repairResult(craftSlots[0], craftSlots[1]))
                                         : game::craftResult(craftSlots.data(), craftExtent);
                 };
                 const auto spendIngredients = [&] {
+                    if (stonecutterOpen) {
+                        if (--craftSlots[0].count <= 0) {
+                            craftSlots[0] = game::ItemStack{};
+                        }
+                        return;
+                    }
                     if (!smithingOpen) {
                         game::consumeIngredients(craftSlots.data(), craftExtent);
                         return;
@@ -2319,6 +3284,12 @@ int main() {
                         return &inventory.slot(at.index);
                     }
                     if (at.region == Region::Chest) {
+                        // An ender chest is a window onto the player's own
+                        // twenty-seven, so it resolves before the block map is
+                        // consulted at all.
+                        if (enderChestOpen) {
+                            return &enderChest.slots[at.index % game::kChestSlots];
+                        }
                         const glm::ivec3 where =
                             at.index < game::kChestSlots ? openChestPosition : openChestPartner;
                         const auto found = chests.find(where);
@@ -2348,13 +3319,18 @@ int main() {
                         }
                     };
 
-                    if (*openScreen == game::inventoryScreen::Kind::Chest ||
-                        *openScreen == game::inventoryScreen::Kind::DoubleChest) {
-                        // A chest is a second container, not a workbench: a
+                    if (game::inventoryScreen::isContainer(*openScreen)) {
+                        // A container is a second store, not a workbench: a
                         // shift-click crosses between the two halves of the
                         // screen rather than shuffling within one.
                         if (at.region == Region::Chest) {
                             append(0, game::kInventorySlots);
+                            return targets;
+                        }
+                        if (enderChestOpen) {
+                            for (game::ItemStack& slot : enderChest.slots) {
+                                targets.push_back(&slot);
+                            }
                             return targets;
                         }
                         const bool doubled = *openScreen == game::inventoryScreen::Kind::DoubleChest;
@@ -2364,8 +3340,15 @@ int main() {
                             if (found == chests.end()) {
                                 continue;
                             }
-                            for (game::ItemStack& slot : found->second.slots) {
-                                targets.push_back(&slot);
+                            // **Only the slots the screen shows.** A hopper
+                            // stores its five in the same struct a chest uses,
+                            // and shift-clicking into the other twenty-two
+                            // would put items where nothing can reach them.
+                            const std::size_t shown =
+                                game::inventoryScreen::chestSlotCount(*openScreen);
+                            for (std::size_t i = 0; i < found->second.slots.size() && i < shown;
+                                 ++i) {
+                                targets.push_back(&found->second.slots[i]);
                             }
                         }
                         if (!targets.empty()) {
@@ -2561,7 +3544,7 @@ int main() {
                             // pass spends at least one ingredient, so this always
                             // terminates.
                             while (true) {
-                                const game::ItemStack batch = pendingResult();
+                                const game::ItemStack batch = pendingResult(hit->index);
                                 if (batch.empty() || !inventory.hasRoomFor(batch.item, batch.count)) {
                                     break;
                                 }
@@ -2578,7 +3561,7 @@ int main() {
                     if (hit->region == Region::CraftResult && !furnaceOpen) {
                         // The result is a preview until it is taken, which is why
                         // the ingredients are only spent here.
-                        const game::ItemStack made = pendingResult();
+                        const game::ItemStack made = pendingResult(hit->index);
                         if (made.empty()) {
                             continue;
                         }
@@ -2764,6 +3747,14 @@ int main() {
                 stats.triangles = renderer.stats().triangles;
                 stats.workerThreads = jobs.threadCount();
                 stats.renderDistance = world.visibleRadius();
+                stats.detailDistance = world.detailRadius();
+                stats.detailedChunks = world.detailedChunkCount();
+                const game::World::DetailLag lag = world.detailLag();
+                stats.detailLagChunks = lag.chunks;
+                stats.detailLagNearest = lag.nearest;
+                stats.deviceAllocations = renderer.stats().deviceAllocations;
+                stats.deviceAllocationLimit = renderer.stats().deviceAllocationLimit;
+                stats.gpuMegabytes = renderer.stats().pooledMegabytesHeld;
                 stats.biome = game::biomeInfo(game::sampleBiome(kWorldSeed,
                                                                 static_cast<int>(std::floor(player.position.x)),
                                                                 static_cast<int>(std::floor(player.position.z)))
@@ -2878,6 +3869,37 @@ int main() {
                 }
             }
             wasHurt = player.hurtFlash > 0.0f;
+            // Trampling. **A probability, not a threshold** - the reference's
+            // rule is `fallDistance - 0.5`, so a one-block step ruins tilled
+            // ground about half the time and a long drop always does. Sampled
+            // on the same edge the fall sound uses, and *before* the landing
+            // clears the distance.
+            if (player.onGround && !wasOnGround && lastFallDistance > 0.5f) {
+                const auto feet = glm::ivec3{glm::floor(player.position)};
+                const glm::ivec3 under{feet.x, feet.y - 1, feet.z};
+                if (game::isFarmland(world.blockAt(under.x, under.y, under.z))) {
+                    composterRandom = composterRandom * 1664525u + 1013904223u;
+                    const int roll = static_cast<int>((composterRandom >> 16) % 100u);
+                    if (roll < game::farming::trampleChancePercent(lastFallDistance)) {
+                        // Whatever was growing on it is harvested rather than
+                        // deleted, which is the reference's own behaviour.
+                        const glm::ivec3 plant{under.x, under.y + 1, under.z};
+                        const game::BlockId crop = world.blockAt(plant.x, plant.y, plant.z);
+                        if (game::isCropBlock(crop) || game::isStemBlock(crop)) {
+                            const game::ItemId yield = game::dropForBlock(crop);
+                            if (yield != game::ItemId::None) {
+                                drops.spawn(glm::vec3{plant} + glm::vec3{0.5f}, yield,
+                                            game::dropCountForBlock(crop));
+                            }
+                            world.setBlock(plant.x, plant.y, plant.z, game::BlockId::Air);
+                        }
+                        world.setBlock(under.x, under.y, under.z, game::BlockId::Dirt);
+                        sounds.play(audio, game::SoundEvent::DigGravel,
+                                    glm::vec3{under} + glm::vec3{0.5f}, 0.6f);
+                    }
+                }
+            }
+            wasOnGround = player.onGround;
             // Sampled *before* the landing clears it, or every fall reads as
             // zero blocks by the time the damage arrives.
             if (!player.onGround) {
@@ -2927,8 +3949,19 @@ int main() {
                         }
                     }
                     closeScreen();
-                    const int rx = spawnX;
-                    const int rz = spawnZ;
+                    // A bed that has been slept in wins over the world spawn,
+                    // and losing the bed falls back rather than stranding you.
+                    int rx = spawnX;
+                    int rz = spawnZ;
+                    if (hasRespawnPoint &&
+                        game::isBed(world.blockAt(respawnPoint.x, respawnPoint.y,
+                                                  respawnPoint.z))) {
+                        rx = respawnPoint.x;
+                        rz = respawnPoint.z;
+                    } else if (hasRespawnPoint) {
+                        hasRespawnPoint = false;
+                        engine::logInfo("Your bed was missing or blocked.");
+                    }
                     game::respawnPlayer(
                         player, glm::vec3{static_cast<float>(rx) + 0.5f,
                                           static_cast<float>(world.highestSolid(rx, rz) + 1),
@@ -2950,6 +3983,44 @@ int main() {
             }
 
             const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kBlockReach);
+
+            // A jukebox, which is neither a screen nor a placement. Asked
+            // before the screens below because it takes the interact for
+            // itself: right-clicking one with a disc must not open anything.
+            if (wantInteract && target.hit &&
+                world.blockAt(target.block.x, target.block.y, target.block.z) ==
+                    game::BlockId::Jukebox) {
+                const auto loaded =
+                    std::find_if(jukeboxDiscs.begin(), jukeboxDiscs.end(),
+                                 [&](const std::pair<glm::ivec3, game::ItemId>& entry) {
+                                     return entry.first == target.block;
+                                 });
+                if (loaded != jukeboxDiscs.end()) {
+                    // It gives the disc back rather than swallowing it, which is
+                    // the same rule the drinking path uses for the glass.
+                    drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f},
+                                loaded->second, 1, glm::vec3{0.0f});
+                    *loaded = jukeboxDiscs.back();
+                    jukeboxDiscs.pop_back();
+                    sounds.play(audio, game::SoundEvent::Pop,
+                                glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                } else if (const game::ItemStack& disc = inventory.slot(selectedSlot);
+                           !disc.empty() && game::isMusicDisc(disc.item)) {
+                    // **Named divergence: there is no music.** A disc sounds one
+                    // note of its own rather than a track, because the music is
+                    // the one part of this that has to be written rather than
+                    // reimplemented.
+                    jukeboxDiscs.emplace_back(target.block, disc.item);
+                    sounds.play(audio, game::SoundEvent::Orb,
+                                glm::vec3{target.block} + glm::vec3{0.5f}, 1.0f,
+                                0.5f + 0.05f * static_cast<float>(game::musicDiscIndex(disc.item)));
+                    if (!creative) {
+                        inventory.consumeOne(selectedSlot);
+                    }
+                    hudDirty = true;
+                }
+                wantInteract = false;
+            }
 
             if (wantInteract && target.hit &&
                 game::isInteractive(world.blockAt(target.block.x, target.block.y, target.block.z))) {
@@ -2975,7 +4046,25 @@ int main() {
                                                      : game::inventoryScreen::Kind::Chest;
                     sounds.play(audio, game::SoundEvent::ChestOpen,
                                 glm::vec3{openChestPosition} + glm::vec3{0.5f}, 0.6f);
-                } else if (opened == game::BlockId::SmithingTable) {
+                } else if (game::isHopper(opened)) {
+                    // Five slots, no partner. It stores them in the very same
+                    // block-entity map a chest uses, so the whole of the
+                    // container path - clicking, shift-clicking, spilling on
+                    // break, saving - already covers it.
+                    openChestPosition = target.block;
+                    openChestPartner = target.block;
+                    chests.try_emplace(openChestPosition);
+                    openScreen = game::inventoryScreen::Kind::Hopper;
+                } else if (opened == game::BlockId::Stonecutter) {
+                    openScreen = game::inventoryScreen::Kind::Stonecutter;
+                } else if (opened == game::BlockId::SmithingTable ||
+                           opened == game::BlockId::Grindstone || opened == game::BlockId::Anvil ||
+                           opened == game::BlockId::ChippedAnvil ||
+                           opened == game::BlockId::DamagedAnvil ||
+                           opened == game::BlockId::BrewingStand) {
+                    // All of them are two inputs and a previewed result, so they
+                    // share one screen and differ only in what that result is.
+                    openBench = opened;
                     openScreen = game::inventoryScreen::Kind::SmithingTable;
                 } else {
                     openScreen = game::inventoryScreen::Kind::CraftingTable;
@@ -2999,6 +4088,13 @@ int main() {
                     sounds.play(audio,
                                 opening ? game::SoundEvent::DoorOpen : game::SoundEvent::DoorClose,
                                 glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                } else if (aimed == game::BlockId::Bell) {
+                    // A bell has one state and one behaviour: it rings. The
+                    // reference's swing is an animated model rather than a
+                    // block state, and we have no animated block models, so the
+                    // sound is the whole of it.
+                    sounds.play(audio, game::SoundEvent::Bell,
+                                glm::vec3{target.block} + glm::vec3{0.5f}, 1.0f);
                 }
             }
 
@@ -3153,6 +4249,9 @@ int main() {
                     // nothing.
                     const std::optional<glm::ivec3> brokenPartner =
                         game::isChest(broken) ? chestPartnerAt(target.block) : std::nullopt;
+                    // Which stored contents the dropped item will carry, or 0
+                    // for everything that is not a stowbox with something in it.
+                    int brokenStowHandle = 0;
                     world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air);
 
                     // A broken furnace spills what was inside it. Erasing the
@@ -3176,19 +4275,31 @@ int main() {
                     }
 
                     // Twenty-seven slots, same reasoning.
-                    if (game::isChest(broken)) {
+                    if (game::isChest(broken) || game::isHopper(broken) ||
+                        broken == game::BlockId::Lectern) {
                         const auto found = chests.find(target.block);
                         if (found != chests.end()) {
                             const glm::vec3 centre = glm::vec3{target.block} + glm::vec3{0.5f};
-                            for (const game::ItemStack& stack : found->second.slots) {
-                                if (!stack.empty()) {
-                                    drops.spawn(centre, stack.item, stack.count);
+                            // A stowbox is the one container whose contents do
+                            // not fall out: they move onto the item, which is
+                            // the whole point of it.
+                            if (game::isStowbox(broken)) {
+                                if (!found->second.empty()) {
+                                    brokenStowHandle = nextStowHandle++;
+                                    stowed.emplace(brokenStowHandle, found->second);
+                                }
+                            } else {
+                                for (const game::ItemStack& stack : found->second.slots) {
+                                    if (!stack.empty()) {
+                                        drops.spawn(centre, stack.item, stack.count,
+                                                    glm::vec3{0.0f}, 0.35f, stack.damage);
+                                    }
                                 }
                             }
                             chests.erase(found);
                         }
-                        if ((openScreen == game::inventoryScreen::Kind::Chest ||
-                             openScreen == game::inventoryScreen::Kind::DoubleChest) &&
+                        if (openScreen.has_value() &&
+                            game::inventoryScreen::isContainer(*openScreen) &&
                             (openChestPosition == target.block || openChestPartner == target.block)) {
                             closeScreen();
                         }
@@ -3226,7 +4337,8 @@ int main() {
                     const game::ItemId dropped = game::dropForBlock(broken);
                     if (dropped != game::ItemId::None && (creative || game::yieldsDrop(broken, tool.item))) {
                         drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped,
-                                    game::dropCountForBlock(broken));
+                                    game::dropCountForBlock(broken), glm::vec3{0.0f}, 0.35f,
+                                    brokenStowHandle);
 
                         // Gravel gives up flint about one time in ten, the
                         // reference's own rate and the only source of the one
@@ -3248,9 +4360,40 @@ int main() {
                         }
                     }
 
+                    // A door is two blocks and one thing: breaking either half
+                    // takes the other, and only one door drops because only the
+                    // lower half is a canonical item.
+                    if (game::isDoor(broken)) {
+                        const int step = game::doorIsUpper(broken) ? -1 : 1;
+                        const glm::ivec3 other{target.block.x, target.block.y + step,
+                                               target.block.z};
+                        const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
+                        if (game::isDoor(twin) &&
+                            game::doorFamily(twin) == game::doorFamily(broken)) {
+                            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
+                        }
+                    }
+                    // A bed is the same idea lying down: the other half is one
+                    // step along the facing, forward from the foot or back from
+                    // the head.
+                    if (game::isBed(broken)) {
+                        const game::FaceDirection along =
+                            game::bedIsHead(broken) ? game::oppositeDirection(game::bedFacing(broken))
+                                                    : game::bedFacing(broken);
+                        const glm::ivec3 step =
+                            along == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
+                            : along == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
+                            : along == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
+                                                                 : glm::ivec3{0, 0, -1};
+                        const glm::ivec3 other = target.block + step;
+                        const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
+                        if (game::isBed(twin) && game::bedColour(twin) == game::bedColour(broken)) {
+                            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
+                        }
+                    }
+
                     // Tools wear only on blocks that actually resist them.
-                    if (!creative && game::blockHardness(broken) > 0.0f) {
-                        const game::ToolProperties properties = game::toolFor(tool.item);
+                    if (!creative && game::blockHardness(broken) > 0.0f) {                        const game::ToolProperties properties = game::toolFor(tool.item);
                         if (properties.durability > 0) {
                             game::ItemStack& held = inventory.slot(selectedSlot);
                             if (++held.damage >= properties.durability) {
@@ -3311,8 +4454,14 @@ int main() {
                 //
                 // A full bar refuses, exactly as the reference does - otherwise
                 // the first thing anyone does is eat their entire stack.
-                if (!held.empty() && game::survival::isEdible(held.item) &&
-                    player.food < game::survival::kMaxFood) {
+                //
+                // **A potion is drunk on the same gesture and the same timer.**
+                // It is not gated on the hunger bar, because a potion of
+                // healing is exactly the thing you reach for when nothing else
+                // about you is full.
+                const bool drinking = !held.empty() && game::isDrinkablePotion(held.item);
+                if (drinking || (!held.empty() && game::survival::isEdible(held.item) &&
+                                 player.food < game::survival::kMaxFood)) {
                     player.eatingSeconds += deltaSeconds;
                     // Crumbs, on a spacing rather than every frame - the same
                     // handful whatever the frame rate.
@@ -3328,11 +4477,44 @@ int main() {
                     }
                     if (player.eatingSeconds >= game::survival::kEatSeconds) {
                         player.eatingSeconds = 0.0f;
-                        game::feedPlayer(player, game::survival::foodValue(held.item));
-                        sounds.playGlobal(audio, game::SoundEvent::Burp, 0.5f);
-                        if (!creative) {
-                            inventory.consumeOne(selectedSlot);
+                        if (drinking) {
+                            const game::PotionKind brew = game::potionKind(held.item);
+                            // The two instant ones land once and are gone, which
+                            // is why they cannot go through `apply` - it holds a
+                            // timer, and theirs would be zero.
+                            if (brew.effect == game::effects::Effect::InstantHealth) {
+                                game::healPlayer(
+                                    player, static_cast<int>(game::effects::instantAmount(
+                                                brew.effect, brew.amplifier)));
+                            } else if (brew.effect == game::effects::Effect::InstantDamage) {
+                                game::damagePlayer(
+                                    player, static_cast<int>(game::effects::instantAmount(
+                                                brew.effect, brew.amplifier)));
+                            } else if (brew.effect != game::effects::Effect::None) {
+                                player.effects.apply(brew.effect, brew.amplifier, brew.seconds);
+                            }
+                            // Only the turtle master carries a second effect,
+                            // and it is the reason `PotionKind` has room for one.
+                            if (brew.second != game::effects::Effect::None) {
+                                player.effects.apply(brew.second, brew.secondAmplifier,
+                                                     brew.seconds);
+                            }
+                            if (!creative) {
+                                inventory.consumeOne(selectedSlot);
+                                // The glass survives. If there is nowhere to put
+                                // it, it goes on the floor rather than nowhere.
+                                if (inventory.add(game::ItemId::GlassBottle, 1) > 0) {
+                                    drops.spawn(camera.position + camera.forward() * 0.6f,
+                                                game::ItemId::GlassBottle, 1, glm::vec3{0.0f});
+                                }
+                            }
+                        } else {
+                            game::feedPlayer(player, game::survival::foodValue(held.item));
+                            if (!creative) {
+                                inventory.consumeOne(selectedSlot);
+                            }
                         }
+                        sounds.playGlobal(audio, game::SoundEvent::Burp, 0.5f);
                         hudDirty = true;
                     } else if (player.eatingSeconds - deltaSeconds <= 0.0f) {
                         // One bite at the start rather than a chew loop, which
@@ -3363,6 +4545,39 @@ int main() {
                     placeTimer = kPlaceRepeatSeconds;
                 }
 
+                // A glass bottle fills from water the same way a bucket does,
+                // and needs the same ray for the same reason. **This is the only
+                // way into the whole brewing tree** - every potion in the game
+                // starts as a bottle of water, and without it they are creative
+                // only.
+                if (placeTimer <= 0.0f && !held.empty() &&
+                    held.item == game::ItemId::GlassBottle) {
+                    const game::RaycastHit reached =
+                        game::raycast(world, camera.position, camera.forward(), kBlockReach, true);
+                    // A cauldron with water in it fills one too, and does not
+                    // empty itself doing so - the reference takes a level, but
+                    // ours has no bottle-sized level to take.
+                    const bool fromWater =
+                        reached.hit && game::isWaterSource(world.blockAt(
+                                           reached.block.x, reached.block.y, reached.block.z));
+                    if (fromWater || player.underwater) {
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                            if (inventory.add(game::ItemId::WaterBottle, 1) > 0) {
+                                drops.spawn(camera.position + camera.forward() * 0.6f,
+                                            game::ItemId::WaterBottle, 1, glm::vec3{0.0f});
+                            }
+                        }
+                        sounds.play(audio, game::SoundEvent::BucketFill,
+                                    glm::vec3{reached.hit ? reached.block
+                                                          : glm::ivec3{camera.position}} +
+                                        glm::vec3{0.5f},
+                                    0.6f);
+                        placeTimer = kPlaceRepeatSeconds;
+                        hudDirty = true;
+                    }
+                }
+
                 // A bucket is used rather than placed, and needs its own ray:
                 // water has no selection geometry, so the ordinary aim passes
                 // straight through it to the riverbed.
@@ -3379,9 +4594,10 @@ int main() {
                     game::ItemId became = game::ItemId::Bucket;
 
                     if (held.item == game::ItemId::MilkBucket) {
-                        // Drinking. There are no status effects yet, so all this
-                        // does is hand the empty bucket back - which is the part
-                        // that has to be right whenever they arrive.
+                        // Drinking, and **milk clears every effect there is** -
+                        // which is the one thing it is for, and the reason it is
+                        // worth carrying beside a potion of harming.
+                        player.effects.clear();
                         used = true;
                     } else if (filling) {
                         // A cow first: an empty bucket aimed at one milks it,
@@ -3450,8 +4666,14 @@ int main() {
                     held.item == game::ItemId::FlintAndSteel && target.hit) {
                     const game::BlockId aimed =
                         world.blockAt(target.block.x, target.block.y, target.block.z);
-                    if (aimed == game::BlockId::Tnt) {
-                        // Lighting a charge directly rather than setting a fire
+                    if (game::isCandle(aimed) && !game::isCandleLit(aimed)) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::candleAt(game::candleColour(aimed),
+                                                      game::candleCount(aimed), true));
+                        sounds.play(audio, game::SoundEvent::Ignite,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.5f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (aimed == game::BlockId::Tnt) {                        // Lighting a charge directly rather than setting a fire
                         // beside it, which is the reference's own behaviour.
                         world.setBlock(target.block.x, target.block.y, target.block.z,
                                        game::BlockId::TntPrimed);
@@ -3490,9 +4712,152 @@ int main() {
                 // frame and the timer above could never finish. Nothing caught
                 // it, because both halves compiled and the survival tests
                 // called `feedPlayer` directly rather than through a click.
+                // The cauldron. A bucket fills or empties it outright; a bottle
+                // takes two of its six levels, which is the reference's own
+                // arithmetic and the reason a cauldron holds three bottles.
+                if (placeTimer <= 0.0f && target.hit &&
+                    game::isCauldron(
+                        world.blockAt(target.block.x, target.block.y, target.block.z))) {
+                    const game::BlockId tub =
+                        world.blockAt(target.block.x, target.block.y, target.block.z);
+                    const int level = game::cauldronLevel(tub);
+                    const auto swapHeld = [&](game::ItemId became) {
+                        if (creative) {
+                            return;
+                        }
+                        game::ItemStack& slot = inventory.slot(selectedSlot);
+                        if (slot.count > 1) {
+                            --slot.count;
+                            inventory.add(became, 1);
+                        } else {
+                            slot = game::ItemStack{became, 1};
+                        }
+                        hudDirty = true;
+                    };
+                    if (!held.empty() && held.item == game::ItemId::WaterBucket && level < 6) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::cauldronAt(6));
+                        swapHeld(game::ItemId::Bucket);
+                        sounds.play(audio, game::SoundEvent::BucketEmpty,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (!held.empty() && held.item == game::ItemId::Bucket && level == 6) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::cauldronAt(0));
+                        swapHeld(game::ItemId::WaterBucket);
+                        sounds.play(audio, game::SoundEvent::BucketFill,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (!held.empty() && held.item == game::ItemId::GlassBottle &&
+                               level >= 2) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::cauldronAt(level - 2));
+                        swapHeld(game::ItemId::WaterBottle);
+                        sounds.play(audio, game::SoundEvent::BucketFill,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (!held.empty() && held.item == game::ItemId::WaterBottle &&
+                               level <= 4) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::cauldronAt(level + 2));
+                        swapHeld(game::ItemId::GlassBottle);
+                        sounds.play(audio, game::SoundEvent::BucketEmpty,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
+                // A lectern holds one book. It borrows the chest map's first
+                // slot rather than owning a map of its own, so it saves, spills
+                // on break and survives a reload with no new machinery.
+                if (placeTimer <= 0.0f && target.hit &&
+                    world.blockAt(target.block.x, target.block.y, target.block.z) ==
+                        game::BlockId::Lectern) {
+                    const auto shelved = chests.find(target.block);
+                    const bool hasBook =
+                        shelved != chests.end() && !shelved->second.slots[0].empty();
+                    if (!hasBook && !held.empty() && held.item == game::ItemId::Book) {
+                        chests[target.block].slots[0] = game::ItemStack{game::ItemId::Book, 1};
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                        }
+                        sounds.play(audio, game::SoundEvent::WoodClick,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        hudDirty = true;
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (hasBook) {
+                        game::ItemStack& shelf = shelved->second.slots[0];
+                        inventory.add(shelf.item, shelf.count);
+                        shelf = game::ItemStack{};
+                        sounds.play(audio, game::SoundEvent::WoodClick,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        hudDirty = true;
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
+                // The composter. It sits ahead of the whole use chain because
+                // aiming at one has to win over whatever the held item would
+                // otherwise do - several compostable things are also food.
+                if (placeTimer <= 0.0f && target.hit &&
+                    game::isComposter(
+                        world.blockAt(target.block.x, target.block.y, target.block.z))) {
+                    const game::BlockId tub =
+                        world.blockAt(target.block.x, target.block.y, target.block.z);
+                    const int level = game::composterLevel(tub);
+                    if (level >= game::farming::kComposterReady) {
+                        // Level eight is *ready*, not merely full: taking from
+                        // it yields exactly one bone meal and empties it.
+                        inventory.add(game::ItemId::BoneMeal, 1);
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::composterAt(0));
+                        sounds.play(audio, game::SoundEvent::DigGrass,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        hudDirty = true;
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (!held.empty() && game::farming::isCompostable(held.item)) {
+                        // Bedrock gives the **first item into an empty tub** a
+                        // guaranteed rise; everything after it rolls the
+                        // material's own chance.
+                        composterRandom = composterRandom * 1664525u + 1013904223u;
+                        const int roll = static_cast<int>((composterRandom >> 16) % 100u);
+                        const bool rose =
+                            level == 0 || roll < game::farming::compostChance(held.item);
+                        if (rose) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::composterAt(level + 1));
+                        }
+                        sounds.play(audio, game::SoundEvent::DigGrass,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                        }
+                        hudDirty = true;
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
                 if (placeTimer <= 0.0f && !held.empty()) {
                     const game::ItemId used = held.item;
                     bool consumed = false;
+
+                    // Working soil wears a tool exactly as breaking a block
+                    // does, so this is the break path's own rule rather than a
+                    // second copy of it that could drift.
+                    const auto wearHeldTool = [&] {
+                        if (creative) {
+                            return;
+                        }
+                        const game::ToolProperties properties = game::toolFor(used);
+                        if (properties.durability <= 0) {
+                            return;
+                        }
+                        game::ItemStack& slot = inventory.slot(selectedSlot);
+                        if (++slot.damage >= properties.durability) {
+                            slot = game::ItemStack{};
+                        }
+                        hudDirty = true;
+                    };
 
                     if (used == game::ItemId::GlassBottle && target.hit) {
                         // A bottle fills from any water, source or flowing -
@@ -3514,14 +4879,16 @@ int main() {
                             placeTimer = kPlaceRepeatSeconds;
                         }
                     } else if ((used == game::ItemId::VoidPearl && pearlCooldown <= 0.0f) ||
-                               used == game::ItemId::Egg) {
+                               used == game::ItemId::Egg || game::isThrownPotion(used)) {
                         // A thrown entity that arcs, rather than a look-ray
                         // that dropped you where you were already aiming. Same
                         // anchor as the bow: spawning at the eye itself puts it
                         // through your own head at point-blank range.
-                        const game::ProjectileKind kind = used == game::ItemId::Egg
-                                                              ? game::ProjectileKind::Egg
-                                                              : game::ProjectileKind::Pearl;
+                        const game::ProjectileKind kind =
+                            used == game::ItemId::Egg          ? game::ProjectileKind::Egg
+                            : game::isSplashPotion(used)       ? game::ProjectileKind::SplashPotion
+                            : game::isLingeringPotion(used)    ? game::ProjectileKind::LingeringPotion
+                                                               : game::ProjectileKind::Pearl;
                         const glm::vec3 from = camera.position - glm::vec3{0.0f, 0.1f, 0.0f};
                         glm::vec3 launch = camera.forward() * game::projectileInfo(kind).power;
                         // Blocks per tick, and only the vertical part while
@@ -3529,11 +4896,22 @@ int main() {
                         // reason: running along the ground must not lift a throw.
                         launch += player.velocity * (1.0f / 20.0f) *
                                   glm::vec3{1.0f, player.onGround ? 0.0f : 1.0f, 1.0f};
-                        projectiles.spawn(kind, from, launch, false, false);
+                        // The brew rides on the shot, because forty-one of them
+                        // share two projectile kinds.
+                        projectiles.spawn(kind, from, launch, false, false,
+                                          game::isThrownPotion(used) ? used : game::ItemId::None);
                         if (kind == game::ProjectileKind::Pearl) {
                             pearlCooldown = kPearlCooldownSeconds;
                         }
                         consumed = true;
+                    } else if (game::isGoatHorn(used)) {
+                        // The whole of what a horn does. Eight of them, and the
+                        // note is the only thing that differs - so one recording
+                        // at eight pitches is not a shortcut, it is the design.
+                        sounds.play(audio, game::SoundEvent::Orb, camera.position, 1.0f,
+                                    game::goatHornPitch(used));
+                        consumed = true;
+                        placeTimer = kPlaceRepeatSeconds;
                     } else if (game::toolFor(used).kind == game::ToolKind::Axe && target.hit) {
                         const game::BlockId bark =
                             world.blockAt(target.block.x, target.block.y, target.block.z);
@@ -3542,6 +4920,92 @@ int main() {
                             world.setBlock(target.block.x, target.block.y, target.block.z, stripped);
                             placeTimer = kPlaceRepeatSeconds;
                         }
+                    } else if (game::toolFor(used).kind == game::ToolKind::Hoe && target.hit) {
+                        // Tilling. Only the **top** face may be worked and only
+                        // with air above it, which is the reference's rule and
+                        // the reason you cannot hoe the underside of an
+                        // overhang into a field.
+                        const game::BlockId soil =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        const game::BlockId tilled = game::farming::tilledFrom(soil);
+                        const game::BlockId above = world.blockAt(
+                            target.block.x, target.block.y + 1, target.block.z);
+                        if (tilled != soil && (above == game::BlockId::Air ||
+                                               game::isWashedAway(above))) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z, tilled);
+                            sounds.play(audio, game::SoundEvent::DigGravel,
+                                        glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                            wearHeldTool();
+                            placeTimer = kPlaceRepeatSeconds;
+                        }
+                    } else if (game::toolFor(used).kind == game::ToolKind::Shovel && target.hit) {
+                        const game::BlockId soil =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        const game::BlockId path = game::farming::pathFrom(soil);
+                        const game::BlockId above = world.blockAt(
+                            target.block.x, target.block.y + 1, target.block.z);
+                        if (path != soil && (above == game::BlockId::Air ||
+                                             game::isWashedAway(above))) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z, path);
+                            sounds.play(audio, game::SoundEvent::DigGravel,
+                                        glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                            wearHeldTool();
+                            placeTimer = kPlaceRepeatSeconds;
+                        }
+                    } else if (target.hit && game::farming::cropForSeed(used) != game::BlockId::Air) {
+                        // Sowing. A seed goes **on top of** what you aimed at,
+                        // never into it, so the ground test and the cell test
+                        // are two different blocks.
+                        const game::BlockId ground =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        const glm::ivec3 cell = target.block + glm::ivec3{0, 1, 0};
+                        const game::BlockId inCell = world.blockAt(cell.x, cell.y, cell.z);
+                        if (game::farming::canSowOn(used, ground) &&
+                            (inCell == game::BlockId::Air || game::isWashedAway(inCell))) {
+                            world.setBlock(cell.x, cell.y, cell.z,
+                                           game::farming::cropForSeed(used));
+                            sounds.play(audio, game::SoundEvent::DigGrass,
+                                        glm::vec3{cell} + glm::vec3{0.5f}, 0.6f);
+                            consumed = true;
+                        }
+                    } else if (target.hit && used == game::ItemId::NetherWart) {
+                        const game::BlockId ground =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        const glm::ivec3 cell = target.block + glm::ivec3{0, 1, 0};
+                        const game::BlockId inCell = world.blockAt(cell.x, cell.y, cell.z);
+                        if (game::farming::canSowOn(used, ground) &&
+                            (inCell == game::BlockId::Air || game::isWashedAway(inCell))) {
+                            world.setBlock(cell.x, cell.y, cell.z, game::BlockId::NetherWart0);
+                            sounds.play(audio, game::SoundEvent::DigGrass,
+                                        glm::vec3{cell} + glm::vec3{0.5f}, 0.6f);
+                            consumed = true;
+                        }
+                    } else if (target.hit && used == game::ItemId::BoneMeal) {
+                        // Bone meal is a random tick you asked for, so it goes
+                        // through the same growth rule the sampler uses rather
+                        // than a second one that could disagree with it.
+                        if (world.applyBoneMeal(target.block)) {
+                            sounds.play(audio, game::SoundEvent::DigGrass,
+                                        glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                            consumed = true;
+                        }
+                    } else if (target.hit && used == game::ItemId::Shears &&
+                               world.blockAt(target.block.x, target.block.y, target.block.z) ==
+                                   game::BlockId::Pumpkin) {
+                        // Carving. The face turns toward whoever cut it, which
+                        // is the reference's own rule for a side cut.
+                        const game::FaceDirection facing =
+                            game::facingToward(camera.forward().x, camera.forward().z);
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       static_cast<game::BlockId>(
+                                           static_cast<int>(game::BlockId::CarvedPumpkinFirst) +
+                                           static_cast<int>(facing)));
+                        drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f, 1.0f, 0.5f},
+                                    game::ItemId::PumpkinSeeds, 1);
+                        sounds.play(audio, game::SoundEvent::DigGrass,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        wearHeldTool();
+                        placeTimer = kPlaceRepeatSeconds;
                     }
 
                     if (consumed) {
@@ -3553,7 +5017,87 @@ int main() {
                     }
                 }
 
+                // A door or trapdoor already standing there swings rather than
+                // being built on. **Before the placement branch**, which would
+                // otherwise try to put a second one against it.
+                if (placeTimer <= 0.0f && target.hit) {
+                    const game::BlockId hit =
+                        world.blockAt(target.block.x, target.block.y, target.block.z);
+                    if (game::isDoor(hit)) {
+                        // Both halves swing together, so the other one is found
+                        // from this one's own half rather than searched for.
+                        const int step = game::doorIsUpper(hit) ? -1 : 1;
+                        const glm::ivec3 other{target.block.x, target.block.y + step,
+                                               target.block.z};
+                        const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
+                        const bool open = !game::doorOpen(hit);
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::doorAt(game::doorFamily(hit), game::doorFacing(hit),
+                                                    game::doorHingeRight(hit), open,
+                                                    game::doorIsUpper(hit)));
+                        if (game::isDoor(twin) && game::doorFamily(twin) == game::doorFamily(hit)) {
+                            world.setBlock(other.x, other.y, other.z,
+                                           game::doorAt(game::doorFamily(twin),
+                                                        game::doorFacing(twin),
+                                                        game::doorHingeRight(twin), open,
+                                                        game::doorIsUpper(twin)));
+                        }
+                        sounds.play(audio, game::SoundEvent::DigWood,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (game::isTrapdoor(hit)) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::trapdoorAt(game::trapdoorFamily(hit),
+                                                        game::trapdoorFacing(hit),
+                                                        !game::trapdoorOpen(hit),
+                                                        game::trapdoorIsTop(hit)));
+                        sounds.play(audio, game::SoundEvent::DigWood,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (game::isBed(hit)) {
+                        // Sleeping. **The respawn point is set whatever the
+                        // hour** - the reference sets it on use, day or night -
+                        // and only the skip to dawn needs it to be dark.
+                        respawnPoint = target.block;
+                        hasRespawnPoint = true;
+                        const bool dark = game::sky::sunDirection(timeOfDay).y < -0.05f;
+                        if (dark) {
+                            // Dawn, in the same units the day cycle runs in.
+                            timeOfDay = 0.0f;
+                            engine::logInfo("Slept. Good morning.");
+                        } else {
+                            engine::logInfo("Respawn point set.");
+                        }
+                        sounds.play(audio, game::SoundEvent::DigCloth,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
+
                 const bool canPlace = !held.empty() && game::isBlockItem(held.item);
+                // Adding a candle to a cell that already holds one of the same
+                // colour raises the stack rather than refusing the placement,
+                // which is the whole of how you get to four.
+                if (placeTimer <= 0.0f && canPlace && target.hit) {
+                    const game::BlockId holding = game::blockForItem(held.item);
+                    const game::BlockId standing =
+                        world.blockAt(target.block.x, target.block.y, target.block.z);
+                    if (game::isCandle(holding) && game::isCandle(standing) &&
+                        game::candleColour(holding) == game::candleColour(standing) &&
+                        game::candleCount(standing) < 4) {
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::candleAt(game::candleColour(standing),
+                                                      game::candleCount(standing) + 1,
+                                                      game::isCandleLit(standing)));
+                        sounds.play(audio, game::SoundEvent::DigWood,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.5f);
+                        if (!creative) {
+                            inventory.consumeOne(selectedSlot);
+                            hudDirty = true;
+                        }
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
+                }
                 // A lily pad is set down **on** the water, so its aim stops at
                 // the surface every other block's ray goes straight through,
                 // and it lands in the cell above rather than in it.
@@ -3608,33 +5152,204 @@ int main() {
                                 ? (aim.x > 0.0f ? game::Facing::West : game::Facing::East)
                                 : (aim.z > 0.0f ? game::Facing::North : game::Facing::South);
                         placing = game::stairsAt(game::stairFamily(placing), facing, clickedBelow);
+                    } else if (game::isRedstoneComponent(placing) ||
+                               game::isRedstoneTorch(placing)) {
+                        // ---- Redstone. ----
+                        // `into` points from the new cell at the block that was
+                        // clicked, so it names the face this is stuck to: down
+                        // for a floor, up for a ceiling, or one of the four
+                        // walls.
+                        const glm::ivec3 into = target.block - placeCell;
+                        const glm::vec3 aim = camera.forward();
+                        // Which way the player is looking, as one of six. A
+                        // machine placed while looking down points down.
+                        const int aimedFacing =
+                            std::abs(aim.y) > std::abs(aim.x) && std::abs(aim.y) > std::abs(aim.z)
+                                ? (aim.y > 0.0f ? game::Facing6Up : game::Facing6Down)
+                                : game::directionAsFacing6(
+                                      game::facingToward(-aim.x, -aim.z));
+                        const game::FaceDirection wall =
+                            into.x > 0   ? game::FaceDirection::PosX
+                            : into.x < 0 ? game::FaceDirection::NegX
+                            : into.z > 0 ? game::FaceDirection::PosZ
+                            : into.z < 0 ? game::FaceDirection::NegZ
+                                         : game::FaceDirection::Unknown;
+                        if (game::isRedstoneTorch(placing)) {
+                            // A torch on a wall leans off it; on a floor it
+                            // stands up. A ceiling gives it nothing to hold on
+                            // to, which is the reference's rule too.
+                            placing = into.y > 0 ? game::BlockId::Air
+                                                 : game::redstoneTorchAt(wall, true);
+                        } else if (game::isLever(placing)) {
+                            const bool alongX = std::abs(aim.x) > std::abs(aim.z);
+                            const int mount =
+                                wall != game::FaceDirection::Unknown
+                                    ? game::LeverWallFirst + static_cast<int>(wall)
+                                : into.y > 0 ? (alongX ? game::LeverCeilingX : game::LeverCeilingZ)
+                                             : (alongX ? game::LeverFloorX : game::LeverFloorZ);
+                            placing = game::leverAt(mount, false);
+                        } else if (game::isButton(placing)) {
+                            const int mount = wall != game::FaceDirection::Unknown
+                                                  ? 2 + static_cast<int>(wall)
+                                              : into.y > 0 ? 1
+                                                           : 0;
+                            placing = game::buttonAt(game::buttonFamily(placing), mount, false);
+                        } else if (game::isRepeater(placing) || game::isComparator(placing)) {
+                            // The arrow points **away** from whoever set it
+                            // down, so the signal runs off into the build
+                            // rather than back at the player.
+                            const game::FaceDirection out = game::oppositeDirection(
+                                game::facingToward(aim.x, aim.z));
+                            placing = game::isRepeater(placing)
+                                          ? game::repeaterAt(out, 1, false, false)
+                                          : game::comparatorAt(out, false, false);
+                        } else if (game::isPiston(placing)) {
+                            placing = game::pistonAt(aimedFacing, false, game::pistonSticky(placing));
+                        } else if (game::isObserver(placing)) {
+                            // The **watching** face points away from you; the
+                            // pulse comes out of the side facing you.
+                            placing = game::observerAt(aimedFacing, false);
+                        } else if (game::isDispenserLike(placing)) {
+                            placing = game::dispenserAt(aimedFacing, game::isDropper(placing));
+                        } else if (game::isLightningRod(placing)) {
+                            placing = game::lightningRodAt(
+                                into.y > 0 ? game::Facing6Up
+                                : into.y < 0
+                                    ? game::Facing6Down
+                                    : game::directionAsFacing6(game::oppositeDirection(wall)),
+                                false);
+                        } else if (game::isTripwireHook(placing)) {
+                            placing = wall == game::FaceDirection::Unknown
+                                          ? game::BlockId::Air
+                                          : game::tripwireHookAt(
+                                                game::oppositeDirection(wall), false, false);
+                        } else if (game::isRail(placing)) {
+                            // Flat, running the way the player is facing. The
+                            // reference derives the shape from its neighbours
+                            // and re-derives it whenever one changes; ours is a
+                            // named divergence and lays straight track.
+                            const bool alongX = std::abs(aim.x) > std::abs(aim.z);
+                            placing = game::railAt(game::railFamily(placing), alongX ? 1 : 0, false);
+                        }
+                    } else if (game::isSignLike(placing)) {
+                        // A sign clicked onto a wall hangs off it and shows its
+                        // face outward; one set on the ground turns to whoever
+                        // put it there. A hanging sign clicked onto a ceiling
+                        // stays the hanging form and is the one that does not
+                        // want a wall at all.
+                        const glm::ivec3 into = target.block - placeCell;
+                        const game::FaceDirection wall =
+                            into.x > 0   ? game::FaceDirection::NegX
+                            : into.x < 0 ? game::FaceDirection::PosX
+                            : into.z > 0 ? game::FaceDirection::NegZ
+                            : into.z < 0 ? game::FaceDirection::PosZ
+                                         : game::FaceDirection::Unknown;
+                        const bool onWall = wall != game::FaceDirection::Unknown &&
+                                            !game::isHangingSign(placing);
+                        placing = game::signAt(
+                            game::signKind(placing), game::signFamily(placing),
+                            onWall ? wall
+                                   : game::facingToward(camera.forward().x, camera.forward().z),
+                            onWall);
                     } else if (game::isFenceGate(placing)) {
                         // A gate takes the facing of whoever set it down, and is
                         // always shut to begin with.
-                        const glm::vec3 aim = camera.forward();
-                        const game::FaceDirection front =
-                            std::abs(aim.x) > std::abs(aim.z)
-                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
-                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
-                        placing = game::gateAt(game::gateFamily(placing), front, false);
+                        placing = game::gateAt(game::gateFamily(placing),
+                                               game::facingToward(camera.forward().x, camera.forward().z), false);
                     } else if (game::isFurnace(placing)) {
                         // The mouth turns to face whoever placed it, which is
                         // the reference's rule and the only way three plain
                         // sides and one front can be told apart.
-                        const glm::vec3 aim = camera.forward();
-                        const game::FaceDirection front =
-                            std::abs(aim.x) > std::abs(aim.z)
-                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
-                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
-                        placing = game::furnaceFacing(front, false, game::isSmoker(placing));
+                        placing = game::cookerAt(placing,
+                                                 game::facingToward(camera.forward().x,
+                                                                    camera.forward().z),
+                                                 false);
                     } else if (game::isChest(placing)) {
                         // Same rule, same reason: one face has the latch on it.
-                        const glm::vec3 aim = camera.forward();
+                        // **Each family keeps its own ids** - handing every
+                        // chest to `chestFacing` would turn a trapped chest
+                        // into a plain one the moment it was placed.
                         const game::FaceDirection front =
-                            std::abs(aim.x) > std::abs(aim.z)
-                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
-                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
-                        placing = game::chestFacing(front);
+                            game::facingToward(camera.forward().x, camera.forward().z);
+                        if (game::isTrappedChest(placing)) {
+                            placing = game::trappedChestFacing(front);
+                        } else if (game::isEnderChest(placing)) {
+                            placing = game::enderChestFacing(front);
+                        } else if (placing != game::BlockId::Barrel &&
+                                   !game::isStowbox(placing)) {
+                            placing = game::chestFacing(front);
+                        }
+                    } else if (game::isDoor(placing)) {
+                        // A door needs the cell above as well, and takes the
+                        // facing of whoever hung it. **The hinge goes to the
+                        // side with something solid beside it**, which is the
+                        // reference's own rule and why it has to be stored.
+                        const game::FaceDirection front =
+                            game::facingToward(camera.forward().x, camera.forward().z);
+                        const glm::ivec3 upper = placeCell + glm::ivec3{0, 1, 0};
+                        const game::BlockId above = world.blockAt(upper.x, upper.y, upper.z);
+                        if (!game::isReplaceable(above)) {
+                            placing = game::BlockId::Air;
+                        } else {
+                            const game::FaceDirection hingeSide = game::quarterTurn(front);
+                            const glm::ivec3 step =
+                                hingeSide == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
+                                : hingeSide == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
+                                : hingeSide == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
+                                                                         : glm::ivec3{0, 0, -1};
+                            const game::BlockId beside = world.blockAt(
+                                placeCell.x + step.x, placeCell.y, placeCell.z + step.z);
+                            const bool hingeRight = !game::isReplaceable(beside);
+                            const int family = game::doorFamily(placing);
+                            placing = game::doorAt(family, front, hingeRight, false, false);
+                            world.setBlock(upper.x, upper.y, upper.z,
+                                           game::doorAt(family, front, hingeRight, false, true));
+                        }
+                    } else if (game::isHopper(placing)) {
+                        // The spout points at whatever you clicked. Clicking a
+                        // floor or a ceiling gives no compass direction, and
+                        // `hopperWithSideSpout` folds both to the plain
+                        // downward one - which is the reference's behaviour and
+                        // the reason there is no upward state to fold *to*.
+                        const glm::ivec3 into = target.block - placeCell;
+                        placing = game::hopperWithSideSpout(
+                            into.x > 0   ? game::FaceDirection::PosX
+                            : into.x < 0 ? game::FaceDirection::NegX
+                            : into.z > 0 ? game::FaceDirection::PosZ
+                            : into.z < 0 ? game::FaceDirection::NegZ
+                                         : game::FaceDirection::Unknown);
+                    } else if (game::isTrapdoor(placing)) {
+                        // Top or bottom half by which way you were looking when
+                        // you hung it, which is the only way to get one under a
+                        // ceiling without a per-face click position.
+                        const bool top = camera.forward().y > 0.0f;
+                        placing = game::trapdoorAt(
+                            game::trapdoorFamily(placing),
+                            game::facingToward(camera.forward().x, camera.forward().z), false, top);
+                    } else if (game::isBed(placing)) {
+                        // A bed needs the cell beyond it as well. The facing is
+                        // the direction the **head** lies from the foot, so one
+                        // value orients both halves.
+                        const game::FaceDirection away = game::oppositeDirection(
+                            game::facingToward(camera.forward().x, camera.forward().z));
+                        const glm::ivec3 step =
+                            away == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
+                            : away == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
+                            : away == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
+                                                                : glm::ivec3{0, 0, -1};
+                        const glm::ivec3 headCell = placeCell + step;
+                        const game::BlockId atHead =
+                            world.blockAt(headCell.x, headCell.y, headCell.z);
+                        const game::BlockId underHead =
+                            world.blockAt(headCell.x, headCell.y - 1, headCell.z);
+                        if (!game::isReplaceable(atHead) || !game::isSolid(underHead)) {
+                            placing = game::BlockId::Air;
+                        } else {
+                            const int colour = game::bedColour(placing);
+                            placing = game::bedAt(colour, away, false);
+                            world.setBlock(headCell.x, headCell.y, headCell.z,
+                                           game::bedAt(colour, away, true));
+                        }
                     } else if (game::isBeehive(placing)) {
                         // Same rule again: a hive has one entrance, and the bees
                         // that will use it need to know which side it is on.
@@ -3693,6 +5408,25 @@ int main() {
                         placeTimer = kPlaceRepeatSeconds;
                     } else {
                         world.setBlock(where.x, where.y, where.z, placing);
+                        // The one construction in the game: a T of iron blocks
+                        // with a carved pumpkin on top becomes an iron golem.
+                        // **Hung off the placement of the pumpkin**, because
+                        // that is the reference's rule — the head must go on
+                        // last — and because this is already the single point
+                        // where the main thread writes a block.
+                        if (game::isCarvedPumpkin(placing) || game::isJackOLantern(placing)) {
+                            tryRaiseGolem(where);
+                        }
+                        // A stowbox brings its contents back out of the side
+                        // table. The handle is freed here rather than left
+                        // behind, so nothing accumulates across a session.
+                        if (game::isStowbox(placing) && held.damage != 0) {
+                            const auto carried = stowed.find(held.damage);
+                            if (carried != stowed.end()) {
+                                chests[where] = carried->second;
+                                stowed.erase(carried);
+                            }
+                        }
                         // The reference uses a block's *dig* sound for placing
                         // it too, quieter. One recording, two events.
                         const game::SoundEvent placed =
@@ -3730,14 +5464,59 @@ int main() {
                 // all three live in the id, so they are recombined rather than
                 // one being overwritten with a default.
                 const game::BlockId wanted =
-                    game::furnaceFacing(game::furnaceFacing(present), lit, game::isSmoker(present));
+                    game::cookerAt(present, game::furnaceFacing(present), lit);
                 if (present != wanted) {
                     world.setBlock(position.x, position.y, position.z, wanted);
                 }
             }
 
-            // Anything a spreading flow swept aside - or a falling block landed
-            // on - drops, the same way a plant left hanging by mining below it
+            // Hoppers move one item every eight game ticks, which is the
+            // reference's own rate. Positions are gathered before anything is
+            // moved: a push into a container nobody has opened yet creates its
+            // block entity, and creating one while walking the map is exactly
+            // the rehash that invalidates the walk.
+            hopperTimer += deltaSeconds;
+            while (hopperTimer >= game::kHopperTransferSeconds) {
+                hopperTimer -= game::kHopperTransferSeconds;
+
+                hopperCells.clear();
+                for (const auto& [position, contents] : chests) {
+                    (void)contents;
+                    if (game::isHopper(world.blockAt(position.x, position.y, position.z))) {
+                        hopperCells.push_back(position);
+                    }
+                }
+
+                for (const glm::ivec3& cell : hopperCells) {
+                    const game::BlockId self = world.blockAt(cell.x, cell.y, cell.z);
+                    const game::FaceDirection spout = game::hopperSideSpout(self);
+                    const glm::ivec3 pours =
+                        cell + (spout == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
+                                : spout == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
+                                : spout == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
+                                : spout == game::FaceDirection::NegZ ? glm::ivec3{0, 0, -1}
+                                                                     : glm::ivec3{0, -1, 0});
+
+                    // Push first, then pull, so a chain of hoppers carries an
+                    // item one step per hopper per tick rather than all the way
+                    // along in whichever order the map happened to be in.
+                    const game::BlockId ahead = world.blockAt(pours.x, pours.y, pours.z);
+                    if (game::isChest(ahead) || game::isHopper(ahead)) {
+                        moveOneItem(chests[cell], containerSlots(self), chests[pours],
+                                    containerSlots(ahead));
+                    }
+
+                    const glm::ivec3 over = cell + glm::ivec3{0, 1, 0};
+                    const game::BlockId above = world.blockAt(over.x, over.y, over.z);
+                    if (game::isChest(above) || game::isHopper(above)) {
+                        moveOneItem(chests[over], containerSlots(above), chests[cell],
+                                    containerSlots(self));
+                    }
+                }
+            }
+
+            // Anything a spreading flow swept aside - or a falling block landed
+            // on - drops, the same way a plant left hanging by mining below it
             // does.
             for (const game::World::WashedBlock& washed : world.takeWashedBlocks()) {
                 const game::ItemId shed = game::dropForBlock(washed.block);
@@ -3802,6 +5581,65 @@ int main() {
             // A shot that reports where it stopped. **What to do about it lives
             // here**, not in the projectile system, which reads the world and
             // never writes it.
+            // What a thrown potion does where it lands, and what a cloud left
+            // by one keeps doing. **Both are applied here** rather than in the
+            // projectile system, which reads the world and never writes it.
+            //
+            // `scale` is how much of the brew reaches you: a splash falls off
+            // linearly to nothing four blocks out, and a cloud applies a
+            // quarter of the duration once a second.
+            const auto applyBrew = [&](game::ItemId potion, float scale) {
+                if (scale <= 0.0f) {
+                    return;
+                }
+                const game::PotionKind brew = game::potionKind(potion);
+                if (brew.effect == game::effects::Effect::InstantHealth) {
+                    game::healPlayer(player, static_cast<int>(game::effects::instantAmount(
+                                                 brew.effect, brew.amplifier) *
+                                                 scale));
+                } else if (brew.effect == game::effects::Effect::InstantDamage) {
+                    game::damagePlayer(player, static_cast<int>(game::effects::instantAmount(
+                                                   brew.effect, brew.amplifier) *
+                                                   scale));
+                } else if (brew.effect != game::effects::Effect::None) {
+                    player.effects.apply(brew.effect, brew.amplifier, brew.seconds * scale);
+                }
+                if (brew.second != game::effects::Effect::None) {
+                    player.effects.apply(brew.second, brew.secondAmplifier, brew.seconds * scale);
+                }
+            };
+
+            // Clouds, ticked before the landings that make them so a cloud born
+            // this frame gets its first application next frame rather than
+            // twice over.
+            for (std::size_t i = 0; i < lingeringClouds.size();) {
+                LingeringCloud& cloud = lingeringClouds[i];
+                cloud.secondsLeft -= deltaSeconds;
+                if (cloud.secondsLeft <= 0.0f) {
+                    cloud = lingeringClouds.back();
+                    lingeringClouds.pop_back();
+                    continue;
+                }
+                // It shrinks as it goes, which is what makes standing at the
+                // edge of an old one safe.
+                const float radius =
+                    kCloudRadius * (0.4f + 0.6f * cloud.secondsLeft / kCloudSeconds);
+                cloud.applyTimer += deltaSeconds;
+                if (cloud.applyTimer >= kCloudInterval) {
+                    cloud.applyTimer -= kCloudInterval;
+                    if (glm::distance(cloud.position, player.eyePosition()) <= radius) {
+                        applyBrew(cloud.potion, kLingeringScale);
+                    }
+                    if (settings.particles) {
+                        particles.spawnEat(cloud.position, glm::vec3{0.0f, 0.2f, 0.0f},
+                                           static_cast<float>(
+                                               game::itemTextureLayer(cloud.potion)),
+                                           4);
+                    }
+                }
+                ++i;
+            }
+
             for (const game::Projectiles::Landing& landing : projectiles.takeLandings()) {
                 const glm::ivec3 cell{static_cast<int>(std::floor(landing.position.x)),
                                       static_cast<int>(std::floor(landing.position.y)),
@@ -3815,6 +5653,28 @@ int main() {
                             landing.kind == game::ProjectileKind::Arrow ? game::SoundEvent::HitLand
                                                                         : game::SoundEvent::Pop,
                             landing.position, 0.7f);
+
+                if (landing.kind == game::ProjectileKind::SplashPotion) {
+                    // Straight onto whoever is inside four blocks, weaker the
+                    // further out they are - the reference's own falloff.
+                    const float away = glm::distance(landing.position, player.eyePosition());
+                    applyBrew(landing.payload, 1.0f - away / kSplashRadius);
+                    if (settings.particles) {
+                        particles.spawnEat(landing.position, glm::vec3{0.0f, 1.0f, 0.0f},
+                                           static_cast<float>(
+                                               game::itemTextureLayer(landing.payload)),
+                                           12);
+                    }
+                    continue;
+                }
+                if (landing.kind == game::ProjectileKind::LingeringPotion) {
+                    // A cloud rather than a splash. It is the whole difference
+                    // between the two forms, and the reason a lingering potion
+                    // is worth the dragon's breath it costs.
+                    lingeringClouds.push_back(
+                        {landing.position, landing.payload, kCloudSeconds, 0.0f});
+                    continue;
+                }
 
                 if (landing.kind == game::ProjectileKind::Egg) {
                     // `egg.json`'s own odds: one throw in eight leaves a chick,
@@ -3883,7 +5743,7 @@ int main() {
                 if (!inventory.hasRoomFor(ready.item, ready.count)) {
                     continue;
                 }
-                const int left = inventory.add(ready.item, ready.count);
+                const int left = inventory.add(ready.item, ready.count, ready.damage);
                 drops.reduce(ready.index, ready.count - left);
                 if (left < ready.count) {
                     sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
@@ -3896,8 +5756,14 @@ int main() {
             // identity model matrix, which is what lets the shader recover
             // normals from world position. The handle is reused rather than
             // recreated, or every frame would retire a GPU buffer.
+            //
+            // Everything here is culled to the detail distance. It is a drawing
+            // limit only - the drops still fall and are still collectable out
+            // there, the creatures still think, and the arrows still fly.
+            const game::DrawRange drawRange{camera.position, entityDrawDistance()};
             {
-                engine::MeshData dropGeometry = drops.buildMesh(world, timeOfDay * 1000.0f, spriteMask);
+                engine::MeshData dropGeometry =
+                    drops.buildMesh(world, timeOfDay * 1000.0f, spriteMask, drawRange);
                 if (dropGeometry.empty()) {
                     if (dropMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(dropMesh);
@@ -3911,7 +5777,7 @@ int main() {
             }
 
             {
-                engine::MeshData fallingGeometry = fallingBlocks.buildMesh(world);
+                engine::MeshData fallingGeometry = fallingBlocks.buildMesh(world, drawRange);
                 if (fallingGeometry.empty()) {
                     if (fallingMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(fallingMesh);
@@ -3925,7 +5791,8 @@ int main() {
             }
 
             {
-                engine::MeshData shotGeometry = projectiles.buildMesh(world, spriteMask, camera.position);
+                engine::MeshData shotGeometry =
+                    projectiles.buildMesh(world, spriteMask, camera.position, drawRange);
                 if (shotGeometry.empty()) {
                     if (projectileMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(projectileMesh);
@@ -3946,7 +5813,7 @@ int main() {
                 std::vector<game::CreatureExplosion> blasts;
                 const game::CreatureAttack blow =
                     creatures.update(world, player.position, deltaSeconds, night, player.sneaking,
-                                     blasts);
+                                     timeOfDay, blasts);
                 if (blow.landed) {
                     // The damage was computed and discarded for four milestones
                     // because there was nothing to apply it to. `damagePlayer`
@@ -4098,7 +5965,7 @@ int main() {
             }
             {
                 engine::MeshData creatureShells;
-                engine::MeshData creatureGeometry = creatures.buildMesh(world, creatureShells);
+                engine::MeshData creatureGeometry = creatures.buildMesh(world, creatureShells, drawRange);
                 if (creatureGeometry.empty()) {
                     if (creatureMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(creatureMesh);
@@ -4157,6 +6024,28 @@ int main() {
                             size.x += static_cast<float>(span.x);
                             size.z += static_cast<float>(span.z);
                         }
+                    }
+                    // Same rule for a door and a bed: **breaking either half
+                    // takes both**, so caging one of them says the wrong thing
+                    // about what you are aiming at. The door grows upward and
+                    // the bed along the direction its head lies.
+                    if (game::isDoor(aimedBlock)) {
+                        if (game::doorIsUpper(aimedBlock)) {
+                            origin.y -= 1;
+                        }
+                        size.y += 1.0f;
+                    } else if (game::isBed(aimedBlock)) {
+                        const game::FaceDirection lie = game::bedFacing(aimedBlock);
+                        const glm::ivec3 step =
+                            lie == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
+                            : lie == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
+                            : lie == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
+                                                               : glm::ivec3{0, 0, -1};
+                        const glm::ivec3 other =
+                            game::bedIsHead(aimedBlock) ? target.block - step : target.block + step;
+                        origin = glm::min(target.block, other);
+                        size.x += static_cast<float>(std::abs(step.x));
+                        size.z += static_cast<float>(std::abs(step.z));
                     }
 
                     // Rebuilt only when the targeted size changes, which is a
@@ -4400,7 +6289,7 @@ int main() {
                     const int sky = world.skyLightAt(static_cast<int>(std::floor(camera.position.x)),
                                                      static_cast<int>(std::floor(camera.position.y)),
                                                      static_cast<int>(std::floor(camera.position.z)));
-                    const float sheltered = static_cast<float>(sky) / 15.0f;
+                    const float sheltered = static_cast<float>(sky) / static_cast<float>(game::kMaxLight);
                     sounds.playGlobal(audio, game::SoundEvent::Rain, level * sheltered * 0.6f);
                     rainSoundTimer = 3.4f;
                 }
@@ -4623,7 +6512,10 @@ int main() {
                                 std::to_string(renderer.retiredMeshCount()) + " | gpu " +
                                 std::to_string(renderer.stats().gpuMilliseconds) + " ms | draws " +
                                 std::to_string(renderer.stats().drawCalls) + " | tris " +
-                                std::to_string(renderer.stats().triangles) + " | creatures " +
+                                std::to_string(renderer.stats().triangles) + " | vram " +
+                                std::to_string(renderer.stats().pooledMegabytesUsed) + "/" +
+                                std::to_string(renderer.stats().pooledMegabytesHeld) + " MB " +
+                                std::to_string(renderer.stats().deviceAllocations) + " allocs | creatures " +
                                 std::to_string(creatures.count()) + " (" + censusText + ") hunting " +
                                 std::to_string(creatures.hunting()) + " | drops " +
                                 std::to_string(drops.count()) + " | particles " +
@@ -4663,6 +6555,15 @@ int main() {
         }
         world.store().saveChests(savedChests);
 
+        std::vector<game::StowedBox> savedStowboxes;
+        savedStowboxes.reserve(stowed.size());
+        for (const auto& [handle, contents] : stowed) {
+            if (!contents.empty()) {
+                savedStowboxes.push_back(game::StowedBox{handle, contents});
+            }
+        }
+        world.store().saveStowboxes(savedStowboxes);
+
         // And it must not write one back either. The showcase population is
         // three copies of whatever was being looked at; saving that would
         // replace the world's animals with it.
@@ -4680,7 +6581,9 @@ int main() {
                                                              creature.position.x, creature.position.y,
                                                              creature.position.z, creature.yaw,
                                                              creature.health, creature.scale,
-                                                             static_cast<std::uint8_t>(creature.charged ? 1 : 0)});
+                                                             static_cast<std::uint8_t>(creature.charged ? 1 : 0),
+                                                             static_cast<std::uint8_t>(creature.playerBuilt ? 1 : 0),
+                                                             creature.profession});
             }
             world.store().saveCreatures(savedCreatures);
         }

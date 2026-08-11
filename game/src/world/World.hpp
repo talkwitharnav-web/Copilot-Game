@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <array>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -58,6 +59,38 @@ public:
 
     int visibleRadius() const { return m_visibleRadius; }
     int loadRadius() const { return m_loadRadius; }
+
+    /// How far out chunks are meshed with everything in them, in chunks.
+    ///
+    /// Beyond it a chunk is built terrain-only: the blocks and their baked
+    /// lighting are identical, and `isDistantDecoration` is left out. **This is
+    /// a rendering tier and nothing else** - the plants are still in the block
+    /// array, still break, still burn, still wash away and are still saved.
+    ///
+    /// Setting it to the render distance or higher turns it off, which is what
+    /// makes it A/B testable rather than a permanent change of behaviour.
+    void setDetailRadius(int chunks);
+    int detailRadius() const { return m_detailRadius; }
+
+    /// Chunks currently carrying their decoration, and how many are drawn at
+    /// all. Reported by the diagnostics overlay so the tier can be seen working
+    /// rather than taken on trust.
+    std::size_t detailedChunkCount() const;
+
+    /// Chunks that are drawn at a tier they should no longer be at, and how far
+    /// away the nearest of them is.
+    ///
+    /// **The number that says whether the tier is keeping up.** While standing
+    /// still it should be zero; while flying, the only chunks in it should be
+    /// the ring at the boundary that is currently being rebuilt. Anything close
+    /// to the player means the re-meshing is losing the race, which on screen
+    /// is plants appearing a few paces in front of you.
+    struct DetailLag {
+        std::size_t chunks = 0;
+        /// Chebyshev distance in chunks, or -1 when nothing is behind.
+        int nearest = -1;
+    };
+    DetailLag detailLag() const;
 
     /// Changes the render distance while playing.
     ///
@@ -143,6 +176,14 @@ public:
 
     void setBlock(int x, int y, int z, BlockId block);
 
+    /// Bone meal on a crop or a stem. **A random tick you asked for** - it runs
+    /// the same growth rule the sampler does, so there is no second idea of
+    /// what "grow" means that could disagree with it.
+    ///
+    /// Returns whether anything was actually fed, so the caller knows whether
+    /// to spend the item.
+    bool applyBoneMeal(const glm::ivec3& at);
+
     /// Loads, unloads and re-meshes around the player, stopping once the time
     /// budget is spent. Returns only what changed this call.
     ///
@@ -215,6 +256,22 @@ private:
         /// Set the moment a block is changed. Only these chunks are ever
         /// written: everything else regenerates from the seed.
         bool modified = false;
+        /// Whether the mesh last **dispatched** for this chunk carried its
+        /// decoration, and whether the mesh currently **on the GPU** does.
+        ///
+        /// **Two fields, not one, and that is the whole of why a tier change
+        /// cannot be lost.** The intent has to be recorded to make the
+        /// boundary's hysteresis work at all - what a chunk should be depends
+        /// on what it already is - but a queued re-mesh can be dropped, by a
+        /// missing neighbour or by the player moving on. With only the intent,
+        /// such a chunk agrees with itself and keeps the wrong mesh for ever.
+        /// Comparing the two is what `refreshQueues` recovers from.
+        ///
+        /// Both start false, so a chunk streaming in outside the boundary is
+        /// built terrain-only the first time rather than built whole and
+        /// immediately rebuilt.
+        bool detailWanted = false;
+        bool detailBuilt = false;
         /// Bumped on every edit. A mesh job records the revision it started
         /// from, and a result whose revision no longer matches is thrown away:
         /// that is how an edit made while meshing was in flight is caught.
@@ -227,11 +284,13 @@ private:
         Chunk blocks;
     };
 
-    /// A finished mesh job, tagged with the chunk revision it was built from.
+    /// A finished mesh job, tagged with the chunk revision it was built from
+    /// and the tier it was built at.
     struct MeshedChunk {
         ChunkCoord coord;
         ChunkMeshes meshes;
         std::uint32_t revision = 0;
+        MeshDetail detail = MeshDetail::Full;
     };
 
     /// Where workers leave their results.
@@ -269,12 +328,27 @@ private:
     /// correct it.
     void invalidateMesh(const ChunkCoord& coord);
 
+    /// Which tier this chunk should be built at, given the tier it is already
+    /// at. **Asymmetric on purpose**: detail is added at `m_detailRadius` and
+    /// only dropped one chunk further out, so a player pacing across the
+    /// boundary re-meshes the ring it crosses once rather than every frame.
+    MeshDetail detailFor(const ChunkCoord& coord, bool currentlyDetailed) const;
+
+    /// Re-meshes every chunk whose tier changed when the player's chunk did.
+    void refreshDetail(const ChunkCoord& centre);
+
     void refreshQueues(const ChunkCoord& centre);
     void saveIfModified(const ChunkCoord& coord, ChunkSlot& slot);
 
     /// Copies the chunk plus one cell of surrounding blocks and light. Runs on
     /// the main thread so the job that follows owns everything it reads.
-    ChunkVolume gatherVolume(const ChunkCoord& coord) const;
+    ///
+    /// **Fills the caller's volume rather than returning one.** It is 118 KB of
+    /// arrays; returning it by value meant zeroing a local, filling it, then
+    /// copying it over a second volume that had also just been zeroed - four
+    /// passes over that memory where two will do, on the one thread the whole
+    /// streaming budget is measured against.
+    void gatherVolume(const ChunkCoord& coord, ChunkVolume& out) const;
 
     using BudgetCheck = std::function<bool()>;
 
@@ -332,6 +406,23 @@ private:
     /// here and cannot leave anything in mid-air.
     void updateFalls(const BudgetCheck& budgetSpent);
     void scheduleFallUpdate(int x, int y, int z);
+
+    /// Random ticks: crops, stems, tilled ground and nether wart.
+    ///
+    /// **Sampled per chunk rather than globally**, which is the reference's own
+    /// arrangement and the only one that gives a sane rate: a fixed number of
+    /// cells per loaded chunk per tick means a given cell comes up about every
+    /// three and a half minutes however far you can see, where a fixed global
+    /// budget would slow every farm down as the render distance grew.
+    void updateGrowth(const BudgetCheck& budgetSpent);
+    /// Whether tilled ground at this cell has water within the reference's own
+    /// nine-by-nine box, at its level or one above.
+    bool farmlandIsHydrated(int x, int y, int z) const;
+
+    /// Advances one crop, stem, farmland or wart cell. Split out of the sampler
+    /// so the same rule can be reached by bone meal, which is a random tick you
+    /// asked for.
+    void growOne(const glm::ivec3& at);
     /// A cell water may occupy, one it may still drain downward out of, and
     /// whether it spreads sideways at all. **The last two are different
     /// questions**: a cell resting on water can neither drain nor pool.
@@ -357,6 +448,9 @@ private:
     int m_visibleRadius;
     int m_loadRadius;
     int m_unloadRadius;
+    /// Chunks nearer than this carry their decoration. Starts at the render
+    /// distance, which is the tier turned off.
+    int m_detailRadius;
     /// Shared with in-flight jobs, which read chunk files from it.
     std::shared_ptr<WorldStore> m_store;
     engine::JobSystem& m_jobs;
@@ -369,6 +463,15 @@ private:
     // what makes the world fill in from the player outwards.
     std::vector<ChunkCoord> m_pendingLoad;
     std::vector<ChunkCoord> m_pendingMesh;
+
+    /// Membership of `m_pendingMesh`, so queueing is O(1).
+    ///
+    /// The queue used to be searched linearly on every push. Flying with a
+    /// large render distance puts thousands of chunks in it and pushes hundreds
+    /// per chunk step - light propagation alone dirties most of the streaming
+    /// frontier - so that search became a real cost on the one thread the
+    /// streaming budget is measured against.
+    std::unordered_set<ChunkCoord> m_pendingMeshSet;
 
     /// Submitted but not yet collected. Stops the same chunk being queued twice.
     std::unordered_set<ChunkCoord> m_loadInFlight;
@@ -421,6 +524,12 @@ private:
     bool m_precipitating = false;
     /// Sand and gravel that may have lost its footing, on the same pacing.
     std::deque<PendingFluid> m_fallUpdates;
+
+    /// The growth sampler's own clock and randomness, kept apart from the
+    /// fire's for the same reason that one is kept apart from worldgen's: a
+    /// field growing must not shift what a burning forest does next.
+    std::chrono::steady_clock::time_point m_nextGrowthTick{};
+    std::uint32_t m_growthRandom = 0x85EBCA6Bu;
 
     /// Plants a flow destroyed this frame, waiting to be turned into drops.
     std::vector<WashedBlock> m_washedBlocks;

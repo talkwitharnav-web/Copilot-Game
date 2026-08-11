@@ -19,8 +19,8 @@ constexpr std::size_t kInventorySlots = kHotbarSlots * (kStorageRows + 1);
 
 /// What the player is carrying.
 ///
-/// Fixed size and plain data: no allocation, cheap to copy, and it can be
-/// written straight to the save file when persistence arrives.
+/// Fixed size and plain data: no allocation, cheap to copy, and it is written
+/// straight into `player.dat` by `WorldStore`.
 class Inventory {
 public:
     ItemStack& slot(std::size_t index) { return m_slots[index]; }
@@ -32,7 +32,10 @@ public:
     ///
     /// Tops up matching stacks before opening an empty slot, so picking things
     /// up does not scatter one item across several slots.
-    int add(ItemId item, int count);
+    /// `damage` is written only into a **freshly opened** slot, never onto a
+    /// stack being topped up. Nothing that carries a meaningful damage stacks
+    /// past one, so the two cases can never both apply.
+    int add(ItemId item, int count, int damage = 0);
 
     /// True if `count` of `item` could be added without anything being lost.
     bool hasRoomFor(ItemId item, int count) const;

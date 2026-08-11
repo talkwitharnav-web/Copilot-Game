@@ -95,6 +95,7 @@ $events = [ordered]@{
     'chest_close' = @('random\chestclosed.ogg')
     'door_open'   = @('random\door_open.ogg')
     'door_close'  = @('random\door_close.ogg')
+    'bell'        = @('block\bell\bell_use01.ogg', 'block\bell\bell_use02.ogg')
 
     'bucket_fill'       = @('item\bucket\fill1.ogg', 'item\bucket\fill2.ogg', 'item\bucket\fill3.ogg')
     'bucket_empty'      = @('item\bucket\empty1.ogg', 'item\bucket\empty2.ogg', 'item\bucket\empty3.ogg')
@@ -170,8 +171,10 @@ $voices = [ordered]@{
     'magma'     = @{ idle = 'mob\magmacube\small';      hurt = 'mob\magmacube\big';        death = 'mob\magmacube\big' }
     'silverfish'= @{ idle = 'mob\silverfish\say';       hurt = 'mob\silverfish\hit';       death = 'mob\silverfish\kill' }
     'princepin' = @{ idle = 'mob\piglin\idle';          hurt = 'mob\piglin\hurt';          death = 'mob\piglin\death' }
-    'fish'      = @{ idle = 'mob\dolphin\swim';         hurt = 'mob\dolphin\hurt';         death = 'mob\dolphin\death' }
-}
+    'fish'      = @{ idle = 'mob\dolphin\swim';         hurt = 'mob\dolphin\hurt';         death = 'mob\dolphin\death' }    # The golem has no idle recording of its own - the reference never gives it
+    # one - so its footfall stands in for the ambient noise it makes standing
+    # about. Its own `hit` is the sound of being struck, not of striking.
+    'golem'     = @{ idle = 'mob\irongolem\walk';       hurt = 'mob\irongolem\hit';       death = 'mob\irongolem\death' }}
 
 foreach ($family in $voices.Keys) {
     foreach ($state in @('idle', 'hurt', 'death')) {

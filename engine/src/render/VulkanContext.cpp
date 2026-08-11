@@ -2,6 +2,7 @@
 
 #include "engine/core/Log.hpp"
 #include "engine/platform/Window.hpp"
+#include "render/GpuMemory.hpp"
 #include "render/VulkanCheck.hpp"
 
 #define GLFW_INCLUDE_VULKAN
@@ -130,6 +131,10 @@ VulkanContext::~VulkanContext() {
     // Vulkan does not reference-count. Everything is destroyed in the exact
     // reverse of the order it was created in.
     if (m_device != VK_NULL_HANDLE) {
+        // Pooled buffer memory outlives every individual buffer, so it has to be
+        // released here - after the last `Buffer` is gone and before the device
+        // it was allocated from.
+        destroyBufferMemoryPools(m_device);
         vkDestroyDevice(m_device, nullptr);
     }
     if (m_surface != VK_NULL_HANDLE) {

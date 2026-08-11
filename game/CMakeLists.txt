@@ -27,6 +27,7 @@
     src/world/Pathfinder.cpp
     src/world/Projectile.cpp
     src/world/Structures.cpp
+    src/world/Village.cpp
     src/world/World.cpp
     src/world/WorldStore.cpp
     src/world/Player.cpp

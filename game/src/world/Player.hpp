@@ -1,5 +1,6 @@
 #pragma once
 
+#include "world/Effects.hpp"
 #include "world/Fluid.hpp"
 #include "world/Survival.hpp"
 
@@ -44,6 +45,10 @@ constexpr float kStickySpeedScale = 0.4f;
 /// How much of an impact a slime block returns, and the speed below which it
 /// simply stops you - without a floor, resting on slime jitters for ever.
 constexpr float kSlimeBounce = 0.8f;
+/// A bed returns less than slime does - the reference's own two thirds against
+/// slime's four fifths - and cancels the fall outright, which is why dropping
+/// onto one never hurts.
+constexpr float kBedBounce = 0.66f;
 constexpr float kBounceThreshold = 1.5f;
 constexpr float kFlySpeed = 11.0f;
 /// Flying with sprint held. Fast enough to cross terrain quickly, but opt-in
@@ -159,6 +164,16 @@ struct Player {
     float burningSeconds = 0.0f;
     float regenTimer = 0.0f;
     float starveTimer = 0.0f;
+
+    /// Everything a potion has put on the player. **Not saved**, which is the
+    /// reference's behaviour on death and ours on quitting; persisting it needs
+    /// a `player.dat` format bump and would drop existing inventories.
+    effects::Effects effects;
+    /// Their own cadences, because regeneration, poison and wither each run at
+    /// an interval that depends on how strong they are - a shared timer would
+    /// make Regeneration II tick at Regeneration I's rate.
+    float effectHealTimer = 0.0f;
+    float effectHurtTimer = 0.0f;
 
     /// How long the meal in hand has been going. Reset the moment the button
     /// comes up or the stack changes.

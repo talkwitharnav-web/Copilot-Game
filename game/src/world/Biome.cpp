@@ -181,7 +181,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Round, .grassDensity = 0.34f, .flowerShare = 0.55f,
      .tags = BiomeTag::Grassland | BiomeTag::Highland,
      .temperature = {kColdT, 1.0f}, .humidity = kAny, .continentalness = {kCoastC, 1.0f},
-     .erosion = {-1.0f, kUplandE}, .ridges = {kValleyPV, kPeakPV}},
+     .erosion = {-1.0f, kUplandE}, .ridges = {kValleyPV, kPeakPV},
+     .villageType = VillageType::Plains},
 
     // **Grass with stone patches, not a slab of stone.** The reference places
     // stone only above its own noise threshold and lets everything else fall
@@ -215,7 +216,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Tall, .grassDensity = 0.18f, .flowerShare = 0.0f,
      .tags = BiomeTag::Forest | BiomeTag::Cold | BiomeTag::Snowy | BiomeTag::Frozen,
      .temperature = {-1.0f, kFrozenT}, .humidity = {kDampH, 1.0f}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Snowy},
 
     {.name = "Snowy Plains", .warmth = 0.0f,
      .top = BlockId::Snow, .filler = BlockId::Dirt, .fillerDepth = 4,
@@ -223,7 +225,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Tall, .grassDensity = 0.14f, .flowerShare = 0.0f,
      .tags = BiomeTag::Grassland | BiomeTag::Cold | BiomeTag::Snowy | BiomeTag::Frozen,
      .temperature = {-1.0f, kFrozenT}, .humidity = {-1.0f, kDampH}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Snowy},
 
     {.name = "Taiga", .warmth = 0.25f,
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
@@ -231,7 +234,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Tall, .grassDensity = 0.26f, .flowerShare = 0.04f,
      .tags = BiomeTag::Forest | BiomeTag::Cold,
      .temperature = {kFrozenT, kColdT}, .humidity = {kDryH, 1.0f}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Taiga},
 
     {.name = "Dense Forest", .warmth = 0.7f,
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
@@ -299,7 +303,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::None, .grassDensity = 0.0f, .flowerShare = 0.0f,
      .tags = BiomeTag::Sandy | BiomeTag::Hot | BiomeTag::Dry,
      .temperature = {kWarmT, 1.0f}, .humidity = {kAridH, kWetH}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Desert},
 
     {.name = "Savanna", .warmth = 2.0f,
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
@@ -307,7 +312,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Round, .grassDensity = 0.38f, .flowerShare = 0.03f,
      .tags = BiomeTag::Grassland | BiomeTag::Hot | BiomeTag::Dry,
      .temperature = {kTemperateT, kWarmT}, .humidity = {-1.0f, kDryH}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Savanna},
 
     {.name = "Forest", .warmth = 0.7f,
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
@@ -323,7 +329,8 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .treeShape = TreeShape::Round, .grassDensity = 0.32f, .flowerShare = 0.16f,
      .tags = static_cast<std::uint32_t>(BiomeTag::Grassland),
      .temperature = {kFrozenT, kWarmT}, .humidity = {-1.0f, kDryH}, .continentalness = {kCoastC, 1.0f},
-     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
+     .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
+     .villageType = VillageType::Plains},
 }};
 
 /// How far outside its box a value sits, or zero if it is inside.

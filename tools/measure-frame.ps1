@@ -89,7 +89,7 @@ if ($samples.Count -eq 0) { Write-Error "no samples"; exit 1 }
 # run, because background noise can only ever make a frame slower.
 $byRun = $samples | Group-Object Run
 Write-Host ""
-Write-Host ("{0,-6} {1,>6} {2,>9} {3,>8} {4,>11} {5,>7}" -f "run", "fps", "gpu ms", "draws", "tris", "ram") -ForegroundColor Cyan
+Write-Host ("{0,-6} {1,6} {2,9} {3,8} {4,11} {5,7}" -f "run", "fps", "gpu ms", "draws", "tris", "ram") -ForegroundColor Cyan
 foreach ($g in $byRun) {
     $f = ($g.Group | Measure-Object Fps -Maximum).Maximum
     $gp = ($g.Group | Measure-Object Gpu -Minimum).Minimum
@@ -104,3 +104,7 @@ $avgDraws = [int](($samples | Measure-Object Draws -Average).Average)
 $avgTris = [int](($samples | Measure-Object Tris -Average).Average)
 Write-Host ""
 Write-Host ("BEST   fps {0}   gpu {1:F2} ms   draws {2}   tris {3}" -f $bestFps, $bestGpu, $avgDraws, $avgTris) -ForegroundColor Green
+
+# Down the pipeline as well, so compare-frame.ps1 can consume it. Write-Host
+# goes to the console only and is invisible to a caller capturing output.
+[pscustomobject]@{ Fps = $bestFps; Gpu = $bestGpu; Draws = $avgDraws; Tris = $avgTris }

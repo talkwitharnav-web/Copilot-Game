@@ -2,6 +2,7 @@
 
 #include "item/Item.hpp"
 #include "item/SpriteMask.hpp"
+#include "world/DrawRange.hpp"
 
 #include <engine/render/MeshData.hpp>
 
@@ -26,8 +27,11 @@ public:
     /// `impulse` throws it somewhere: without one a dropped stack lands at your
     /// feet and is collected again immediately. `pickupDelay` has to cover the
     /// flight, or a thrown item is pulled straight back before it gets away.
+    /// `damage` rides along untouched. It is a tool's wear for most items, and
+    /// **which stored contents a stowbox is** for those - either way, dropping
+    /// something and picking it up again must not change it.
     void spawn(const glm::vec3& position, ItemId item, int count, const glm::vec3& impulse = glm::vec3{0.0f},
-               float pickupDelay = 0.35f);
+               float pickupDelay = 0.35f, int damage = 0);
 
     /// Falls, settles on the ground, and drifts toward a nearby player.
     void update(const World& world, const glm::vec3& playerFeet, float deltaSeconds);
@@ -38,6 +42,7 @@ public:
         std::size_t index;
         ItemId item;
         int count;
+        int damage;
     };
     std::vector<Collectable> collectable(const glm::vec3& playerFeet) const;
     void remove(std::size_t index);
@@ -50,7 +55,12 @@ public:
     ///
     /// `sprites` is the silhouette of every item sprite, which is what turns a
     /// dropped tool from two flat faces into a solid shape.
-    engine::MeshData buildMesh(const World& world, float timeSeconds, const SpriteMask& sprites) const;
+    ///
+    /// `range` drops the ones too far away to read as anything. They keep
+    /// falling, keep drifting toward the player and keep expiring; only their
+    /// geometry is skipped.
+    engine::MeshData buildMesh(const World& world, float timeSeconds, const SpriteMask& sprites,
+                               const DrawRange& range = {}) const;
 
     std::size_t count() const { return m_drops.size(); }
 
@@ -60,6 +70,7 @@ private:
         glm::vec3 velocity{0.0f};
         ItemId item = ItemId::None;
         int count = 0;
+        int damage = 0;
         float age = 0.0f;
         float pickupDelay = 0.0f;
         bool onGround = false;

@@ -112,6 +112,27 @@ constexpr std::uint32_t operator|(std::uint32_t a, BiomeTag b) {
     return a | static_cast<std::uint32_t>(b);
 }
 
+/// Which building set a village here is made of, or `None` for a biome that
+/// never holds one.
+///
+/// **This is a column on the biome table rather than a question asked of tags**,
+/// and that is the reference's own design: since Bedrock 26.0 every biome that
+/// can host a village carries a `minecraft:village_type` component, and a biome
+/// without one simply never generates one. Defaulting to `None` means a new
+/// biome opts in explicitly, which is the safe direction — the alternative is a
+/// `villageTypeFor(BiomeId)` switch somewhere else, and a second copy of a fact
+/// is the most common bug in this codebase.
+enum class VillageType : std::uint8_t {
+    None,
+    Plains,
+    Desert,
+    Savanna,
+    Taiga,
+    /// The reference calls this one `ice`. It has **no architecture of its own**
+    /// — it is the taiga set with snow laid over everything the sky can see.
+    Snowy,
+};
+
 /// A tree's silhouette. One log and one leaf block cover both, because what
 /// separates a conifer from a broadleaf here is the shape of the canopy rather
 /// than its colour.
@@ -216,6 +237,10 @@ struct Biome {
     ///
     /// Defaulted to "any", which is what every row that predates it wants.
     ClimateRange weirdness{};
+
+    /// Which village set stands here, if any. Ten biomes carry it in the
+    /// reference; seven of ours do.
+    VillageType villageType = VillageType::None;
 };
 
 const Biome& biomeInfo(BiomeId id);

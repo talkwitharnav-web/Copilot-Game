@@ -864,7 +864,13 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
         }
     }
 
-    structures::generateInto(chunk, seed, coord);
+    // Villages are solved once here and handed to both passes that need the
+    // answer: the tree pass, so nothing grows through a roof, and the village
+    // pass itself. Solving it twice would rebuild the same plan per tree cell.
+    const village::Nearby villages = village::plansNear(seed, coord.x, coord.z);
+
+    structures::generateInto(chunk, seed, coord, villages);
+    village::generateInto(chunk, seed, coord, villages);
 
     return chunk;
 }

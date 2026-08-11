@@ -58,7 +58,7 @@ glm::vec3 eyeLevel(const glm::vec3& feet) {
 } // namespace
 
 void ItemEntities::spawn(const glm::vec3& position, ItemId item, int count, const glm::vec3& impulse,
-                         float pickupDelay) {
+                         float pickupDelay, int damage) {
     if (item == ItemId::None || count <= 0) {
         return;
     }
@@ -71,6 +71,7 @@ void ItemEntities::spawn(const glm::vec3& position, ItemId item, int count, cons
     drop.velocity = impulse + glm::vec3{jitter * 1.4f, 3.0f, jitter * -1.1f};
     drop.item = item;
     drop.count = count;
+    drop.damage = damage;
     drop.pickupDelay = pickupDelay;
     m_drops.push_back(drop);
 }
@@ -191,7 +192,7 @@ std::vector<ItemEntities::Collectable> ItemEntities::collectable(const glm::vec3
     for (std::size_t i = 0; i < m_drops.size(); ++i) {
         const Drop& drop = m_drops[i];
         if (drop.age > drop.pickupDelay && glm::length(target - drop.position) < kCollectRadius) {
-            ready.push_back({i, drop.item, drop.count});
+            ready.push_back({i, drop.item, drop.count, drop.damage});
         }
     }
     return ready;
@@ -216,11 +217,14 @@ void ItemEntities::reduce(std::size_t index, int taken) {
 }
 
 engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
-                                         const SpriteMask& sprites) const {
+                                         const SpriteMask& sprites, const DrawRange& range) const {
     engine::MeshData mesh;
 
     for (const Drop& drop : m_drops) {
         if (drop.item == ItemId::None) {
+            continue;
+        }
+        if (!range.contains(drop.position)) {
             continue;
         }
         // Anything without a cube to build is drawn from its sprite: every
@@ -261,25 +265,6 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
         const glm::vec3 forward{-s * kHalfSize, 0.0f, c * kHalfSize};
         const glm::vec3 up{0.0f, kHalfSize, 0.0f};
 
-        const auto quad = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& d, const glm::vec3& e,
-                              BlockFace face, float shade) {
-            const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
-            const glm::vec3 corners[4]{a, b, d, e};
-            const glm::vec2 uvs[4]{{0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f}};
-
-            for (int i = 0; i < 4; ++i) {
-                mesh.vertices.push_back(engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
-                                                       engine::packVertexColor(sky, blockLight, shade, 1.0f),
-                                                       {uvs[i].x, uvs[i].y},
-                                                       flat ? static_cast<float>(spriteLayer)
-                                                            : blockTextureLayer(block, face),
-                                                       engine::kVertexSurfaceDefault});
-            }
-            // Both windings: the cube spins, so either side can face the camera.
-            mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
-                                                     base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
-        };
-
         // A tool, a spawn egg or a flower is its sprite made solid, built by
         // `appendSpriteModel` - shared with thrown items, which have to look
         // like the same object in the air as they do on the floor.
@@ -293,16 +278,78 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
             continue;
         }
 
-        quad(centre - right - forward - up, centre + right - forward - up, centre + right - forward + up,
-             centre - right - forward + up, BlockFace::Side, 0.86f);
-        quad(centre + right + forward - up, centre - right + forward - up, centre - right + forward + up,
-             centre + right + forward + up, BlockFace::Side, 0.60f);
-        quad(centre + right - forward - up, centre + right + forward - up, centre + right + forward + up,
-             centre + right - forward + up, BlockFace::Side, 0.72f);
-        quad(centre - right + forward - up, centre - right - forward - up, centre - right - forward + up,
-             centre - right + forward + up, BlockFace::Side, 0.72f);
-        quad(centre - right + forward + up, centre + right + forward + up, centre + right - forward + up,
-             centre - right - forward + up, BlockFace::Top, 1.0f);
+        // Everything else is a **miniature of the block itself**, box for box.
+        // It used to be a single cube wearing the block's side texture, so a
+        // dropped bell was a gold brick, a dropped fence a plank and a dropped
+        // anvil a black cube. The boxes come from the same owner the slot
+        // picture reads, so what is on the floor and what is in the hotbar
+        // cannot disagree.
+        const auto corner = [&](float x, float y, float z) {
+            return centre + right * (x * 2.0f - 1.0f) + up * (y * 2.0f - 1.0f) +
+                   forward * (z * 2.0f - 1.0f);
+        };
+        const auto part = [&](const BlockBox& b, const ModelBox* model) {
+            const float wallLayer =
+                model != nullptr && model->sideLayer >= 0.0f
+                    ? model->sideLayer
+                    : blockTextureLayer(block, BlockFace::Side, blockFacing(block));
+            const float capLayer = model != nullptr && model->lidLayer >= 0.0f
+                                       ? model->lidLayer
+                                       : blockTextureLayer(block, BlockFace::Top);
+            const glm::vec2 wall[4]{{model != nullptr ? model->uMin : 0.0f, model != nullptr ? model->vMax : 1.0f},
+                                    {model != nullptr ? model->uMax : 1.0f, model != nullptr ? model->vMax : 1.0f},
+                                    {model != nullptr ? model->uMax : 1.0f, model != nullptr ? model->vMin : 0.0f},
+                                    {model != nullptr ? model->uMin : 0.0f, model != nullptr ? model->vMin : 0.0f}};
+            const glm::vec2 cap[4]{
+                {model != nullptr ? model->topUMin : 0.0f, model != nullptr ? model->topVMax : 1.0f},
+                {model != nullptr ? model->topUMax : 1.0f, model != nullptr ? model->topVMax : 1.0f},
+                {model != nullptr ? model->topUMax : 1.0f, model != nullptr ? model->topVMin : 0.0f},
+                {model != nullptr ? model->topUMin : 0.0f, model != nullptr ? model->topVMin : 0.0f}};
+
+            const auto face = [&](const glm::vec3& a, const glm::vec3& b2, const glm::vec3& d,
+                                  const glm::vec3& e, const glm::vec2* rect, float layer, float shade) {
+                const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+                const glm::vec3 corners[4]{a, b2, d, e};
+                for (int i = 0; i < 4; ++i) {
+                    mesh.vertices.push_back(
+                        engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
+                                       engine::packVertexColor(sky, blockLight, shade, 1.0f),
+                                       {rect[i].x, rect[i].y},
+                                       layer,
+                                       engine::kVertexSurfaceDefault});
+                }
+                // Both windings: it spins, so either side can face the camera.
+                mesh.indices.insert(mesh.indices.end(),
+                                    {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
+                                     base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
+            };
+
+            face(corner(b.minX, b.minY, b.minZ), corner(b.maxX, b.minY, b.minZ),
+                 corner(b.maxX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.minZ), wall, wallLayer, 0.60f);
+            face(corner(b.maxX, b.minY, b.maxZ), corner(b.minX, b.minY, b.maxZ),
+                 corner(b.minX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.maxZ), wall, wallLayer, 0.86f);
+            face(corner(b.maxX, b.minY, b.minZ), corner(b.maxX, b.minY, b.maxZ),
+                 corner(b.maxX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.minZ), wall, wallLayer, 0.72f);
+            face(corner(b.minX, b.minY, b.maxZ), corner(b.minX, b.minY, b.minZ),
+                 corner(b.minX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.maxZ), wall, wallLayer, 0.72f);
+            face(corner(b.minX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.maxZ),
+                 corner(b.maxX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.minZ), cap, capLayer, 1.0f);
+            face(corner(b.minX, b.minY, b.minZ), corner(b.maxX, b.minY, b.minZ),
+                 corner(b.maxX, b.minY, b.maxZ), corner(b.minX, b.minY, b.maxZ), cap,
+                 model != nullptr ? capLayer : blockTextureLayer(block, BlockFace::Bottom), 0.45f);
+        };
+
+        if (usesModelIcon(blockShape(block))) {
+            const ModelBoxes model = postModel(block);
+            for (int i = 0; i < model.count; ++i) {
+                part(model.boxes[i].box, &model.boxes[i]);
+            }
+        } else {
+            const BlockBoxes parts = iconBoxes(block);
+            for (int i = 0; i < parts.count; ++i) {
+                part(parts.boxes[i], nullptr);
+            }
+        }
     }
 
     return mesh;

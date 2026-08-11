@@ -131,6 +131,57 @@ $targets = @(
     @{ Row = 3072; X = 32; Y = 48; Path = "..\block\red_mushroom.png" }
     @{ Row = 3552; Path = "bee\bee.png" }
     @{ Row = 3616; Path = "bee\bee_angry.png" }
+    # The iron golem, 128 rows: the largest single species allocation the sheet
+    # has, and the only one as tall as it is wide.
+    @{ Row = 3680; Path = "iron_golem\iron_golem.png" }
+    # The fourteen villager outfits, sixty-four rows each, in the same order as
+    # `professionForJobSite` numbers them. Each is three layers, exactly as the
+    # reference renders one: the bare body, the biome robe over it, and the
+    # trade's apron over that. **Unemployed is not in this list** - it wears the
+    # plain villager already staged at row 1280, which is what makes taking a
+    # job visibly change a villager.
+    @{ Row = 3808; Path = "villager\villager.png" }
+    @{ Row = 3808; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 3808; Path = "villager\profession\farmer.png"; Over = $true }
+    @{ Row = 3872; Path = "villager\villager.png" }
+    @{ Row = 3872; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 3872; Path = "villager\profession\fisherman.png"; Over = $true }
+    @{ Row = 3936; Path = "villager\villager.png" }
+    @{ Row = 3936; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 3936; Path = "villager\profession\fletcher.png"; Over = $true }
+    @{ Row = 4000; Path = "villager\villager.png" }
+    @{ Row = 4000; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4000; Path = "villager\profession\shepherd.png"; Over = $true }
+    @{ Row = 4064; Path = "villager\villager.png" }
+    @{ Row = 4064; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4064; Path = "villager\profession\cartographer.png"; Over = $true }
+    @{ Row = 4128; Path = "villager\villager.png" }
+    @{ Row = 4128; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4128; Path = "villager\profession\librarian.png"; Over = $true }
+    @{ Row = 4192; Path = "villager\villager.png" }
+    @{ Row = 4192; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4192; Path = "villager\profession\mason.png"; Over = $true }
+    @{ Row = 4256; Path = "villager\villager.png" }
+    @{ Row = 4256; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4256; Path = "villager\profession\toolsmith.png"; Over = $true }
+    @{ Row = 4320; Path = "villager\villager.png" }
+    @{ Row = 4320; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4320; Path = "villager\profession\weaponsmith.png"; Over = $true }
+    @{ Row = 4384; Path = "villager\villager.png" }
+    @{ Row = 4384; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4384; Path = "villager\profession\armorer.png"; Over = $true }
+    @{ Row = 4448; Path = "villager\villager.png" }
+    @{ Row = 4448; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4448; Path = "villager\profession\butcher.png"; Over = $true }
+    @{ Row = 4512; Path = "villager\villager.png" }
+    @{ Row = 4512; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4512; Path = "villager\profession\leatherworker.png"; Over = $true }
+    @{ Row = 4576; Path = "villager\villager.png" }
+    @{ Row = 4576; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4576; Path = "villager\profession\cleric.png"; Over = $true }
+    @{ Row = 4640; Path = "villager\villager.png" }
+    @{ Row = 4640; Path = "villager\type\plains.png"; Over = $true }
+    @{ Row = 4640; Path = "villager\profession\nitwit.png"; Over = $true }
 )
 
 $ours = Join-Path $PSScriptRoot "..\assets\textures\creatures.png"

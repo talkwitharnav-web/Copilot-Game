@@ -217,8 +217,10 @@ constexpr float kWaterAlpha = 0.72f;
 
 } // namespace
 
-ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) {
+ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, MeshDetail detail) {
     ChunkMeshes result;
+
+    const bool terrainOnly = detail == MeshDetail::TerrainOnly;
 
     constexpr int size = Chunk::kSize;
     std::array<FaceSample, size * size> faces{};
@@ -291,6 +293,20 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     const bool sharedWithOwnKind = isCutout(block) && ahead == block;
                     const bool positiveFacing =
                         face.neighbourOffset.x + face.neighbourOffset.y + face.neighbourOffset.z > 0;
+                    // **The far tier drops those shared faces entirely**, which
+                    // turns a canopy into the hollow shell the paragraph above
+                    // deliberately refuses to build up close. It is by a wide
+                    // margin the largest saving the tier makes: a solid blob of
+                    // leaves emits every internal boundary, and every one of
+                    // them is drawn from both sides.
+                    //
+                    // The silhouette is untouched - only faces *between two
+                    // identical cutout blocks* go, never one that meets air. All
+                    // that is lost is seeing more leaves through the holes in
+                    // the near ones, at a distance where a hole is smaller than
+                    // a pixel.
+                    const bool cutoutInterior =
+                        sharedWithOwnKind && (terrainOnly || !positiveFacing);
                     // **A fluid's face rules, not a translucent block's.** Lava
                     // is opaque and still needs these: a fluid draws only where
                     // it meets air or a thinner fluid below, so its internal
@@ -310,8 +326,7 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                                (isFluid(ahead) && ahead != block &&
                                 face.neighbourOffset.y <= 0 &&
                                 fluidLevel(ahead) > fluidLevel(block)))
-                            : (!occludesFace(ahead, face.neighbourOffset.y) &&
-                               (positiveFacing || !sharedWithOwnKind));
+                            : (!occludesFace(ahead, face.neighbourOffset.y) && !cutoutInterior);
                     if (!visible) {
                         continue;
                     }
@@ -326,7 +341,15 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     sample.surfaceDrop =
                         isFluid(block) ? static_cast<float>(fluidLevel(block)) * kWaterLevelDrop
                                        : 0.0f;
-                    sample.wavy = isWater(block);
+                    // **The far tier holds the surface still**, which is what
+                    // lets an ocean merge greedily: a wave moves a quad's own
+                    // corners, so every wavy face has to be emitted one cell at
+                    // a time. Only the geometric displacement goes - the
+                    // fragment stage shades the same wave field from world
+                    // position, so distant water still ripples, it just no
+                    // longer moves. The amplitude it gives up is a fraction of
+                    // a pixel at the boundary's own distance.
+                    sample.wavy = isWater(block) && !terrainOnly;
                     // Leaves move with the wind too, at a quarter of a blade's
                     // reach. **Every vertex of a leaf block, not just its top**:
                     // the displacement is a pure function of world position, so
@@ -376,6 +399,33 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         sample.sky[c] = lightCurve(skySum * scale);
                         sample.block[c] = lightCurve(blockSum * scale);
                         sample.occlusion[c] = kOcclusionSteps[static_cast<std::size_t>(occlusion)];
+                    }
+
+                    // **The far tier drops faces no light of any kind reaches**,
+                    // which is the great majority of a voxel world: two thirds
+                    // of everything this mesher emits sits in the bottom third
+                    // of the map, on the walls of caves sealed inside rock.
+                    //
+                    // It is a rendering tier and it is safe by construction.
+                    // Light here is a flood fill, so for such a face to be seen
+                    // from outside there would have to be an opening - and an
+                    // opening is exactly what would have raised its light above
+                    // zero. What is dropped is geometry that renders black
+                    // inside solid rock, at a distance where the hole you would
+                    // have to look through is smaller than a pixel.
+                    //
+                    // Sky light is a *level*, not a time of day: outdoor faces
+                    // read 15 at midnight as well as at noon, so nothing on the
+                    // surface is ever caught by this.
+                    if (terrainOnly) {
+                        bool anyLight = false;
+                        for (std::size_t c = 0; c < 4 && !anyLight; ++c) {
+                            anyLight = sample.sky[c] > 0.0f || sample.block[c] > 0.0f;
+                        }
+                        if (!anyLight) {
+                            sample = FaceSample{};
+                            continue;
+                        }
                     }
 
                     sample.flat = true;
@@ -602,6 +652,14 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                 if (!usesShapePass(shape)) {
                     continue;
                 }
+                // The distance tier, and the only place it acts. Everything the
+                // greedy pass above emits is terrain and is untouched, so a
+                // far chunk keeps its exact outline and its baked lighting -
+                // which lives in vertex colours on that geometry and therefore
+                // costs nothing to keep.
+                if (terrainOnly && isDistantDecoration(block)) {
+                    continue;
+                }
 
                 const glm::vec3 cellOrigin = originOffset + glm::vec3{x, y, z};
                 float sky = 0.0f;
@@ -662,13 +720,16 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                 //
                 // A fence is the exception: its arms follow its neighbours,
                 // which the id alone cannot express, so the drawn shape is
-                // computed here while collision assumes every arm.
+                // computed here - and `Collision.hpp`'s `worldCollisionBoxes`
+                // computes it through the same `connectionBits`, so the two
+                // still cannot disagree.
                 BlockBoxes shapeBoxes = collisionBoxes(block);
                 // A *model* rather than a shape cut out of a cube, so each box
                 // names the rectangle of texture it samples instead of taking
                 // it from where the box happens to sit.
                 ModelBoxes model;
-                if (shape == BlockShape::Post || shape == BlockShape::Cocoa) {
+                if (shape == BlockShape::Model || shape == BlockShape::Cocoa ||
+                    shape == BlockShape::Bed) {
                     model = postModel(block);
                     shapeBoxes = BlockBoxes{};
                     for (int i = 0; i < model.count; ++i) {
@@ -685,6 +746,10 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                     // uses in the other direction: `collisionBoxes` answers
                     // nothing here so you can step onto the rungs.
                     shapeBoxes = ladderBoxes(ladderFacing(block));
+                } else if (drawsWithoutColliding(block)) {
+                    // The same split again, for the five redstone shapes you
+                    // walk straight over.
+                    shapeBoxes = uncollidableDrawnBoxes(block);
                 } else if (shape == BlockShape::Fence || shape == BlockShape::Wall ||
                            shape == BlockShape::Pane) {
                     // A fence reaches toward fences and gates; a wall reaches
@@ -805,8 +870,17 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                         // on it, which is why lit TNT read backwards.
                         const int uAxis = face.uAxis;
                         const int vAxis = face.vAxis;
-                        const bool flipU = std::abs(face.uvs[0].x - face.corners[0][uAxis]) > 0.5f;
+                        bool flipU = std::abs(face.uvs[0].x - face.corners[0][uAxis]) > 0.5f;
                         const bool flipV = std::abs(face.uvs[0].y - face.corners[0][vAxis]) > 0.5f;
+                        // Mirroring is right for a texture that should read the
+                        // same from every side and wrong for one that marks a
+                        // world direction, which is why a bed's pillow came out
+                        // at the head end on one long side and the foot on the
+                        // other.
+                        if (model.count > 0 && axis != 1 &&
+                            model.boxes[i].unmirror == face.direction) {
+                            flipU = !flipU;
+                        }
 
                         // A model box paints its lid from a different corner of
                         // its net than its walls.
@@ -831,8 +905,33 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                             const glm::vec3 local = lo + face.corners[c] * (hi - lo);
                             corners[c] = cellOrigin + local;
                             if (model.count > 0) {
-                                const float fu = face.corners[c][uAxis];
-                                const float fv = face.corners[c][vAxis];
+                                float fu = face.corners[c][uAxis];
+                                float fv = face.corners[c][vAxis];
+                                // A lid may be turned, which is how a model
+                                // says which way round a texture goes when the
+                                // block itself cannot be rotated.
+                                if (axis == 1) {
+                                    switch (model.boxes[i].lidTurns) {
+                                    case 1: {
+                                        const float wasU = fu;
+                                        fu = fv;
+                                        fv = 1.0f - wasU;
+                                        break;
+                                    }
+                                    case 2:
+                                        fu = 1.0f - fu;
+                                        fv = 1.0f - fv;
+                                        break;
+                                    case 3: {
+                                        const float wasU = fu;
+                                        fu = 1.0f - fv;
+                                        fv = wasU;
+                                        break;
+                                    }
+                                    default:
+                                        break;
+                                    }
+                                }
                                 uvs[c] = {flipU ? glm::mix(uHigh, uLow, fu) : glm::mix(uLow, uHigh, fu),
                                           flipV ? glm::mix(vHigh, vLow, fv) : glm::mix(vLow, vHigh, fv)};
                             } else {
@@ -840,8 +939,21 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset) 
                                           flipV ? 1.0f - local[vAxis] : local[vAxis]};
                             }
                         }
-                        pushQuad(corners, uvs, blockTextureLayer(block, face.facing, face.direction), sky,
-                                 blockLight, face.shade,
+                        pushQuad(corners, uvs,
+                                 // A model box may name its own layer, which is
+                                 // what lets a bell be a wooden frame round a
+                                 // gold bell rather than gold throughout.
+                                 [&] {
+                                     if (model.count > 0) {
+                                         const ModelBox& m = model.boxes[i];
+                                         const float own = axis == 1 ? m.lidLayer : m.sideLayer;
+                                         if (own >= 0.0f) {
+                                             return own;
+                                         }
+                                     }
+                                     return blockTextureLayer(block, face.facing, face.direction);
+                                 }(),
+                                 sky, blockLight, face.shade,
                                  shape == BlockShape::Vine ? engine::kNormalUnaligned : face.normalCode,
                                  shape == BlockShape::Vine);
                     }

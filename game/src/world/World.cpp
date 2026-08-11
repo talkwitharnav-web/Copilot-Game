@@ -1,8 +1,10 @@
-﻿#include "world/World.hpp"
+#include "world/World.hpp"
 
 #include "world/ChunkMesher.hpp"
+#include "world/Farming.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <chrono>
 #include <cmath>
 #include <iterator>
@@ -84,14 +86,24 @@ struct MeshJobInput {
     ChunkCoord coord;
     std::uint32_t revision = 0;
     glm::vec3 origin{0.0f};
+    /// Decided on the main thread and carried with the volume, so the job never
+    /// has to ask where the player is.
+    MeshDetail detail = MeshDetail::Full;
     ChunkVolume volume;
 };
+
+/// How far past `m_detailRadius` a chunk keeps decoration it already has.
+///
+/// One chunk. The boundary is measured between chunk coordinates, so without
+/// this a player pacing across a single chunk edge would flip a whole ring in
+/// and out on alternate steps, re-meshing it every time.
+constexpr int kDetailHysteresisChunks = 1;
 
 } // namespace
 
 World::World(std::uint32_t seed, std::filesystem::path saveRoot, engine::JobSystem& jobs, int visibleRadiusChunks)
     : m_seed(seed), m_visibleRadius(std::max(1, visibleRadiusChunks)), m_loadRadius(m_visibleRadius + 1),
-      m_unloadRadius(m_loadRadius + 2),
+      m_unloadRadius(m_loadRadius + 2), m_detailRadius(m_visibleRadius),
       m_store(std::make_shared<WorldStore>(std::move(saveRoot), seed)), m_jobs(jobs),
       m_results(std::make_shared<JobResults>()) {}
 
@@ -453,10 +465,229 @@ bool World::fireCanSurvive(int x, int y, int z) const {
     return false;
 }
 
+bool World::farmlandIsHydrated(int x, int y, int z) const {
+    // The reference's rule is a **nine-by-nine box at this level or one above**
+    // - not a radius and not a line of sight, so nothing in between matters and
+    // flowing water counts the same as a source.
+    constexpr int reach = farming::kHydrationReach;
+    for (int dy = 0; dy <= 1; ++dy) {
+        for (int dz = -reach; dz <= reach; ++dz) {
+            for (int dx = -reach; dx <= reach; ++dx) {
+                if (isWater(blockAt(x + dx, y + dy, z + dz))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void World::growOne(const glm::ivec3& at) {
+    // The sampler's own xorshift, advanced in place. Kept apart from the fire's
+    // so a field growing cannot perturb what a burning forest does next.
+    const auto nextRandom = [this] {
+        m_growthRandom ^= m_growthRandom << 13;
+        m_growthRandom ^= m_growthRandom >> 17;
+        m_growthRandom ^= m_growthRandom << 5;
+        return m_growthRandom;
+    };
+    const BlockId here = blockAt(at.x, at.y, at.z);
+
+    // ---- Tilled ground. ----
+    if (isFarmland(here)) {
+        const bool wet = farmlandIsHydrated(at.x, at.y, at.z);
+        const BlockId above = blockAt(at.x, at.y + 1, at.z);
+        const bool planted = isCropBlock(above) || isStemBlock(above);
+        if (!wet && !planted) {
+            // Dry and unsown goes back to dirt. **Sown ground never does**,
+            // which is what makes dry farming legitimate rather than doomed.
+            setBlock(at.x, at.y, at.z, BlockId::Dirt);
+            return;
+        }
+        const BlockId wanted = wet ? BlockId::FarmlandMoist : BlockId::Farmland;
+        if (wanted != here) {
+            setBlock(at.x, at.y, at.z, wanted);
+        }
+        return;
+    }
+
+    // ---- Nether wart. ----
+    // A flat one-in-ten, and the one plant the reference gates on nothing else
+    // at all: no light, no biome, no dimension, no bone meal.
+    if (isNetherWart(here)) {
+        if (netherWartAge(here) >= 3 || (nextRandom() % 10) != 0) {
+            return;
+        }
+        setBlock(at.x, at.y, at.z, static_cast<BlockId>(static_cast<int>(here) + 1));
+        return;
+    }
+
+    const bool crop = isCropBlock(here);
+    const bool stem = isGrowingStem(here);
+    if (!crop && !stem) {
+        return;
+    }
+
+    // A plant needs tilled ground under it and light at its own cell.
+    const glm::ivec3 soil{at.x, at.y - 1, at.z};
+    const BlockId under = blockAt(soil.x, soil.y, soil.z);
+    if (!isFarmland(under)) {
+        return;
+    }
+    if (std::max(skyLightAt(at.x, at.y, at.z), blockLightAt(at.x, at.y, at.z)) < 9) {
+        return;
+    }
+
+    // The reference's points, counted in quarters so the sum stays integral.
+    // They come from the **three-by-three patch of farmland**, not from the
+    // plant - which is why a lone crop in a field grows faster than one on its
+    // own however well watered it is.
+    int quarters = (under == BlockId::FarmlandMoist) ? farming::kPointsWetUnder
+                                                     : farming::kPointsDryUnder;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dz == 0) {
+                continue;
+            }
+            const BlockId neighbour = blockAt(soil.x + dx, soil.y, soil.z + dz);
+            if (neighbour == BlockId::FarmlandMoist) {
+                quarters += farming::kPointsWetNear;
+            } else if (neighbour == BlockId::Farmland) {
+                quarters += farming::kPointsDryNear;
+            }
+        }
+    }
+
+    const float roll = static_cast<float>(nextRandom() & 0xFFFFFF) /
+                       static_cast<float>(0x1000000);
+    if (roll >= farming::growthChance(quarters)) {
+        return;
+    }
+
+    if (crop) {
+        const int age = cropAge(here);
+        if (age < 7) {
+            setBlock(at.x, at.y, at.z, cropAt(cropFamily(here), age + 1));
+        }
+        return;
+    }
+
+    // ---- A stem. ----
+    const int age = stemAge(here);
+    if (age < 7) {
+        setBlock(at.x, at.y, at.z, static_cast<BlockId>(static_cast<int>(here) + 1));
+        return;
+    }
+
+    // Ripe: try to put a fruit down. **The support test looks at the block
+    // beneath the candidate cell, not at the cell**, and the reference's own
+    // preference order is east, west, north, south.
+    static constexpr glm::ivec3 kSides[4] = {{1, 0, 0}, {-1, 0, 0}, {0, 0, -1}, {0, 0, 1}};
+    const bool melon = stemGrowsMelon(here);
+    for (int side = 0; side < 4; ++side) {
+        const glm::ivec3 cell = at + kSides[side];
+        if (blockAt(cell.x, cell.y, cell.z) != BlockId::Air) {
+            continue;
+        }
+        if (!farming::supportsFruit(blockAt(cell.x, cell.y - 1, cell.z))) {
+            continue;
+        }
+        setBlock(cell.x, cell.y, cell.z, melon ? BlockId::Melon : BlockId::Pumpkin);
+        // The stem now points at what it grew and produces nothing more until
+        // that fruit is taken. Attached order matches `kSides`, so the facing
+        // is the loop index rather than a second table.
+        const BlockId attached = melon ? BlockId::MelonStemAttachedFirst
+                                       : BlockId::PumpkinStemAttachedFirst;
+        setBlock(at.x, at.y, at.z, static_cast<BlockId>(static_cast<int>(attached) + side));
+        return;
+    }
+}
+
+bool World::applyBoneMeal(const glm::ivec3& at) {
+    const BlockId here = blockAt(at.x, at.y, at.z);
+    if (!isCropBlock(here) && !isGrowingStem(here)) {
+        return false;
+    }
+    m_growthRandom ^= m_growthRandom << 13;
+    m_growthRandom ^= m_growthRandom >> 17;
+    m_growthRandom ^= m_growthRandom << 5;
+    // **Beetroot takes a single stage and only three times in four**, which is
+    // the reference's own split and the reason bone meal is poor value on it.
+    if (isCropBlock(here) && farming::boneMealIsSingleStage(cropFamily(here))) {
+        if ((m_growthRandom % 4u) != 0u) {
+            const int age = cropAge(here);
+            if (age < 7) {
+                setBlock(at.x, at.y, at.z, cropAt(cropFamily(here), age + 1));
+            }
+        }
+        return true;
+    }
+    // Everything else jumps two to five stages. Straight to the advance,
+    // skipping the chance roll: bone meal is not a faster tick, it is a
+    // guaranteed one.
+    const int steps = 2 + static_cast<int>(m_growthRandom % 4u);
+    for (int step = 0; step < steps; ++step) {
+        const BlockId current = blockAt(at.x, at.y, at.z);
+        if (isCropBlock(current)) {
+            const int age = cropAge(current);
+            if (age >= 7) {
+                break;
+            }
+            setBlock(at.x, at.y, at.z, cropAt(cropFamily(current), age + 1));
+        } else if (isGrowingStem(current)) {
+            // A stem is advanced but **never fruited** by bone meal, which is
+            // the reference's rule and the whole reason a melon farm takes time.
+            if (stemAge(current) >= 7) {
+                break;
+            }
+            setBlock(at.x, at.y, at.z, static_cast<BlockId>(static_cast<int>(current) + 1));
+        } else {
+            break;
+        }
+    }
+    return true;
+}
+
+void World::updateGrowth(const BudgetCheck& budgetSpent) {
+    const auto now = Clock::now();
+    if (m_nextGrowthTick.time_since_epoch().count() == 0) {
+        m_nextGrowthTick = now;
+    }
+    if (now < m_nextGrowthTick) {
+        return;
+    }
+    // One game tick. Every rate below is quoted per tick, so this is the number
+    // that must not drift - raising it would silently speed every farm up.
+    m_nextGrowthTick = now + std::chrono::milliseconds(50);
+
+    for (auto& [coord, slot] : m_chunks) {
+        if (budgetSpent()) {
+            return;
+        }
+        // Sampled straight out of the chunk rather than through `blockAt`, so
+        // the common case - a cell of stone or air - costs one array read
+        // instead of a hash lookup.
+        for (int sample = 0; sample < farming::kRandomTicksPerChunkPerTick; ++sample) {
+            m_growthRandom ^= m_growthRandom << 13;
+            m_growthRandom ^= m_growthRandom >> 17;
+            m_growthRandom ^= m_growthRandom << 5;
+            const std::uint32_t roll = m_growthRandom;
+            const int lx = static_cast<int>((roll >> 2) % Chunk::kSize);
+            const int ly = static_cast<int>((roll >> 10) % Chunk::kSize);
+            const int lz = static_cast<int>((roll >> 18) % Chunk::kSize);
+            const BlockId here = slot.blocks.at(lx, ly, lz);
+            if (!isFarmland(here) && !isCropBlock(here) && !isGrowingStem(here) &&
+                !isNetherWart(here)) {
+                continue;
+            }
+            growOne(glm::ivec3{coord.x * Chunk::kSize + lx, ly, coord.z * Chunk::kSize + lz});
+        }
+    }
+}
+
 void World::updateFire(const BudgetCheck& budgetSpent) {
     const auto now = std::chrono::steady_clock::now();
-    while (!m_fireUpdates.empty() && !budgetSpent()) {
-        if (m_fireUpdates.front().due > now) {
+    while (!m_fireUpdates.empty() && !budgetSpent()) {        if (m_fireUpdates.front().due > now) {
             break;
         }
         const glm::ivec3 p = m_fireUpdates.front().position;
@@ -995,6 +1226,76 @@ void World::setVisibleRadius(int chunks) {
     m_hasCentre = false;
 }
 
+void World::setDetailRadius(int chunks) {
+    const int radius = std::max(1, chunks);
+    if (radius == m_detailRadius) {
+        return;
+    }
+    m_detailRadius = radius;
+
+    // Every chunk has to be re-asked, and the recentre path is what does that.
+    m_hasCentre = false;
+}
+
+MeshDetail World::detailFor(const ChunkCoord& coord, bool currentlyDetailed) const {
+    // At or beyond the render distance the tier is off, and every chunk that is
+    // drawn at all is drawn whole. Written as a comparison rather than a
+    // separate flag so there is one number to reason about.
+    if (m_detailRadius >= m_visibleRadius) {
+        return MeshDetail::Full;
+    }
+    const int distance = chebyshevDistance(coord, m_centre);
+    const int limit = m_detailRadius + (currentlyDetailed ? kDetailHysteresisChunks : 0);
+    return distance <= limit ? MeshDetail::Full : MeshDetail::TerrainOnly;
+}
+
+void World::refreshDetail(const ChunkCoord& centre) {
+    // Deliberately not short-circuited when the tier is off: turning it off is
+    // exactly the case where chunks built terrain-only have to be told to put
+    // their decoration back, and `detailFor` already answers `Full` for every
+    // chunk in that state.
+    for (auto& [coord, slot] : m_chunks) {
+        // Only what is drawable can be looked at, and a chunk that comes back
+        // into range is re-asked when it is next dispatched.
+        if (chebyshevDistance(coord, centre) > m_visibleRadius) {
+            continue;
+        }
+        const bool wanted = detailFor(coord, slot.detailWanted) == MeshDetail::Full;
+        if (wanted == slot.detailWanted) {
+            continue;
+        }
+        // A tier crossing genuinely changes what the chunk looks like, so it
+        // goes through the same door an edit does: bumping the revision throws
+        // away any job already building the old tier.
+        slot.detailWanted = wanted;
+        invalidateMesh(coord);
+    }
+}
+
+std::size_t World::detailedChunkCount() const {
+    std::size_t count = 0;
+    for (const auto& [coord, slot] : m_chunks) {
+        if (slot.meshed && slot.detailBuilt) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+World::DetailLag World::detailLag() const {    DetailLag lag;
+    for (const auto& [coord, slot] : m_chunks) {
+        const int distance = chebyshevDistance(coord, m_centre);
+        if (distance > m_visibleRadius) {
+            continue;
+        }
+        if (slot.meshed && slot.detailBuilt != slot.detailWanted) {
+            ++lag.chunks;
+            lag.nearest = lag.nearest < 0 ? distance : std::min(lag.nearest, distance);
+        }
+    }
+    return lag;
+}
+
 void World::saveIfModified(const ChunkCoord& coord, ChunkSlot& slot) {
     if (!slot.modified) {
         return;
@@ -1054,7 +1355,7 @@ void World::queueMesh(const ChunkCoord& coord) {
     if (it == m_chunks.end()) {
         return;
     }
-    if (std::find(m_pendingMesh.begin(), m_pendingMesh.end(), coord) == m_pendingMesh.end()) {
+    if (m_pendingMeshSet.insert(coord).second) {
         m_pendingMesh.push_back(coord);
     }
 }
@@ -1212,7 +1513,7 @@ constexpr int kMaxChestRun = 64;
 
 std::optional<glm::ivec3> World::chestPartnerAt(const glm::ivec3& at) const {
     const BlockId id = blockAt(at.x, at.y, at.z);
-    if (!isChest(id)) {
+    if (!isChest(id) || !chestPairs(id)) {
         return std::nullopt;
     }
     const glm::ivec3 axis = chestJoinsAlongX(id) ? glm::ivec3{1, 0, 0} : glm::ivec3{0, 0, 1};
@@ -1238,9 +1539,7 @@ ChestHalf World::chestHalfAt(const glm::ivec3& at) const {
     return chestHalfFor(chestFacing(blockAt(at.x, at.y, at.z)), offset.x, offset.z);
 }
 
-ChunkVolume World::gatherVolume(const ChunkCoord& coord) const {
-    ChunkVolume volume;
-
+void World::gatherVolume(const ChunkCoord& coord, ChunkVolume& volume) const {
     // The padded region spans at most one chunk in each direction, so the 27
     // possible source chunks are looked up once rather than per cell.
     const Chunk* sources[3][3][3]{};
@@ -1255,49 +1554,99 @@ ChunkVolume World::gatherVolume(const ChunkCoord& coord) const {
     constexpr int size = Chunk::kSize;
     constexpr int pad = ChunkVolume::kPad;
 
-    for (int y = -pad; y < size + pad; ++y) {
+    // Blocks and light are overwritten in full below, but the flags are written
+    // only where something is set, so they are cleared here. **Self-contained
+    // on purpose**: relying on the caller to hand over zeroed storage is the
+    // sort of unstated precondition that survives until somebody pools the
+    // buffers, and then fails as stale waterlogging in a chunk that has none.
+    volume.flags.fill(0u);
+
+    // **Copied a row at a time, not a cell at a time.** X is the fastest-moving
+    // axis in both layouts, so the thirty-two interior cells of every row are
+    // one contiguous run in the source and one in the destination. This runs on
+    // the main thread for every chunk that is meshed, which while flying is the
+    // budget the whole streaming pipeline is metered against - the per-cell
+    // version re-derived a chunk pointer, a local coordinate and three
+    // bounds-checked accessors for each of thirty-nine thousand cells.
+    const auto copyRow = [&](int y, int z) {
         const int dy = (y < 0) ? -1 : (y >= size ? 1 : 0);
         const int ly = y - dy * size;
+        const int dz = (z < 0) ? -1 : (z >= size ? 1 : 0);
+        const int lz = z - dz * size;
 
-        for (int z = -pad; z < size + pad; ++z) {
-            const int dz = (z < 0) ? -1 : (z >= size ? 1 : 0);
-            const int lz = z - dz * size;
+        // A row's three pieces: one cell from the -X neighbour, the whole
+        // interior span, one cell from the +X neighbour.
+        struct Piece {
+            int dx;
+            int fromX;
+            int toX;
+            int count;
+        };
+        const Piece pieces[3]{{-1, size - 1, -pad, pad}, {0, 0, 0, size}, {1, 0, size, pad}};
 
-            for (int x = -pad; x < size + pad; ++x) {
-                const int dx = (x < 0) ? -1 : (x >= size ? 1 : 0);
-                const int lx = x - dx * size;
+        for (const Piece& piece : pieces) {
+            const Chunk* source = sources[piece.dx + 1][dy + 1][dz + 1];
+            const std::size_t at = ChunkVolume::index(piece.toX, y, z);
+            const auto count = static_cast<std::size_t>(piece.count);
 
-                const Chunk* source = sources[dx + 1][dy + 1][dz + 1];
-                const std::size_t at = ChunkVolume::index(x, y, z);
+            if (source == nullptr) {
+                // Missing neighbours read as open sky rather than as solid, so
+                // the streaming frontier does not draw a wall of faces or a
+                // band of darkness.
+                std::fill_n(volume.blocks.begin() + static_cast<std::ptrdiff_t>(at), count, BlockId::Air);
+                std::fill_n(volume.light.begin() + static_cast<std::ptrdiff_t>(at), count,
+                            static_cast<std::uint8_t>(0xF0));
+                std::fill_n(volume.flags.begin() + static_cast<std::ptrdiff_t>(at), count,
+                            static_cast<std::uint8_t>(0u));
+                continue;
+            }
 
-                if (source == nullptr) {
-                    // Missing neighbours read as open sky rather than as solid,
-                    // so the streaming frontier does not draw a wall of faces or
-                    // a band of darkness.
-                    volume.blocks[at] = BlockId::Air;
-                    volume.light[at] = 0xF0;
-                    volume.flags[at] = 0u;
-                } else {
-                    const BlockId block = source->at(lx, ly, lz);
-                    volume.blocks[at] = block;
-                    volume.light[at] = source->lightAt(lx, ly, lz);
-                    volume.flags[at] = static_cast<std::uint8_t>(
-                        source->waterloggedAt(lx, ly, lz) ? ChunkVolume::kWaterlogged : 0u);
-                    // Only a chest can answer anything but `Single`, and chests
-                    // are rare, so the run walk is never paid for on the cells
-                    // that make up the world.
-                    if (isChest(block)) {
-                        const glm::ivec3 world{coord.x * size + x, coord.y * size + y,
-                                               coord.z * size + z};
-                        volume.flags[at] |= static_cast<std::uint8_t>(
-                            static_cast<int>(chestHalfAt(world)) << ChunkVolume::kChestHalfShift);
-                    }
+            const std::size_t from = Chunk::cellIndex(piece.fromX, ly, lz);
+            std::memcpy(volume.blocks.data() + at, source->data() + from, count * sizeof(BlockId));
+            std::memcpy(volume.light.data() + at, source->lightData() + from, count);
+
+            // The waterlogged bits are one per cell in the same order, so a run
+            // along X is a run of consecutive bits - and an interior row starts
+            // on a byte boundary, which is what lets the whole row be dismissed
+            // with one test. **Almost every row in the world has none**, and
+            // the caller hands us storage that is already zeroed, so the common
+            // case is a single load and nothing written.
+            const std::uint8_t* bits = source->waterloggedData();
+            const std::size_t firstByte = from >> 3;
+            const std::size_t byteCount = (count + 7) / 8;
+            bool any = false;
+            for (std::size_t b = 0; b < byteCount && !any; ++b) {
+                any = bits[firstByte + b] != 0u;
+            }
+            if (!any) {
+                continue;
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                const std::size_t bit = from + i;
+                if ((bits[bit >> 3] & (1u << (bit & 7u))) != 0u) {
+                    volume.flags[at + i] |= ChunkVolume::kWaterlogged;
                 }
             }
         }
-    }
 
-    return volume;
+        // Only a chest can answer anything but `Single`, and chests are rare, so
+        // the run walk is never paid for on the cells that make up the world.
+        for (int x = -pad; x < size + pad; ++x) {
+            const std::size_t at = ChunkVolume::index(x, y, z);
+            if (!isChest(volume.blocks[at])) {
+                continue;
+            }
+            const glm::ivec3 world{coord.x * size + x, coord.y * size + y, coord.z * size + z};
+            volume.flags[at] |= static_cast<std::uint8_t>(static_cast<int>(chestHalfAt(world))
+                                                          << ChunkVolume::kChestHalfShift);
+        }
+    };
+
+    for (int y = -pad; y < size + pad; ++y) {
+        for (int z = -pad; z < size + pad; ++z) {
+            copyRow(y, z);
+        }
+    }
 }
 
 void World::refreshQueues(const ChunkCoord& centre) {
@@ -1325,14 +1674,26 @@ void World::refreshQueues(const ChunkCoord& centre) {
     // radius. Nothing else would ever pick them up again, which shows as a
     // permanent hole when the player walks back toward them.
     //
+    // **And chunks whose drawn tier is not the tier they should be at.** A
+    // queued re-mesh can be dropped for the same two reasons, and a chunk that
+    // is already meshed would otherwise never be looked at again - which is how
+    // a plant fails to reappear until something unrelated dirties the chunk.
+    //
     // Queued, not invalidated: their contents have not changed, and bumping the
     // revision here would throw away perfectly good work every time the player
     // crossed a chunk boundary.
     for (const auto& [coord, slot] : m_chunks) {
-        if (!slot.meshed && chebyshevDistance(coord, centre) <= m_visibleRadius) {
+        if (chebyshevDistance(coord, centre) > m_visibleRadius) {
+            continue;
+        }
+        if (!slot.meshed || slot.detailBuilt != slot.detailWanted) {
             queueMesh(coord);
         }
     }
+
+    // The player's chunk has moved, so the detail boundary has moved with it.
+    // This is the one place a chunk crosses it in either direction.
+    refreshDetail(centre);
 }
 
 std::size_t World::jobCapacity() const {
@@ -1370,9 +1731,29 @@ void World::dispatchLoads(const BudgetCheck& budgetSpent, std::size_t capacity) 
 }
 
 void World::dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSpent, std::size_t capacity) {
+    // **Nearest first, or the chunk you are flying toward waits behind the one
+    // you just left.** The queue is drained from the back and entries arrive in
+    // whatever order the chunk map iterates and light propagation dirties them,
+    // which is effectively random - so with a deep queue a tier upgrade landed
+    // at an arbitrary distance and plants appeared a couple of chunks away
+    // rather than at the boundary.
+    //
+    // `nth_element` rather than a full sort: only the handful about to be
+    // dispatched need to be the right ones, and this is linear where a sort of
+    // several thousand entries every frame is not.
+    if (m_pendingMesh.size() > capacity) {
+        const auto farthestFirst = [&](const ChunkCoord& a, const ChunkCoord& b) {
+            return chebyshevDistance(a, centre) > chebyshevDistance(b, centre);
+        };
+        std::nth_element(m_pendingMesh.begin(),
+                         m_pendingMesh.end() - static_cast<std::ptrdiff_t>(capacity),
+                         m_pendingMesh.end(), farthestFirst);
+    }
+
     while (!m_pendingMesh.empty() && m_meshInFlight.size() < capacity && !budgetSpent()) {
         const ChunkCoord coord = m_pendingMesh.back();
         m_pendingMesh.pop_back();
+        m_pendingMeshSet.erase(coord);
 
         const auto it = m_chunks.find(coord);
         if (it == m_chunks.end()) {
@@ -1389,22 +1770,29 @@ void World::dispatchMeshes(const ChunkCoord& centre, const BudgetCheck& budgetSp
 
         m_meshInFlight.insert(coord);
 
+        // The tier is resolved here, on the main thread, and travels with the
+        // volume. A job that asked where the player was would give two chunks
+        // meshed in the same frame different answers.
+        const MeshDetail detail = detailFor(coord, it->second.detailWanted);
+        it->second.detailWanted = detail == MeshDetail::Full;
+
         // The chunk and its borders are copied here, on the main thread, so the
         // job owns everything it reads. That copy is what removes the whole
         // question of what the main thread may do to this chunk meanwhile.
         auto input = std::make_shared<MeshJobInput>();
         input->coord = coord;
         input->revision = it->second.revision;
+        input->detail = detail;
         input->origin = glm::vec3{static_cast<float>(coord.x * Chunk::kSize),
                                   static_cast<float>(coord.y * Chunk::kSize),
                                   static_cast<float>(coord.z * Chunk::kSize)};
-        input->volume = gatherVolume(coord);
-
+        gatherVolume(coord, input->volume);
         m_jobs.submit([input = std::move(input), results = m_results] {
-            ChunkMeshes meshes = meshChunk(input->volume, input->origin);
+            ChunkMeshes meshes = meshChunk(input->volume, input->origin, input->detail);
 
             std::lock_guard<std::mutex> lock(results->mutex);
-            results->meshed.push_back(MeshedChunk{input->coord, std::move(meshes), input->revision});
+            results->meshed.push_back(
+                MeshedChunk{input->coord, std::move(meshes), input->revision, input->detail});
         });
     }
 }
@@ -1431,7 +1819,7 @@ void World::collectFinishedJobs() {
             continue;
         }
 
-        m_chunks.emplace(result.coord, ChunkSlot{std::move(result.blocks), false, false, 0});
+        m_chunks.emplace(result.coord, ChunkSlot{std::move(result.blocks), false, false, false, false, 0});
 
         // Sky light is traced from the top of the world down, so it can only be
         // done once every chunk in the column is present.
@@ -1496,7 +1884,11 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         // alone; they are discarded on collection instead, because a running job
         // cannot be recalled.
         const auto outOfRange = [&](const ChunkCoord& c) {
-            return chebyshevDistance(c, centre) > m_unloadRadius;
+            if (chebyshevDistance(c, centre) <= m_unloadRadius) {
+                return false;
+            }
+            m_pendingMeshSet.erase(c);
+            return true;
         };
         m_pendingMesh.erase(std::remove_if(m_pendingMesh.begin(), m_pendingMesh.end(), outOfRange),
                             m_pendingMesh.end());
@@ -1525,6 +1917,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
     updateFluids(budgetSpent);
     updateLava(budgetSpent);
     updateFire(budgetSpent);
+    updateGrowth(budgetSpent);
     updateTnt(budgetSpent);
     updateFalls(budgetSpent);
 
@@ -1546,6 +1939,7 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
         }
 
         it->second.meshed = true;
+        it->second.detailBuilt = result.detail == MeshDetail::Full;
         updates.push_back(ChunkMeshUpdate{result.coord, std::move(result.meshes.opaque),
                                           std::move(result.meshes.translucent), false});
     }

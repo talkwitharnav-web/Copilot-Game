@@ -104,11 +104,19 @@ public:
     BlockId* data() { return m_blocks.data(); }
     const BlockId* data() const { return m_blocks.data(); }
 
-private:
-    static constexpr std::size_t index(int x, int y, int z) {
+    /// Where a cell sits in that raw storage.
+    ///
+    /// **Public because a second file now copies whole rows out of a chunk**,
+    /// and the one thing worse than exposing this is a second copy of the
+    /// layout. X is the fastest-moving axis, so a run along X is contiguous -
+    /// which is the property the bulk copy depends on.
+    static constexpr std::size_t cellIndex(int x, int y, int z) {
         return static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * kSize +
                static_cast<std::size_t>(y) * kSize * kSize;
     }
+
+private:
+    static constexpr std::size_t index(int x, int y, int z) { return cellIndex(x, y, z); }
 
     /// Full sky, no block light.
     static constexpr std::uint8_t kDefaultLight = 0xF0;

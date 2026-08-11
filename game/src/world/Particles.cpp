@@ -332,10 +332,10 @@ engine::MeshData Particles::buildMesh(const World& world, const glm::vec3& right
         const auto bx = static_cast<int>(std::floor(p.position.x));
         const auto by = static_cast<int>(std::floor(p.position.y));
         const auto bz = static_cast<int>(std::floor(p.position.z));
-        const float sky =
-            std::max(p.glow, static_cast<float>(world.skyLightAt(bx, by, bz)) / 15.0f);
-        const float block =
-            std::max(p.glow, static_cast<float>(world.blockLightAt(bx, by, bz)) / 15.0f);
+        const float sky = std::max(
+            p.glow, static_cast<float>(world.skyLightAt(bx, by, bz)) / static_cast<float>(kMaxLight));
+        const float block = std::max(
+            p.glow, static_cast<float>(world.blockLightAt(bx, by, bz)) / static_cast<float>(kMaxLight));
 
         const glm::vec3 r = right * (p.size * scale);
         const glm::vec3 u = up * (p.size * scale);

@@ -12,6 +12,16 @@ namespace game {
 /// one panel layout serves both halves of the screen.
 constexpr std::size_t kChestSlots = 27;
 
+/// How many a hopper holds. It stores its five in the same `Chest` struct and
+/// simply never touches the rest, which is what lets the whole container path -
+/// saving, spilling on break, clicking, shift-clicking - serve both with no
+/// second type.
+constexpr std::size_t kHopperSlots = 5;
+
+/// How often a hopper moves one item. Eight game ticks at the reference's
+/// twenty a second, written as the seconds our frame loop actually counts in.
+constexpr float kHopperTransferSeconds = 8.0f / 20.0f;
+
 /// One chest's contents.
 ///
 /// A **block entity**, for the same reason a furnace's is: which way a chest

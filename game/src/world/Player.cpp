@@ -122,12 +122,17 @@ glm::vec3 climbPush(BlockId block, const glm::vec2& wish, bool& anyDirection) {
 
 /// Seconds of air, and the drowning clock, advanced from the head alone.
 ///
-/// Nothing consumes the damage yet, because the player has no health until M21;
-/// the meter is on screen so the state is visible rather than merely computed.
+/// The damage is applied on the shared hazard cadence in `applyHazards` below,
+/// two health a second once the meter is past empty.
 void updateBreath(Player& player, float dt) {
     using namespace fluid;
 
     if (player.underwater) {
+        // Water breathing freezes the bar rather than refilling it, which is
+        // what the reference does: surfacing still tops it up the usual way.
+        if (player.effects.level(effects::Effect::WaterBreathing) > 0) {
+            return;
+        }
         player.air = std::max(0.0f, player.air - dt);
         if (player.air <= 0.0f) {
             player.drowningSeconds += dt;
@@ -232,11 +237,14 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
     // running four separate timers would let them interleave into a much
     // faster stream than any of them is supposed to be.
     player.hazardTimer += dt;
-    while (player.hazardTimer >= kLavaInterval) {
-        player.hazardTimer -= kLavaInterval;
-        if (inLava) {
+    while (player.hazardTimer >= kHazardInterval) {
+        player.hazardTimer -= kHazardInterval;
+        // Fire resistance covers every heat source there is, which is the whole
+        // of what the reference gives it - no scaling, no partial protection.
+        const bool fireproof = player.effects.level(effects::Effect::FireResistance) > 0;
+        if (inLava && !fireproof) {
             damagePlayer(player, kLavaDamage);
-        } else if (inFire) {
+        } else if (inFire && !fireproof) {
             damagePlayer(player, kFireDamage);
         }
         if (onCactus) {
@@ -247,9 +255,53 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
         }
         if (player.air <= 0.0f && player.underwater) {
             damagePlayer(player,
-                         static_cast<int>(kDrownDamagePerSecond * kLavaInterval + 0.5f));
+                         static_cast<int>(kDrownDamagePerSecond * kHazardInterval + 0.5f));
         }
     }
+
+    // --- What the potions are doing.
+    //
+    // Counted down first, so an effect that runs out this frame does not get
+    // one last tick out of it. Regeneration, poison and wither each keep their
+    // own clock because each one's interval is set by how strong it is.
+    player.effects.tick(dt);
+
+    if (const float interval = effects::regenerationInterval(player.effects); interval > 0.0f) {
+        player.effectHealTimer += dt;
+        while (player.effectHealTimer >= interval) {
+            player.effectHealTimer -= interval;
+            healPlayer(player, 1);
+        }
+    } else {
+        player.effectHealTimer = 0.0f;
+    }
+
+    const float poison = effects::poisonInterval(player.effects);
+    const float wither = effects::witherInterval(player.effects);
+    if (poison > 0.0f || wither > 0.0f) {
+        // Whichever is running faster sets the pace; both together is the
+        // reference's own behaviour of two independent counters, and the
+        // difference is a fraction of a heart nobody could see.
+        const float interval = poison > 0.0f && (wither <= 0.0f || poison < wither) ? poison : wither;
+        player.effectHurtTimer += dt;
+        while (player.effectHurtTimer >= interval) {
+            player.effectHurtTimer -= interval;
+            // **Poison cannot take the last point of health; wither can.** That
+            // is the whole difference between them and it is why this is not one
+            // branch.
+            if (wither > 0.0f) {
+                damagePlayer(player, 1, true);
+            } else if (player.health > 1) {
+                damagePlayer(player, 1, true);
+            }
+        }
+    } else {
+        player.effectHurtTimer = 0.0f;
+    }
+
+    // Hunger empties the bar by adding exhaustion rather than by touching it,
+    // which is what lets saturation absorb the first of it.
+    player.exhaustion += effects::hungerExhaustion(player.effects) * dt;
 
     // --- Burning, which outlives the flame that started it. Water puts it out.
     if (inLava) {
@@ -257,7 +309,7 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
     } else if (inFire) {
         player.burningSeconds = std::max(player.burningSeconds, kFireBurnSeconds);
     }
-    if (player.inWater) {
+    if (player.inWater || player.effects.level(effects::Effect::FireResistance) > 0) {
         player.burningSeconds = 0.0f;
     }
     if (player.burningSeconds > 0.0f) {
@@ -341,7 +393,16 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
 /// starts halfway across its cell, so walking into one from the high side threw
 /// the player a whole block backwards. Same failure as landing on a slab, one
 /// axis over.
-float blockingPlaneAlong(const World& world, const Aabb& box, int axis, bool positive) {
+///
+/// `from` is where the body was **before** the move, and it is what makes this
+/// safe for a thin box. A door leaf is three texels thick, so the player can
+/// legitimately stand on either side of it inside the same cell - and taking
+/// the nearest face without asking which side they came from picked the one
+/// behind them and threw them backwards through it. That is the teleport a
+/// doorway used to do, and it can only ever happen to a box the player is able
+/// to be past.
+float blockingPlaneAlong(const World& world, const Aabb& box, int axis, bool positive,
+                         const Aabb& from) {
     const int minX = static_cast<int>(std::floor(box.min.x));
     const int maxX = static_cast<int>(std::floor(box.max.x - kSkin));
     const int minY = static_cast<int>(std::floor(box.min.y));
@@ -376,8 +437,14 @@ float blockingPlaneAlong(const World& world, const Aabb& box, int axis, bool pos
                     }
 
                     if (positive) {
+                        if (lo[axis] + kSkin < from.max[axis]) {
+                            continue;
+                        }
                         best = std::min(best, lo[axis]);
                     } else {
+                        if (hi[axis] - kSkin > from.min[axis]) {
+                            continue;
+                        }
                         best = std::max(best, hi[axis]);
                     }
                 }
@@ -421,7 +488,9 @@ bool moveAxis(glm::vec3& position, const World& world, int axis, float amount, f
     const float extentAbove = (axis == 1) ? height : half;
     const float extentBelow = (axis == 1) ? 0.0f : half;
 
-    const float plane = blockingPlaneAlong(world, boxAt(candidate, height), axis, amount > 0.0f);
+    const float plane =
+        blockingPlaneAlong(world, boxAt(candidate, height), axis, amount > 0.0f,
+                           boxAt(position, height));
     if (!std::isfinite(plane)) {
         // Overlapped but nothing squarely in the way, which the skin makes
         // possible at a corner. Refusing the move is the safe answer.
@@ -520,7 +589,7 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
                          : player.sneaking ? kSneakSpeed
                          : sprinting       ? kSprintSpeed
                                            : kWalkSpeed) *
-                        stickScale;
+                        stickScale * effects::moveSpeedScale(player.effects);
 
     glm::vec3 wish = input.moveDirection;
     wish.y = 0.0f;
@@ -745,6 +814,16 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
                 player.onGround = false;
                 continue;
             }
+            // A bed bounces too, at about a third of the speed you arrived
+            // with, and swallows the fall that would have hurt. The reference's
+            // own numbers, and the reason falling onto one is survivable.
+            if (movingDown && !player.sneaking && isBed(landedOn) &&
+                player.velocity.y < -kBounceThreshold) {
+                player.velocity.y = -player.velocity.y * kBedBounce;
+                player.fallDistance = 0.0f;
+                player.onGround = false;
+                continue;
+            }
             player.onGround = movingDown;
             player.velocity.y = 0.0f;
 
@@ -892,6 +971,11 @@ void respawnPlayer(Player& player, const glm::vec3& at) {
     player.drowningSeconds = 0.0f;
     player.fallDistance = 0.0f;
     player.burningSeconds = 0.0f;
+    // Death takes every effect with it, which is the reference's rule and the
+    // reason a potion of harming is survivable rather than a life sentence.
+    player.effects.clear();
+    player.effectHealTimer = 0.0f;
+    player.effectHurtTimer = 0.0f;
     player.invulnerableSeconds = 0.0f;
     player.lastDamage = 0;
     player.deathSeconds = 0.0f;

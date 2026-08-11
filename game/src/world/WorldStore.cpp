@@ -17,6 +17,7 @@ constexpr std::array<char, 4> kMagic{'V', 'X', 'C', 'H'};
 constexpr std::array<char, 4> kPlayerMagic{'V', 'X', 'P', 'L'};
 constexpr std::array<char, 4> kFurnaceMagic{'V', 'X', 'F', 'N'};
 constexpr std::array<char, 4> kChestMagic{'V', 'X', 'C', 'T'};
+constexpr std::array<char, 4> kStowboxMagic{'V', 'X', 'S', 'B'};
 constexpr std::array<char, 4> kCreatureMagic{'V', 'X', 'C', 'R'};
 /// Versions `player.dat` alone, and is deliberately **not** the chunk version:
 /// bumping that one regenerates stale terrain, and doing so must never cost the
@@ -47,7 +48,7 @@ constexpr std::uint32_t kFormatVersion = 2;
 /// those chunks goes with them. Cosmetic ground cover is not worth a world.
 /// New chunks get the new rule; already-visited ones keep the old sparse cover.
 /// Bump it to 4 if that mixed state ever matters more than the builds do.
-constexpr std::uint32_t kChunkFormatVersion = 3;
+constexpr std::uint32_t kChunkFormatVersion = 4;
 
 /// Versioned separately from chunks and the player, because it stores
 /// `ItemStack`s and so has to be invalidated whenever those change shape. A
@@ -61,7 +62,9 @@ constexpr std::uint32_t kFurnaceVersion = 3;
 constexpr std::uint32_t kFurnaceLegacyItemVersion = 2;
 constexpr std::uint32_t kChestVersion = 2;
 constexpr std::uint32_t kChestLegacyItemVersion = 1;
-constexpr std::uint32_t kCreatureVersion = 2;
+/// New at M29c, so there is nothing older to upgrade from.
+constexpr std::uint32_t kStowboxVersion = 1;
+constexpr std::uint32_t kCreatureVersion = 3;
 
 /// Sanity bound on a file the game did not write this run. Far more furnaces
 /// than anyone would place, and small enough that a corrupt length cannot ask
@@ -81,6 +84,8 @@ static_assert(std::is_trivially_copyable_v<SavedCreature>,
               "SavedCreature is written as raw bytes and must stay trivially copyable");
 static_assert(std::is_trivially_copyable_v<PlacedChest>,
               "PlacedChest is written as raw bytes and must stay trivially copyable");
+static_assert(std::is_trivially_copyable_v<StowedBox>,
+              "StowedBox is written as raw bytes and must stay trivially copyable");
 
 /// Shifts one stack's id back into the range it means now. An empty slot has
 /// id `None`, which is below the old boundary and so is left alone.
@@ -438,6 +443,89 @@ void WorldStore::saveChests(const std::vector<PlacedChest>& chests) const {
     std::filesystem::rename(temporary, path, error);
     if (error) {
         engine::logError("Could not replace chest file " + path.string() + ": " + error.message());
+        std::filesystem::remove(temporary, error);
+    }
+}
+
+std::vector<StowedBox> WorldStore::loadStowboxes() const {
+    const std::filesystem::path path = m_directory.parent_path() / "stowboxes.dat";
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return {};
+    }
+
+    std::array<char, 4> magic{};
+    std::uint32_t version = 0;
+    std::uint32_t seed = 0;
+    std::uint32_t count = 0;
+
+    file.read(magic.data(), magic.size());
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+    file.read(reinterpret_cast<char*>(&seed), sizeof(seed));
+    file.read(reinterpret_cast<char*>(&count), sizeof(count));
+
+    if (!file || magic != kStowboxMagic || seed != m_seed || version != kStowboxVersion) {
+        engine::logWarn("Stowbox file does not match this world, ignoring: " + path.string());
+        return {};
+    }
+    if (count > kMaxChests) {
+        engine::logWarn("Stowbox file claims " + std::to_string(count) +
+                        " entries, ignoring: " + path.string());
+        return {};
+    }
+
+    std::vector<StowedBox> boxes;
+    boxes.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        StowedBox stowed;
+        file.read(reinterpret_cast<char*>(&stowed), sizeof(stowed));
+        if (!file) {
+            engine::logWarn("Truncated stowbox file, keeping what was read: " + path.string());
+            break;
+        }
+        boxes.push_back(stowed);
+    }
+    return boxes;
+}
+
+void WorldStore::saveStowboxes(const std::vector<StowedBox>& boxes) const {
+    const std::filesystem::path path = m_directory.parent_path() / "stowboxes.dat";
+
+    if (boxes.empty()) {
+        std::error_code removeError;
+        std::filesystem::remove(path, removeError);
+        return;
+    }
+
+    const std::filesystem::path temporary = path.string() + ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            engine::logError("Could not open stowbox file for writing: " + temporary.string());
+            return;
+        }
+
+        const auto count = static_cast<std::uint32_t>(boxes.size());
+        file.write(kStowboxMagic.data(), kStowboxMagic.size());
+        file.write(reinterpret_cast<const char*>(&kStowboxVersion), sizeof(kStowboxVersion));
+        file.write(reinterpret_cast<const char*>(&m_seed), sizeof(m_seed));
+        file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (const StowedBox& stowed : boxes) {
+            file.write(reinterpret_cast<const char*>(&stowed), sizeof(stowed));
+        }
+
+        if (!file) {
+            engine::logError("Failed writing stowbox file: " + temporary.string());
+            return;
+        }
+    }
+
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        engine::logError("Could not replace stowbox file " + path.string() + ": " +
+                         error.message());
         std::filesystem::remove(temporary, error);
     }
 }

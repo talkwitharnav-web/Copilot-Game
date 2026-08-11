@@ -32,6 +32,8 @@ constexpr std::array<const char*, static_cast<std::size_t>(SoundEvent::Count)> k
     "cave",        "music",
 
     "rain",        "thunder",
+
+    "bell",
 };
 
 /// And the voice families, in `CreatureVoice` order.
@@ -40,7 +42,7 @@ constexpr std::array<const char*, static_cast<std::size_t>(CreatureVoice::Count)
     "wolf",    "fox",       "panda",    "bear",    "rabbit",    "goat",      "bee",
     "turtle",  "dolphin",   "squid",    "villager","trader",    "zombie",    "husk",
     "drowned", "zvillager", "skeleton", "stray",   "bogged",    "blackbone", "spider",
-    "creeper", "slime",     "magma",    "silverfish", "princepin", "fish",
+    "creeper", "slime",     "magma",    "silverfish", "princepin", "fish", "golem",
 };
 
 constexpr std::array<const char*, static_cast<std::size_t>(VoiceState::Count)> kVoiceStates{
@@ -160,6 +162,8 @@ CreatureVoice voiceFamilyFor(CreatureKind kind) {
     case CreatureKind::TropicalFish:
     case CreatureKind::Axolotl:
         return CreatureVoice::Fish;
+    case CreatureKind::IronGolem:
+        return CreatureVoice::Golem;
     default:
         // The frog is the one land animal left silent on purpose: it has its
         // own voice in the dump and no family here fits it, and the wrong

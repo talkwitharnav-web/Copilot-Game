@@ -86,19 +86,30 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 16> rows{{
+    const std::array<Row, 19> rows{{
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
         {"biome", stats.biome},
         {"air", formatFloat(stats.air, 1) + " s"},
         {"dist", std::to_string(stats.renderDistance)},
+        {"detail", stats.detailDistance >= stats.renderDistance
+                       ? std::string("off")
+                       : std::to_string(stats.detailDistance) + "  " +
+                             std::to_string(stats.detailedChunks) + " ch"},
+        {"tier lag", stats.detailLagChunks == 0
+                         ? std::string("0")
+                         : std::to_string(stats.detailLagChunks) + " at " +
+                               std::to_string(stats.detailLagNearest)},
         {"chunks", std::to_string(stats.loadedChunks)},
         {"meshes", std::to_string(stats.meshes)},
         {"queued", std::to_string(stats.pending)},
         {"retired", std::to_string(stats.retired)},
         {"draws", std::to_string(stats.drawCalls)},
         {"tris", formatCount(stats.triangles)},
+        {"gpu mem", std::to_string(stats.gpuMegabytes) + " MB  " +
+                       std::to_string(stats.deviceAllocations) + "/" +
+                       std::to_string(stats.deviceAllocationLimit)},
         {"workers", std::to_string(stats.workerThreads)},
         {"tone F10", stats.toneMapper},
         {"shade G", stats.shadows},
