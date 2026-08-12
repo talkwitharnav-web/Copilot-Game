@@ -134,6 +134,7 @@ Settings loadSettings(const std::filesystem::path& file) {
         read("clouds", Settings::kCloudQualityCount - 1, settings.clouds);
         read("rain_distance", 48, settings.rainDistance);
         read("start_weather", 3, settings.startWeather);
+        read("input_mode", Settings::kInputModeCount - 1, settings.inputMode);
 
         const auto readInt = [&](const char* name, int& target) {
             if (key != name) {
@@ -181,6 +182,14 @@ Settings loadSettings(const std::filesystem::path& file) {
         readFloat("anti_alias", settings.antiAlias);
         readFloat("render_scale", settings.renderScale);
         readFloat("contact_shadows", settings.contactShadows);
+        readFloat("controller_look_sensitivity", settings.controllerLookSensitivity);
+        readFloat("controller_cursor_sensitivity", settings.controllerCursorSensitivity);
+        readFloat("controller_deadzone", settings.controllerDeadzone);
+        readFloat("controller_rumble", settings.controllerRumble);
+
+        if (key == "controller_invert_y") {
+            settings.controllerInvertY = (value == "1" || value == "true");
+        }
 
         if (key == "bloom") {
             settings.bloom = (value == "1" || value == "true");
@@ -235,6 +244,12 @@ Settings loadSettings(const std::filesystem::path& file) {
     settings.antiAlias = std::clamp(settings.antiAlias, 0.0f, 1.0f);
     settings.contactShadows = std::clamp(settings.contactShadows, 0.0f, 64.0f);
     settings.renderScale = std::clamp(settings.renderScale, 0.5f, 1.0f);
+    settings.controllerLookSensitivity = std::clamp(settings.controllerLookSensitivity, 0.1f, 5.0f);
+    settings.controllerCursorSensitivity = std::clamp(settings.controllerCursorSensitivity, 0.1f, 5.0f);
+    // Never the whole stick: a dead zone of one would leave the pad inert with
+    // nothing on screen to say why.
+    settings.controllerDeadzone = std::clamp(settings.controllerDeadzone, 0.0f, 0.6f);
+    settings.controllerRumble = std::clamp(settings.controllerRumble, 0.0f, 1.0f);
 
     return settings;
 }
@@ -338,6 +353,22 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "# contact_shadows: radius in screen pixels for the darkening where\n"
         << "#   surfaces meet. 0 turns it off; 24 is the default.\n"
         << "#\n"
+        << "# input_mode: 0 follows whichever device you last touched, 1 pins\n"
+        << "#   the keyboard and mouse, 2 pins the gamepad. F cycles it while\n"
+        << "#   playing. Pin it if a worn stick drifts, or if a pad is plugged\n"
+        << "#   in and you want the keyboard anyway.\n"
+        << "# controller_look_sensitivity: right-stick camera speed, as a\n"
+        << "#   multiple of the default. 1 turns about 155 degrees a second at\n"
+        << "#   full deflection; raise it if turning feels slow.\n"
+        << "# controller_cursor_sensitivity: pointer speed in menus, likewise.\n"
+        << "# controller_invert_y: 1 pitches up when the stick goes down.\n"
+        << "# controller_deadzone: how much of each stick's travel from centre\n"
+        << "#   counts as no movement, 0 to 0.6. Raise it if a worn stick walks\n"
+        << "#   on its own; lower it for finer aim on a new pad.\n"
+        << "# controller_rumble: how hard the pad vibrates, 0 to 1. 0 is off.\n"
+        << "#   Cues fire on landing a hit, taking damage, a heavy landing, a\n"
+        << "#   block breaking, loosing an arrow, an explosion and dying.\n"
+        << "#\n"
         << "# worldgen_probe: 1 censuses the generated world to the log and\n"
         << "#   exits without opening a window. Reports the surface range, each\n"
         << "#   biome's share and top block, cave volume, ore counts, and how\n"
@@ -388,6 +419,12 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "anti_alias=" << settings.antiAlias << "\n"
         << "contact_shadows=" << settings.contactShadows << "\n"
         << "render_scale=" << settings.renderScale << "\n"
+        << "input_mode=" << settings.inputMode << "\n"
+        << "controller_look_sensitivity=" << settings.controllerLookSensitivity << "\n"
+        << "controller_cursor_sensitivity=" << settings.controllerCursorSensitivity << "\n"
+        << "controller_invert_y=" << (settings.controllerInvertY ? 1 : 0) << "\n"
+        << "controller_deadzone=" << settings.controllerDeadzone << "\n"
+        << "controller_rumble=" << settings.controllerRumble << "\n"
         << "worldgen_probe=" << (settings.worldgenProbe ? 1 : 0) << "\n"
         << "block_probe=" << (settings.blockProbe ? 1 : 0) << "\n";
 }

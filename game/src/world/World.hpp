@@ -137,6 +137,14 @@ public:
     /// Highest solid block in a column, or -1 if empty or not loaded.
     int highestSolid(int x, int z) const;
 
+    /// The y a body's feet rest at on top of a column.
+    ///
+    /// **Not `highestSolid() + 1`**, which is what three separate places used
+    /// to write: that answers -1 for a column no chunk is loaded for, and -1 + 1
+    /// is the bottom of the world. Falls back to the generator, which is the
+    /// right answer for ground nobody has touched and is always available.
+    int groundHeight(int x, int z) const;
+
     /// Changes one block and marks every affected chunk for re-meshing.
     /// A block a spreading flow destroyed, and what it was.
     struct WashedBlock {

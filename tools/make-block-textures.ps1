@@ -1405,3 +1405,12 @@ New-FlatTexture -Name 'brown_mushroom' -Palette @('9A7A5A','9A7A5A','9A7A5A','9A
 New-FlatTexture -Name 'red_mushroom' -Palette @('C03030','C03030','C03030','C03030') -Weights @(1,1,1,1) -Salt 9047
 New-FlatTexture -Name 'kelp' -Palette @('3A7A3A','3A7A3A','3A7A3A','3A7A3A') -Weights @(1,1,1,1) -Salt 9048
 New-FlatTexture -Name 'seagrass' -Palette @('4A9A5A','4A9A5A','4A9A5A','4A9A5A') -Weights @(1,1,1,1) -Salt 9049
+
+# The ten breaking stages. Deliberately blank: this is an overlay drawn ON a
+# block, so a flat colour placeholder would paint the whole block solid while
+# you mine it. Fully clear means no cracks until the reference art is staged,
+# which is the honest failure for a decoration.
+0..9 | ForEach-Object {
+    $blank = New-Object System.Drawing.Bitmap $size, $size
+    Save-Bitmap -Bitmap $blank -Name ("destroy_stage_{0}" -f $_)
+}

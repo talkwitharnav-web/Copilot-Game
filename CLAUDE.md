@@ -7,15 +7,15 @@
 
 - **1** &middot; CLAUDE.md
   - **34** &middot; The bug shapes that have cost the most
-  - **59** &middot; If you are a new session, read this box first
-  - **73** &middot; Critical — Read First
-  - **98** &middot; The User and Working Style
-  - **110** &middot; The Machine (2026-07-30)
-  - **122** &middot; Settled Technology Decisions
-  - **137** &middot; Architecture Rules
-    - **161** &middot; Coding Habits That Make Later Migration Cheap
-  - **188** &middot; Where everything else lives
-  - **205** &middot; Update Discipline
+  - **61** &middot; If you are a new session, read this box first
+  - **75** &middot; Critical — Read First
+  - **100** &middot; The User and Working Style
+  - **112** &middot; The Machine (2026-07-30)
+  - **124** &middot; Settled Technology Decisions
+  - **139** &middot; Architecture Rules
+    - **163** &middot; Coding Habits That Make Later Migration Cheap
+  - **190** &middot; Where everything else lives
+  - **217** &middot; Update Discipline
 
 <!-- /INDEX -->
 
@@ -46,8 +46,10 @@ and commands.
 9. **A standard formula written from memory can come out inverted, and consuming it as a *ratio* hides that.** **Print a curve you did not derive on the spot at three known points before trusting it.**
 10. **A `default:` that returns a real value hides every missing entry — and there is usually more than one `default:`.** A per-run catch-all is not a shortcut, it is a second place for the identical bug. **Make the inner one fall through to the outer rule.**
 11. **A `static_assert` comparing one side of a derivation against itself proves nothing.** Eleven of them passed while pointing at the wrong texture. **Assert the whole expression the real reader evaluates, base and all.**
-12. **Rectangles guessed out of an image instead of read from the model that names them.** One bed, four playtest rounds, one mistake — and then twenty more blocks and every dropped item. The reference's `models/block/*.json` states every box, every face's `uv` rect and which texture it uses. **When a block is more than a cube, open its JSON first**, and **run `tools/check-models.ps1`**, which measures all 1293 of them against it in one command. Where the reference has no model — a bell body is a block entity — say so and measure the art, rather than guessing and calling it the reference.
-13. **A block is drawn in four places, and fixing the world fixes one of them.** The mesher, the slot picture, the dropped entity and the thrown entity. Every non-flat block item was dropped as a single spinning cube for twenty milestones because nobody threw one on the floor. **When you change how a block looks, ask where else it is drawn** — and give the answer one owner rather than four.
+12. **Rectangles guessed out of an image instead of read from the model that names them.** One bed, four playtest rounds, one mistake — and then twenty more blocks and every dropped item. The reference's `models/block/*.json` states every box, every face's `uv` rect and which texture it uses. **When a block is more than a cube, open its JSON first**, and **run `tools/check-models.ps1`**, which measures every block that has a model against it in one command — 1792 of them today, 0 disagreeing. Where the reference has no model — a bell body is a block entity — say so and measure the art, rather than guessing and calling it the reference.
+13. **A block is drawn in four places, and fixing the world fixes one of them.** The mesher, the slot picture, the dropped entity and the thrown entity. Every non-flat block item was dropped as a single spinning cube for twenty milestones because nobody threw one on the floor. **When you change how a block looks, ask where else it is drawn** — and give the answer one owner rather than four. **Paid a third and fourth time on 2026-08-11**, both found by play and both invisible from the world: the drop handed one side layer to all four side quads, so a sticky piston wore its front right round, and the icon painted the side layer on the lid of every model-shaped block, so an end portal frame lost its eye socket. **The three paths differ in how many face directions they can be told** — the mesher one per face, the icon two, the drop four — and any that settles for a single answer is wrong for every block whose faces differ.
+
+14. **A rule that exists, is correct, and is commented — in only one of the two places that need it.** Lava's pooling test was water's rule minus the single clause that made water right, so a poured column shelved sideways at every level. The player fell through not-yet-loaded chunks and was buried when they arrived, for twenty milestones, while creatures — guarded against precisely that since the day they were written, with the reason spelled out in their own comment — never did. **Neither is a missing rule you could grep for; both are a rule that did not travel.** When you write a guard, a fallback or an exception, ask what else does the same thing, and put the answer in one function both call.
 
 **Two that are about method rather than code, and they are worth as much:**
 
@@ -121,7 +123,7 @@ Facts about this specific development machine that have already cost time to dis
 
 ## Settled Technology Decisions
 
-**Moved to `DECISIONS.md` on 2026-08-10.** Forty-one sections: why Vulkan and not DirectX,
+**Moved to `DECISIONS.md` on 2026-08-10.** Forty-five sections: why Vulkan and not DirectX,
 why C++20 from day one, why no multiplayer, why terrain is single-valued, why chests pair
 by derivation, why the audio mixer may hold a mutex, **why there is no redstone signal
 engine and why a potion is an id per brew**, and thirty-four more. **This file is
@@ -189,13 +191,23 @@ Do not add interfaces, virtual base classes, "manager" objects, template general
 
 | | | |
 |---|---|---|
-| **`DECISIONS.md`** | 41 settled choices and why | Before undoing anything deliberate |
-| **`LESSONS.md`** | 600 mistakes already paid for | Before debugging unfamiliar ground |
+| **`DECISIONS.md`** | 45 settled choices and why | Before undoing anything deliberate |
+| **`LESSONS.md`** | 592 mistakes already paid for | Before debugging unfamiliar ground |
 | **`SYSTEM_MEMORY.md`** | What the code currently does | Before touching code |
 | **`TIMELINE.md`** | Milestone route and history | Before starting work |
 | **`START-HERE.md`** | The ten-minute orientation | First session |
 
-All three of the first were split out of this file, because it is attached to every session
+**One agent at a time. Do not build a channel between two of them.** Two windows were run
+side by side on 2026-08-11, with a message log, a status board of file claims and a script
+that announced unread messages from the build, `run.ps1`, `dev-env.ps1` and `soak.ps1`. All
+of it is deleted. User's call: _"remove the multi-agent thing it's not working out man."_
+It failed for a reason worth keeping - **both windows were handed the same brief, so both
+claimed and both wrote the same file**, and it was caught by comparing the file's modified
+time against the clock rather than by any of the machinery built to prevent exactly that.
+**Research subagents are unaffected and still wanted** - those are a different thing, they
+read rather than write, and `model: "Claude Opus 5 (copilot)"` remains mandatory.
+
+All of the first were split out of this file, because it is attached to every session
 and they are not. **Add new material to them, not here.** Every document opens with a
 generated index of sections and line numbers - `tools/index-docs.ps1` rebuilds them and
 `tools/check-index.ps1` proves each entry still points where it says.

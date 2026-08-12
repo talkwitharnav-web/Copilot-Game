@@ -4,12 +4,15 @@
 #include "world/Furnace.hpp"
 #include "world/Chest.hpp"
 #include "world/TerrainGenerator.hpp"
+#include "item/Inventory.hpp"
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 namespace game {
@@ -28,7 +31,21 @@ struct SavedPlayer {
     std::int32_t food = 20;
     float saturation = 5.0f;
     float exhaustion = 0.0f;
+    /// Everything being carried, hotbar first - the same order `Inventory`
+    /// keeps, so this is a copy rather than a translation.
+    ///
+    /// **Widened again at M29m, and the version bumped with it**, because until
+    /// then nothing the player was carrying was written down anywhere: every
+    /// launch handed back an empty inventory, which in survival is the whole
+    /// game. A version 2 file is still read - it simply has no inventory in it -
+    /// so a world saved before this keeps where it was standing.
+    std::array<ItemStack, kInventorySlots> inventory{};
+    /// Which hotbar slot is in hand.
+    std::int32_t selectedSlot = 0;
 };
+
+static_assert(std::is_trivially_copyable_v<SavedPlayer>,
+              "the player record is written as bytes and must stay plain data");
 
 /// A furnace and the block it belongs to.
 struct PlacedFurnace {

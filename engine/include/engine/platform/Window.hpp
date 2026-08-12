@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -69,6 +70,54 @@ enum class MouseButton {
 struct CursorDelta {
     float x = 0.0f;
     float y = 0.0f;
+};
+
+/// Gamepad buttons, named for the Xbox layout.
+///
+/// **The order is the underlying library's order**, which is what lets the
+/// translation be a cast instead of a table; `Window.cpp` asserts every
+/// enumerator against the library's own constant so that stays true.
+///
+/// The triggers are deliberately absent: they are analogue, and how far one has
+/// to travel before it counts as pressed is a judgement about feel, which
+/// belongs to the game.
+enum class GamepadButton {
+    A,
+    B,
+    X,
+    Y,
+    LeftBumper,
+    RightBumper,
+    Back,
+    Start,
+    Guide,
+    LeftThumb,
+    RightThumb,
+    DpadUp,
+    DpadRight,
+    DpadDown,
+    DpadLeft,
+    Count,
+};
+
+/// Stick and trigger positions.
+///
+/// Sticks run -1 to 1, and **Y is negative upward** - that is the library's
+/// convention, not a choice made here.
+///
+/// Triggers run 0 (released) to 1 (fully pressed). The device reports them from
+/// -1 to 1 and they are shifted here, at the one place that knows the device's
+/// units, because a resting trigger read as 0.5 would mine continuously.
+///
+/// No dead zone is applied. How much of a worn stick to ignore is a player
+/// setting, so it belongs with the settings rather than in the transport.
+struct GamepadAxes {
+    float leftX = 0.0f;
+    float leftY = 0.0f;
+    float rightX = 0.0f;
+    float rightY = 0.0f;
+    float leftTrigger = 0.0f;
+    float rightTrigger = 0.0f;
 };
 
 /// Owns a single OS window and the windowing library's lifetime.
@@ -154,6 +203,50 @@ public:
     void setCursorCaptured(bool captured);
     bool isCursorCaptured() const { return m_cursorCaptured; }
 
+    /// Whether a gamepad is connected and has a known button layout.
+    ///
+    /// Only the lowest-numbered one is read. This game is single-player by
+    /// design, so a second pad has nothing to drive.
+    bool isGamepadConnected() const { return m_gamepadConnected; }
+
+    /// Whether the pad is connected **and** this window is the one being played.
+    ///
+    /// A pad reports to every process regardless of focus, so this is the one
+    /// to ask before acting on it - and in particular before starting a motor,
+    /// which would otherwise carry on running behind whatever the player
+    /// alt-tabbed to.
+    bool isGamepadLive() const { return m_gamepadLive; }
+
+    /// The gamepad's sticks and triggers as of the last `pollEvents`.
+    /// All zero while nothing is connected.
+    const GamepadAxes& gamepadAxes() const { return m_gamepadAxes; }
+
+    /// Whether a gamepad button is held right now.
+    bool isGamepadButtonDown(GamepadButton button) const;
+
+    /// Whether a gamepad button went down during the last `pollEvents`.
+    ///
+    /// **Not a queue that a caller drains**, unlike the keyboard. A gamepad is
+    /// polled rather than delivered as events, so the edges are found once per
+    /// frame and stay readable for the whole of it - which means two consumers
+    /// can both see the same press, and the key queue's "first reader wins"
+    /// trap does not exist here.
+    bool wasGamepadButtonPressed(GamepadButton button) const;
+
+    /// Runs the pad's two vibration motors, each 0 (off) to 1 (full).
+    ///
+    /// **`heavy` is the low-frequency motor and `light` the high-frequency
+    /// one.** They are physically different weights, not a stereo pair: the
+    /// heavy one thumps and the light one buzzes, and swapping them turns every
+    /// impact in the game into a fizz.
+    ///
+    /// Silently does nothing where the platform cannot vibrate, or for a pad
+    /// the vibration API does not recognise. **Stops on its own when the window
+    /// loses focus and when the window is destroyed** - a pad left buzzing
+    /// behind an alt-tab is the one fault this can inflict on the rest of the
+    /// desktop, and it outlives the process that caused it.
+    void setGamepadRumble(float heavy, float light);
+
     /// Called by the platform resize callback. Not intended for game code.
     void markResized() { m_resized = true; }
 
@@ -175,6 +268,9 @@ public:
     GLFWwindow* handle() const { return m_handle; }
 
 private:
+    /// Reads the first connected gamepad and works out this frame's edges.
+    void updateGamepad();
+
     GLFWwindow* m_handle = nullptr;
     bool m_resized = false;
     std::vector<Key> m_keyPresses;
@@ -190,6 +286,26 @@ private:
     double m_lastCursorY = 0.0;
     CursorDelta m_cursorDelta;
     float m_scrollDelta = 0.0f;
+
+    static constexpr std::size_t kGamepadButtonCount = static_cast<std::size_t>(GamepadButton::Count);
+    bool m_gamepadConnected = false;
+    /// Whether the previous update actually read the pad. Distinct from
+    /// connected, because focus can be lost without unplugging anything.
+    bool m_gamepadLive = false;
+    GamepadAxes m_gamepadAxes;
+    std::array<bool, kGamepadButtonCount> m_gamepadDown{};
+    std::array<bool, kGamepadButtonCount> m_gamepadPressed{};
+
+    /// The vibration entry point, resolved at run time. Typeless here so the
+    /// header stays free of platform headers.
+    void* m_rumbleProc = nullptr;
+    bool m_rumbleResolved = false;
+    /// Which of the vibration API's four slots this pad answers on, or -1 while
+    /// unknown. Forgotten when a call fails, so a reconnected pad is found.
+    int m_rumbleSlot = -1;
+    /// What was last sent, so an unchanged level costs no call at all.
+    std::uint16_t m_rumbleSentHeavy = 0;
+    std::uint16_t m_rumbleSentLight = 0;
 };
 
 } // namespace engine

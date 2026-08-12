@@ -50,6 +50,22 @@ inline BlockBoxes worldSelectionBoxes(const World& world, int x, int y, int z) {
                            world.blockAt(x - 1, y, z), world.blockAt(x + 1, y, z)));
 }
 
+/// What the mesher actually put on screen for this block, in world terms.
+///
+/// Beside its two twins for the same reason they are beside each other: the
+/// connection rule has one owner and all three have to ask it. This is the one
+/// to use when drawing **onto** a block rather than colliding with it.
+inline BlockBoxes worldDrawnBoxes(const World& world, int x, int y, int z) {
+    const BlockId id = world.blockAt(x, y, z);
+    const BlockShape shape = blockShape(id);
+    const std::uint8_t connections =
+        connectsToNeighbours(shape)
+            ? connectionBits(shape, world.blockAt(x, y, z - 1), world.blockAt(x, y, z + 1),
+                             world.blockAt(x - 1, y, z), world.blockAt(x + 1, y, z))
+            : std::uint8_t{0};
+    return drawnBoxes(id, connections, isOpaque(world.blockAt(x, y + 1, z)));
+}
+
 /// True if any block's collision geometry overlaps the box.
 ///
 /// **Everything that collides with the world goes through here**, because

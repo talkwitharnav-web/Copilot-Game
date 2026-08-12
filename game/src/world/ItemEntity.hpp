@@ -59,8 +59,15 @@ public:
     /// `range` drops the ones too far away to read as anything. They keep
     /// falling, keep drifting toward the player and keep expiring; only their
     /// geometry is skipped.
+    ///
+    /// `blended` takes the drops whose art is see-through everywhere - the
+    /// stained and tinted glass - because the opaque pass throws away any texel
+    /// under half alpha and theirs is a frame at 0.64 around a panel at 0.40.
+    /// Null simply leaves them in the return value, which is what every caller
+    /// that has no blended mesh to give wants.
     engine::MeshData buildMesh(const World& world, float timeSeconds, const SpriteMask& sprites,
-                               const DrawRange& range = {}) const;
+                               const DrawRange& range = {},
+                               engine::MeshData* blended = nullptr) const;
 
     std::size_t count() const { return m_drops.size(); }
 

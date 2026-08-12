@@ -234,6 +234,40 @@ struct Settings {
     /// fog, or its edge shows as a ring in clear air.
     unsigned rainDistance = 22;
 
+    /// Which device drives the game: 0 follows whichever was last touched, 1
+    /// pins the keyboard and mouse, 2 pins the gamepad. Cycled with F.
+    ///
+    /// Following the last device used is the reference's behaviour and wants no
+    /// menu visit. The pinned modes are for the two cases where that is wrong:
+    /// a stick worn enough to drift, and a pad left plugged in by someone who
+    /// wants the keyboard anyway.
+    unsigned inputMode = 0;
+
+    /// Camera speed with the right stick, as a multiple of the default. The
+    /// default turns about 155 degrees a second at full deflection.
+    float controllerLookSensitivity = 1.0f;
+
+    /// Speed of the on-screen pointer in menus, as a multiple of the default.
+    float controllerCursorSensitivity = 1.0f;
+
+    /// Pitch up when the stick goes down. Standard on a pad in a way it is not
+    /// on a mouse, so it gets a setting even though mouse look does not.
+    bool controllerInvertY = false;
+
+    /// How much of each stick's travel, from its centre, is treated as no
+    /// movement at all.
+    ///
+    /// **Adjustable because it is a property of the pad, not of the game.**
+    /// Sticks wear, and a worn one reports a small constant offset that would
+    /// otherwise walk the player into a wall all night. Applied radially, so
+    /// this is a circle rather than a square.
+    float controllerDeadzone = 0.2f;
+
+    /// How hard the pad vibrates, as a fraction of the designed strength.
+    /// **0 turns rumble off entirely**, which is both the accessibility answer
+    /// and the answer for anyone who simply dislikes it.
+    float controllerRumble = 1.0f;
+
     /// Highest hardware thread count worth offering, so a settings screen has a
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;
@@ -249,6 +283,9 @@ struct Settings {
 
     /// Off, fast, fancy.
     static constexpr unsigned kCloudQualityCount = 3;
+
+    /// Auto, keyboard and mouse, gamepad.
+    static constexpr unsigned kInputModeCount = 3;
 };
 
 /// Reads `file`, filling anything missing with defaults for this machine. A

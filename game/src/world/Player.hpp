@@ -213,6 +213,13 @@ struct Player {
 struct PlayerInput {
     /// Desired horizontal direction in world space; need not be normalised.
     glm::vec3 moveDirection{0.0f, 0.0f, 0.0f};
+    /// How much of full speed to move at, 0 to 1.
+    ///
+    /// **A separate field because `moveDirection` is normalised**, so a stick
+    /// pushed halfway and one pushed to the stop are the same vector by the
+    /// time the physics sees them - and the difference between a stroll and a
+    /// walk is most of what an analogue stick is for. A keyboard leaves it at 1.
+    float moveScale = 1.0f;
     bool jump = false;
     bool sprint = false;
     bool sneak = false;

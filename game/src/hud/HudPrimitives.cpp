@@ -153,7 +153,26 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
     const auto box = [&](const BlockBox& b, const ModelBox* model) {
         const float boxDepth =
             depth - kBoxStep * ((b.minX + b.maxX + b.minY + b.maxY + b.minZ + b.maxZ) * 0.5f);
-        const float layer = blockTextureLayer(block, BlockFace::Side);
+
+        // A model box names its own rectangle of the sheet per face, and may
+        // name its own layer with it. Where it does not, the face falls back to
+        // **the block's own layer for that face** - the lid to its top and a
+        // wall to its side.
+        //
+        // The lid used to fall back to the *side* layer instead, which left an
+        // end portal frame wearing its sandstone flank where its eye socket
+        // should be and reading as a plain sandy cube. The dropped-item version
+        // of this same drawing had it right all along; this is the second of
+        // the three places a block is drawn, and they now agree.
+        const auto lidLayer = [&] {
+            return model != nullptr && model->lidLayer >= 0.0f ? model->lidLayer
+                                                               : blockTextureLayer(block, BlockFace::Top);
+        };
+        const auto wallLayer = [&](FaceDirection direction) {
+            return model != nullptr && model->sideLayer >= 0.0f
+                       ? model->sideLayer
+                       : blockTextureLayer(block, BlockFace::Side, direction);
+        };
 
         glm::vec2 lid[4]{uvs[0], uvs[1], uvs[2], uvs[3]};
         glm::vec2 wall[4]{uvs[0], uvs[1], uvs[2], uvs[3]};
@@ -177,19 +196,17 @@ void appendBlockIcon(engine::MeshData& mesh, BlockId block, float centreX, float
         const float frontShade = kFaceShades[static_cast<std::size_t>(AxisFace::PosZ)];
         const float rightShade = kFaceShades[static_cast<std::size_t>(AxisFace::PosX)];
         appendQuadCorners(mesh, topFace, lid, boxDepth, glm::vec4{topShade, topShade, topShade, 1.0f},
-                          model != nullptr ? layer : blockTextureLayer(block, BlockFace::Top));
+                          lidLayer());
 
         const glm::vec2 front[4]{project(b.minX, b.maxY, b.maxZ), project(b.maxX, b.maxY, b.maxZ),
                                  project(b.maxX, b.minY, b.maxZ), project(b.minX, b.minY, b.maxZ)};
         appendQuadCorners(mesh, front, wall, boxDepth,
-                          glm::vec4{frontShade, frontShade, frontShade, 1.0f},
-                          model != nullptr ? layer : blockTextureLayer(block, BlockFace::Side, frontFacing));
+                          glm::vec4{frontShade, frontShade, frontShade, 1.0f}, wallLayer(frontFacing));
 
         const glm::vec2 right[4]{project(b.maxX, b.maxY, b.minZ), project(b.maxX, b.maxY, b.maxZ),
                                  project(b.maxX, b.minY, b.maxZ), project(b.maxX, b.minY, b.minZ)};
         appendQuadCorners(mesh, right, wall, boxDepth,
-                          glm::vec4{rightShade, rightShade, rightShade, 1.0f},
-                          model != nullptr ? layer : blockTextureLayer(block, BlockFace::Side, rightFacing));
+                          glm::vec4{rightShade, rightShade, rightShade, 1.0f}, wallLayer(rightFacing));
     };
 
     // A lantern and an end rod are *models*, and drawing either as a flat crop
@@ -355,6 +372,44 @@ void appendTooltip(engine::MeshData& mesh, std::string_view text, float cursorX,
     appendQuad(mesh, centreX, centreY, innerHalfWidth, innerHalfHeight, depth - kLayer * 2.0f, panel, white, false);
 
     appendText(mesh, text, centreX - innerHalfWidth + padding, centreY, charHeight, depth - kLayer * 3.0f, label);
+}
+
+void appendPointer(engine::MeshData& mesh, float x, float y, float height, float depth) {
+    // The arrow every desktop has drawn since 1984, as a fraction of its own
+    // height with the tip at the origin. Nothing here needs explaining to a
+    // player, which is the whole reason for using this shape.
+    const glm::vec2 shape[3]{
+        glm::vec2{0.0f, 0.0f},
+        glm::vec2{0.0f, 1.0f},
+        glm::vec2{0.70f, 0.70f},
+    };
+    const glm::vec2 centroid = (shape[0] + shape[1] + shape[2]) / 3.0f;
+
+    // Grown about the centroid rather than stroked, which keeps the tip in the
+    // same place as the point being tested.
+    constexpr float kOutlineGrowth = 0.22f;
+    constexpr float kOutlineDepth = 0.00004f;
+
+    const glm::vec2 uvs[4]{{0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}};
+    const float white = static_cast<float>(TextureLayer::White);
+
+    // Outline first and behind it, so the body draws over its own edge.
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool outline = pass == 0;
+        const float scale = outline ? 1.0f + kOutlineGrowth : 1.0f;
+
+        glm::vec2 corners[4];
+        for (int point = 0; point < 3; ++point) {
+            const glm::vec2 placed = centroid + (shape[point] - centroid) * scale;
+            corners[point] = glm::vec2{x + placed.x * height, y + placed.y * height};
+        }
+        // A triangle, drawn as a quad whose last two corners coincide.
+        corners[3] = corners[2];
+
+        appendQuadCorners(mesh, corners, uvs, outline ? depth + kOutlineDepth : depth,
+                          outline ? glm::vec4{0.05f, 0.05f, 0.07f, 0.9f} : glm::vec4{1.0f, 1.0f, 1.0f, 1.0f},
+                          white);
+    }
 }
 
 } // namespace game::hud

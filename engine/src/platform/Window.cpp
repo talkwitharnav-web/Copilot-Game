@@ -4,7 +4,19 @@
 
 #include <GLFW/glfw3.h>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -18,6 +30,77 @@ constexpr std::size_t kMaxTypedText = 256;
 void glfwErrorCallback(int code, const char* description) {
     logError("GLFW error " + std::to_string(code) + ": " + (description ? description : "unknown"));
 }
+
+// `GamepadButton` is translated by a cast rather than a table, so every
+// enumerator has to line up with the library's own constant. These are what
+// make that safe: a reordered enum stops the build instead of quietly binding
+// jump to sneak.
+static_assert(static_cast<int>(GamepadButton::A) == GLFW_GAMEPAD_BUTTON_A);
+static_assert(static_cast<int>(GamepadButton::B) == GLFW_GAMEPAD_BUTTON_B);
+static_assert(static_cast<int>(GamepadButton::X) == GLFW_GAMEPAD_BUTTON_X);
+static_assert(static_cast<int>(GamepadButton::Y) == GLFW_GAMEPAD_BUTTON_Y);
+static_assert(static_cast<int>(GamepadButton::LeftBumper) == GLFW_GAMEPAD_BUTTON_LEFT_BUMPER);
+static_assert(static_cast<int>(GamepadButton::RightBumper) == GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER);
+static_assert(static_cast<int>(GamepadButton::Back) == GLFW_GAMEPAD_BUTTON_BACK);
+static_assert(static_cast<int>(GamepadButton::Start) == GLFW_GAMEPAD_BUTTON_START);
+static_assert(static_cast<int>(GamepadButton::Guide) == GLFW_GAMEPAD_BUTTON_GUIDE);
+static_assert(static_cast<int>(GamepadButton::LeftThumb) == GLFW_GAMEPAD_BUTTON_LEFT_THUMB);
+static_assert(static_cast<int>(GamepadButton::RightThumb) == GLFW_GAMEPAD_BUTTON_RIGHT_THUMB);
+static_assert(static_cast<int>(GamepadButton::DpadUp) == GLFW_GAMEPAD_BUTTON_DPAD_UP);
+static_assert(static_cast<int>(GamepadButton::DpadRight) == GLFW_GAMEPAD_BUTTON_DPAD_RIGHT);
+static_assert(static_cast<int>(GamepadButton::DpadDown) == GLFW_GAMEPAD_BUTTON_DPAD_DOWN);
+static_assert(static_cast<int>(GamepadButton::DpadLeft) == GLFW_GAMEPAD_BUTTON_DPAD_LEFT);
+static_assert(static_cast<int>(GamepadButton::Count) == GLFW_GAMEPAD_BUTTON_LAST + 1,
+              "every button the library reports needs a name here");
+
+/// A trigger as the device reports it, turned into 0 released to 1 pressed.
+///
+/// The shift is not a taste: the Windows backend computes the axis as
+/// `raw / 127.5 - 1`, so a released trigger genuinely sits at -1.
+constexpr float triggerFromAxis(float axis) {
+    return (axis + 1.0f) * 0.5f;
+}
+
+// The two ends of that derivation, checked rather than trusted. **The first is
+// the one that matters**: a released trigger read as half pressed would mine
+// continuously from the moment the game started, and nothing about the code
+// would look wrong.
+static_assert(triggerFromAxis(-1.0f) == 0.0f, "a released trigger must read as no press at all");
+static_assert(triggerFromAxis(1.0f) == 1.0f, "a fully pulled trigger must read as a full press");
+static_assert(triggerFromAxis(0.0f) == 0.5f, "and half its travel as half a press");
+
+#ifdef _WIN32
+
+/// The two motor speeds, in the vibration API's own layout and units.
+///
+/// **Left is the low-frequency motor and right the high-frequency one**, which
+/// is the platform's naming, not a guess. Both run 0 to 65535.
+struct XInputVibration {
+    std::uint16_t left;
+    std::uint16_t right;
+};
+using XInputSetStateFn = DWORD(WINAPI*)(DWORD, XInputVibration*);
+
+/// Finds the vibration entry point at run time.
+///
+/// **Loaded rather than linked**, so the build needs no import library and the
+/// game still starts on a machine carrying a different version. The library's
+/// name has changed three times; the function's has not.
+void* loadRumbleProc() {
+    static constexpr const char* kLibraries[]{"xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"};
+    for (const char* name : kLibraries) {
+        // Never freed: the process wants it until it exits, and unloading it
+        // while a motor is running is how a pad gets left buzzing.
+        if (HMODULE library = LoadLibraryA(name); library != nullptr) {
+            if (FARPROC found = GetProcAddress(library, "XInputSetState"); found != nullptr) {
+                return reinterpret_cast<void*>(found);
+            }
+        }
+    }
+    return nullptr;
+}
+
+#endif
 
 /// The one place engine key names are translated to the windowing library's.
 int toGlfwKey(Key key) {
@@ -308,6 +391,9 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
 }
 
 Window::~Window() {
+    // Before the window goes, or the motors keep running with nothing left to
+    // stop them.
+    setGamepadRumble(0.0f, 0.0f);
     if (m_handle != nullptr) {
         glfwDestroyWindow(m_handle);
     }
@@ -316,6 +402,121 @@ Window::~Window() {
 
 void Window::pollEvents() {
     glfwPollEvents();
+    // A gamepad is polled rather than delivered as events, so it is sampled
+    // here alongside them and every reader sees one consistent frame.
+    updateGamepad();
+}
+
+void Window::updateGamepad() {
+    GLFWgamepadstate state{};
+    bool found = false;
+    for (int id = GLFW_JOYSTICK_1; id <= GLFW_JOYSTICK_LAST && !found; ++id) {
+        // `glfwGetGamepadState` answers only for a pad the library has a button
+        // mapping for, which is what keeps a flight stick from being read as an
+        // Xbox controller.
+        if (glfwJoystickIsGamepad(id) == GLFW_TRUE && glfwGetGamepadState(id, &state) == GLFW_TRUE) {
+            found = true;
+        }
+    }
+
+    // **A gamepad keeps reporting to every process, focused or not** - the
+    // keyboard does not, so nothing else here needs this check. Without it the
+    // player walks on while you are working in another window.
+    const bool focused = glfwGetWindowAttrib(m_handle, GLFW_FOCUSED) == GLFW_TRUE;
+    const bool wasLive = m_gamepadLive;
+
+    if (!found || !focused) {
+        // Still "connected" when only focus is missing, so the game can go on
+        // saying a pad is there; it simply reports nothing until we are back.
+        m_gamepadConnected = found;
+        m_gamepadLive = false;
+        m_gamepadAxes = GamepadAxes{};
+        m_gamepadDown.fill(false);
+        m_gamepadPressed.fill(false);
+        return;
+    }
+
+    m_gamepadConnected = true;
+    m_gamepadLive = true;
+
+    for (std::size_t i = 0; i < kGamepadButtonCount; ++i) {
+        const bool down = state.buttons[i] == GLFW_PRESS;
+        // **A button already held on the first live frame is not a press.**
+        // Held state is cleared while unplugged or unfocused, so without this
+        // every held button would fire again the moment the window came back.
+        m_gamepadPressed[i] = down && !m_gamepadDown[i] && wasLive;
+        m_gamepadDown[i] = down;
+    }
+
+    m_gamepadAxes.leftX = state.axes[GLFW_GAMEPAD_AXIS_LEFT_X];
+    m_gamepadAxes.leftY = state.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
+    m_gamepadAxes.rightX = state.axes[GLFW_GAMEPAD_AXIS_RIGHT_X];
+    m_gamepadAxes.rightY = state.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
+    m_gamepadAxes.leftTrigger = triggerFromAxis(state.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]);
+    m_gamepadAxes.rightTrigger = triggerFromAxis(state.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]);
+}
+
+bool Window::isGamepadButtonDown(GamepadButton button) const {
+    return m_gamepadDown[static_cast<std::size_t>(button)];
+}
+
+bool Window::wasGamepadButtonPressed(GamepadButton button) const {
+    return m_gamepadPressed[static_cast<std::size_t>(button)];
+}
+
+void Window::setGamepadRumble(float heavy, float light) {
+#ifdef _WIN32
+    const auto quantise = [](float level) {
+        return static_cast<std::uint16_t>(std::clamp(level, 0.0f, 1.0f) * 65535.0f);
+    };
+    XInputVibration wanted{quantise(heavy), quantise(light)};
+
+    // **Nothing changed means no call at all**, which is what keeps this off
+    // the frame budget: a still pad is the overwhelmingly common case, and this
+    // also means a machine with no vibration API never even looks for one.
+    if (wanted.left == m_rumbleSentHeavy && wanted.right == m_rumbleSentLight) {
+        return;
+    }
+
+    if (!m_rumbleResolved) {
+        m_rumbleProc = loadRumbleProc();
+        m_rumbleResolved = true;
+    }
+    if (m_rumbleProc == nullptr) {
+        return;
+    }
+    auto* setState = reinterpret_cast<XInputSetStateFn>(m_rumbleProc);
+
+    // The pad's slot, which is not the same numbering the window library uses,
+    // so it is found by asking rather than assumed. Silence is a valid probe.
+    if (m_rumbleSlot < 0) {
+        XInputVibration silence{0, 0};
+        for (int slot = 0; slot < 4; ++slot) {
+            if (setState(static_cast<DWORD>(slot), &silence) == ERROR_SUCCESS) {
+                m_rumbleSlot = slot;
+                break;
+            }
+        }
+    }
+    if (m_rumbleSlot < 0) {
+        return;
+    }
+
+    if (setState(static_cast<DWORD>(m_rumbleSlot), &wanted) != ERROR_SUCCESS) {
+        // Unplugged mid-effect. Forget the slot so a reconnected pad is found,
+        // and forget what was sent so the next level is not skipped as a repeat.
+        m_rumbleSlot = -1;
+        m_rumbleSentHeavy = 0;
+        m_rumbleSentLight = 0;
+        return;
+    }
+
+    m_rumbleSentHeavy = wanted.left;
+    m_rumbleSentLight = wanted.right;
+#else
+    (void)heavy;
+    (void)light;
+#endif
 }
 
 bool Window::shouldClose() const {
@@ -384,6 +585,15 @@ void Window::clearInputState() {
     // A character typed while alt-tabbing away must not arrive on the way back.
     m_typedText.clear();
     m_scrollDelta = 0.0f;
+    // Held state only; the pad is re-read next frame anyway. Dropping `live`
+    // with it is what stops a button held across the focus change from being
+    // reported as a fresh press on the way back.
+    m_gamepadLive = false;
+    m_gamepadDown.fill(false);
+    m_gamepadPressed.fill(false);
+    // Focus went elsewhere, so nothing here will be asking for rumble. A motor
+    // left running would keep going in somebody else's window.
+    setGamepadRumble(0.0f, 0.0f);
 }
 
 std::vector<MouseButton> Window::consumeMouseButtonPresses() {

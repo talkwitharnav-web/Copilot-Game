@@ -1,5 +1,6 @@
 ﻿add_executable(game
     src/Main.cpp
+    src/core/Gamepad.cpp
     src/core/Settings.cpp
     src/core/Sounds.cpp
     src/hud/Crosshair.cpp

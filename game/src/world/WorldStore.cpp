@@ -23,7 +23,25 @@ constexpr std::array<char, 4> kCreatureMagic{'V', 'X', 'C', 'R'};
 /// bumping that one regenerates stale terrain, and doing so must never cost the
 /// player their inventory or position. Bumped to 2 at M21, when the record grew
 /// health and hunger.
-constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kFormatVersion = 3;
+
+/// Version 2's field list, kept so a world saved before the inventory was
+/// written down still resumes where it was standing rather than at spawn.
+///
+/// **Spelled out as its own record rather than read as a prefix of the current
+/// one.** A prefix read is a silent promise that nobody reorders the first
+/// seven fields, and the rule at `SavedPlayer` is that a save record is a
+/// stated list of fields - so the fields are copied across by name below and
+/// the compiler is told about both shapes.
+struct LegacyPlayerV2 {
+    glm::vec3 position{0.0f};
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    std::int32_t health = 20;
+    std::int32_t food = 20;
+    float saturation = 5.0f;
+    float exhaustion = 0.0f;
+};
 
 /// Chunks carry their own version, separate from the player file's.
 ///
@@ -42,12 +60,24 @@ constexpr std::uint32_t kFormatVersion = 2;
 /// The cost is that anything built in a chunk untouched since the id widening
 /// goes with it. That is the trade this number exists to make.
 ///
-/// **Deliberately NOT bumped for the 2026-08-10 ground-cover change.** Making
-/// patchier grass reach an already-played world would mean rejecting every
-/// chunk on disk and regenerating it, and everything the player has built in
-/// those chunks goes with them. Cosmetic ground cover is not worth a world.
-/// New chunks get the new rule; already-visited ones keep the old sparse cover.
-/// Bump it to 4 if that mixed state ever matters more than the builds do.
+/// **Bumped to 4 after the 2026-08-10 ground-cover change, and a playtest is
+/// why.** It was held at 3 first, on the reasoning that patchier grass is
+/// cosmetic and not worth rejecting every chunk on disk: new chunks would get
+/// the new rule and already-visited ones would keep the old cover.
+///
+/// **That reasoning was wrong, and the failure does not look like a save bug.**
+/// A world played across the change is a patchwork - here, 32 chunks loaded and
+/// 186 rejected and regenerated - and the damage is all at the *seams*. What
+/// gets reported is sugar cane hanging in the air and a river that stops dead,
+/// because the ground a plant grew from and the channel a river ran down were
+/// regenerated differently one chunk over. It reads as a worldgen fault, the
+/// generator is innocent, and the world has to be thrown away regardless - so
+/// holding the number back saved nothing and cost a playtest.
+///
+/// **So: anything that changes the shape of terrain bumps this.** Only a change
+/// that cannot disagree with a neighbouring chunk may leave it alone. Losing
+/// what was built is the smaller cost, because the alternative is losing it
+/// anyway with a day of confusion first.
 constexpr std::uint32_t kChunkFormatVersion = 4;
 
 /// Versioned separately from chunks and the player, because it stores
@@ -225,10 +255,31 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
     file.read(magic.data(), magic.size());
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
     file.read(reinterpret_cast<char*>(&seed), sizeof(seed));
-    file.read(reinterpret_cast<char*>(&player), sizeof(player));
 
-    if (!file || magic != kPlayerMagic || version != kFormatVersion || seed != m_seed) {
+    if (!file || magic != kPlayerMagic || seed != m_seed ||
+        (version != kFormatVersion && version != 2)) {
         engine::logWarn("Player file does not match this world, ignoring: " + path.string());
+        return std::nullopt;
+    }
+
+    if (version == kFormatVersion) {
+        file.read(reinterpret_cast<char*>(&player), sizeof(player));
+    } else {
+        // An older world: everything but what it was carrying, which it never
+        // stored. The inventory and the selected slot keep their defaults.
+        LegacyPlayerV2 legacy;
+        file.read(reinterpret_cast<char*>(&legacy), sizeof(legacy));
+        player.position = legacy.position;
+        player.yaw = legacy.yaw;
+        player.pitch = legacy.pitch;
+        player.health = legacy.health;
+        player.food = legacy.food;
+        player.saturation = legacy.saturation;
+        player.exhaustion = legacy.exhaustion;
+    }
+
+    if (!file) {
+        engine::logWarn("Player file is truncated, ignoring: " + path.string());
         return std::nullopt;
     }
 

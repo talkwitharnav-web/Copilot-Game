@@ -1169,8 +1169,20 @@ void World::updateLava(const BudgetCheck& budgetSpent) {
                 }
                 // A neighbour with somewhere to fall does not also run sideways,
                 // which is what keeps a lava fall a column.
+                //
+                // **A cell resting on more lava is partway down that column,
+                // not the bottom of one**, and leaving that out is what the
+                // user reported as lava stacking on top of itself: every cell
+                // of a fall counted as pooling, so it shelved out sideways at
+                // every height it passed and the drop grew a wall instead of a
+                // stream. A source is the exception, because that is how a lava
+                // lake has a surface at all. Deliberately the same shape as
+                // `fluidFeedsSideways`, which is water's own copy of this rule -
+                // the two fluids are parallel here on purpose, since they differ
+                // in spread step, delay and what they do on contact.
                 const BlockId under = blockAt(n.x, n.y - 1, n.z);
-                const bool pools = game::isSolid(under) || isLava(under) || isWater(under);
+                const bool pools = game::isSolid(under) || isWater(under) ||
+                                   (isLavaSource(neighbour) && isLava(under));
                 if (!pools) {
                     continue;
                 }
@@ -1348,6 +1360,16 @@ int World::highestSolid(int x, int z) const {
         }
     }
     return -1;
+}
+
+int World::groundHeight(int x, int z) const {
+    const int top = highestSolid(x, z);
+    if (top >= 0) {
+        return top + 1;
+    }
+    // Nothing solid all the way down is not a real column - bedrock is - so
+    // this only ever means the chunks are not here. Ask whoever made them.
+    return surfaceHeightAt(m_seed, x, z) + 1;
 }
 
 void World::queueMesh(const ChunkCoord& coord) {

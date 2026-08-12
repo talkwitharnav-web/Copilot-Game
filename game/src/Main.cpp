@@ -7,6 +7,7 @@
 #include <engine/render/Renderer.hpp>
 #include <engine/render/VulkanContext.hpp>
 
+#include "core/Gamepad.hpp"
 #include "core/Settings.hpp"
 #include "hud/Crosshair.hpp"
 #include "hud/DebugOverlay.hpp"
@@ -1695,12 +1696,15 @@ int main() {
                     std::snprintf(name, sizeof(name), "firework_star_%02d.png", i);
                     spriteLayers.push_back(blockTexture(name));
                 }
+                for (int i = 0; i < game::kDestroyStages; ++i) {
+                    std::snprintf(name, sizeof(name), "destroy_stage_%d.png", i);
+                    spriteLayers.push_back(blockTexture(name));
+                }
             }
-            if (spriteLayers.size() != static_cast<std::size_t>(game::kFireworkStarSpritesEnd)) {
-                engine::logError("collectible sprites end at " +
-                                 std::to_string(spriteLayers.size()) +
+            if (spriteLayers.size() != static_cast<std::size_t>(game::kDestroyStagesEnd)) {
+                engine::logError("sprite layers end at " + std::to_string(spriteLayers.size()) +
                                  " but the layer constants say " +
-                                 std::to_string(game::kFireworkStarSpritesEnd));
+                                 std::to_string(game::kDestroyStagesEnd));
             }
         }
 
@@ -2173,9 +2177,8 @@ int main() {
                 player.position + glm::vec3{halfWidth, game::player_constants::kHeight, halfWidth}};
             if (game::overlapsSolid(world, body)) {
                 player.position.y = static_cast<float>(
-                    world.highestSolid(static_cast<int>(std::floor(player.position.x)),
-                                       static_cast<int>(std::floor(player.position.z))) +
-                    1);
+                    world.groundHeight(static_cast<int>(std::floor(player.position.x)),
+                                       static_cast<int>(std::floor(player.position.z))));
                 engine::logWarn("Saved position was inside terrain; lifted to the surface.");
             }
             engine::logInfo("Resumed from the last saved position.");
@@ -2184,7 +2187,7 @@ int main() {
             // it cannot run until the chunks exist. A resumed position was read
             // before the loading screen, because it is what the world had to be
             // streamed around.
-            player.position.y = static_cast<float>(world.highestSolid(spawnX, spawnZ) + 1);
+            player.position.y = static_cast<float>(world.groundHeight(spawnX, spawnZ));
 
             if (settings.spawnUnderground) {
                 // Searched over an area rather than one column, because whether
@@ -2343,11 +2346,19 @@ int main() {
         // The HUD only rebuilds when something asks it to, so the frame digging
         // *stops* has to ask - otherwise the last drawn bar stays on screen.
         float lastBreakProgress = 0.0f;
+        // What the crack overlay is currently showing, so it is rebuilt when
+        // the picture would change and not once a frame. `-1` is "no cracks".
+        int crackStage = -1;
+        glm::ivec3 crackBlock = kNoBlock;
         // Where the last footstep was taken, and whether the last frame was
         // already showing a hurt flash - both exist so an event fires on the
         // edge rather than every frame the condition holds.
         glm::vec3 lastStepAt{0.0f};
         bool wasHurt = false;
+        bool wasAlive = true;
+        /// Health as of the last hurt check, so the next one can tell how much
+        /// was actually lost. Nothing else reports the size of a hit.
+        int lastHealth = 0;
         bool wasInWater = false;
         float lastFallDistance = 0.0f;
         /// Whether the player was standing last frame, so a landing is an edge
@@ -2366,7 +2377,7 @@ int main() {
         // there knows the HUD exists.
         int lastShownHealth = -1;
         int lastShownFood = -1;
-        int lastShownAir = -1;
+        game::hud::AirRow lastShownAir;
         bool lastShownHurt = false;
 
         // Creative starts with one of everything placeable; survival starts with
@@ -2412,6 +2423,7 @@ int main() {
         float pearlCooldown = 0.0f;
         game::FallingBlocks fallingBlocks;
         engine::MeshHandle dropMesh = engine::kInvalidMesh;
+        engine::MeshHandle dropGlassMesh = engine::kInvalidMesh;
         engine::MeshHandle fallingMesh = engine::kInvalidMesh;
         engine::MeshHandle projectileMesh = engine::kInvalidMesh;
 
@@ -2727,6 +2739,42 @@ int main() {
         std::size_t lastClickIndex = ~std::size_t{0};
 
         std::size_t selectedSlot = 0;
+        // What they were carrying, restored here rather than beside the rest of
+        // the saved player because this is where the inventory first exists -
+        // and **after** the creative starting kit, so reopening a world hands
+        // back what was in your hands rather than a fresh set of blocks.
+        //
+        // **Checked rather than trusted, for the same reason the health is**:
+        // an item id out of a corrupt file would index the name and sprite
+        // tables straight off the end, so anything outside the run is dropped
+        // and every count is clamped to what that item may actually stack to.
+        if (savedPlayer.has_value()) {
+            // A version 2 world has no inventory in it at all, and neither has
+            // one saved with every slot empty. Either way there is nothing to
+            // restore, and wiping on the strength of it would throw away the
+            // creative starting kit for no reason.
+            const bool carried =
+                std::any_of(savedPlayer->inventory.begin(), savedPlayer->inventory.end(),
+                            [](const game::ItemStack& stack) { return stack.count > 0; });
+            for (std::size_t i = 0; carried && i < game::kInventorySlots; ++i) {
+                const game::ItemStack& stored = savedPlayer->inventory[i];
+                game::ItemStack& into = inventory.slot(i);
+                // Assigned rather than merged, so the saved inventory is the
+                // whole answer: a slot deliberately emptied stays empty instead
+                // of being restocked by the starting kit above.
+                if (stored.item <= game::ItemId::None || stored.item > game::ItemId::kLastItem ||
+                    stored.count <= 0) {
+                    into = {};
+                    continue;
+                }
+                into.item = stored.item;
+                into.count = std::min(stored.count, game::maxStackFor(stored.item));
+                into.damage = std::max(0, stored.damage);
+            }
+            selectedSlot = static_cast<std::size_t>(
+                std::clamp<std::int32_t>(savedPlayer->selectedSlot, 0,
+                                         static_cast<std::int32_t>(game::kHotbarSlots) - 1));
+        }
         bool hudDirty = true;
         /// Whether the camera itself is inside a water cell, which is a
         /// different question from `Player::inWater` - that one asks about the
@@ -2809,6 +2857,33 @@ int main() {
         frameHistory.reserve(kFrameHistoryLength);
         auto lastHudRebuild = previousTime;
 
+        // One frame of gamepad input, rewritten at the top of every frame.
+        game::Gamepad pad;
+        game::Rumble rumble;
+        auto inputMode =
+            static_cast<game::InputMode>(std::min(settings.inputMode, game::Settings::kInputModeCount - 1));
+        game::InputDevice inputDevice = inputMode == game::InputMode::Gamepad ? game::InputDevice::Gamepad
+                                                                             : game::InputDevice::KeyboardMouse;
+
+        // Where the interface's pointer is, in screen space.
+        //
+        // **One variable for both devices.** The mouse writes its position here
+        // and the left stick nudges it, so every hit test downstream takes a
+        // point and none of them has to know which device produced it - which
+        // is why a pad can drive the whole inventory without a second copy of
+        // the screen's interaction written against a focus ring.
+        float pointerX = 0.0f;
+        float pointerY = 0.0f;
+        bool pointerScreenWasOpen = false;
+        /// Set when a click is spent taking the cursor back, and held until that
+        /// button comes up again, so re-entering the window cannot also swing.
+        bool swallowClickUntilRelease = false;
+        double lastMouseX = 0.0;
+        double lastMouseY = 0.0;
+        bool cursorWasCaptured = false;
+        /// Frames left to ignore mouse movement for. See where it is set.
+        int mouseSettleFrames = 0;
+
         // Crosshair, hotbar and the diagnostics panel share one screen mesh.
         const auto rebuildHud = [&](const game::OverlayStats& stats) {
             // A panel carries its own hotbar row, and a crosshair over a
@@ -2829,9 +2904,6 @@ int main() {
             };
 
             if (openScreen.has_value()) {
-                const engine::Extent2D extent = window.framebufferExtent();
-                const float halfHeight = static_cast<float>(extent.height) * 0.5f;
-
                 // A furnace shows what it has actually made; every other screen
                 // shows what its grid *would* make.
                 game::ItemStack shownResult;
@@ -2864,13 +2936,22 @@ int main() {
                     *openScreen, inventory, craftSlots.data(),
                     *openScreen == game::inventoryScreen::Kind::Stonecutter ? shownCuts.data()
                                                                            : &shownResult,
-                    heldStack,
-                    (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight,
-                    (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight, renderer.aspectRatio(),
+                    heldStack, pointerX, pointerY, renderer.aspectRatio(),
                     catalogue, progress, creative,
                     chests.count(openChestPosition) != 0 ? &chests.at(openChestPosition) : nullptr,
                     chests.count(openChestPartner) != 0 ? &chests.at(openChestPartner) : nullptr, clipped,
                     topLayer));
+
+                // The pad has no pointer of its own, so it gets one drawn.
+                // Nothing is shown for the mouse: the OS already draws that,
+                // and two arrows in the same place is the bug this avoids.
+                if (inputDevice == game::InputDevice::Gamepad) {
+                    // In front of everything, held stack included, because it
+                    // is the thing you are aiming with.
+                    constexpr float kPointerHeight = 0.075f;
+                    constexpr float kPointerDepth = 0.0004f;
+                    game::hud::appendPointer(topLayer, pointerX, pointerY, kPointerHeight, kPointerDepth);
+                }
             } else {
                 append(game::makeHotbar(inventory, selectedSlot, bowHeld ? bowDraw : -1.0f));
 
@@ -2885,26 +2966,6 @@ int main() {
                     status.airFraction = player.air / game::fluid::kAirSeconds;
                     status.hurtFlash = player.hurtFlash;
                     append(game::hud::makeStatusBars(status));
-                }
-
-                // Digging takes time now, so it needs to show that it is
-                // happening - without this a slow block looks like a dead click.
-                if (breakProgress > 0.0f) {
-                    constexpr float kBarHalfWidth = 0.085f;
-                    constexpr float kBarHalfHeight = 0.009f;
-                    constexpr float kBarCentreY = 0.11f;
-                    constexpr float kTrackDepth = 0.00095f;
-                    constexpr float kFillDepth = 0.00090f;
-                    const float white = static_cast<float>(game::TextureLayer::White);
-
-                    engine::MeshData bar;
-                    game::hud::appendQuad(bar, 0.0f, kBarCentreY, kBarHalfWidth, kBarHalfHeight, kTrackDepth,
-                                          {0.0f, 0.0f, 0.0f, 0.55f}, white, false);
-                    const float filled = kBarHalfWidth * std::min(breakProgress, 1.0f);
-                    game::hud::appendQuad(bar, -kBarHalfWidth + filled, kBarCentreY, filled,
-                                          kBarHalfHeight * 0.6f, kFillDepth, {0.92f, 0.92f, 0.95f, 1.0f}, white,
-                                          false);
-                    append(bar);
                 }
             }
             if (overlayVisible) {
@@ -3003,6 +3064,89 @@ int main() {
                 frameHistory.erase(frameHistory.begin());
             }
 
+            // The pad is sampled once, here, and everything below asks `pad`
+            // rather than the device - so every reader sees the same frame and
+            // the trigger edges are found in exactly one place.
+            game::updateGamepad(pad, window, settings, deltaSeconds);
+            {
+                // **Read rather than consumed.** The cursor delta belongs to
+                // mouse-look further down, and draining it here to notice
+                // movement would steal it.
+                const double mouseX = window.cursorX();
+                const double mouseY = window.cursorY();
+
+                // **Capturing or releasing the cursor teleports the position
+                // the OS reports**, and a teleport is indistinguishable from a
+                // large mouse movement. Without this the two modes hand the
+                // cursor back and forth forever: the pad captures, the jump
+                // reads as the mouse being used, that releases, and so on. The
+                // change is noticed a frame late because it is made further
+                // down, so the count covers this frame and the next.
+                if (window.isCursorCaptured() != cursorWasCaptured) {
+                    cursorWasCaptured = window.isCursorCaptured();
+                    mouseSettleFrames = 2;
+                }
+                const bool mouseMoved = mouseSettleFrames == 0 && (std::abs(mouseX - lastMouseX) > 0.5 ||
+                                                                   std::abs(mouseY - lastMouseY) > 0.5);
+                mouseSettleFrames = std::max(0, mouseSettleFrames - 1);
+                lastMouseX = mouseX;
+                lastMouseY = mouseY;
+
+                const bool keyboardActive =
+                    mouseMoved || window.isMouseButtonDown(engine::MouseButton::Left) ||
+                    window.isMouseButtonDown(engine::MouseButton::Right) ||
+                    window.isKeyDown(engine::Key::W) || window.isKeyDown(engine::Key::A) ||
+                    window.isKeyDown(engine::Key::S) || window.isKeyDown(engine::Key::D) ||
+                    window.isKeyDown(engine::Key::Space) || window.isKeyDown(engine::Key::LeftShift) ||
+                    window.isKeyDown(engine::Key::LeftControl);
+
+                const game::InputDevice wanted =
+                    game::resolveInputDevice(inputMode, inputDevice, pad, keyboardActive);
+                if (wanted != inputDevice) {
+                    inputDevice = wanted;
+                    engine::logInfo(inputDevice == game::InputDevice::Gamepad ? "Input: gamepad"
+                                                                             : "Input: keyboard and mouse");
+                }
+
+                const engine::Extent2D extent = window.framebufferExtent();
+                const float halfHeight = static_cast<float>(extent.height) * 0.5f;
+                const float aspect = renderer.aspectRatio();
+                const bool screenOpen = openScreen.has_value();
+
+                // A screen opens with the pointer in the middle. Carrying the
+                // last position over means it starts wherever the stick left it
+                // last time, which on a pad is nowhere useful.
+                if (screenOpen && !pointerScreenWasOpen) {
+                    pointerX = 0.0f;
+                    pointerY = 0.0f;
+                }
+                pointerScreenWasOpen = screenOpen;
+
+                if (inputDevice == game::InputDevice::Gamepad) {
+                    if (screenOpen) {
+                        pointerX = std::clamp(pointerX + pad.pointerDelta.x, -aspect, aspect);
+                        pointerY = std::clamp(pointerY + pad.pointerDelta.y, -1.0f, 1.0f);
+                    }
+                    // Two cursors on screen with only one of them working is
+                    // worse than none, so the OS pointer stays hidden and put
+                    // even while a panel is up.
+                    if (screenOpen && !window.isCursorCaptured()) {
+                        window.setCursorCaptured(true);
+                    }
+                } else {
+                    if (halfHeight > 0.0f) {
+                        pointerX =
+                            (static_cast<float>(mouseX) - static_cast<float>(extent.width) * 0.5f) / halfHeight;
+                        pointerY = (static_cast<float>(mouseY) - halfHeight) / halfHeight;
+                    }
+                    // Switching back mid-panel has to hand the real pointer
+                    // over, or the screen becomes unusable by either device.
+                    if (screenOpen && window.isCursorCaptured()) {
+                        window.setCursorCaptured(false);
+                    }
+                }
+            }
+
             // Drained every frame whether or not anything wants it, so a
             // keystroke can never be delivered late. Read before the key loop,
             // so the `E` that opens a screen is discarded with the frame it
@@ -3034,6 +3178,22 @@ int main() {
                     hudDirty = true;
                 }
             }
+
+            // Double-tapping jump toggles flight, on either device. One lambda
+            // rather than a copy per device: the timer behind it is shared, so
+            // two copies would each half-work.
+            const auto tapJump = [&] {
+                if (secondsSinceSpacePress < kDoubleTapSeconds) {
+                    player.flying = !player.flying;
+                    player.velocity = glm::vec3{0.0f};
+                    engine::logInfo(player.flying ? "Fly mode ON" : "Fly mode OFF");
+                    // Reset, so a third tap starts a fresh pair rather than
+                    // toggling again immediately.
+                    secondsSinceSpacePress = kDoubleTapSeconds;
+                } else {
+                    secondsSinceSpacePress = 0.0f;
+                }
+            };
 
             for (const engine::Key key : window.consumeKeyPresses()) {
                 if (key == engine::Key::Escape) {
@@ -3079,16 +3239,7 @@ int main() {
                     continue;
                 }
                 if (key == engine::Key::Space) {
-                    if (secondsSinceSpacePress < kDoubleTapSeconds) {
-                        player.flying = !player.flying;
-                        player.velocity = glm::vec3{0.0f};
-                        engine::logInfo(player.flying ? "Fly mode ON" : "Fly mode OFF");
-                        // Reset, so a third tap starts a fresh pair rather than
-                        // toggling again immediately.
-                        secondsSinceSpacePress = kDoubleTapSeconds;
-                    } else {
-                        secondsSinceSpacePress = 0.0f;
-                    }
+                    tapJump();
                     continue;
                 }
                 if (key == engine::Key::F5) {
@@ -3182,6 +3333,17 @@ int main() {
                     engine::logInfo(std::string("Clouds: ") + kCloudQualityNames[settings.clouds]);
                     continue;
                 }
+                if (key == engine::Key::F) {
+                    // Auto, then the two pinned modes. Auto is right almost
+                    // always; the pins are for a stick worn enough to drift and
+                    // for a pad you would rather the game ignored.
+                    settings.inputMode = (settings.inputMode + 1) % game::Settings::kInputModeCount;
+                    inputMode = static_cast<game::InputMode>(settings.inputMode);
+                    game::saveSettings(settingsPath, settings);
+                    engine::logInfo(std::string("Input mode: ") + game::inputModeName(inputMode) +
+                                    (pad.connected ? " (gamepad connected)" : " (no gamepad)"));
+                    continue;
+                }
                 if (key == engine::Key::V) {
                     // Cycles the override rather than the weather itself: a
                     // storm you asked for has to stay until you ask for
@@ -3208,10 +3370,97 @@ int main() {
                 engine::logInfo("Frame cap: " + describeCap(kFpsCapOptions[capIndex]));
             }
 
+            // Gamepad buttons that are not clicks. The layout is the
+            // reference's: A jumps, B sneaks, Y opens the item screen, the
+            // bumpers page sideways and the triggers mine and place.
+            //
+            // The pad's *pointer* actions are further down, where they are
+            // turned into clicks instead.
+            //
+            // **Both blocks test this one copy of the screen state**, taken
+            // before either can change it. Reading it fresh in the second block
+            // meant the Y that opened the inventory arrived again as a click
+            // inside it, quick-moving whatever the pointer had been left on.
+            const bool padScreenOpen = openScreen.has_value();
+            if (inputDevice == game::InputDevice::Gamepad) {
+                if (padScreenOpen) {
+                    // B backs out, which is what B does in every menu the
+                    // reference has. **Start does the same rather than opening
+                    // a pause menu**, because there is not one yet.
+                    if (pad.pressed(game::PadButton::B) || pad.pressed(game::PadButton::Start)) {
+                        closeScreen();
+                    } else if (game::inventoryScreen::showsCatalogue(*openScreen)) {
+                        const int step = (pad.repeated(game::PadButton::RightBumper) ? 1 : 0) -
+                                         (pad.repeated(game::PadButton::LeftBumper) ? 1 : 0);
+                        if (step != 0) {
+                            const auto tabs =
+                                static_cast<int>(game::inventoryScreen::CatalogueTab::Count);
+                            int next = (static_cast<int>(catalogue.tab) + step) % tabs;
+                            if (next < 0) {
+                                next += tabs;
+                            }
+                            catalogue.tab = static_cast<game::inventoryScreen::CatalogueTab>(next);
+                            // Same reset a click on a tab does: a new tab starts
+                            // at the top and does not hold the keyboard.
+                            catalogue.scrollRow = 0;
+                            catalogue.searchFocused = false;
+                            hudDirty = true;
+                        }
+                    }
+                } else {
+                    // The reference puts crafting on X and the inventory on Y.
+                    // Here they are one screen - the 2x2 grid lives in it - so
+                    // both buttons land on the same place rather than one of
+                    // them doing nothing.
+                    if (pad.pressed(game::PadButton::Y) || pad.pressed(game::PadButton::X)) {
+                        openScreen = game::inventoryScreen::Kind::Inventory;
+                        hudDirty = true;
+                    }
+                    if (pad.pressed(game::PadButton::A)) {
+                        tapJump();
+                    }
+                    const int cycle = (pad.repeated(game::PadButton::RightBumper) ? 1 : 0) -
+                                      (pad.repeated(game::PadButton::LeftBumper) ? 1 : 0);
+                    if (cycle != 0) {
+                        const auto slots = static_cast<int>(game::kHotbarSlots);
+                        int next = (static_cast<int>(selectedSlot) + cycle) % slots;
+                        if (next < 0) {
+                            next += slots;
+                        }
+                        selectedSlot = static_cast<std::size_t>(next);
+                        hudDirty = true;
+                    }
+                }
+            }
+
             // Drained every frame even when unused, so the queue cannot grow
             // without bound. It only exists to notice a click while the cursor
             // is free.
-            const std::vector<engine::MouseButton> presses = window.consumeMouseButtonPresses();
+            std::vector<engine::MouseButton> presses = window.consumeMouseButtonPresses();
+
+            // **The pad drives the existing pointer interface rather than a
+            // second copy of it**: a button becomes the click it stands for and
+            // the whole of the screen handling below runs unchanged. That is
+            // also the reference's arrangement - its controller inventory is a
+            // cursor, not a focus ring - and it is why none of the slot code,
+            // the sweep or the double-click gather needed touching.
+            //
+            // At most one press a frame, in a fixed order, so `padQuickMove`
+            // can never be read against a different button's click.
+            bool padQuickMove = false;
+            if (padScreenOpen && inputDevice == game::InputDevice::Gamepad) {
+                if (pad.pressed(game::PadButton::A)) {
+                    presses.push_back(engine::MouseButton::Left);
+                } else if (pad.pressed(game::PadButton::X)) {
+                    // Take half, which is what the right button does here and
+                    // what X does in the reference's own crafting screen.
+                    presses.push_back(engine::MouseButton::Right);
+                } else if (pad.pressed(game::PadButton::Y)) {
+                    presses.push_back(engine::MouseButton::Left);
+                    padQuickMove = true;
+                }
+            }
+
             const bool clicked = !presses.empty();
             const bool hadCursor = window.isCursorCaptured();
 
@@ -3221,13 +3470,11 @@ int main() {
             bool wantInteract = false;
 
             if (openScreen.has_value()) {
-                // Pixels to the same space the screen is laid out in: relative
-                // to window height, origin at the centre, Y down.
-                const engine::Extent2D extent = window.framebufferExtent();
-                const float halfHeight = static_cast<float>(extent.height) * 0.5f;
-                const float cursorX =
-                    (static_cast<float>(window.cursorX()) - static_cast<float>(extent.width) * 0.5f) / halfHeight;
-                const float cursorY = (static_cast<float>(window.cursorY()) - halfHeight) / halfHeight;
+                // Already in the space the screen is laid out in: relative to
+                // window height, origin at the centre, Y down. Which device put
+                // it there was settled at the top of the frame.
+                const float cursorX = pointerX;
+                const float cursorY = pointerY;
                 const int craftExtent = game::inventoryScreen::craftSize(*openScreen);
                 const bool furnaceOpen = *openScreen == game::inventoryScreen::Kind::Furnace;
                 const bool smithingOpen = *openScreen == game::inventoryScreen::Kind::SmithingTable;
@@ -3482,10 +3729,10 @@ int main() {
                                     *openScreen, cursorX, cursorY, catalogue.scrollRow);
                                 cell.has_value()) {
                                 const std::vector<game::ItemId> listed =
-                                    game::inventoryScreen::catalogueItems(catalogue.tab, catalogue.query);
+                                    game::inventoryScreen::catalogueItems(catalogue);
                                 if (*cell < listed.size()) {
                                     const game::ItemId picked = listed[*cell];
-                                    if (window.isKeyDown(engine::Key::LeftShift) && !right) {
+                                    if ((window.isKeyDown(engine::Key::LeftShift) || padQuickMove) && !right) {
                                         inventory.add(picked, game::maxStackFor(picked));
                                     } else {
                                         // Whatever the cursor held is replaced
@@ -3536,7 +3783,7 @@ int main() {
                         continue;
                     }
 
-                    const bool shiftHeld = window.isKeyDown(engine::Key::LeftShift);
+                    const bool shiftHeld = window.isKeyDown(engine::Key::LeftShift) || padQuickMove;
 
                     if (shiftHeld && !right) {
                         if (hit->region == Region::CraftResult && !furnaceOpen) {
@@ -3656,6 +3903,7 @@ int main() {
                 }
             } else if (!hadCursor && clicked) {
                 window.setCursorCaptured(true);
+                swallowClickUntilRelease = true;
             } else if (hadCursor) {
                 // Sneaking suppresses this, which is what lets you place a block
                 // on top of a table rather than opening it.
@@ -3663,6 +3911,11 @@ int main() {
                                std::any_of(presses.begin(), presses.end(), [](engine::MouseButton button) {
                                    return button == engine::MouseButton::Right;
                                });
+                // Same rule on the pad: the left trigger uses, B is sneak.
+                if (inputDevice == game::InputDevice::Gamepad &&
+                    pad.pressed(game::PadButton::LeftTrigger) && !pad.down(game::PadButton::B)) {
+                    wantInteract = true;
+                }
             }
 
             // Scrolling away from the user moves right along the bar, and the
@@ -3673,13 +3926,18 @@ int main() {
             // the hotbar underneath - silently, because the bar is hidden behind
             // the panel while you are looking at it.
             const float scroll = window.consumeScrollDelta();
-            scrollCarry += scroll;
+            // The right stick scrolls the catalogue, the way the wheel does.
+            // In the world that same stick is the camera, so this only counts
+            // while a panel is up.
+            scrollCarry += scroll + ((inputDevice == game::InputDevice::Gamepad && openScreen.has_value())
+                                         ? pad.scrollNotches
+                                         : 0.0f);
             const int notches = static_cast<int>(scrollCarry);
             scrollCarry -= static_cast<float>(notches);
             if (notches != 0) {
                 if (openScreen.has_value() && game::inventoryScreen::showsCatalogue(*openScreen)) {
                     const int limit = game::inventoryScreen::catalogueMaxScroll(
-                        game::inventoryScreen::catalogueItems(catalogue.tab, catalogue.query).size());
+                        game::inventoryScreen::catalogueItems(catalogue).size());
                     const int next = std::clamp(catalogue.scrollRow - notches, 0, limit);
                     if (next != catalogue.scrollRow) {
                         catalogue.scrollRow = next;
@@ -3721,17 +3979,56 @@ int main() {
             // was last *drawn* means a bar cannot stick on screen after the
             // number behind it moved, which is the dig bar's bug in its fourth
             // outfit. The flash is included so the hearts stop shaking.
-            const int airBars = static_cast<int>(
-                std::ceil(std::clamp(player.air / game::fluid::kAirSeconds, 0.0f, 1.0f) * 10.0f));
+            //
+            // **The air row is compared through the builder's own answer**,
+            // never through a bubble count worked out here. A count agrees with
+            // the row in the middle and disagrees at both ends: submerging left
+            // `ceil(0.999 * 10)` at ten, so the row did not appear until a
+            // bubble and a half had gone, and surfacing reached ten while the
+            // row was still drawn, so it hung there until something unrelated
+            // dirtied the HUD. A value derived somewhere other than the one
+            // place that owns it, which is the oldest shape of bug here.
+            const game::hud::AirRow air =
+                game::hud::airRow(player.air / game::fluid::kAirSeconds);
             const bool statusMoved = player.health != lastShownHealth ||
-                                     player.food != lastShownFood || airBars != lastShownAir ||
+                                     player.food != lastShownFood || air != lastShownAir ||
                                      (player.hurtFlash > 0.0f) != lastShownHurt;
             if (statusMoved) {
                 hudDirty = true;
                 lastShownHealth = player.health;
                 lastShownFood = player.food;
-                lastShownAir = airBars;
+                lastShownAir = air;
                 lastShownHurt = player.hurtFlash > 0.0f;
+            }
+
+            // **The recipe book only ever grows.** Recomputed when something in
+            // the inventory moved rather than every frame, because scanning
+            // every recipe is not free and nothing else can change the answer.
+            //
+            // Creative keeps the whole catalogue: there it is a source to take
+            // from, not a book of what you have learned.
+            catalogue.restrictToKnown = !creative;
+            if (hudDirty && !creative) {
+                // The full grid, so a recipe you could only make at a table is
+                // still learned by holding its ingredients.
+                for (const game::ItemId made : game::craftableItems(inventory, game::kMaxCraftSize)) {
+                    catalogue.known.insert(made);
+                }
+            }
+
+            // **The recipe book only ever grows.** Recomputed when something in
+            // the inventory moved rather than every frame, because scanning
+            // every recipe is not free and nothing else can change the answer.
+            //
+            // Creative keeps the whole catalogue: there it is a source to take
+            // from, not a book of what you have learned.
+            catalogue.restrictToKnown = !creative;
+            if (hudDirty && !creative) {
+                // The full grid, so a recipe you could only make at a table is
+                // still learned by holding its ingredients.
+                for (const game::ItemId made : game::craftableItems(inventory, game::kMaxCraftSize)) {
+                    catalogue.known.insert(made);
+                }
             }
 
             if (hudDirty || overlayDue || openScreen.has_value() || breakProgress > 0.0f || bowHeld) {
@@ -3778,9 +4075,19 @@ int main() {
             }
 
             const engine::CursorDelta look = window.consumeCursorDelta();
-            if (window.isCursorCaptured()) {
+            // The panel owns the pointer while it is up. In gamepad mode the
+            // OS cursor stays captured behind it, so without the screen test a
+            // knocked mouse would turn the camera while you shopped.
+            if (window.isCursorCaptured() && !openScreen.has_value()) {
                 // Screen Y grows downward, so moving the mouse down must pitch down.
                 camera.addLook(look.x * kLookRadiansPerPixel, -look.y * kLookRadiansPerPixel);
+            }
+            if (!openScreen.has_value()) {
+                // **Added, not scaled.** This is already radians for this
+                // frame; the mouse constant above is radians per *pixel*, and
+                // putting a stick through it would make turning depend on the
+                // frame rate.
+                camera.addLook(pad.lookRadians.x, pad.lookRadians.y);
             }
 
             // Movement is relative to where the camera is looking, but flattened
@@ -3793,6 +4100,9 @@ int main() {
             game::PlayerInput move;
             // Keys belong to the screen while it is open, not to the player.
             if (!openScreen.has_value()) {
+                const bool keyMoving =
+                    window.isKeyDown(engine::Key::W) || window.isKeyDown(engine::Key::S) ||
+                    window.isKeyDown(engine::Key::A) || window.isKeyDown(engine::Key::D);
                 if (window.isKeyDown(engine::Key::W)) {
                     move.moveDirection += forward;
                 }
@@ -3805,13 +4115,22 @@ int main() {
                 if (window.isKeyDown(engine::Key::A)) {
                     move.moveDirection -= right;
                 }
-                move.jump = window.isKeyDown(engine::Key::Space);
-                move.sprint = window.isKeyDown(engine::Key::LeftControl);
-                move.sneak = window.isKeyDown(engine::Key::LeftShift);
+                move.moveDirection += forward * pad.move.y + right * pad.move.x;
+
+                // How far the stick is pushed is the walking speed, and a key
+                // is always all the way. `moveDirection` is normalised inside
+                // the physics, so the magnitude has to travel separately.
+                const float push = std::min(std::sqrt(pad.move.x * pad.move.x + pad.move.y * pad.move.y), 1.0f);
+                move.moveScale = std::max(keyMoving ? 1.0f : 0.0f, push);
+
+                const bool jumping = window.isKeyDown(engine::Key::Space) || pad.down(game::PadButton::A);
+                const bool sneaking = window.isKeyDown(engine::Key::LeftShift) || pad.down(game::PadButton::B);
+                move.jump = jumping;
+                move.sprint = window.isKeyDown(engine::Key::LeftControl) || pad.sprint;
+                move.sneak = sneaking;
                 move.lookY = glm::normalize(camera.forward()).y;
                 move.invulnerable = creative;
-                move.verticalWish = (window.isKeyDown(engine::Key::Space) ? 1.0f : 0.0f) -
-                                    (window.isKeyDown(engine::Key::LeftShift) ? 1.0f : 0.0f);
+                move.verticalWish = (jumping ? 1.0f : 0.0f) - (sneaking ? 1.0f : 0.0f);
             }
 
             game::updatePlayer(player, move, world, deltaSeconds);
@@ -3862,6 +4181,18 @@ int main() {
                 } else {
                     sounds.playGlobal(audio, game::SoundEvent::Hurt, 0.7f);
                 }
+                // Every damage source that is *not* a blow or a landing: lava,
+                // fire, drowning, poison, cactus, starvation. The two that are
+                // have their own cues on their own edges, because **a blow is
+                // an event and damage is only its consequence** - creative
+                // takes none, and hanging these here left a golem knocking the
+                // player across a field in silence.
+                //
+                // Sized by the health actually lost, which is the only thing
+                // here that knows whether that was a singe or a lava bath.
+                game::playRumble(rumble, game::RumbleEvent::Hurt,
+                                 game::rumbleStrength(static_cast<float>(lastHealth - player.health),
+                                                      1.0f, 10.0f));
                 if (settings.particles && lastFallDistance > game::survival::kSafeFallDistance) {
                     const auto feet = glm::ivec3{glm::floor(player.position)};
                     particles.spawnFootstep(player.position,
@@ -3869,12 +4200,22 @@ int main() {
                 }
             }
             wasHurt = player.hurtFlash > 0.0f;
+            lastHealth = player.health;
             // Trampling. **A probability, not a threshold** - the reference's
             // rule is `fallDistance - 0.5`, so a one-block step ruins tilled
             // ground about half the time and a long drop always does. Sampled
             // on the same edge the fall sound uses, and *before* the landing
             // clears the distance.
             if (player.onGround && !wasOnGround && lastFallDistance > 0.5f) {
+                // The landing itself, so it still lands in creative. Scaled
+                // across the drop rather than switched on at one height, or the
+                // block either side of the threshold feel nothing alike.
+                if (lastFallDistance > game::survival::kSafeFallDistance) {
+                    game::playRumble(rumble, game::RumbleEvent::HeavyLanding,
+                                     game::rumbleStrength(lastFallDistance,
+                                                          game::survival::kSafeFallDistance,
+                                                          kBigFallDistance));
+                }
                 const auto feet = glm::ivec3{glm::floor(player.position)};
                 const glm::ivec3 under{feet.x, feet.y - 1, feet.z};
                 if (game::isFarmland(world.blockAt(under.x, under.y, under.z))) {
@@ -3932,6 +4273,14 @@ int main() {
             // the body settles and whatever killed you is still visible; only
             // once `kRespawnSeconds` is up does the world put you back. Anything
             // faster reads as a teleport rather than as a death.
+            // Death is a transition and `alive()` is a state. Without the
+            // mirror this would fire again on every frame of the death
+            // animation, which is the same shape as the trampling bug above.
+            if (!player.alive() && wasAlive) {
+                game::playRumble(rumble, game::RumbleEvent::Death);
+            }
+            wasAlive = player.alive();
+
             if (!player.alive()) {
                 hudDirty = true;
                 if (player.deathSeconds >= game::survival::kRespawnSeconds) {
@@ -3964,7 +4313,7 @@ int main() {
                     }
                     game::respawnPlayer(
                         player, glm::vec3{static_cast<float>(rx) + 0.5f,
-                                          static_cast<float>(world.highestSolid(rx, rz) + 1),
+                                          static_cast<float>(world.groundHeight(rx, rz)),
                                           static_cast<float>(rz) + 0.5f});
                     engine::logInfo("Respawned.");
                 }
@@ -4102,10 +4451,22 @@ int main() {
             // click that recaptures the cursor does not also swing at a block,
             // and on the screen state *now*, so the click that just opened a
             // table does not also place against it.
-            const bool playing = hadCursor && !openScreen.has_value();
-            const bool wantBreak = playing && window.isMouseButtonDown(engine::MouseButton::Left);
-            const bool wantPlace = playing && window.isMouseButtonDown(engine::MouseButton::Right);
-            const bool wantDrop = !openScreen.has_value() && window.isKeyDown(engine::Key::Q);
+            //
+            // **The latch is the other half of that**, and it is what the
+            // frame-start test alone missed: the button is still down on the
+            // *next* frame, by which time the cursor is held and the click that
+            // only meant "give this window the mouse back" swings for real.
+            if (swallowClickUntilRelease && !window.isMouseButtonDown(engine::MouseButton::Left) &&
+                !window.isMouseButtonDown(engine::MouseButton::Right)) {
+                swallowClickUntilRelease = false;
+            }
+            const bool playing = hadCursor && !openScreen.has_value() && !swallowClickUntilRelease;
+            const bool wantBreak = playing && (window.isMouseButtonDown(engine::MouseButton::Left) ||
+                                               pad.down(game::PadButton::RightTrigger));
+            const bool wantPlace = playing && (window.isMouseButtonDown(engine::MouseButton::Right) ||
+                                               pad.down(game::PadButton::LeftTrigger));
+            const bool wantDrop = !openScreen.has_value() && (window.isKeyDown(engine::Key::Q) ||
+                                                              pad.down(game::PadButton::DpadDown));
 
             if (!wantDrop) {
                 dropTimer = 0.0f;
@@ -4160,6 +4521,8 @@ int main() {
                         // Pitched by the charge, so a snap shot sounds thinner
                         // than a full draw - one number doing two jobs.
                         sounds.playGlobal(audio, game::SoundEvent::Bow, 0.7f, 0.85f + charge * 0.35f);
+                        game::playRumble(rumble, game::RumbleEvent::BowLoosed,
+                                         game::rumbleStrength(charge, game::kMinBowCharge, 1.0f));
                         if (spendsArrows) {
                             inventory.consume(game::ItemId::Arrow, 1);
                             game::ItemStack& bow = inventory.slot(selectedSlot);
@@ -4186,7 +4549,19 @@ int main() {
             // it. Asked every frame rather than only when a swing is ready,
             // because the swing's cooldown would otherwise let the block behind
             // a creature be mined straight through it.
-            const float entityReach = creative ? kCreativeEntityReach : kEntityReach;
+            const float armsLength = creative ? kCreativeEntityReach : kEntityReach;
+            // **A swing stops at the first thing it cannot pass through.**
+            // `findAimed` is told about creatures and nothing else, so without
+            // this a villager behind a shut door was exactly as reachable as
+            // one standing in the open.
+            //
+            // Collision geometry rather than opacity, which is the distinction
+            // `Raycast.hpp` already draws: you cannot punch through glass even
+            // though you can see through it, and you can punch through tall
+            // grass even though a creeper cannot see through it.
+            const game::SweepHit swingBlocked = game::sweepBlocks(
+                world, camera.position, camera.position + camera.forward() * armsLength);
+            const float entityReach = swingBlocked.hit ? swingBlocked.distance : armsLength;
             const bool creatureInWay =
                 wantBreak && creatures.aimedAt(camera.position, camera.forward(), entityReach);
             if (creatureInWay && swingTimer <= 0.0f) {
@@ -4196,6 +4571,10 @@ int main() {
                 if (creatures.strike(camera.position, camera.forward(), entityReach, damage)) {
                     swingTimer = kSwingSeconds;
                     player.exhaustion += game::survival::kExhaustAttack;
+                    // A bare fist deals 1 and the best tool in the game deals 6,
+                    // which is the whole range a blow of ours can land in.
+                    game::playRumble(rumble, game::RumbleEvent::HitCreature,
+                                     game::rumbleStrength(static_cast<float>(damage), 1.0f, 6.0f));
                 }
             }
 
@@ -4233,6 +4612,19 @@ int main() {
                         if (dug != game::SoundEvent::Count) {
                             sounds.play(audio, dug, glm::vec3{target.block} + glm::vec3{0.5f}, 0.8f);
                         }
+                        // A tick rather than a thump. This fires several times a
+                        // second while mining, and anything heavier here turns
+                        // the whole core loop into one long buzz.
+                        //
+                        // Sized by the block's **own** hardness rather than by
+                        // how long the dig took: the tool in your hand changes
+                        // the second and not the first, and obsidian should not
+                        // feel like dirt because you brought the right pick.
+                        game::playRumble(
+                            rumble, game::RumbleEvent::BlockBroken,
+                            game::rumbleStrength(game::blockHardness(world.blockAt(
+                                                     target.block.x, target.block.y, target.block.z)),
+                                                 0.2f, 3.0f));
                         if (settings.particles) {
                             particles.spawnBlockBreak(target.block,
                                                       world.blockAt(target.block.x, target.block.y,
@@ -5559,12 +5951,21 @@ int main() {
                 }
             }
 
-            // An archer's arrows, on the same handover: `Creatures` works out
-            // where and how fast, and the loop that owns projectiles fires
-            // them. **Never collectable** - the reference refuses a mob's
-            // arrow even in creative, or a skeleton is an arrow farm.
+            // An archer's arrows and a witch's bottles, on the same handover:
+            // `Creatures` works out where and how fast, and the loop that owns
+            // projectiles fires them. **Never collectable** - the reference
+            // refuses a mob's arrow even in creative, or a skeleton is an arrow
+            // farm, and the same goes for a thrown potion.
+            //
+            // The kind is mapped here rather than carried, because
+            // `Creature.hpp` deliberately does not know `ProjectileKind`
+            // exists. This `switch` is the whole cost of that.
             for (const game::Creatures::Launch& shot : creatures.takeLaunches()) {
-                projectiles.spawn(game::ProjectileKind::Arrow, shot.origin, shot.velocity, false, false);
+                const game::ProjectileKind kind =
+                    shot.kind == game::Creatures::LaunchKind::SplashPotion
+                        ? game::ProjectileKind::SplashPotion
+                        : game::ProjectileKind::Arrow;
+                projectiles.spawn(kind, shot.origin, shot.velocity, false, false, shot.payload);
             }
             for (const game::FallingBlocks::Crushed& hit : fallingBlocks.update(world, deltaSeconds)) {
                 const game::ItemId shed = game::dropForBlock(hit.block);
@@ -5646,12 +6047,18 @@ int main() {
                                       static_cast<int>(std::floor(landing.position.z))};
                 const glm::vec2 centre{static_cast<float>(cell.x) + 0.5f, static_cast<float>(cell.z) + 0.5f};
 
-                // An arrow biting into wood, and everything else breaking on
-                // it. The reference splits these the same way and it is most of
-                // how you know whether a shot stuck or a snowball burst.
+                // An arrow biting into wood, a bottle shattering, and everything
+                // else bursting. The reference splits these the same way and it
+                // is most of how you know whether a shot stuck or a snowball
+                // burst. A bottle wants `random.glass`, which we already stage
+                // as the glass digging sound - the same three recordings the
+                // reference plays, so a potion needs no event of its own.
+                const bool bottle = landing.kind == game::ProjectileKind::SplashPotion ||
+                                    landing.kind == game::ProjectileKind::LingeringPotion;
                 sounds.play(audio,
                             landing.kind == game::ProjectileKind::Arrow ? game::SoundEvent::HitLand
-                                                                        : game::SoundEvent::Pop,
+                            : bottle                                   ? game::SoundEvent::DigGlass
+                                                                       : game::SoundEvent::Pop,
                             landing.position, 0.7f);
 
                 if (landing.kind == game::ProjectileKind::SplashPotion) {
@@ -5727,27 +6134,33 @@ int main() {
                 }
             }
             for (const game::Projectiles::Collectable& ready : projectiles.collectable(player.position)) {
-                if (!inventory.hasRoomFor(ready.item, ready.count)) {
-                    continue;
+                if (inventory.add(ready.item, ready.count) != 0) {
+                    continue; // No room for this one; the next may still fit.
                 }
-                if (inventory.add(ready.item, ready.count) == 0) {
-                    projectiles.remove(ready.index);
-                    sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
-                    hudDirty = true;
-                }
+                projectiles.remove(ready.index);
+                sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
+                hudDirty = true;
                 break; // Indices shift as shots are removed.
             }
             for (const game::ItemEntities::Collectable& ready : drops.collectable(player.position)) {
                 // Collection is mode-independent, like dropping. Skipping it in
                 // creative left anything dropped orbiting the player forever.
-                if (!inventory.hasRoomFor(ready.item, ready.count)) {
-                    continue;
-                }
+                //
+                // **Take what fits rather than all or nothing.** `add` already
+                // returns whatever would not go in, and the drop keeps exactly
+                // that, so testing for room for the whole stack first was the
+                // only thing preventing a partial pickup. And because this loop
+                // takes one drop per frame and stopped at the first stack it
+                // could not swallow whole, that one refusal left every other
+                // drop in the world orbiting the player too - which is what
+                // being nearly full looked like from the outside.
                 const int left = inventory.add(ready.item, ready.count, ready.damage);
-                drops.reduce(ready.index, ready.count - left);
-                if (left < ready.count) {
-                    sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
+                const int taken = ready.count - left;
+                if (taken <= 0) {
+                    continue; // Genuinely no room for this item; try the next.
                 }
+                drops.reduce(ready.index, taken);
+                sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
                 hudDirty = true;
                 break; // Indices shift as drops are removed.
             }
@@ -5762,8 +6175,13 @@ int main() {
             // there, the creatures still think, and the arrows still fly.
             const game::DrawRange drawRange{camera.position, entityDrawDistance()};
             {
+                // Two meshes, because a dropped pane of stained glass has to be
+                // sorted behind the opaque world for the same reason the placed
+                // block is - its art is see-through everywhere, and the opaque
+                // pass would discard the centre of it.
+                engine::MeshData dropBlended;
                 engine::MeshData dropGeometry =
-                    drops.buildMesh(world, timeOfDay * 1000.0f, spriteMask, drawRange);
+                    drops.buildMesh(world, timeOfDay * 1000.0f, spriteMask, drawRange, &dropBlended);
                 if (dropGeometry.empty()) {
                     if (dropMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(dropMesh);
@@ -5773,6 +6191,17 @@ int main() {
                     dropMesh = renderer.addMesh(dropGeometry);
                 } else {
                     renderer.updateMesh(dropMesh, dropGeometry);
+                }
+
+                if (dropBlended.empty()) {
+                    if (dropGlassMesh != engine::kInvalidMesh) {
+                        renderer.removeMesh(dropGlassMesh);
+                        dropGlassMesh = engine::kInvalidMesh;
+                    }
+                } else if (dropGlassMesh == engine::kInvalidMesh) {
+                    dropGlassMesh = renderer.addMesh(dropBlended, true);
+                } else {
+                    renderer.updateMesh(dropGlassMesh, dropBlended);
                 }
             }
 
@@ -5824,6 +6253,17 @@ int main() {
                     }
                     player.velocity += blow.push;
                     player.onGround = false;
+                    // **Outside the creative gate on purpose.** Being hit and
+                    // being hurt are different things: creative still takes the
+                    // blow and still gets shoved, and it is the default mode.
+                    //
+                    // Sized against ten, not against the golem's worst of 21.
+                    // Seven is the hardest an ordinary mob hits, so a range that
+                    // reached 21 would squeeze every normal fight into the
+                    // bottom third and leave one creature owning the whole top.
+                    // The golem instead saturates, which is what it should do.
+                    game::playRumble(rumble, game::RumbleEvent::Hurt,
+                                     game::rumbleStrength(static_cast<float>(blow.damage), 1.0f, 10.0f));
                 }
 
                 // Only the strongest blast of a frame throws the player.
@@ -5935,6 +6375,25 @@ int main() {
                     // system's, which is why this is a call rather than a loop.
                     const int caught = creatures.applyExplosion(world, blast.centre, blast.power);
                     sounds.play(audio, game::SoundEvent::Explode, blast.centre, 1.0f, 1.0f);
+                    // Falls off with distance the way the noise does, so a blast
+                    // across the valley is a tremor and one at your feet is a
+                    // shove. Four blocks of reach per unit of power, matching how
+                    // far the blast itself is felt.
+                    {
+                        const float span = std::max(blast.power * 4.0f, 1.0f);
+                        const float away = glm::distance(camera.position, blast.centre);
+                        const float nearness = std::clamp(1.0f - away / span, 0.0f, 1.0f);
+                        // **How big it was and how close you were**, which is
+                        // what a blast actually is. Sized against TNT, so
+                        // anything at least that big simply reads as maximum -
+                        // a charged Bramble's power lives in the creature table
+                        // and does not need a second copy over here.
+                        //
+                        // No floor on the product: a blast far enough away
+                        // genuinely should arrive as nothing at all.
+                        game::playRumble(rumble, game::RumbleEvent::Explosion,
+                                         game::rumbleStrength(blast.power, 1.0f, kTntPower) * nearness);
+                    }
                     if (settings.particles) {
                         particles.spawnExplosion(blast.centre, blast.power);
                     }
@@ -5965,7 +6424,10 @@ int main() {
             }
             {
                 engine::MeshData creatureShells;
-                engine::MeshData creatureGeometry = creatures.buildMesh(world, creatureShells, drawRange);
+                // The mask is what turns a held item's picture into a shape, the
+                // same way a dropped one and a thrown one already do.
+                engine::MeshData creatureGeometry =
+                    creatures.buildMesh(world, creatureShells, drawRange, &spriteMask);
                 if (creatureGeometry.empty()) {
                     if (creatureMesh != engine::kInvalidMesh) {
                         renderer.removeMesh(creatureMesh);
@@ -6055,6 +6517,28 @@ int main() {
                         renderer.setOverlayMesh(game::makeBlockOutline(size));
                     }
                     highlight = glm::translate(glm::mat4{1.0f}, glm::vec3{origin} + low);
+                }
+            }
+
+            // The breaking cracks. **Rebuilt only when the picture would
+            // actually change** - the stage or the block - because each rebuild
+            // retires a buffer, and a mesh per frame for a block that takes a
+            // second to dig is a hundred of them for ten pictures.
+            //
+            // Torn down the moment digging stops, which is the same shape of
+            // bug the dig bar already paid for: leave it and the last stage
+            // stays painted on a block nobody is touching.
+            {
+                const int stage = breakProgress > 0.0f && breakingBlock != kNoBlock
+                                      ? game::destroyStageLayer(breakProgress)
+                                      : -1;
+                if (stage != crackStage || breakingBlock != crackBlock) {
+                    crackStage = stage;
+                    crackBlock = breakingBlock;
+                    renderer.setCrackMesh(stage < 0
+                                              ? engine::MeshData{}
+                                              : game::makeBlockCracks(world, breakingBlock,
+                                                                      breakProgress));
                 }
             }
 
@@ -6480,6 +6964,23 @@ int main() {
                 renderer.setFog(weatherSky, reach, fogStart);
             }
 
+            // Cues are asked for all over the frame and mixed here, once,
+            // after everything that could add one.
+            //
+            // **Silent unless the pad is the device in use**, so one left
+            // plugged in does not buzz at somebody playing on the keyboard. A
+            // scale of zero also drains whatever was in flight when the mode
+            // changed, rather than freezing a motor mid-cue.
+            //
+            // `isGamepadLive` rather than `connected`: losing focus stops the
+            // motors, and without this a cue still fading would start them
+            // again on the very next frame, behind whatever was alt-tabbed to.
+            const bool rumbleWanted =
+                inputDevice == game::InputDevice::Gamepad && window.isGamepadLive();
+            game::updateRumble(rumble, deltaSeconds,
+                               rumbleWanted ? settings.controllerRumble : 0.0f);
+            window.setGamepadRumble(rumble.heavy, rumble.light);
+
             renderer.drawFrame(engine::ClearColor{background.r, background.g, background.b, 1.0f},
                                camera.viewMatrix(), highlight);
 
@@ -6531,9 +7032,16 @@ int main() {
 
         engine::logInfo("Window closed. Saving world.");
         world.saveAll();
-        world.store().savePlayer(game::SavedPlayer{player.position, camera.yaw, camera.pitch,
-                                                   player.health, player.food, player.saturation,
-                                                   player.exhaustion});
+        {
+            game::SavedPlayer saved{player.position,   camera.yaw,        camera.pitch,
+                                    player.health,     player.food,       player.saturation,
+                                    player.exhaustion};
+            for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
+                saved.inventory[i] = inventory.slot(i);
+            }
+            saved.selectedSlot = static_cast<std::int32_t>(selectedSlot);
+            world.store().savePlayer(saved);
+        }
 
         // Empty ones are dropped rather than written: a furnace nobody has used
         // is indistinguishable from one that has never been opened.

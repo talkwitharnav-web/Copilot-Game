@@ -28,17 +28,9 @@ struct CellSprite {
 constexpr CellSprite kNormalCell{{42.0f, 18.0f}, {21.0f, 21.0f}, {4.0f, 4.0f}, {14.0f, 14.0f}};
 constexpr CellSprite kSelectedCell{{0.0f, 16.0f}, {25.0f, 25.0f}, {6.0f, 6.0f}, {15.0f, 15.0f}};
 
-/// On-screen size of one cell, relative to window height. The renderer corrects
-/// for aspect ratio. Y spans -1 to 1 across the window, so this is a little over
-/// 6% of screen height per cell.
-constexpr float kSlotSize = 0.152f;
-
 /// The selected cell is drawn larger by the same ratio its sprite is larger, so
 /// the frame overhangs its neighbours exactly as the artwork intends.
 constexpr float kSelectedScale = kSelectedCell.tileSize.x / kNormalCell.tileSize.x;
-
-/// Positive Y is down in screen space, so this sits near the bottom edge.
-constexpr float kBarCentreY = 0.888f;
 
 /// Half-height of a block icon as a fraction of the cell's half-size, leaving
 /// clear margin between the icon and the bevel.
@@ -106,24 +98,24 @@ engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected, fl
 
     // Cells butt up against each other so neighbouring borders merge into a
     // single divider, as they do in the artwork.
-    const float totalWidth = kHotbarSlots * kSlotSize;
-    const float firstCentreX = -totalWidth * 0.5f + kSlotSize * 0.5f;
+    const float totalWidth = kHotbarWidth;
+    const float firstCentreX = -totalWidth * 0.5f + kHotbarSlotSize * 0.5f;
 
     for (std::size_t slot = 0; slot < kHotbarSlots; ++slot) {
-        const float centreX = firstCentreX + static_cast<float>(slot) * kSlotSize;
+        const float centreX = firstCentreX + static_cast<float>(slot) * kHotbarSlotSize;
         const bool isSelected = slot == selected;
 
         const CellSprite& cell = isSelected ? kSelectedCell : kNormalCell;
-        const float cellSize = kSlotSize * (isSelected ? kSelectedScale : 1.0f);
+        const float cellSize = kHotbarSlotSize * (isSelected ? kSelectedScale : 1.0f);
 
-        appendCellFrame(mesh, cell, centreX, kBarCentreY, cellSize,
+        appendCellFrame(mesh, cell, centreX, kHotbarCentreY, cellSize,
                         isSelected ? kSelectedFrameDepth : kFrameDepth);
 
         // The interior is off-centre within the tile, because the bevel is
         // thicker on the top and left. Everything inside follows that centre
         // rather than the tile's, or it sits visibly high and to the left.
         const glm::vec2 scale = glm::vec2{cellSize} / cell.tileSize;
-        const glm::vec2 interiorCentre = glm::vec2{centreX, kBarCentreY} +
+        const glm::vec2 interiorCentre = glm::vec2{centreX, kHotbarCentreY} +
                                          (cell.interiorMin + cell.interiorSize * 0.5f - cell.tileSize * 0.5f) * scale;
         const glm::vec2 interiorHalf = cell.interiorSize * scale * 0.5f;
 
@@ -136,7 +128,7 @@ engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected, fl
             continue;
         }
 
-        const float iconHalf = kSlotSize * 0.5f * kIconScale;
+        const float iconHalf = kHotbarSlotSize * 0.5f * kIconScale;
         const float iconDepth = isSelected ? kSelectedIconDepth : kIconDepth;
         if (isBlockItem(stack.item)) {
             hud::appendBlockIcon(mesh, blockForItem(stack.item), interiorCentre.x, interiorCentre.y, iconHalf,

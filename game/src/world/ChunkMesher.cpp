@@ -215,6 +215,21 @@ constexpr float kWaterLevelDrop = 0.11f;
 /// How much of the world shows through water.
 constexpr float kWaterAlpha = 0.72f;
 
+/// How much of what is behind a translucent block survives it.
+///
+/// **Glass answers 1.0 because its art already says**, and that is the fix for
+/// what the user reported as "it looks like a ghost". Its alpha map is a frame
+/// at 200, a diagonal highlight streak at 155 and a centre panel at 110; this
+/// used to hand back the *average* of those - 0.46, or 0.51 for tinted - and
+/// one number for the whole face is exactly a ghost. Staging no longer flattens
+/// that map and the blended pass no longer runs the cutout test over it, so the
+/// three survive all the way to the blend and the vertex has nothing left to
+/// say. Water is the other way round: its art is opaque and the number here is
+/// the whole of it.
+constexpr float translucentAlpha(BlockId block) {
+    return isBlendedGlass(block) ? 1.0f : kWaterAlpha;
+}
+
 } // namespace
 
 ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, MeshDetail detail) {
@@ -307,6 +322,14 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     // a pixel.
                     const bool cutoutInterior =
                         sharedWithOwnKind && (terrainOnly || !positiveFacing);
+                    // **Two panes of the same glass drop the boundary between
+                    // them entirely**, from both sides, unlike a cutout - which
+                    // keeps it so you can still see leaves through the holes in
+                    // the leaves in front. There is nothing to see through here:
+                    // the boundary is invisible in the reference and all it
+                    // would contribute is a second helping of tint, so a wall
+                    // two blocks thick would read darker than one.
+                    const bool blendedInterior = isTranslucent(block) && ahead == block;
                     // **A fluid's face rules, not a translucent block's.** Lava
                     // is opaque and still needs these: a fluid draws only where
                     // it meets air or a thinner fluid below, so its internal
@@ -326,7 +349,8 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                                (isFluid(ahead) && ahead != block &&
                                 face.neighbourOffset.y <= 0 &&
                                 fluidLevel(ahead) > fluidLevel(block)))
-                            : (!occludesFace(ahead, face.neighbourOffset.y) && !cutoutInterior);
+                            : (!occludesFace(ahead, face.neighbourOffset.y) && !cutoutInterior &&
+                               !blendedInterior);
                     if (!visible) {
                         continue;
                     }
@@ -334,8 +358,11 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     sample.layer = blockTextureLayer(block, face.facing, face.direction,
                                                      volume.chestHalfAt(p.x, p.y, p.z));
                     sample.translucent = isTranslucent(block);
-                    sample.doubleSided = isCutout(block);
-                    sample.alpha = sample.translucent ? kWaterAlpha : 1.0f;
+                    // **Never both.** A double-sided quad rasterises from either
+                    // side, so blending one would lay the same tint down twice
+                    // and a single pane would read as two.
+                    sample.doubleSided = isCutout(block) && !sample.translucent;
+                    sample.alpha = sample.translucent ? translucentAlpha(block) : 1.0f;
                     // Thinner flows sit lower, so a stream visibly tapers away
                     // from its source rather than running at full depth.
                     sample.surfaceDrop =
@@ -610,8 +637,12 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
     const auto pushQuad = [&](const std::array<glm::vec3, 4>& corners, const std::array<glm::vec2, 4>& uvs,
                               float layer, float sky, float blockLight, float shading,
                               std::uint32_t normalCode, bool doubleSided, bool sways = false,
-                              std::uint32_t rootHalfBlocks = 0) {
-        engine::MeshData& mesh = result.opaque;
+                              std::uint32_t rootHalfBlocks = 0, bool translucent = false) {
+        // Defaulted, so every shape but a stained pane emits exactly the quad it
+        // did before. A pane is the one thing in this pass that has to be sorted
+        // behind the opaque world, because it wears a blended block's own art -
+        // and that art carries its own alpha, so the vertex still says 1.
+        engine::MeshData& mesh = translucent ? result.translucent : result.opaque;
         const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
         // **Measured against this quad's own extent, not against a block
         // boundary.** A plant blade's corners sit at whole world heights, so
@@ -723,7 +754,6 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                 // computed here - and `Collision.hpp`'s `worldCollisionBoxes`
                 // computes it through the same `connectionBits`, so the two
                 // still cannot disagree.
-                BlockBoxes shapeBoxes = collisionBoxes(block);
                 // A *model* rather than a shape cut out of a cube, so each box
                 // names the rectangle of texture it samples instead of taking
                 // it from where the box happens to sit.
@@ -731,38 +761,21 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                 if (shape == BlockShape::Model || shape == BlockShape::Cocoa ||
                     shape == BlockShape::Bed) {
                     model = postModel(block);
-                    shapeBoxes = BlockBoxes{};
-                    for (int i = 0; i < model.count; ++i) {
-                        shapeBoxes.boxes[shapeBoxes.count++] = model.boxes[i].box;
-                    }
-                } else if (shape == BlockShape::Vine) {
-                    // The ceiling sheet is **derived from the world, not from
-                    // the id** - which is Bedrock's own arrangement and why
-                    // sixteen ids cover the block where Java needs thirty-two.
-                    shapeBoxes = vineBoxes(vineSides(block),
-                                           isOpaque(volume.blockAt(x, y + 1, z)));
-                } else if (shape == BlockShape::Ladder) {
-                    // Drawn but not collided with, the same split the fence
-                    // uses in the other direction: `collisionBoxes` answers
-                    // nothing here so you can step onto the rungs.
-                    shapeBoxes = ladderBoxes(ladderFacing(block));
-                } else if (drawsWithoutColliding(block)) {
-                    // The same split again, for the five redstone shapes you
-                    // walk straight over.
-                    shapeBoxes = uncollidableDrawnBoxes(block);
-                } else if (shape == BlockShape::Fence || shape == BlockShape::Wall ||
-                           shape == BlockShape::Pane) {
-                    // A fence reaches toward fences and gates; a wall reaches
-                    // toward walls and gates; a pane reaches toward panes and
-                    // bars. `connectionBits` owns that rule, so what is drawn
-                    // and what is bumped into cannot disagree about it.
-                    const std::uint8_t connections =
-                        connectionBits(shape, volume.blockAt(x, y, z - 1), volume.blockAt(x, y, z + 1),
-                                       volume.blockAt(x - 1, y, z), volume.blockAt(x + 1, y, z));
-                    shapeBoxes = shape == BlockShape::Fence  ? fenceRailBoxes(connections)
-                                 : shape == BlockShape::Wall ? wallBoxes(connections)
-                                                             : paneBoxes(connections);
                 }
+                // **`drawnBoxes` owns which boxes these are**, so the crack
+                // overlay and anything else that draws onto a block gets the
+                // same answer this does rather than a second copy of it. The
+                // two facts an id cannot carry are supplied here: what a fence
+                // reaches toward, and whether a vine has a ceiling to hang from.
+                const BlockShape connectShape = shape;
+                const std::uint8_t connections =
+                    connectsToNeighbours(connectShape)
+                        ? connectionBits(connectShape, volume.blockAt(x, y, z - 1),
+                                         volume.blockAt(x, y, z + 1), volume.blockAt(x - 1, y, z),
+                                         volume.blockAt(x + 1, y, z))
+                        : std::uint8_t{0};
+                const BlockBoxes shapeBoxes =
+                    drawnBoxes(block, connections, isOpaque(volume.blockAt(x, y + 1, z)));
 
                 for (int i = 0; i < shapeBoxes.count; ++i) {
                     const BlockBox& b = shapeBoxes.boxes[i];
@@ -955,7 +968,7 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                                  }(),
                                  sky, blockLight, face.shade,
                                  shape == BlockShape::Vine ? engine::kNormalUnaligned : face.normalCode,
-                                 shape == BlockShape::Vine);
+                                 shape == BlockShape::Vine, false, 0u, isTranslucent(block));
                     }
                 }
             }

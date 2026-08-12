@@ -1,5 +1,6 @@
 #include "world/Creature.hpp"
 
+#include "item/SpriteModel.hpp"
 #include "world/Block.hpp"
 #include "world/Collision.hpp"
 #include "world/Explosion.hpp"
@@ -213,6 +214,34 @@ constexpr float kSkinFlashLayer = -5.0f;
 /// One texel is 1/16 of a block, matching the block textures.
 constexpr float kTexel = 1.0f / 16.0f;
 
+/// How the reference holds an item in a hand.
+///
+/// **Read off its own item models rather than guessed** -
+/// `models/item/handheld.json` for tools and weapons, `models/item/bow.json`
+/// for the bow, `models/item/generated.json` for everything else flat - and
+/// every number is that model's `thirdperson_righthand` display transform in
+/// the reference's own units: rotation in **degrees**, applied X then Y then Z;
+/// translation in **sixteenths of a block**; scale a plain multiplier.
+///
+/// The left hand is this same row with the Y and Z rotations and the sideways
+/// translation negated. That is the reference's own mirroring, and it is a
+/// derivation rather than a second row precisely so the two cannot drift.
+struct HeldTransform {
+    float rotation[3];
+    float translation[3];
+    float scale;
+};
+constexpr HeldTransform kHeldHandheld{{0.0f, -90.0f, 55.0f}, {0.0f, 4.0f, 0.5f}, 0.85f};
+constexpr HeldTransform kHeldBow{{-80.0f, 260.0f, -40.0f}, {-1.0f, -2.0f, 2.5f}, 0.9f};
+constexpr HeldTransform kHeldFlat{{0.0f, 0.0f, 0.0f}, {0.0f, 3.0f, 1.0f}, 0.55f};
+
+const HeldTransform& heldTransform(ItemId item) {
+    if (item == ItemId::Bow) {
+        return kHeldBow;
+    }
+    return isTool(item) ? kHeldHandheld : kHeldFlat;
+}
+
 /// Half the thickness given to a fin the reference authors with none at all.
 /// A box of zero extent puts its two large faces on exactly one plane, and
 /// every creature quad here is double-sided, so they would fight for every
@@ -235,6 +264,15 @@ constexpr float kAttackInterval = 1.0f;
 /// blows. Six ticks, the reference's own swing duration - so a mob strikes,
 /// recovers, and stands there for most of a second before doing it again.
 constexpr float kAttackSwingSeconds = 0.3f;
+
+/// Burning in daylight: one point a second, which is the reference's own fire
+/// damage rate, above a sky light of twelve. A zombie therefore takes twenty
+/// seconds to die of the sun and can still reach shade in that time - the
+/// reference's behaviour, and the whole reason it reads as burning rather than
+/// as vanishing.
+constexpr float kBurnInterval = 1.0f;
+constexpr int kBurnDamage = 1;
+constexpr int kBurnSkyLight = 12;
 
 /// What a hopper does when it arrives on you. **Ours, not the reference's** -
 /// Bedrock makes a slime `pushable` and lets entity collision separate the two,
@@ -809,7 +847,7 @@ constexpr CreatureSpecies kSpecies[] = {
      .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
      .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
-     .chaseSpeedScale = 1.25f, .shootsArrows = true},
+     .chaseSpeedScale = 1.25f, .shootsArrows = true, .heldMainHand = ItemId::Bow},
     // Model and texture only for now: it wanders and nothing more. Trading, the
     // schedule and villages are their own milestone entirely. It bolts at its
     // run speed and gets no bonus on top, which leaves it the least athletic
@@ -859,24 +897,27 @@ constexpr CreatureSpecies kSpecies[] = {
      .senseRange = 16.0f, .attackDamage = 6, .nocturnal = true, .maxBlockLight = 6,
      .weight = 0.35f, .burnsInDay = false, .avoids = tagMask(CreatureTag::Canine),
      .avoidRange = 6.0f, .floats = false, .amphibious = true,
-     .breathesWater = true, .avoidsWater = true, .chaseSpeedScale = 1.25f, .swingsArms = true},
+     .breathesWater = true, .avoidsWater = true, .chaseSpeedScale = 1.25f, .swingsArms = true,
+     .heldMainHand = ItemId::StoneSword},
     // Stray and bogged are the skeleton's rig again, unchanged. What separates
     // them is where they live and how hard they are: the stray holds the cold
     // uplands and is the tougher, the bogged swarms the lowlands and is the
-    // weaker. The reference tells them apart by the arrows they fire, which we
-    // have no bow for yet.
+    // weaker. The reference also tells them apart by the arrows they fire -
+    // `aux_val` 19 slowness and 26 poison - which needs a tipped-arrow launch
+    // kind we do not have; both fire plain ones.
     {.name = "Stray", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 20, .walkSpeed = 1.2f, .runSpeed = 2.8f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.5f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
      .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
-     .chaseSpeedScale = 1.25f, .shootsArrows = true},
+     .chaseSpeedScale = 1.25f, .shootsArrows = true, .heldMainHand = ItemId::Bow},
     {.name = "Bogged", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.5f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 3.0f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.6f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
      .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
-     .chaseSpeedScale = 1.25f, .shootsArrows = true},
+     .chaseSpeedScale = 1.25f, .shootsArrows = true, .rangedInterval = 3.5f,
+     .heldMainHand = ItemId::Bow},
     // The villager's rig - its nets are identical row for row - but posed with
     // the arms held out rather than folded, which is the reference's own
     // distinction between a villager and one that has turned.
@@ -890,10 +931,18 @@ constexpr CreatureSpecies kSpecies[] = {
     // caught out at dawn keeps coming. It notices you at only 10 m, which is
     // the reference's, and then follows to 64: a witch is hard to provoke and
     // very hard to shake.
+    //
+    // **It throws and does not touch you.** Until now it set neither ranged
+    // flag, so it fell through to `MeleeAttack` and dealt its two damage by
+    // walking into you with no animation at all - the `attackDamage` below is
+    // now what a bottle of Harming is worth rather than what its hands are.
+    // `heldMainHand` stays empty on purpose: the reference's witch has nothing
+    // in its hands until it reaches for a bottle, and the bottle is put there
+    // by the behaviour through `heldOverride`.
     {.name = "Witch", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f, .gaitSwing = 0.62f,
      .modelScale = 0.92f, .health = 26, .walkSpeed = 0.9f, .runSpeed = 1.8f, .hostile = true,
      .senseRange = 10.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.3f,
-     .burnsInDay = false, .leashRange = 64.0f},
+     .burnsInDay = false, .leashRange = 64.0f, .throwsPotions = true},
     // Passive, rare and found anywhere: the one thing on the roster that is
     // meant to read as a traveller rather than a resident. Trading is a
     // milestone of its own, so for now it only wanders.
@@ -910,11 +959,18 @@ constexpr CreatureSpecies kSpecies[] = {
     //
     // It has no float goal in the shipped data, which is not an oversight: a
     // piglin genuinely will not swim up, so deep water drowns it.
+    //
+    // ⚠ **Named divergence: it carries a stone sword, not a golden one.** The
+    // reference arms all three of these in gold and we have no gold tier at
+    // all - wood, stone, iron, diamond, emberite. A stone blade is the nearest
+    // thing that exists rather than a choice, and it is one word to change on
+    // the day a golden sword does.
     {.name = "Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 16, .walkSpeed = 1.1f, .runSpeed = 2.4f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 5, .maxBlockLight = 15, .weight = 0.3f,
      .burnsInDay = false, .floats = false, .avoidsWater = true, .leashRange = 64.0f,
-     .angerSeconds = 30.0f, .alertRange = 16.0f, .swingsArms = true},
+     .angerSeconds = 30.0f, .alertRange = 16.0f, .swingsArms = true,
+     .heldMainHand = ItemId::StoneSword},
     // The zombie's rig and the zombie's stats, living in the sea. It is
     // amphibious with no float goal, so it walks the seabed exactly as its dry
     // cousins do - and `breathes_water` is why that costs it nothing.
@@ -1084,16 +1140,21 @@ constexpr CreatureSpecies kSpecies[] = {
     // calms down - while the zombified one is **neutral**, which needs no flag
     // at all: not hostile with damage above zero is already "ignores you until
     // struck", and its thirty-second grudge is the reference's `angry` duration.
+    // The brute carries an **axe** where the other two carry swords, which is
+    // the reference's own distinction and the only thing that tells the three
+    // apart at a glance once they are all wearing the same skin family.
     {.name = "Princepin Brute", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
      .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 50, .walkSpeed = 1.2f, .runSpeed = 2.6f,
      .hostile = true, .senseRange = 16.0f, .attackDamage = 7, .maxBlockLight = 15,
      .weight = 0.12f, .burnsInDay = false, .floats = false, .avoidsWater = true,
-     .leashRange = 64.0f, .angerSeconds = 600.0f, .alertRange = 16.0f, .swingsArms = true},
+     .leashRange = 64.0f, .angerSeconds = 600.0f, .alertRange = 16.0f, .swingsArms = true,
+     .heldMainHand = ItemId::StoneAxe},
     {.name = "Zombie Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
      .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f,
      .senseRange = 16.0f, .attackDamage = 5, .nocturnal = true, .maxBlockLight = 7,
      .weight = 0.35f, .burnsInDay = false, .floats = false, .amphibious = true,
-     .breathesWater = true, .angerSeconds = 30.0f, .alertRange = 20.0f, .swingsArms = true},
+     .breathesWater = true, .angerSeconds = 30.0f, .alertRange = 20.0f, .swingsArms = true,
+     .heldMainHand = ItemId::StoneSword},
     // The silverfish's cousin, and it keeps the one thing that makes a
     // silverfish frightening: no line of sight needed.
     {.name = "Voidmite", .halfWidth = 0.20f, .height = 0.30f, .gaitRate = 11.0f,
@@ -1806,9 +1867,13 @@ void panicTick(const BehaviourContext& ctx) {
 /// there is a target, which is exactly why retaliation, pack anger and hunting
 /// on sight all reach it through the same slot.
 bool meleeAttackStart(const BehaviourContext& ctx) {
-    // An archer never closes. Excluded here as well as being outranked by
-    // `RangedAttack`, so the two can never both want the same controllers.
-    return ctx.self.target != CreatureTarget::None && !ctx.species.shootsArrows;
+    // An archer never closes, and neither does a thrower. Excluded here as well
+    // as being outranked by `RangedAttack`, so the two can never both want the
+    // same controllers - and **the witch is the reason this is now two tests**:
+    // it set neither flag, so it fell straight through to melee and dealt two
+    // damage by walking into you, with no animation and nothing thrown.
+    return ctx.self.target != CreatureTarget::None && !ctx.species.shootsArrows &&
+           !ctx.species.throwsPotions;
 }
 
 void meleeAttackTick(const BehaviourContext& ctx) {
@@ -1991,15 +2056,95 @@ void meleeAttackTick(const BehaviourContext& ctx) {
     ctx.attack.landed = true;
 }
 
+/// A point on a creature's body, in the same model units `buildMesh`'s `place`
+/// takes: forward from the middle, up from the feet, and out to its **left**.
+struct ModelPoint {
+    float alongForward = 0.0f;
+    float up = 0.0f;
+    float alongSide = 0.0f;
+};
+
+/// The biped rig's arm, as `biped` itself authors it.
+///
+/// Lifted to file scope because **two things now read these numbers**: the mesh
+/// hangs a bow on the hand, and the archer below looses an arrow from it. A
+/// hand worked out twice is a hand in two places, which is the first entry in
+/// `CLAUDE.md`'s box of bug shapes.
+constexpr float kBipedArmRestUp = 1.125f;
+constexpr float kBipedShoulderGap = 0.25f;
+constexpr float kBipedArmLength = 12.0f;
+constexpr float kBipedArmGrow = 0.005f;
+
+/// Where a biped's hand ends up, in model units.
+///
+/// **`legBox` derives its pivot from the box's own extent** - half the thinner
+/// cross-section below the top face - and the hand is that pivot swung by the
+/// whole length of the limb, so this reproduces `legBox`'s arithmetic rather
+/// than approximating it. At `pitch` and `roll` of zero it returns the bottom
+/// of an arm hanging at rest, which is the same "reduces to what it replaced"
+/// property `legBox` and `beginHead` both have.
+///
+/// `mainHand` is the creature's **right**, which is `-side`: the player skin
+/// net this rig uses paints the right arm at (40,16) and the left at (32,48),
+/// and the Princepin's two arms - the one model here with a different net per
+/// side - already sit that way round. That is the check, not a guess.
+///
+/// Swell is deliberately absent: the one species that swells has no hands.
+ModelPoint bipedHandPoint(float limbWidth, float pitch, float roll, bool mainHand) {
+    const float halfHeight = kBipedArmLength * kTexel * 0.5f + kBipedArmGrow;
+    const float overhang = limbWidth * kTexel * 0.5f + kBipedArmGrow;
+    const float hang = std::max(halfHeight - overhang, 0.0f);
+    const float reach = hang + halfHeight;
+    const float cosRoll = std::cos(roll);
+    const float shoulder = (mainHand ? -1.0f : 1.0f) *
+                           (kBipedShoulderGap + limbWidth * kTexel * 0.5f);
+    return {-std::sin(pitch) * cosRoll * reach,
+            kBipedArmRestUp + hang - std::cos(pitch) * cosRoll * reach,
+            shoulder + std::sin(roll) * reach};
+}
+
+/// The villager rig's folded hands, in model units.
+///
+/// **Derived from the fold's own pivot and the arm's own length**, not measured
+/// off a picture. `villagerRig` places three boxes as one rigid group pitched
+/// `kVillagerFold`, and solving its two stated centres back for the point they
+/// turn about gives 1.384 from both to within the sixteenth of a texel the
+/// forearm block is deliberately nudged by. The hands are then that pivot
+/// carried one arm's length along the way the fold points.
+constexpr float kVillagerFold = -0.75f;
+constexpr float kVillagerArmPivotUp = 1.384f;
+constexpr float kVillagerArmLength = 8.0f;
+
+ModelPoint villagerHandPoint() {
+    const float reach = kVillagerArmLength * kTexel;
+    return {-std::sin(kVillagerFold) * reach,
+            kVillagerArmPivotUp - std::cos(kVillagerFold) * reach, 0.0f};
+}
+
+/// A model point in world space, for the two things outside `buildMesh` that
+/// need one: an arrow leaves an archer's bow and a bottle leaves a witch's
+/// hands, and both have to start where the thing being thrown is *drawn*.
+///
+/// Reads `position`, never `renderPosition`: the step-up smoothing is a fact
+/// about the picture and nothing that reasons about the world may see it.
+glm::vec3 modelPointToWorld(const Creature& creature, const CreatureSpecies& species,
+                            const ModelPoint& point) {
+    const float scale = species.modelScale * creature.scale;
+    const float sinYaw = std::sin(creature.yaw);
+    const float cosYaw = std::cos(creature.yaw);
+    return creature.position + glm::vec3{sinYaw, 0.0f, cosYaw} * (point.alongForward * scale) +
+           glm::vec3{cosYaw, 0.0f, -sinYaw} * (point.alongSide * scale) +
+           glm::vec3{0.0f, point.up * scale, 0.0f};
+}
+
 /// How an archer fights: at a distance, on a cadence, and never by touching you.
 ///
 /// The reference's `behavior.ranged_attack` in miniature - engage inside
 /// `kArcherRange`, back off inside `kArcherTooClose`, close up outside
-/// `kArcherPreferred`, and loose once a second.
+/// `kArcherPreferred`, and loose on `species.rangedInterval`.
 constexpr float kArcherRange = 15.0f;
 constexpr float kArcherPreferred = 9.0f;
 constexpr float kArcherTooClose = 4.0f;
-constexpr float kArcherInterval = 1.0f;
 /// Bedrock's `mob_arrow` power, in blocks per tick.
 constexpr float kArcherPower = 1.6f;
 /// `uncertainty_base` 16 less `uncertainty_multiplier` 4 times a Normal
@@ -2011,47 +2156,212 @@ constexpr float kArcherSpread = 8.0f;
 /// vector.
 constexpr float kSpreadPerUnit = 0.0172275f;
 
-bool rangedAttackStart(const BehaviourContext& ctx) {
-    return ctx.species.shootsArrows && ctx.self.target != CreatureTarget::None;
+/// How far off straight ahead a target may be and still be shot at, in radians.
+///
+/// **Asked of the body, never the head.** The bow is in a hand, the hand hangs
+/// off the body, and the arrow's direction is worked out from where the target
+/// actually is - so an archer that fires before it has finished turning sends
+/// an arrow sideways out of a bow pointing somewhere else. Twenty degrees is
+/// tight enough that the two always agree and loose enough that a `kTurnRate`
+/// of 4 rad/s reaches it in a fraction of the reload.
+constexpr float kArcherFov = 0.35f;
+
+/// How long the loose itself takes, and it is the **tail of the reload** rather
+/// than time added to it - the cadence is still `rangedInterval`.
+///
+/// Once it starts, nothing stops it but dying: an archer plants where it
+/// stands, holds what it has, and the arrow goes. That is also what guarantees
+/// it is never retreating at the moment of release, whatever it was doing when
+/// it committed.
+constexpr float kArcherRelease = 0.4f;
+
+/// How fast the weapon comes up and goes back down, in fractions of the pose
+/// per second. A sixth of a second either way - fast enough that an archer
+/// looks ready rather than slow, slow enough that the bow is not simply *at*
+/// the shoulder on the frame the target is acquired.
+///
+/// **The easing is ours; the reference has none.** Its controller is two states
+/// with no blend time at all, so a Bedrock skeleton's bow snaps up. A sixth of
+/// a second is below the threshold where that reads as a delay and above the
+/// one where it reads as a pop.
+constexpr float kAimRate = 6.0f;
+
+/// `animation.humanoid.bow_and_arrow`, and it is a far simpler pose than the
+/// obvious guess. **Both arms go straight out to -90 degrees**; the only thing
+/// that separates the bow hand from the string hand is a third of a turn of
+/// **yaw** - the reference's own +28.65 on the left against -5.73 on the right,
+/// which brings the string hand in across the chest. There is no draw-back, no
+/// second pitch, and no keyframes: the entry has two bones and nothing else.
+///
+/// Our `legBox` takes a pitch and a roll rather than a yaw, and for an arm
+/// already pointing straight forward those are the same motion - the hand runs
+/// along `forward * cos(roll) + side * sin(roll)`, so the roll *is* the yaw
+/// once the arm is level. Positive swings toward `side`, which is the
+/// creature's left, so the left arm's inward turn is the negative one.
+///
+/// 28.65 degrees is 0.5 radians and 5.73 is 0.1: the reference's numbers are
+/// radian constants that have been through a conversion, which is a good sign
+/// they are being read the right way round.
+constexpr float kArcherArmPitch = -1.5708f;
+constexpr float kArcherBowArmRoll = 0.10f;
+constexpr float kArcherStringArmRoll = -0.50f;
+
+/// Every archer on the roster is the skeleton rig, at a two-texel limb.
+/// **This is asserted rather than assumed**, because the hand the arrow leaves
+/// from is derived from that limb width: giving a four-texel biped
+/// `shootsArrows` would otherwise fire its arrows out of a shoulder, silently,
+/// and nothing about the shot would look wrong enough to notice.
+constexpr float kArcherLimbWidth = 2.0f;
+
+constexpr bool archersShareOneRig() {
+    for (std::size_t i = 0; i < std::size(kSpecies); ++i) {
+        if (!kSpecies[i].shootsArrows) {
+            continue;
+        }
+        const auto kind = static_cast<CreatureKind>(i);
+        if (kind != CreatureKind::Skeleton && kind != CreatureKind::Stray &&
+            kind != CreatureKind::Bogged) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(archersShareOneRig(),
+              "every archer must be the skeleton rig, or the arrow leaves the wrong place");
+
+/// How a witch fights, and it is the archer's shape with different numbers.
+///
+/// `attack_radius` 10 rather than 15, because a bottle arcs where an arrow
+/// flies and has to be lobbed from closer in.
+constexpr float kWitchRange = 10.0f;
+constexpr float kWitchPreferred = 7.0f;
+constexpr float kWitchTooClose = 3.0f;
+/// The reference's own throw: power 0.75 blocks per tick, inaccuracy 8, aimed
+/// at the target's eye **less 1.1** so the bottle bursts at their feet rather
+/// than over their head. Same 8-unit spread the archer uses, which is why the
+/// two share the wobble below.
+constexpr float kWitchThrowPower = 0.75f;
+constexpr float kWitchAimDrop = 1.1f;
+/// Far enough away that a bottle of Slowness is worth more than damage. The
+/// reference's own threshold; its companion at three blocks is in the table
+/// above `witchBrewFor` and is unreachable until player health arrives here.
+constexpr float kWitchSlownessRange = 8.0f;
+/// How long before a throw a witch reaches for the bottle, in seconds.
+///
+/// **Ours.** The reference has no witch throw animation to port, and without
+/// some tell a potion appears out of a motionless villager. Long enough to be
+/// seen coming and short enough that the other two and a half seconds of the
+/// reload still read as a witch walking at you.
+constexpr float kWitchReach = 0.6f;
+/// How far the folded arms swing up over a throw, in radians. Taken with the
+/// fold's own -0.75 it ends just past straight out, which is an overhand lob
+/// rather than a punch - and it is applied to the assembly **as one rigid
+/// group**, because that fold is closed and may only move without coming apart.
+///
+/// **Ours, not the reference's.** Bedrock's witch has no throw animation in the
+/// shipped pack at all; without some tell, a thrown potion appears out of a
+/// motionless villager.
+constexpr float kWitchArmRaise = 0.85f;
+
+/// The row in `kPotions` carrying an effect at a given strength.
+///
+/// **Scanned rather than written down.** The forty-one brews are a table in
+/// `Item.hpp` and their indices are an implementation detail of it; a literal
+/// 23 here would be a second copy of that ordering, and inserting one brew
+/// would silently turn every witch into a thrower of something else.
+constexpr int potionRow(effects::Effect effect, int amplifier) {
+    for (std::size_t i = 0; i < kPotions.size(); ++i) {
+        if (kPotions[i].effect == effect && kPotions[i].amplifier == amplifier &&
+            kPotions[i].second == effects::Effect::None) {
+            return static_cast<int>(i);
+        }
+    }
+    return 0;
 }
 
-void rangedAttackTick(const BehaviourContext& ctx) {
+/// The splash form of a brew, which is the only form a witch ever holds.
+constexpr ItemId witchBrew(effects::Effect effect) {
+    return potionAt(potionRow(effect, 0), 1);
+}
+
+static_assert(isSplashPotion(witchBrew(effects::Effect::Slowness)) &&
+                  isSplashPotion(witchBrew(effects::Effect::Poison)) &&
+                  isSplashPotion(witchBrew(effects::Effect::Weakness)) &&
+                  isSplashPotion(witchBrew(effects::Effect::InstantDamage)),
+              "a witch must be holding a splash potion, not a bottle it would drink");
+static_assert(potionKind(witchBrew(effects::Effect::InstantDamage)).effect ==
+                      effects::Effect::InstantDamage &&
+                  potionKind(witchBrew(effects::Effect::Poison)).effect == effects::Effect::Poison,
+              "the scan must find the brew it was asked for");
+
+/// Which bottle to reach for.
+///
+/// **This is a first-match list in the reference's shipped `minecraft:shooter`,
+/// not engine code**, and the order is Mojang's own:
+///
+/// | | Potion | Condition |
+/// |---|---|---|
+/// | 1 | Healing | target is a raider on 4 health or less |
+/// | 2 | Regeneration | target is any raider |
+/// | 3 | Slowness | target 8 blocks or further, not already slowed |
+/// | 4 | Poison | target on 8 health or more, not already poisoned |
+/// | 5 | Weakness | target within 3 blocks, not weakened, one chance in four |
+/// | - | Harming | when nothing above matched |
+///
+/// **Two of the six are dead here and two more are unreachable, and both
+/// reasons are worth stating rather than hiding.** We have no raiders, so rows
+/// 1 and 2 cannot fire at all. And nothing in this system can see how hurt the
+/// player is - `Creatures` is handed their feet and whether they are sneaking,
+/// and nothing else - so row 4's health test is taken as satisfied, which is
+/// exactly what the reference does for anyone on eight health or more. That
+/// leaves rows 5 and 6 unreachable until player health arrives here, at which
+/// point they are two lines and the brews are already named below.
+///
+/// The result is faithful for a healthy player, which is nearly always: at
+/// range a witch slows you so it can keep the range, and in close it poisons
+/// you.
+ItemId witchBrewFor(const BehaviourContext& ctx) {
+    if (ctx.distance >= kWitchSlownessRange) {
+        return witchBrew(effects::Effect::Slowness);
+    }
+    return witchBrew(effects::Effect::Poison);
+}
+
+bool rangedAttackStart(const BehaviourContext& ctx) {
+    return (ctx.species.shootsArrows || ctx.species.throwsPotions) &&
+           ctx.self.target != CreatureTarget::None;
+}
+
+/// Lets the shot go. Split out of the tick because the tick decides *whether*
+/// and this decides *where*, and a committed release has to be able to run it
+/// from a branch that has already stopped thinking about anything else.
+void loose(const BehaviourContext& ctx, bool thrower) {
     Creature& self = ctx.self;
-    self.targetHeadYaw = ctx.yawToPlayer;
-    self.targetHeadPitch = ctx.pitchToPlayer;
-    self.targetYaw = ctx.yawToPlayer;
-    self.speedScale = ctx.species.chaseSpeedScale;
 
-    if (ctx.distance > kArcherPreferred) {
-        self.running = true;
-        walkTo(ctx, ctx.self.position + ctx.toPlayer);
-    } else if (ctx.distance < kArcherTooClose) {
-        // Backing away is a bearing rather than a place, like panic: there is
-        // nowhere in particular it wants to be, only somewhere further off.
-        self.running = true;
-        walkToward(ctx, ctx.yawToPlayer + 3.14159265f);
-    } else {
-        self.walking = false;
-        self.route.clear();
-    }
-
-    self.shootTimer -= ctx.deltaSeconds;
-    if (self.shootTimer > 0.0f || ctx.distance > kArcherRange || !ctx.seesPlayer) {
-        return;
-    }
-    self.shootTimer = kArcherInterval;
-    self.swingTimer = kAttackSwingSeconds;
-
+    // Where the shot leaves, and it is **the hand holding the weapon** rather
+    // than the middle of the chest it used to be. Both points come from the
+    // same two functions the mesh hangs the item on, so the arrow can only ever
+    // leave the bow and the bottle can only ever leave the fingers.
     const glm::vec3 from =
-        self.position + glm::vec3{0.0f, ctx.species.height * self.scale * 0.85f, 0.0f};
-    const glm::vec3 to = ctx.self.position + ctx.toPlayer +
-                         glm::vec3{0.0f, player_constants::kEyeHeight * 0.66f, 0.0f};
+        thrower ? modelPointToWorld(self, ctx.species, villagerHandPoint())
+                : modelPointToWorld(self, ctx.species,
+                                    bipedHandPoint(kArcherLimbWidth,
+                                                   kArcherArmPitch + self.headPitch,
+                                                   kArcherBowArmRoll, true));
+
+    // A bottle is aimed **below** the eye and an arrow above the waist: the one
+    // is meant to burst at your feet and the other to hit your chest.
+    const float aimHeight = thrower ? player_constants::kEyeHeight - kWitchAimDrop
+                                    : player_constants::kEyeHeight * 0.66f;
+    const glm::vec3 to = ctx.self.position + ctx.toPlayer + glm::vec3{0.0f, aimHeight, 0.0f};
 
     glm::vec3 aim = to - from;
     const float flat = std::sqrt(aim.x * aim.x + aim.z * aim.z);
     // Aim above the target by a fifth of the ground distance. The reference's
     // own lead, and without it an archer's arrows all land at your feet -
     // gravity is not something a straight aim can survive over fifteen metres.
+    // The reference gives a witch's throw the identical fifth, which is why one
+    // line serves both.
     aim.y += flat * 0.2f;
 
     const float length = glm::length(aim);
@@ -2067,7 +2377,120 @@ void rangedAttackTick(const BehaviourContext& ctx) {
     };
     aim += glm::vec3{wobble(), wobble(), wobble()};
 
+    if (thrower) {
+        ctx.launches.push_back({from, aim * kWitchThrowPower,
+                                Creatures::LaunchKind::SplashPotion, self.heldOverride});
+        // Out of its hands the instant it leaves them.
+        self.heldOverride = ItemId::None;
+        return;
+    }
     ctx.launches.push_back({from, aim * kArcherPower});
+}
+
+void rangedAttackTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+    self.targetHeadYaw = ctx.yawToPlayer;
+    self.targetHeadPitch = ctx.pitchToPlayer;
+    self.targetYaw = ctx.yawToPlayer;
+    self.speedScale = ctx.species.chaseSpeedScale;
+
+    // One behaviour, two weapons. They engage at different distances and throw
+    // different things, and everything between those two facts - closing,
+    // backing off, reloading, leading the shot, the spread - is identical, so
+    // it is written once. A second row in the table would have been a second
+    // copy of all of it.
+    const bool thrower = ctx.species.throwsPotions;
+    const float range = thrower ? kWitchRange : kArcherRange;
+    const float preferred = thrower ? kWitchPreferred : kArcherPreferred;
+    const float tooClose = thrower ? kWitchTooClose : kArcherTooClose;
+    const float release = thrower ? kWitchReach : kArcherRelease;
+
+    // **The weapon comes up on sight of a target and stays up.** The
+    // reference's `controller.animation.humanoid.bow_and_arrow` is two states
+    // transitioning on `query.has_target` and on nothing else - no charge gate,
+    // no blend, no animation length. So a skeleton with a target is an archer
+    // with a raised bow whether or not it can shoot this second, and the three
+    // seconds between shots are a *reload happening behind a drawn bow* rather
+    // than a wind-up. This behaviour only runs with a target, so saying it here
+    // says exactly that.
+    //
+    // **A witch is ours and is deliberately not that.** Bedrock ships no throw
+    // animation for her at all, and holding the arms up for the whole
+    // engagement would leave a villager brandishing a bottle at you for three
+    // seconds at a stretch. She reaches for the bottle only while she is
+    // actually committed to throwing it, which is what makes a throw read as a
+    // throw - and it is the reason `aimWanted` exists apart from `aiming`
+    // rather than being the same flag twice.
+    self.aiming = true;
+    self.aimWanted = (!thrower || self.releaseTimer > 0.0f) ? 1.0f : 0.0f;
+
+    // **A shot, once started, finishes.** Nothing below cancels a release: not
+    // losing sight of you, not stepping out of range, not being shoved. Only
+    // dying does, and it does so by the corpse branch never reaching this
+    // behaviour at all. The archer plants where it stands for the length of it,
+    // which is also what guarantees the second half of the rule below - that it
+    // is never retreating at the moment the arrow leaves.
+    if (self.releaseTimer > 0.0f) {
+        self.walking = false;
+        self.route.clear();
+        self.releaseTimer -= ctx.deltaSeconds;
+        if (self.releaseTimer > 0.0f) {
+            return;
+        }
+        self.releaseTimer = 0.0f;
+        self.drawTimer = 0.0f;
+        loose(ctx, thrower);
+        return;
+    }
+
+    if (ctx.distance > preferred) {
+        self.running = true;
+        walkTo(ctx, ctx.self.position + ctx.toPlayer);
+    } else if (ctx.distance < tooClose) {
+        // Backing away is a bearing rather than a place, like panic: there is
+        // nowhere in particular it wants to be, only somewhere further off.
+        self.running = true;
+        walkToward(ctx, ctx.yawToPlayer + 3.14159265f);
+    } else {
+        self.walking = false;
+        self.route.clear();
+    }
+
+    // Clamped rather than left to run on, so a target that ducks behind a wall
+    // for a minute is shot at once when it steps out and not four times.
+    self.drawTimer = std::min(self.drawTimer + ctx.deltaSeconds, ctx.species.rangedInterval);
+    if (self.drawTimer < ctx.species.rangedInterval) {
+        return;
+    }
+
+    // **Four things have to be true before it will even start a shot**, and the
+    // reload sitting at full while they are not is the point: it looses the
+    // moment they come true rather than losing its turn.
+    //
+    // The first two are the old ones - in range, and it can actually see you.
+    // The third is that the **body** is pointed at you: the arrow's direction
+    // is worked out from where you are, so a skeleton that fires while still
+    // turning sends an arrow sideways out of a bow that is not facing it. The
+    // body yaw is the right one to ask because the bow is in a hand and the
+    // hand follows the body - the head turns on its own and must not count.
+    // And the fourth is that it is not **backing away**: it may shoot standing
+    // still or while closing, never while retreating.
+    const float offAim = std::abs(std::remainder(ctx.yawToPlayer - self.yaw, kTwoPi));
+    const bool retreating = ctx.distance < tooClose;
+    if (ctx.distance > range || !ctx.seesPlayer || offAim > kArcherFov || retreating) {
+        return;
+    }
+
+    // Committed. From here the release runs to its end on its own.
+    //
+    // The bottle is chosen **here**, at the moment she reaches for it, and held
+    // until it leaves her hand - so what she is visibly holding is what arrives.
+    // It has to be this side of the commit rather than during the release,
+    // because the release branch above does nothing but count down and throw.
+    if (thrower) {
+        self.heldOverride = witchBrewFor(ctx);
+    }
+    self.releaseTimer = release;
 }
 
 bool wanderStart(const BehaviourContext&) {
@@ -3097,6 +3520,34 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     creature.scanTimer = std::max(0.0f, creature.scanTimer - deltaSeconds);
     creature.decisionTimer -= deltaSeconds;
 
+    // **Caught in the sun, and it burns to death rather than being deleted.**
+    // `manage` used to retire one outright the moment the sky reached twelve,
+    // which is why a zombie from a spawn egg at noon simply vanished on the
+    // frame it appeared - no fire, no body, no drop, and nothing to tell the
+    // player what had happened. The reference sets an undead alight and lets
+    // ordinary damage finish it, so it staggers, flashes, falls over and leaves
+    // what it was carrying. That also means **anything can now be spawned in
+    // daylight**; the ones the sun kills just take the twenty seconds it takes.
+    //
+    // Water and shade both stop it, which is the reference's rule and the only
+    // reason a drowned is not extinct by breakfast.
+    if (!night && species.nocturnal && species.burnsInDay && !creature.inWater &&
+        creature.health > 0 &&
+        world.skyLightAt(static_cast<int>(std::floor(creature.position.x)),
+                         static_cast<int>(std::floor(creature.position.y)),
+                         static_cast<int>(std::floor(creature.position.z))) >= kBurnSkyLight) {
+        creature.burnTimer += deltaSeconds;
+        while (creature.burnTimer >= kBurnInterval) {
+            creature.burnTimer -= kBurnInterval;
+            creature.health -= kBurnDamage;
+            creature.hurtTimer = kHurtSeconds;
+        }
+    } else {
+        // Stepping into shade puts it out rather than pausing it, so a zombie
+        // that reaches a doorway with one point left keeps that point.
+        creature.burnTimer = 0.0f;
+    }
+
     const glm::vec3 toPlayer = playerFeet - creature.position;
     const float distance = std::sqrt(toPlayer.x * toPlayer.x + toPlayer.z * toPlayer.z);
     const float yawToPlayer = std::atan2(toPlayer.x, toPlayer.z);
@@ -3264,6 +3715,8 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     creature.running = false;
     creature.speedScale = 1.0f;
     creature.swelling = false;
+    creature.aiming = false;
+    creature.aimWanted = 0.0f;
     creature.targetHeadYaw = creature.yaw;
     creature.targetHeadPitch = 0.0f;
 
@@ -3304,6 +3757,32 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                                    m_pathfinder,
                                    m_pathBudget};
     runBehaviours(context);
+
+    // The weapon comes up and goes back down. Eased rather than switched, so a
+    // bow is raised over a sixth of a second instead of appearing at the
+    // shoulder, and **held across the release** - the reference starts the next
+    // draw rather than lowering the bow between shots, which is why `aiming`
+    // stays true through a shot and only a lost target puts it down.
+    //
+    // The wind-up unwinds only once nothing is holding it, the same way the
+    // Bramble's fuse does: breaking line of sight is then a real defence rather
+    // than a pause, and a half-drawn bow cannot be left drawn for ever.
+    const float aimWanted = creature.aimWanted;
+    if (creature.aim < aimWanted) {
+        creature.aim = std::min(aimWanted, creature.aim + deltaSeconds * kAimRate);
+    } else {
+        creature.aim = std::max(aimWanted, creature.aim - deltaSeconds * kAimRate);
+    }
+    if (!creature.aiming) {
+        creature.drawTimer = std::max(0.0f, creature.drawTimer - deltaSeconds);
+        creature.heldOverride = ItemId::None;
+        // Losing the target outright is the one thing that abandons a committed
+        // shot, and only because there is nothing left to shoot at - it takes
+        // `forgetSeconds`, so it cannot happen inside a release that lasts a
+        // fraction of a second. Left set, it would fire the instant you came
+        // back into view.
+        creature.releaseTimer = 0.0f;
+    }
 
     // Rearmed after the table has run, not before, so the acquisition predicate
     // gets to see the tick on which it expired. A scan that finds nothing costs
@@ -4356,23 +4835,18 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
         const CreatureSpecies& species = speciesInfo(creature.kind);
         const glm::vec3 offset = creature.position - playerFeet;
         const bool tooFar = glm::dot(offset, offset) > m_activeRadius * m_activeRadius;
-        // Nocturnal creatures caught in daylight retire, which is what makes a
-        // night different from a day rather than merely darker. Slimes and
-        // spiders are exempt: they spawn in the dark and simply stay. So is
-        // anything still in the water, which is the reference's rule and the
-        // only reason a drowned is not extinct by breakfast.
-        const int sky = world.skyLightAt(static_cast<int>(std::floor(creature.position.x)),
-                                        static_cast<int>(std::floor(creature.position.y)),
-                                        static_cast<int>(std::floor(creature.position.z)));
-        const bool burnedOff =
-            !night && species.nocturnal && species.burnsInDay && sky >= 12 && !creature.inWater;
         // Not simply "out of health": the body stays while it tips over. Every
         // other reason to go is immediate, which is right - retiring at a
-        // distance and burning off are the world forgetting about something,
-        // not it dying in front of you.
+        // distance is the world forgetting about something, not it dying in
+        // front of you.
+        //
+        // **Daylight is no longer one of those reasons.** A nocturnal creature
+        // caught in the sun used to be deleted here; it now catches fire in
+        // `think` and dies of it, which is what lets one be spawned at noon and
+        // watched rather than blinking out of existence.
         const bool killed = creature.health <= 0 && creature.deathTimer >= kDeathSeconds;
 
-        if (tooFar || burnedOff || killed || creature.position.y < -8.0f) {
+        if (tooFar || killed || creature.position.y < -8.0f) {
             // Only a kill leaves anything behind. Retiring at a distance or
             // burning off is the world forgetting about an animal, and a trail
             // of meat at the edge of the render distance is not that.
@@ -4757,7 +5231,7 @@ int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float
 }
 
 engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& translucent,
-                                      const DrawRange& range) const {
+                                      const DrawRange& range, const SpriteMask* sprites) const {
     engine::MeshData mesh;
 
     // Where the next quad goes and how see-through it is. Everything defaults
@@ -4971,26 +5445,36 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // `roll` tips the box about its own forward axis, which is the only
             // way an axis-aligned box gets a wing that lifts.
             //
-            // The box's own up axis after both rotations, and the one place it
-            // is worked out: `uprightBox` measures its height along it and
-            // `legBox` hangs a limb from it, and those two disagreeing would
-            // put every limb somewhere its own box is not.
+            // The box's own three axes after both rotations, and the one place
+            // they are worked out: `uprightBox` measures its extents along
+            // them, `legBox` hangs a limb from the height axis and a held item
+            // rides on all three. Any two of those disagreeing would put
+            // something somewhere its own box is not.
+            struct BoxAxes {
+                glm::vec3 depth;
+                glm::vec3 side;
+                glm::vec3 height;
+            };
+            const auto boxAxes = [&](float pitch, float roll) {
+                const float cosPitch = std::cos(pitch);
+                const float sinPitch = std::sin(pitch);
+                const glm::vec3 pitched = forward * sinPitch + upAxis * cosPitch;
+                return BoxAxes{forward * cosPitch - upAxis * sinPitch,
+                               side * std::cos(roll) + pitched * std::sin(roll),
+                               pitched * std::cos(roll) - side * std::sin(roll)};
+            };
             const auto boxHeightAxis = [&](float pitch, float roll) {
-                const glm::vec3 pitched = forward * std::sin(pitch) + upAxis * std::cos(pitch);
-                return pitched * std::cos(roll) - side * std::sin(roll);
+                return boxAxes(pitch, roll).height;
             };
 
             const auto uprightBox = [&](const glm::vec3& centre, float netW, float netH, float netD,
                                         float u, float v, float vBase, float grow, float pitch = 0.0f,
                                         float growSide = 0.0f, float roll = 0.0f,
                                         bool mirror = false) {
-                const float cosPitch = std::cos(pitch);
-                const float sinPitch = std::sin(pitch);
-                const glm::vec3 depthAxis = forward * cosPitch - upAxis * sinPitch;
-                const glm::vec3 pitched = forward * sinPitch + upAxis * cosPitch;
-
-                const glm::vec3 sideAxis = side * std::cos(roll) + pitched * std::sin(roll);
-                const glm::vec3 heightAxis = boxHeightAxis(pitch, roll);
+                const BoxAxes axes = boxAxes(pitch, roll);
+                const glm::vec3 depthAxis = axes.depth;
+                const glm::vec3 sideAxis = axes.side;
+                const glm::vec3 heightAxis = axes.height;
 
                 const glm::vec3 f = depthAxis * ((netD * kTexel * 0.5f + grow) * modelScale * swellWide);
                 const glm::vec3 s =
@@ -5023,6 +5507,16 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                          0.55f, vBase, u + netD + netW, v, netW, netD);
             };
 
+            // Where a limb's far end came to rest, and the frame it got there
+            // on. `up` runs from that end back toward the joint, so a hand's
+            // three axes are the arm's own.
+            struct LimbEnd {
+                glm::vec3 tip;
+                glm::vec3 up;
+                glm::vec3 forward;
+                glm::vec3 side;
+            };
+
             // A limb that hangs from a joint and turns about it, instead of
             // sliding back and forth. The foot then traces an arc - it lifts,
             // it eases into each extreme, and the top of the limb stays put
@@ -5044,6 +5538,13 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // `restCentre` is where the box sits at rest, so an angle of zero
             // rebuilds precisely the box `uprightBox` would have. That is what
             // lets the roster convert one species at a time.
+            //
+            // **It returns where the far end of the limb ended up**, because
+            // that is where a hand is and there is nowhere else to get one.
+            // Working a fist out from the shoulder and the pitch a second time
+            // is this repo's oldest bug shape - a value derived somewhere other
+            // than the one place that owns it - and it would show up as a bow
+            // floating a few centimetres off an arm at only some angles.
             const auto legBox = [&](const glm::vec3& restCentre, float netW, float netH, float netD,
                                     float u, float v, float vBase, float grow, float pitch,
                                     float roll = 0.0f, bool mirror = false) {
@@ -5060,8 +5561,11 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 const float hang = std::max(halfHeight - overhang, 0.0f);
 
                 const glm::vec3 pivot = restCentre + upAxis * hang;
-                uprightBox(pivot - boxHeightAxis(pitch, roll) * hang, netW, netH, netD, u, v, vBase,
+                const BoxAxes axes = boxAxes(pitch, roll);
+                uprightBox(pivot - axes.height * hang, netW, netH, netD, u, v, vBase,
                            grow, pitch, 0.0f, roll, mirror);
+                return LimbEnd{pivot - axes.height * (hang + halfHeight), axes.height, axes.depth,
+                               axes.side};
             };
 
             // A limb that runs *sideways* out of the body and pivots at its
@@ -5181,6 +5685,100 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 skinQuad(centre - f - s - up, centre - f + s - up, centre - f + s + up,
                          centre - f - s + up, 0.72f, vBase, u + netD + netW + netD, v + netD, netW,
                          netH);
+            };
+
+            // An item in a hand: the picture extruded and walled in, through
+            // the same `appendSpriteModel` a dropped item and a thrown one
+            // already go through. **Third caller rather than a fourth path** -
+            // a bow in a fist and a bow on the floor cannot then disagree.
+            //
+            // **The hand frame is composed, not authored.** The reference moves
+            // to the arm's pivot, turns a quarter about X and a half about Y,
+            // and only then steps to the fist. Working that composition through
+            // its own model space - x the mob's left, y *down*, z backward -
+            // leaves three axes: the mob's right, the arm's own forward face,
+            // and one running back up the arm toward the shoulder. Those three
+            // are what the item's rotation and translation are expressed in,
+            // and getting them from `legBox` rather than re-deriving them is
+            // what keeps a held item welded to the arm at every angle.
+            //
+            // The step to the fist is `legBox`'s own far end rather than the
+            // reference's flat -10/16, because that number is only true of a
+            // 4-wide arm: our overhang rule puts a skeleton's 2-wide arm on a
+            // pivot a texel lower, and a constant would push a bow through the
+            // hand on one of the two.
+            const auto heldItem = [&](ItemId item, const LimbEnd& hand, bool leftHand) {
+                // **A behaviour's own choice outranks the species' standing
+                // weapon.** That is the whole of the witch's bottle: her row
+                // carries nothing, because the reference's witch has empty
+                // hands until she reaches for one, and the bottle exists only
+                // for the two seconds she is winding up to throw it.
+                if (creature.heldOverride != ItemId::None) {
+                    item = creature.heldOverride;
+                }
+                // No mask means the caller has no item pictures to hand, which
+                // is a state rather than a fault: everything else about the
+                // creature is still drawn.
+                if (item == ItemId::None || sprites == nullptr) {
+                    return;
+                }
+                // A block in a hand would need the miniature-cube path a
+                // dropped block takes, not a sprite. Nothing on the roster
+                // holds one, and drawing it as a flat picture would be worse
+                // than drawing nothing.
+                const int layer = itemTextureLayer(item);
+                if (layer < 0) {
+                    return;
+                }
+
+                const HeldTransform& held = heldTransform(item);
+                const float mirror = leftHand ? -1.0f : 1.0f;
+
+                // `side` is the creature's *left*, so its right is the negative.
+                const glm::vec3 gripRight = -hand.side;
+                const glm::vec3 gripUp = hand.forward;
+                const glm::vec3 gripBack = hand.up;
+                const auto intoWorld = [&](const glm::vec3& v) {
+                    return gripRight * v.x + gripUp * v.y + gripBack * v.z;
+                };
+
+                // The reference's own offset from the arm's end to the grip: a
+                // texel **outboard** and two forward. Outboard rather than "to
+                // the right", which is what makes one expression serve both
+                // hands instead of two numbers free to drift apart.
+                const glm::vec3 fist =
+                    hand.tip + (gripRight * mirror + gripUp * 2.0f) * (kTexel * modelScale);
+                const glm::vec3 centre =
+                    fist + intoWorld({held.translation[0] * mirror, held.translation[1],
+                                      held.translation[2]}) *
+                               (kTexel * modelScale);
+
+                constexpr float kDegrees = kPi / 180.0f;
+                const float rx = held.rotation[0] * kDegrees;
+                const float ry = held.rotation[1] * kDegrees * mirror;
+                const float rz = held.rotation[2] * kDegrees * mirror;
+                // Composed X then Y then Z, which is the reference's own order
+                // and the whole of what makes a bow stand upright when the arm
+                // comes level. Written out rather than remembered: a rotation
+                // recalled from memory comes out inverted about a third of the
+                // time, and this one has no symmetry to expose it.
+                const auto turned = [&](glm::vec3 v) {
+                    v = {v.x * std::cos(rz) - v.y * std::sin(rz),
+                         v.x * std::sin(rz) + v.y * std::cos(rz), v.z};
+                    v = {v.x * std::cos(ry) + v.z * std::sin(ry), v.y,
+                         -v.x * std::sin(ry) + v.z * std::cos(ry)};
+                    v = {v.x, v.y * std::cos(rx) - v.z * std::sin(rx),
+                         v.y * std::sin(rx) + v.z * std::cos(rx)};
+                    return intoWorld(v);
+                };
+
+                // `appendSpriteModel` wants half-extents of equal length, and
+                // the item is one block cubed in its own space before its
+                // display scale.
+                const float half = 0.5f * held.scale * modelScale;
+                appendSpriteModel(mesh, *sprites, layer, centre, turned({1.0f, 0.0f, 0.0f}) * half,
+                                  turned({0.0f, 1.0f, 0.0f}) * half,
+                                  turned({0.0f, 0.0f, 1.0f}) * half, sky, block);
             };
 
             // Runs `body` with the local frame turned about the vertical. The
@@ -6207,7 +6805,8 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // own leg, which is the whole of a walk cycle. Every part is grown a
             // third of a texel because a 12-tall limb against a 12-tall torso
             // otherwise shares a face plane exactly.
-            const auto biped = [&](float skin, float limb, bool armsOut, float inflate = 0.0f) {
+            const auto biped = [&](float skin, float limb, bool armsOut, float inflate = 0.0f,
+                                   ItemId held = ItemId::None) {
                 const float half = limb * kTexel * 0.5f;
                 const float grow = 0.005f + inflate;
                 beginHead(0.0f, 1.5f);
@@ -6236,6 +6835,16 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // zombie animations mirror the left arm onto the right
                 // throughout. Anything holding a weapon swings only the hand it
                 // is holding it in, and the other arm just keeps walking.
+                //
+                // **The swinging arm is the mob's right**, because that is the
+                // main hand and it is the hand an item is drawn in. It was the
+                // left until held items arrived, which nothing could see while
+                // both hands were empty and which would have read as a
+                // Blackbone swinging one arm and carrying its sword in the
+                // other.
+                LimbEnd mainHand{};
+                float mainPitch = 0.0f;
+                float mainRoll = 0.0f;
                 if (armsOut) {
                     // Held straight out in front. The pitch is **negative** so
                     // the net's top - the sleeve - stays at the shoulder and the
@@ -6249,25 +6858,67 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                     // spans 1.5 to 2.0 - and the arms hinged from the ears.
                     //
                     // The chop is **added**, which swings them down from here.
-                    legBox(place(0.0f, 1.125f, shoulder), limb, 12.0f, limb,
+                    legBox(place(0.0f, kBipedArmRestUp, shoulder), limb, 12.0f, limb,
                            40.0f, 16.0f, skin, grow, -1.5708f + swayPitch + zombieChop, swayRoll);
-                    legBox(place(0.0f, 1.125f, -shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, grow, -1.5708f - swayPitch + zombieChop, -swayRoll);
+                    mainPitch = -1.5708f - swayPitch + zombieChop;
+                    mainRoll = -swayRoll;
                 } else {
-                    legBox(place(0.0f, 1.125f, shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, grow, -swing + swayPitch - humanoidRaise, swayRoll);
-                    legBox(place(0.0f, 1.125f, -shoulder), limb, 12.0f, limb,
-                           40.0f, 16.0f, skin, grow, swing - swayPitch, -swayRoll);
+                    // **Aiming a bow.** `animation.humanoid.bow_and_arrow` is
+                    // two bones and nothing else: both arms straight out at -90
+                    // degrees, differing **only in yaw** - the reference's
+                    // +28.65 on the left against -5.73 on the right, which
+                    // brings the string hand in across the chest while the bow
+                    // hand stays pointed at you. There is no draw-back and no
+                    // second pitch, and the three drawn-bow pictures live on
+                    // the *item*, not on the arms.
+                    //
+                    // **The pose replaces the walk rather than adding to it.**
+                    // The reference's channels end in `- this`, which overrides
+                    // whatever the walk cycle put there, so an aiming
+                    // skeleton's arms stop swinging. Blending toward it does
+                    // exactly that at full aim - and at zero every expression
+                    // below is precisely the walking pose it replaces, which is
+                    // what makes this safe for the fifty-odd species that will
+                    // never hold anything.
+                    //
+                    // The sway is carried *through* the pose rather than
+                    // blended away, because the reference's aiming entry has
+                    // its own jitter and it is the same jitter: 0.05 radians of
+                    // pitch out of phase between the arms and a mirrored 0.05
+                    // of roll, which is `swayPitch` and `swayRoll` to the
+                    // constant.
+                    const auto blend = [&](float rest, float aimed) {
+                        return rest + (aimed - rest) * creature.aim;
+                    };
+                    const float aimPitch = kArcherArmPitch + creature.headPitch;
+
+                    legBox(place(0.0f, kBipedArmRestUp, shoulder), limb, 12.0f, limb,
+                           40.0f, 16.0f, skin, grow,
+                           blend(-swing + swayPitch, aimPitch + swayPitch),
+                           blend(swayRoll, kArcherStringArmRoll + swayRoll));
+                    mainPitch = blend(swing - swayPitch - humanoidRaise, aimPitch - swayPitch);
+                    mainRoll = blend(-swayRoll, kArcherBowArmRoll - swayRoll);
                 }
+                mainHand = legBox(place(0.0f, kBipedArmRestUp, -shoulder), limb, 12.0f, limb,
+                                  40.0f, 16.0f, skin, grow, mainPitch, mainRoll);
+                // **The anchor is `bipedHandPoint`, not the limb's own far
+                // end.** The two agree - it reproduces `legBox`'s pivot rule
+                // exactly - but the arrow leaves from that same call, and a
+                // weapon and the shot it fires derived separately would be the
+                // first entry in `CLAUDE.md`'s box of bug shapes. The limb
+                // still supplies the three axes, because only it has them.
+                const ModelPoint grip = bipedHandPoint(limb, mainPitch, mainRoll, true);
+                mainHand.tip = place(grip.alongForward, grip.up, grip.alongSide);
+                heldItem(held, mainHand, false);
             };
 
             if (creature.kind == CreatureKind::Zombie) {
-                biped(kZombieSkin, 4.0f, true);
+                biped(kZombieSkin, 4.0f, true, 0.0f, species.heldMainHand);
                 continue;
             }
 
             if (creature.kind == CreatureKind::Husk) {
-                biped(kHuskSkin, 4.0f, true);
+                biped(kHuskSkin, 4.0f, true, 0.0f, species.heldMainHand);
                 continue;
             }
 
@@ -6277,28 +6928,31 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // larger. That layer is an ordinary alpha-tested cutout like
                 // every skin here, so it needs no new rendering path - the same
                 // arrangement the sheep's fleece has used since M19.
-                biped(kDrownedSkin, 4.0f, true);
+                //
+                // **Only the first call carries the held item**, or the shell
+                // would build a second one inside the same fist.
+                biped(kDrownedSkin, 4.0f, true, 0.0f, species.heldMainHand);
                 biped(kDrownedOuterSkin, 4.0f, true, 0.25f * kTexel);
                 continue;
             }
 
             if (creature.kind == CreatureKind::Skeleton) {
-                biped(kSkeletonSkin, 2.0f, false);
+                biped(kSkeletonSkin, 2.0f, false, 0.0f, species.heldMainHand);
                 continue;
             }
 
             if (creature.kind == CreatureKind::Blackbone) {
-                biped(kBlackboneSkin, 2.0f, false);
+                biped(kBlackboneSkin, 2.0f, false, 0.0f, species.heldMainHand);
                 continue;
             }
 
             if (creature.kind == CreatureKind::Stray) {
-                biped(kStraySkin, 2.0f, false);
+                biped(kStraySkin, 2.0f, false, 0.0f, species.heldMainHand);
                 continue;
             }
 
             if (creature.kind == CreatureKind::Bogged) {
-                biped(kBoggedSkin, 2.0f, false);
+                biped(kBoggedSkin, 2.0f, false, 0.0f, species.heldMainHand);
                 continue;
             }
 
@@ -6366,7 +7020,7 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // villager read as a villager. The zombie villager's nets are
             // identical row for row, and the reference tells the two apart by
             // the pose alone - folded arms against a zombie's reach.
-            const auto villagerRig = [&](float skin, bool armsOut) {
+            const auto villagerRig = [&](float skin, bool armsOut, float armRaise = 0.0f) {
                 beginHead(0.0f, 1.5f);
                 uprightBox(place(0.0f, 1.8125f, 0.0f), 8.0f, 10.0f, 8.0f,
                            0.0f, 0.0f, skin, 0.005f);
@@ -6407,22 +7061,44 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 }
 
                 // The arms are **one folded assembly**, not three parts placed
-                // separately, and they never animate. In the reference both
-                // upper arms and the crossed forearms sit in a single group
-                // pitched 0.75 rad as a unit, and the forearm block spans the
-                // gap between the two upper arms so the whole thing is one
-                // continuous sleeve from shoulder to shoulder.
+                // separately. In the reference both upper arms and the crossed
+                // forearms sit in a single group pitched 0.75 rad as a unit,
+                // and the forearm block spans the gap between the two upper
+                // arms so the whole thing is one continuous sleeve from
+                // shoulder to shoulder.
                 //
                 // So all three share the pitch, and their centres are the
                 // reference's local offsets carried through that rotation
                 // rather than guessed. Tilting the arms while leaving the
                 // forearms level - which is how this first shipped - is exactly
                 // what left the hands floating unattached.
-                constexpr float kFold = -0.75f;
-                uprightBox(place(0.1477f, 1.221f, 0.375f), 4.0f, 8.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, kFold);
-                uprightBox(place(0.1477f, 1.221f, -0.375f), 4.0f, 8.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, kFold);
+                //
+                // **`armRaise` swings the whole group and cannot break it.**
+                // The one way this assembly is allowed to move is rigidly: the
+                // same extra pitch on every part *and* every centre carried
+                // round one pivot, so the three keep exactly the relative
+                // geometry the user closed the book on. The pivot is not
+                // invented either - solving the two stated centres above back
+                // for the point they turn about gives `kVillagerArmPivotUp`
+                // from both, agreeing to within the sixteenth of a texel the
+                // forearm block is deliberately nudged by. At an `armRaise` of
+                // zero every expression below reduces to the numbers it
+                // replaced, so a villager and a trader are untouched.
+                constexpr float kFold = kVillagerFold;
+                const float turn = -armRaise;
+                const float cosTurn = std::cos(turn);
+                const float sinTurn = std::sin(turn);
+                const auto folded = [&](float alongForward, float up, float alongSide) {
+                    const float dy = up - kVillagerArmPivotUp;
+                    return place(alongForward * cosTurn - dy * sinTurn,
+                                 kVillagerArmPivotUp + alongForward * sinTurn + dy * cosTurn,
+                                 alongSide);
+                };
+
+                uprightBox(folded(0.1477f, 1.221f, 0.375f), 4.0f, 8.0f, 4.0f,
+                           44.0f, 22.0f, skin, 0.005f, kFold + armRaise);
+                uprightBox(folded(0.1477f, 1.221f, -0.375f), 4.0f, 8.0f, 4.0f,
+                           44.0f, 22.0f, skin, 0.005f, kFold + armRaise);
                 // Cross-section matched to the sleeves exactly - same 0.005
                 // grow, so both cut ends are 4.16 texels square - and stretched
                 // sideways to reach well into them.
@@ -6434,8 +7110,19 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // sixteenth of a texel along its own height and depth axes
                 // separates every one of them while leaving it the same size to
                 // the eye - which sizing it up or down cannot do.
-                uprightBox(place(0.2332f, 1.1381f, 0.0f), 8.0f, 4.0f, 4.0f,
-                           40.0f, 38.0f, skin, 0.005f, kFold, 0.08f);
+                uprightBox(folded(0.2332f, 1.1381f, 0.0f), 8.0f, 4.0f, 4.0f,
+                           40.0f, 38.0f, skin, 0.005f, kFold + armRaise, 0.08f);
+
+                // The bottle, held where the hands are. `villagerHandPoint` is
+                // the same function the thrown potion leaves from, turned by
+                // the same rigid swing, so what is in her hands and what
+                // arrives at your feet start from one place.
+                const ModelPoint grip = villagerHandPoint();
+                const float pitch = kFold + armRaise;
+                const glm::vec3 gripUp = boxHeightAxis(pitch, 0.0f);
+                const LimbEnd hands{folded(grip.alongForward, grip.up, 0.0f), gripUp,
+                                    forward * std::cos(pitch) - upAxis * std::sin(pitch), side};
+                heldItem(ItemId::None, hands, false);
             };
 
             if (creature.kind == CreatureKind::Villager) {
@@ -6505,7 +7192,12 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             }
 
             if (creature.kind == CreatureKind::Witch) {
-                villagerRig(kWitchSkin, false);
+                // The arms come up as she winds up, and that is the whole tell
+                // that a bottle is coming - the folded assembly is closed by
+                // the user's own instruction, so it swings rigidly or not at
+                // all. `aim` is the eased 0 to 1 the archer's bow rides on, so
+                // the two wind-ups are the same clock.
+                villagerRig(kWitchSkin, false, creature.aim * kWitchArmRaise);
                 // Four boxes stacked off the crown, every one measured: brim
                 // 10x2x10 at (0,64), then 7x4x7, 4x4x4 and a 1x2x1 tip. Each
                 // takes its own small grow so the stack overlaps instead of

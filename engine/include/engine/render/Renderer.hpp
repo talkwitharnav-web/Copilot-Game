@@ -92,6 +92,12 @@ public:
     /// Geometry drawn after the world with its own transform, supplied per
     /// frame. Uploaded once; moving it costs nothing.
     void setOverlayMesh(const MeshData& mesh);
+    /// The breaking cracks, already in world space so it needs no transform of
+    /// its own. **Drawn lit like ordinary world geometry on purpose**: that is
+    /// what runs the cutout alpha test over it, and the crack art is a cutout -
+    /// opaque lines on a field of alpha 1. Unlit it would skip the test, blend
+    /// the whole square at half a percent and stamp depth across the face.
+    void setCrackMesh(const MeshData& mesh);
 
     /// Flat geometry drawn last, in screen space, ignoring the camera entirely.
     ///
@@ -628,6 +634,7 @@ private:
     std::vector<GpuMesh> m_meshes;
     std::vector<MeshHandle> m_freeSlots;
     GpuMesh m_overlayMesh;
+    GpuMesh m_crackMesh;
     GpuMesh m_screenMesh;
     GpuMesh m_clippedScreenMesh;
     GpuMesh m_topScreenMesh;

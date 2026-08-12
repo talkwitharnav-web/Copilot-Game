@@ -6,6 +6,7 @@
 #include "world/Fluid.hpp"
 #include "world/Pathfinder.hpp"
 #include "item/Item.hpp"
+#include "item/SpriteMask.hpp"
 
 #include <engine/render/MeshData.hpp>
 
@@ -685,9 +686,8 @@ struct CreatureSpecies {
     /// field.** The skeleton family are archers - the reference gives them
     /// `ranged_attack` at priority 0 and only drops them to melee when they
     /// have no bow - so miming a sword swing tells the player exactly the wrong
-    /// thing about what they are. They still deal contact damage here, because
-    /// we have no arrows yet and a harmless skeleton is worse than an
-    /// unconvincing one, but they do not wind up to it.
+    /// thing about what they are. They shoot instead, and keep their contact
+    /// damage as well, which is the reference's own arrangement.
     ///
     /// Defaults false, which is safe: most of the roster has no arms at all, so
     /// the rows that want this are the handful that opt in rather than the
@@ -700,6 +700,43 @@ struct CreatureSpecies {
     /// told not to mime a swing. This is the real thing, and it replaces that
     /// stopgap rather than adding to it - an archer does not also punch.
     bool shootsArrows = false;
+
+    /// Fights at a distance by lobbing a bottle. The witch, and the third of
+    /// the family `swingsArms` and `shootsArrows` began: same arbitration, same
+    /// refusal to close, and a wholly different thing arriving at the far end.
+    bool throwsPotions = false;
+
+    /// Seconds between one ranged attack and the next.
+    ///
+    /// **`attack_interval` in `minecraft:behavior.ranged_attack`, and it is in
+    /// seconds rather than ticks** - the whole of that component is, which is
+    /// worth stating beside a field whose neighbours in this file are per-tick
+    /// reference numbers. Three seconds for the skeleton, the stray and the
+    /// witch on Normal difficulty; the bogged alone is slower, which pairs with
+    /// its lower health and is the reference's own distinction.
+    ///
+    /// **It is a reload, not a wind-up.** The reference raises the bow the
+    /// moment a target is acquired and holds it up, so nothing about this
+    /// number is visible as a draw - it is the wait between shots taken behind
+    /// an already-drawn bow.
+    float rangedInterval = 3.0f;
+
+    /// What it carries in its main hand, which is its **right** - the side the
+    /// player's own skin net calls right, and the side every arm on this roster
+    /// that swings a blow already uses. `None` for empty hands.
+    ///
+    /// A fact about the species rather than about the rig, for the same reason
+    /// `swingsArms` is: the skeleton family and the Blackbone are one set of
+    /// boxes and are not carrying the same thing. Anything a *behaviour* puts
+    /// in a hand - the witch's bottle, which only exists while it is winding up
+    /// - overrides this rather than being listed here.
+    ///
+    /// **It is drawn through `appendSpriteModel`**, the same owner a dropped
+    /// item and a thrown one already go through, so a bow in a fist and a bow
+    /// on the floor cannot disagree about what a bow looks like. Only items
+    /// with a flat sprite are held: a block in a hand would need the miniature
+    /// cube path instead, and nothing on the roster wants one.
+    ItemId heldMainHand = ItemId::None;
 
     /// Top of a damage *range*, or zero to mean "exactly `attackDamage`".
     ///
@@ -1049,8 +1086,42 @@ struct Creature {
     /// than `attackTimer`, because the arm is moving for well under a third of
     /// the cycle and rests visibly in between.
     float swingTimer = 0.0f;
-    /// Seconds until this archer may loose again.
-    float shootTimer = 0.0f;
+
+    /// How long this one has been drawing a bow or raising a bottle, in
+    /// seconds. **Counts up, unlike every other timer here**, because what it
+    /// measures is a wind-up and not a wait: the shot leaves the moment it is
+    /// full, and the cadence is that duration rather than a separate cooldown.
+    float drawTimer = 0.0f;
+    /// Whether a ranged behaviour ran at all this tick. Re-derived from nothing
+    /// every tick, exactly like `running`, so it cannot go stale and leave a
+    /// reload ticking on a creature that has forgotten you.
+    bool aiming = false;
+    /// Where the weapon **should** be this tick, 0 down and 1 up. Also
+    /// re-derived from nothing every tick.
+    ///
+    /// **Separate from `aiming`, because for a witch the two genuinely
+    /// differ.** An archer's bow is up the whole time it has a target - the
+    /// reference's controller transitions on `query.has_target` and on nothing
+    /// else - so its two values agree. A witch spends most of the same three
+    /// seconds reloading with her arms folded and reaches for the bottle only
+    /// at the end, so hers do not.
+    float aimWanted = 0.0f;
+    /// How far the arms are into the aiming pose, 0 to 1. Eased, so a bow comes
+    /// up and goes back down rather than appearing at the shoulder - and held
+    /// **across** the release, because the reference keeps the bow up and
+    /// starts the next draw rather than lowering it between shots.
+    float aim = 0.0f;
+    /// Seconds left in a **committed** shot. Nothing cancels one but death,
+    /// which cancels it by a corpse never reaching the behaviour at all.
+    float releaseTimer = 0.0f;
+    /// What a *behaviour* has put in this one's hand, overriding the species'
+    /// own `heldMainHand`. `None` means "whatever it always carries".
+    ///
+    /// **Not re-derived every tick, unlike `aiming` beside it**, and that is
+    /// deliberate: a witch chooses its brew once at the start of the wind-up
+    /// and has to keep holding that one, or the bottle changes colour while it
+    /// winds up and lies about what is coming.
+    ItemId heldOverride = ItemId::None;
 
     /// This individual's size against its species. One for an adult; a baby is
     /// smaller, and it multiplies the collision box as well as the model, so a
@@ -1064,6 +1135,11 @@ struct Creature {
 
     /// How long it has been out of water, for anything with `dryOutSeconds`.
     float dryTimer = 0.0f;
+
+    /// Seconds of sunlight accumulated toward the next point of fire damage.
+    /// Reset by shade or water rather than paused, so reaching a doorway is a
+    /// real escape.
+    float burnTimer = 0.0f;
 
     /// Struck by lightning, in the reference. **Doubles the blast power and
     /// nothing else** - a charged creeper has the same twenty health as any
@@ -1165,10 +1241,29 @@ public:
     /// drops over and `World` hands over the blocks a flow swept aside:
     /// `Creatures` has no idea projectiles exist, and the loop that owns them
     /// does.
+
+    /// What a creature let go of, **in the creature's own vocabulary**.
+    ///
+    /// Deliberately not a `ProjectileKind`: this header does not know
+    /// projectiles exist and the paragraph above is the reason. The loop that
+    /// owns them maps this onto whatever it actually fires, which is one
+    /// `switch` there against a dependency here that would never come back out.
+    enum class LaunchKind : std::uint8_t {
+        Arrow,
+        SplashPotion,
+    };
+
     struct Launch {
         glm::vec3 origin;
-        /// Blocks per tick, already carrying the archer's spread.
+        /// Blocks per tick, already carrying the thrower's spread.
         glm::vec3 velocity;
+        LaunchKind kind = LaunchKind::Arrow;
+        /// Which brew, for a bottle. `None` for anything else, and an `ItemId`
+        /// rather than a raw number because `Loot` above already hands one over
+        /// and a second way of naming an item is a second way of getting it
+        /// wrong. **The default is what keeps every existing archer shot
+        /// compiling and meaning exactly what it did.**
+        ItemId payload = ItemId::None;
     };
     std::vector<Launch> takeLaunches();
 
@@ -1243,8 +1338,18 @@ public:
     /// `setActiveRadius`, which is the simulation one. A creature outside this
     /// still walks, still paths, still hunts, still despawns on its own terms
     /// and is still saved - it is only not built into triangles this frame.
+    ///
+    /// `sprites` is the silhouette of every item picture, needed for the same
+    /// reason a dropped item needs it: anything held in a hand is that picture
+    /// extruded and walled in, not a decal.
+    ///
+    /// **Last, and defaulted to null on purpose.** A required parameter breaks
+    /// every existing caller on the frame it lands, and null simply means "no
+    /// held items this frame" - nothing else in here depends on it, so a caller
+    /// without a mask still draws every creature correctly.
     engine::MeshData buildMesh(const World& world, engine::MeshData& translucent,
-                               const DrawRange& range = {}) const;
+                               const DrawRange& range = {},
+                               const SpriteMask* sprites = nullptr) const;
 
     std::size_t count() const { return m_creatures.size(); }
     /// How many are currently hunting the player. This is the number that makes

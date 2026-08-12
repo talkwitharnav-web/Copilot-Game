@@ -792,6 +792,7 @@ Renderer::~Renderer() {
     m_meshes.clear();
     m_freeSlots.clear();
     m_overlayMesh = GpuMesh{};
+    m_crackMesh = GpuMesh{};
     m_screenMesh = GpuMesh{};
     m_clippedScreenMesh = GpuMesh{};
     m_topScreenMesh = GpuMesh{};
@@ -1189,6 +1190,10 @@ std::uint8_t Renderer::fontAlphaAt(std::uint32_t x, std::uint32_t y) const {
 
 void Renderer::setOverlayMesh(const MeshData& mesh) {
     uploadInto(m_overlayMesh, mesh);
+}
+
+void Renderer::setCrackMesh(const MeshData& mesh) {
+    uploadInto(m_crackMesh, mesh);
 }
 
 // No device wait: retiring the old buffers already defers their destruction
@@ -1896,12 +1901,20 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
         if (!boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax) || beyondFog(mesh)) {
             continue;
         }
-        drawMesh(mesh, viewProjection, true);
+        // Flagged, so the fragment stage keeps the texture's own alpha instead
+        // of running the cutout test on it. Only this loop carries it: the
+        // particle draw below is blended too but its art is a cutout.
+        drawMesh(mesh, viewProjection, true, true, kDrawFlagBlended);
     }
 
     if (overlayTransform.has_value()) {
         drawMesh(m_overlayMesh, viewProjection * *overlayTransform, false);
     }
+
+    // The breaking cracks, in world space and lit, so the cutout test throws
+    // away everything but the crack lines themselves. After the outline because
+    // both sit on the same block and the cage should not be cracked over.
+    drawMesh(m_crackMesh, viewProjection, true);
 
     // Particles, lit and cutout like any other world surface. After the
     // translucent pass so a chip in front of water draws, and before the rain

@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -149,6 +150,19 @@ struct CatalogueState {
     /// hidden, the hint is shown, and **the keyboard belongs to the game** - so
     /// selecting the Search tab does not silently stop `E` closing the screen.
     bool searchFocused = false;
+
+    /// The recipe book: everything the player has been able to make at least
+    /// once. It only ever grows, which is what the reference's own book does -
+    /// a recipe you have seen stays visible after you spend the ingredients.
+    std::unordered_set<ItemId> known;
+
+    /// Whether `known` is consulted at all.
+    ///
+    /// **An empty book and no book are different things**, which is why this is
+    /// a flag rather than "empty means everything": creative wants the whole
+    /// catalogue because there it is a *source*, and a survival player who has
+    /// made nothing yet wants an empty one.
+    bool restrictToKnown = false;
 };
 
 /// Whether this screen shows the catalogue card beside the inventory.
@@ -189,11 +203,16 @@ std::pair<glm::vec2, glm::vec2> catalogueListBounds();
 
 /// The items a tab lists, in declaration order.
 ///
-/// `query` is only read by the Search tab, and matches at the **start of any
-/// word** of an item's name rather than anywhere in it - so "st" finds Stone
-/// and Stone Stairs but not Sandstone, which is what makes a short query
+/// `catalogue.query` is only read by the Search tab, and matches at the **start
+/// of any word** of an item's name rather than anywhere in it - so "st" finds
+/// Stone and Stone Stairs but not Sandstone, which is what makes a short query
 /// useful in a list of seven hundred.
-std::vector<ItemId> catalogueItems(CatalogueTab tab, std::string_view query = {});
+///
+/// **Takes the whole state rather than a tab and a string.** Three callers read
+/// this list - the drawing, the click that resolves a cell, and the scroll
+/// limit - and if any of them built a different list the clicks would land on
+/// the wrong item. One argument is one list.
+std::vector<ItemId> catalogueItems(const CatalogueState& catalogue);
 
 /// Which slot, if any, sits under a point in screen space.
 std::optional<SlotHit> slotAt(Kind kind, float x, float y);

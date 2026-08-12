@@ -32,6 +32,7 @@ const uint kDrawFlagLit = 1u;
 const uint kDrawFlagFogged = 2u;
 const uint kDrawFlagEmissive = 4u;
 const uint kDrawFlagSky = 8u;
+const uint kDrawFlagBlended = 16u;
 
 // How far above ordinary diffuse an emissive surface sits. It has to clear 1.0
 // by a good margin or the tone curve has nothing to turn into a white core with
@@ -125,7 +126,15 @@ void main() {
         // Cutout: a hole in the texture is thrown away outright rather than
         // blended. What survives still writes depth, so this needs no sorting -
         // unlike the translucent pass.
-        if (texel.a < 0.5) {
+        //
+        // **The blended pass is exempt, and that exemption is the whole of what
+        // makes glass look like glass.** Its art is a frame at 0.78 alpha
+        // around a panel at 0.43, with a diagonal streak between them, so this
+        // test would keep the frame and the streak and delete the panel. It is
+        // safe to skip precisely here because a blended fragment does not write
+        // depth, which is what the test exists to protect.
+        bool blended = (push.flags.x & kDrawFlagBlended) != 0u;
+        if (!blended && texel.a < 0.5) {
             discard;
         }
 
@@ -319,8 +328,15 @@ void main() {
             // 0.6 which pass the test and then blend with the sky behind -
             // which turned every distant tree pale grey. World transparency
             // comes from the vertex instead.
+            //
+            // **Glass is the exception and takes its alpha from the art**,
+            // because a frame, a highlight streak and a panel are three
+            // different opacities inside one face and no per-vertex number can
+            // say that. It is the same `texel.a` the cutout test above would
+            // have thrown away.
+            float base = blended ? alpha : fragColor.a;
             float grazing = 1.0 - abs(dot(normal, viewDirection));
-            alpha = mix(fragColor.a, 1.0, (1.0 - surface.roughness) * grazing * grazing);
+            alpha = mix(base, 1.0, (1.0 - surface.roughness) * grazing * grazing);
         }
     }
 

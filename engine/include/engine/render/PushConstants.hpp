@@ -44,6 +44,13 @@ inline constexpr std::uint32_t kDrawFlagEmissive = 1u << 2;
 /// starts at the eye rather than at a distance.
 inline constexpr std::uint32_t kDrawFlagSky = 1u << 3;
 
+/// The blended pass: water and glass. **Exempt from the cutout alpha test**,
+/// which is the whole point of it - a cutout throws away anything under half
+/// alpha, and glass art is a frame at 0.78 around a panel at 0.43, so the test
+/// would delete the panel and leave a rectangle of border. Only geometry that
+/// is genuinely sorted behind everything opaque may carry this.
+inline constexpr std::uint32_t kDrawFlagBlended = 1u << 4;
+
 static_assert(sizeof(MeshPushConstants) == 80,
               "Push constants must stay well under the 128 bytes Vulkan guarantees");
 

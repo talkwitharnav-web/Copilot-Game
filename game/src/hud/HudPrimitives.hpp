@@ -118,4 +118,16 @@ float textWidth(std::string_view text, float charHeight);
 void appendTooltip(engine::MeshData& mesh, std::string_view text, float cursorX, float cursorY, float aspect,
                    float charHeight, float depth);
 
+/// The gamepad's on-screen pointer: a white arrow with its tip exactly at
+/// (x, y), falling down and to the right, outlined so it reads against a pale
+/// slot as well as a dark panel.
+///
+/// **Geometry rather than a sprite.** It is three triangles of flat colour, so
+/// it costs no row in the sprite sheet and no artwork - and the tip being the
+/// anchor is what makes it agree with the hit tests, which take a point.
+///
+/// `height` is the arrow's full length. `depth` is the nearest layer it
+/// occupies; the outline goes just behind that.
+void appendPointer(engine::MeshData& mesh, float x, float y, float height, float depth);
+
 } // namespace game::hud

@@ -3282,6 +3282,38 @@ constexpr BlockId paneAt(int family) {
     return static_cast<BlockId>(static_cast<int>(BlockId::PaneRunFirst) + family);
 }
 
+/// The glass whose art is partly clear *everywhere* rather than clear in
+/// places: the sixteen stained ones, the tinted one, and the sixteen stained
+/// panes that share their texture.
+///
+/// **This is the line between a cutout and a blend, and it is a fact about the
+/// artwork rather than a taste.** Plain glass is a solid frame around a fully
+/// clear middle - 191 of its 256 texels have no alpha at all - so throwing the
+/// clear ones away draws it exactly right. These have no fully clear texel
+/// anywhere and no fully opaque one either, so a cutout can only round them to
+/// one or the other, and rounding up is what made every stained pane a solid
+/// cube and tinted glass in particular a black block.
+///
+/// **The panes are in here because they are the same picture.** A pane is a
+/// `ShapedFamily` whose parent is the block, so `shapedParent` hands it the
+/// parent's texture layer - and once that art keeps its real alpha, a pane left
+/// on the cutout path would have its 0.40 centre panel discarded and draw as a
+/// frame with a hole in it. It has to travel with the block or not at all.
+/// **Declared here rather than beside `isGlassBlock` for that reason alone**:
+/// it needs `isPane` and `kPaneFamilies`, which are above.
+constexpr bool isBlendedGlass(BlockId id) {
+    if (isPane(id)) {
+        return kPaneFamilies[static_cast<std::size_t>(paneFamily(id))].parent != BlockId::Glass;
+    }
+    return id == BlockId::TintedGlass ||
+           (id >= BlockId::WhiteStainedGlass && id <= BlockId::BlackStainedGlass);
+}
+
+static_assert(isBlendedGlass(BlockId::TintedGlass) && !isBlendedGlass(BlockId::Glass),
+              "plain glass has real holes and stays a cutout; tinted glass has none and cannot");
+static_assert(isBlendedGlass(paneAt(1)) && !isBlendedGlass(paneAt(0)),
+              "a stained pane wears the blended block's own art; a plain glass pane does not");
+
 constexpr bool isLadder(BlockId id) {
     return id >= BlockId::LadderNorth && id <= BlockId::LadderWest;
 }
@@ -4497,6 +4529,25 @@ constexpr int kCollectibleSpritesEnd = kMusicDiscSpritesFirst + kMusicDiscSprite
 constexpr int kFireworkStarSpritesFirst = kCollectibleSpritesEnd;
 constexpr int kFireworkStarSprites = 16;
 constexpr int kFireworkStarSpritesEnd = kFireworkStarSpritesFirst + kFireworkStarSprites;
+
+/// The ten breaking stages, drawn over whatever is being mined.
+///
+/// **Appended at the very end on purpose.** Several runs above end in a
+/// constant another run starts from, and one of them - `kRedstoneSpritesFirst`
+/// - is a hard literal held in place by a `static_assert`; inserting anywhere
+/// but here slides every layer after the insertion point and re-textures a few
+/// hundred blocks at once.
+constexpr int kDestroyStageFirst = kFireworkStarSpritesEnd;
+constexpr int kDestroyStages = 10;
+constexpr int kDestroyStagesEnd = kDestroyStageFirst + kDestroyStages;
+
+/// Which of the ten pictures a break that far along shows. Clamped at both
+/// ends: progress reaches exactly 1 on the frame the block goes, and an
+/// eleventh stage would sample whatever layer follows this run.
+constexpr int destroyStageLayer(float progress) {
+    const int stage = static_cast<int>(progress * static_cast<float>(kDestroyStages));
+    return kDestroyStageFirst + (stage < 0 ? 0 : (stage >= kDestroyStages ? kDestroyStages - 1 : stage));
+}
 /// Four more that a model box needs by name rather than by face, because these
 /// blocks paint a *lid* from their side image: an anvil's plinths, a campfire's
 /// logs, a scaffold's posts and a hopper's funnel are all the same picture all
@@ -5744,6 +5795,57 @@ constexpr BlockBoxes selectionBoxesWith(BlockId id, std::uint8_t connections) {
     return connectsToNeighbours(blockShape(id)) ? collisionBoxesWith(id, connections) : selectionBoxes(id);
 }
 
+/// **Exactly the boxes the mesher draws**, and the single owner of that answer.
+///
+/// Not `collisionBoxes`, not `selectionBoxes`, not `modelSilhouette`, and the
+/// difference is the point: a fence's drawn rails are not the posts you bump
+/// into, a plant's pick column is not its blades, and a silhouette is one box
+/// round a lantern that is drawn as two. Every one of those three is
+/// deliberately a different shape, so **anything that wants to draw something
+/// else onto a block - a crack overlay, say - has to ask this one**, or it
+/// decorates a shape that is not there and the decoration hangs in mid-air.
+///
+/// `connections` comes from `connectionBits` and `opaqueAbove` is the cell
+/// overhead; both are facts about the world that no id can carry on its own.
+/// A `Cross` plant is the one family with no box answer at all - it is two
+/// crossed quads - so it returns nothing here and its callers handle it.
+constexpr BlockBoxes drawnBoxes(BlockId id, std::uint8_t connections, bool opaqueAbove) {
+    const BlockShape shape = blockShape(id);
+    if (shape == BlockShape::Model || shape == BlockShape::Cocoa || shape == BlockShape::Bed) {
+        const ModelBoxes model = postModel(id);
+        BlockBoxes boxes{};
+        for (int i = 0; i < model.count; ++i) {
+            boxes.boxes[boxes.count++] = model.boxes[i].box;
+        }
+        return boxes;
+    }
+    if (shape == BlockShape::Vine) {
+        return vineBoxes(vineSides(id), opaqueAbove);
+    }
+    if (shape == BlockShape::Ladder) {
+        return ladderBoxes(ladderFacing(id));
+    }
+    if (drawsWithoutColliding(id)) {
+        return uncollidableDrawnBoxes(id);
+    }
+    if (shape == BlockShape::Fence) {
+        return fenceRailBoxes(connections);
+    }
+    if (shape == BlockShape::Wall) {
+        return wallBoxes(connections);
+    }
+    if (shape == BlockShape::Pane) {
+        return paneBoxes(connections);
+    }
+    return collisionBoxes(id);
+}
+
+static_assert(drawnBoxes(BlockId::Stone, 0, false).count == 1,
+              "an ordinary cube is one box, or every crack on one is drawn six times over");
+static_assert(drawnBoxes(BlockId::Poppy, 0, false).count == 0,
+              "a plant is two crossed quads and has no box answer at all - a caller that forgets "
+              "that draws a cage round every flower instead of cracking its blades");
+
 /// Whether the inventory and a dropped item draw this block as the flat picture
 /// its texture actually is rather than as a little cube. **Shape, not a list**,
 /// so a new plant or a new pane is right the day it is added.
@@ -5856,14 +5958,27 @@ constexpr bool occludesFace(BlockId neighbour, int offsetY) {
 
 /// Drawn in the transparent pass, after everything opaque.
 ///
-/// **Water alone.** Lava is a fluid geometrically - its surface sits below the
-/// top of its cell - but it is fully opaque, so putting it in the blended pass
-/// meant it neither wrote depth nor occluded anything: water in front of it
-/// showed the lava through itself, and standing in a lava cell you could see
-/// straight out of the world.
+/// **Water and the seventeen blended glasses.** Lava is a fluid geometrically -
+/// its surface sits below the top of its cell - but it is fully opaque, so
+/// putting it in the blended pass meant it neither wrote depth nor occluded
+/// anything: water in front of it showed the lava through itself, and standing
+/// in a lava cell you could see straight out of the world.
+///
+/// **The glass was in the cutout pass instead, and that is why it was solid.**
+/// A cutout keeps a texel whole or throws it away, and the reference paints
+/// stained and tinted glass at about half alpha across every texel, so there
+/// was nothing for it to throw away and the result was an opaque cube. Plain
+/// glass is deliberately not here: its art really is holes, so a cutout draws
+/// it correctly and blending it would only turn its frame ghostly.
 constexpr bool isTranslucent(BlockId id) {
-    return isWater(id);
+    return isWater(id) || isBlendedGlass(id);
 }
+
+static_assert(isTranslucent(BlockId::TintedGlass) && !isTranslucent(BlockId::Glass),
+              "the blended glasses go through the transparent pass; plain glass does not");
+static_assert(!isOpaque(BlockId::TintedGlass),
+              "a translucent block must never occlude - isOpaque reads isCutout, so the blended "
+              "glasses have to stay in the cutout family even though they no longer draw as one");
 
 /// Highest light level a source can have. Four bits per channel, so a level fits
 /// in a nibble and sky plus block light fit in one byte per block.

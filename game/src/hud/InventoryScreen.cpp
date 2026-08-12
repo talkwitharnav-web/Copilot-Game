@@ -535,7 +535,9 @@ void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const Ca
 
 } // namespace
 
-std::vector<ItemId> catalogueItems(CatalogueTab tab, std::string_view query) {
+std::vector<ItemId> catalogueItems(const CatalogueState& catalogue) {
+    const CatalogueTab tab = catalogue.tab;
+    const std::string_view query = catalogue.query;
     // Matching at the start of a word rather than anywhere in the name is what
     // keeps a two-letter query useful: "st" finds Stone and Stone Stairs and
     // leaves Sandstone out.
@@ -570,6 +572,11 @@ std::vector<ItemId> catalogueItems(CatalogueTab tab, std::string_view query) {
 
     std::vector<ItemId> shown;
     for (const ItemId item : allItems()) {
+        // The recipe book, when there is one. Applied before the tab and the
+        // search so every tab is a view of the same book.
+        if (catalogue.restrictToKnown && catalogue.known.count(item) == 0) {
+            continue;
+        }
         if (tab == CatalogueTab::Search) {
             if (matches(item)) {
                 shown.push_back(item);
@@ -720,7 +727,7 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     const std::optional<std::size_t> hoveredEntry =
         catalogueCellAt(kind, cursorX, cursorY, catalogue.scrollRow);
     if (showsCatalogue(kind)) {
-        catalogueList = catalogueItems(catalogue.tab, catalogue.query);
+        catalogueList = catalogueItems(catalogue);
         // **Nothing is red in creative**, because nothing there is out of
         // reach: the catalogue is a source and every entry is one click away.
         // So the check is not run at all rather than run and ignored.

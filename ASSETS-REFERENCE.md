@@ -145,7 +145,7 @@ Every non-cube block's exact dimensions, in sixteenths of a block. Example — `
 
 That is a post spanning 0.375–0.625, which is **exactly what our `fenceBoxes()` already uses**. This folder is how to check any future shape without guessing.
 
-> ⭐ **You do not have to check them by hand any more.** `tools/check-models.ps1` measures **every block in the game** against this folder and names any that disagree by more than half a texel — 1293 checked, 0 disagreeing. Run it after touching any block's geometry. Three divergences are named inside the tool as deliberate.
+> ⭐ **You do not have to check them by hand any more.** `tools/check-models.ps1` measures **every block in the game** against this folder and names any that disagree by more than half a texel — **3186 drawn, 1792 matched a model and agree, 0 disagreeing, 1370 have no model to check against**. Run it after touching any block's geometry. Three divergences are named inside the tool as deliberate.
 
 > ⛔ **Some blocks are not in here at all, and the gap is silent.** Anything the reference draws as a **block entity** has no block model: a **bell body**, a chest, a sign, a banner. `bell_floor.json` is the bell's *frame* and nothing else — reading it and assuming it is the whole bell is what made ours wrong three times. When a block is missing or only partly here, measure the artwork and say that is what you did.
 

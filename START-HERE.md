@@ -9,13 +9,13 @@
   - **28** &middot; 0. The sixty-second version
   - **38** &middot; 1. The five rules that will otherwise cost the user time
   - **50** &middot; 2. Read these, in this order
-  - **75** &middot; 3. Where the project actually is
-  - **214** &middot; 4. Build and run
-  - **243** &middot; 5. The creature-skin situation — read this before you panic
-  - **285** &middot; 6. Building a creature model — the procedure that stopped the failures
-  - **303** &middot; 7. The one bug shape that keeps recurring
-  - **313** &middot; 8. Things that are settled — do not re-litigate
-  - **324** &middot; 9. Talking to the user
+  - **77** &middot; 3. Where the project actually is
+  - **217** &middot; 4. Build and run
+  - **246** &middot; 5. The creature-skin situation — read this before you panic
+  - **288** &middot; 6. Building a creature model — the procedure that stopped the failures
+  - **306** &middot; 7. The one bug shape that keeps recurring
+  - **318** &middot; 8. Things that are settled — do not re-litigate
+  - **329** &middot; 9. Talking to the user
 
 <!-- /INDEX -->
 
@@ -27,11 +27,11 @@ You are picking up a **custom C++20 + Vulkan voxel sandbox** built from scratch.
 
 ## 0. The sixty-second version
 
-- **Milestones 1–29 are done** (plus M29b–h). The game is genuinely playable: an endless seeded world, survival, combat, farming, villages, 57 creature species, a deferred HDR renderer with shadows, clouds, weather and water reflections. **M30, hardware ray tracing, is next and is optional.**
-- **No fault is currently open.** The last round closed on 2026-08-11 with the redstone kit arriving as forty-one craftable blocks — **deliberately without a signal engine**, which the player ruled out as a week's work on its own.
+- **Milestones 1–29 are done** (plus M29b–m). The game is genuinely playable: an endless seeded world, survival, combat, farming, villages, 57 creature species, a deferred HDR renderer with shadows, clouds, weather and water reflections. **M30, hardware ray tracing, is next and is optional.**
+- **No fault is currently open.** The last round closed on 2026-08-12 (M29m): eight playtest reports in a row, none of which any build, soak or checker had caught. Tinted glass keeps its own per-texel alpha, hostiles spawn by day and burn for it, lava falls as a column, the hotbar and inventory survive a restart, an archer only shoots when it means it, breaking a block **cracks the block itself** and the HUD progress bar is gone — and respawning no longer buries you, because the player now asks whether the ground has loaded before it falls through it.
 - **Build:** `. .\tools\dev-env.ps1` then `cmake --build build\release`, run with `.\run.ps1 release`. PowerShell 5.1, chain with `;` and never `&&`.
 - **The bar:** both presets clean at `/W4` with zero warnings, and `tools\soak.ps1 -Seconds 45` with zero validation errors and an empty stderr. **That bar proves it does not crash and almost nothing else** — see §7.
-- **Never commit to Git. The user is the playtester. Textures are Mojang's on purpose.** Those three catch most new sessions out; §1 and §5 are the long versions.
+- **Never commit to Git. The user is the playtester. Textures are Mojang's on purpose. One agent at a time.** Those catch most new sessions out; §1 and §5 are the long versions.
 
 ---
 
@@ -43,7 +43,7 @@ They have paid for each of these once already. Do not make them pay twice.
 2. **Bedrock Edition is the reference, not Java.** Where they differ, Bedrock wins. `RESEARCH.md` marks Java values `[JE]`.
 3. **The user is the playtester, and a good one.** Anything needing aim, a held button, or a judgement about how something *feels* goes to them. They have said "I'm a tool" three times, the last in capitals. **Two failed screenshot-harness attempts is the signal to stop** — restore `settings.cfg` and `saves/*/player.dat`, hand over the build, and say what to look at.
 4. **When the user names a milestone, build it.** If it is too big, split it *yourself* and ship the first slice. Handing back a recommendation instead of work is the one thing that has genuinely angered them. Bugs are expected and forgiven; not starting is not.
-5. **Launch subagents with `model: "Claude Opus 5 (copilot)"`.** Omitting the parameter silently gets a small model and the work comes back thin.
+5. **Launch subagents with `model: "Claude Opus 5 (copilot)"`.** Omitting the parameter silently gets a small model and the work comes back thin. **Subagents only — do not run two agents side by side.** That was tried on 2026-08-11 and removed the same day; §2 says why.
 
 ---
 
@@ -52,7 +52,7 @@ They have paid for each of these once already. Do not make them pay twice.
 | File | What it is | When |
 |---|---|---|
 | **`CLAUDE.md`** | The hard rules, the working style and the architecture rules. **Auto-attached every turn, and opens with a box of the bug shapes that have cost the most.** | Always |
-| **`DECISIONS.md`** | Why every settled choice is the way it is — 37 sections. Split out of `CLAUDE.md` so it is *not* auto-attached. | **Before undoing anything that looks deliberate** |
+| **`DECISIONS.md`** | Why every settled choice is the way it is — 45 sections. Split out of `CLAUDE.md` so it is *not* auto-attached. | **Before undoing anything that looks deliberate** |
 | **`LESSONS.md`** | Every mistake already paid for once, and what it cost. Also split out of `CLAUDE.md`. | **Before debugging in an area you have not touched** |
 | **`SYSTEM_MEMORY.md`** | Current technical truth — structure, build, invariants, sizes | Before touching code |
 | **`TIMELINE.md`** | Milestone route and what the finished game is | Before starting work |
@@ -66,6 +66,8 @@ They have paid for each of these once already. Do not make them pay twice.
 
 **Every one of them opens with a generated index of section names and line numbers, so you can jump straight to what you need instead of reading to find it.** `tools/index-docs.ps1` rebuilds every index; run it after editing any document. `-Check` fails if one is stale, and `tools/check-index.ps1` proves every entry still points at the heading it names.
 
+**One agent at a time.** Two were run side by side on 2026-08-11 with a message log, a board of file claims and a script that announced unread messages from the build and every script. It is all deleted at the user's instruction — _"remove the multi-agent thing it's not working out man."_ Both windows had been handed the same brief, so both claimed and both wrote the same file. **Research subagents are a different thing and are still wanted**, with `model: "Claude Opus 5 (copilot)"`.
+
 **Read the section you need, not the whole file.** `SYSTEM_MEMORY.md` and `RESEARCH.md` are the two biggest by a wide margin and neither is meant to be read end to end.
 
 **If you only read two:** `CLAUDE.md`'s opening box and §3 of this file.
@@ -74,7 +76,7 @@ They have paid for each of these once already. Do not make them pay twice.
 
 ## 3. Where the project actually is
 
-**Milestones 1–29 are done, plus M29b through M29k. `INTERFACE.md` slices 1–5 and 7 are built; 6, 8 and 9 are not.**
+**Milestones 1–29 are done, plus M29b through M29m. `INTERFACE.md` slices 1–5 and 7 are built; 6, 8 and 9 are not.**
 
 > ✅ **The catalogue passed 1300 on 2026-08-11.** The user asked for "at least 300" more blocks and items in one run and got **+313**: the redstone kit (M29h), the whole effect-potion-brewing system (M29i, 124 entries), signs and banners (M29j, 38), and thrown potions plus the collectibles (M29k, 110 — pottery sherds, goat horns, music discs and firework stars). **1343 catalogue entries against 1152 recipes.**
 
@@ -154,9 +156,10 @@ Underneath: generation and meshing run on worker threads, geometry is greedily m
 
 ### What is in flight right now
 
+- **Mobs fight at range properly as of 2026-08-11 (M29l), and it is the one thing still needing your eye.** No creature had ever rendered a **held item** of any kind; the mechanism turned out to be free, because a creature quad carrying a *non-negative* texture layer already reaches the block-and-item pictures where the skin sheet is a negative one. So a bow goes through `appendSpriteModel`, the same owner a dropped item already uses. Archers carry one in the **right** hand, raise it when they see you and shoot **from the hand** rather than the chest; witches **throw splash potions** instead of walking into you. Three reference numbers were corrected on the way: the interval is **3 s, not 1** (bogged 3.5), everything in `minecraft:behavior.ranged_attack` is in **seconds**, and **there is no bow wind-up in Bedrock at all** — the pose is gated on "do I have a target" and the interval is a reload behind an already-drawn bow. **Not verified by eye:** stand off a skeleton at night and check the bow is in the hand and the arrow leaves it, and let a witch see you.
 - **The bed is finished as of 2026-08-10, after four rounds of playtesting.** Its top is a single face — pillow rows 0–7, the pillow's shadow row 8, blanket rows 9–15 — sampled whole through `lidTurns`, so the pillow is half the head block and blanket covers the rest. The head's outward end has its own shared texture, `bed_head_north.png`, because the long-side image is half blanket and painted the headboard red down one half. And the head's legs read u 13–16 of the side net rather than the foot's u 0–3, or they sample empty texture and the bed stands on two. **One new texture layer, appended at the very end.**
 - **Fifty-three of the fifty-seven creature skins are Mojang placeholders**, as are all 57 spawn egg sprites, the five catalogue tabs and every block and item texture. This is **deliberate and sanctioned** — see §5. Do not "fix" it.
-- **Water physics were rebuilt on 2026-08-05** and the old fudge is gone. Three halves, recorded as **M20h**, with `world/Fluid.hpp` and `SYSTEM_MEMORY.md` → "Water" now the owners — `RESEARCH.md` §9.1 was retired to a pointer once the work shipped. **Entities:** water no longer weakens gravity, it replaces the model with the reference's multiplicative drag, so sinking, swimming, sprint-swimming, the plunge after a dive and being carried by a current are all one expression. Breath and drowning exist, dropped items float, and creatures follow the reference's navigation flags — a cow bobs, a zombie walks the seabed, a Princepin drowns. **The block:** falling water is its own block and is full, a cell that can drop never runs sideways (so a waterfall is a column, not a cone), and a weight search sends a stream at the nearest hole within four blocks. Seven blocks of spread sideways, unlimited downward, paced at the reference's five ticks a block. Plants are washed away and dropped rather than damming the flow. The surface plays its thirty-two frame animation, redirected in the fragment shader so no chunk is re-meshed for it. **The look:** real distance fog, not a tint — and **its colour is measured off screenshots, not taken from Bedrock's fog JSON.** `SYSTEM_MEMORY.md` has a do-not-revert box; read it before changing that constant, because the obvious correction is wrong and has been made twice. `world/Fluid.hpp` owns every water constant. **Not done and deliberate:** the directional `water_flow` texture (32×32 against our 16×16 array, and it needs per-cell UV rotation), lava, the swimming *pose*, the reference's eyes-adjusting fog ramp (built, then removed — it restarts on every dip), and the player's bubble bar — which waits for M21 so it can be built beside the heart bar.
+- **Water physics were rebuilt on 2026-08-05** and the old fudge is gone. Three halves, recorded as **M20h**, with `world/Fluid.hpp` and `SYSTEM_MEMORY.md` → "Water" now the owners — `RESEARCH.md` §9.1 was retired to a pointer once the work shipped. **Entities:** water no longer weakens gravity, it replaces the model with the reference's multiplicative drag, so sinking, swimming, sprint-swimming, the plunge after a dive and being carried by a current are all one expression. Breath and drowning exist, dropped items float, and creatures follow the reference's navigation flags — a cow bobs, a zombie walks the seabed, a Princepin drowns. **The block:** falling water is its own block and is full, a cell that can drop never runs sideways (so a waterfall is a column, not a cone), and a weight search sends a stream at the nearest hole within four blocks. Seven blocks of spread sideways, unlimited downward, paced at the reference's five ticks a block. Plants are washed away and dropped rather than damming the flow. The surface plays its thirty-two frame animation, redirected in the fragment shader so no chunk is re-meshed for it. **The look:** real distance fog, not a tint — and **its colour is measured off screenshots, not taken from Bedrock's fog JSON.** `SYSTEM_MEMORY.md` has a do-not-revert box; read it before changing that constant, because the obvious correction is wrong and has been made twice. `world/Fluid.hpp` owns every water constant. **Not done and deliberate:** the directional `water_flow` texture (32×32 against our 16×16 array, and it needs per-cell UV rotation), lava, the swimming *pose*, and the reference's eyes-adjusting fog ramp (built, then removed — it restarts on every dip). **The bubble bar exists** — it arrived beside the heart bar as planned, ten bubbles of thirty ticks each, `static_assert`ed against the air clock so the two cannot drift.
 - **Mobs no longer spawn inside blocks**, and the loading screen no longer finishes early. Both were 2026-08-05 and both were the same shape of bug: a value derived somewhere other than the table that owns it. A spawn candidate now clears its real body box through the shared collision helpers instead of scanning whole cells, anything that ends up buried climbs out, and the loading bar streams around the player's *saved* position rather than the generator's spawn point — the first log line went from `pending 372` to `pending 0`.
 - **M20b's archetypes are complete.** The **flying** archetype landed with the bee: `flies` is the airborne mirror of `swims` — no gravity, a heading in three dimensions, no pathfinder — plus a 2–6 block height band, a dive angle while chasing, and no knockback, because a flier's own locomotion owns every axis of its velocity. The **water** archetype landed at M20i, the melee behaviour at M20j, **pathfinding at M20k** — creatures now search a real route with A\* and fall back to the old steering fan when they have none, so a wall is something to walk around rather than press against — and **the death fall at M20m**: a killed creature keeps its damage tint, tips a quarter turn onto its side and lies there before it goes, driven off the shared rig so all fifty-seven species get it with no per-species table. `TIMELINE.md` has the list.
 - **`INTERFACE.md` slice 6 is next** on the interface side. Slice 4 landed the catalogue's scrolling; **slice 5 landed the craftable colouring** — **four** cell backgrounds, not the six vanilla's UI data lists, read from the recipe table and answered against the grid the open screen has. Three of vanilla's six are expandable groups (slice 9) and the fourth was a *selected* state the user rejected twice: hovering may brighten a cell, but nothing stays lit.
@@ -307,6 +310,8 @@ Three models in a row came out wrong before this was written down. Follow it in 
 Block shapes, creature nets, sheet dimensions, knockback — each has exactly one home. Every bug in this project that "compiled and looked plausible but was subtly wrong" traces back to a second copy.
 
 It bites hardest when you *widen* what something can be: adding slabs broke collision resolution, the fluid update, the targeting outline and the raycast, one at a time, because each had its own idea of a block's shape. **When widening an invariant, grep for the old literals** — the compiler cannot help, because nothing changed type.
+
+**Its meanest form is a rule that is written down, correct, commented — and only in one of the two places that need it.** Lava's pooling test was water's rule minus the one clause that made water right. The player fell through unloaded chunks and was buried by them for twenty milestones while creatures, guarded against exactly that since the day they were written, never did. Neither is a *missing* rule you could grep for; both are a rule that exists and did not travel. **When you write a guard, ask what else does the same thing.**
 
 ---
 

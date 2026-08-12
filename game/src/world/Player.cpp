@@ -538,6 +538,36 @@ SurfaceMotion surfaceMotion(float slipperiness) {    const float keep = 0.91f * 
 
 void updatePlayer(Player& player, const PlayerInput& input, const World& world, float deltaSeconds) {
     const float dt = std::min(deltaSeconds, kMaxDeltaSeconds);
+
+    // Ground that has not arrived yet reads as air, so stepping over it drops
+    // the player out of the world and the chunk buries them wherever they got
+    // to. Creatures have asked this since the day they were written and the
+    // player never did; respawning at a world spawn you have since walked away
+    // from is the way in.
+    if (!world.columnResident(static_cast<int>(std::floor(player.position.x)),
+                              static_cast<int>(std::floor(player.position.z)))) {
+        player.velocity = glm::vec3{0.0f};
+        return;
+    }
+
+    // And a body that is already inside terrain climbs out instead of living
+    // there, because every move it tries overlaps something and it is stuck for
+    // good. The other half of the same bug: the chunk arrives around whoever
+    // fell through it. Creatures have had this since they were written.
+    if (overlapsSolid(world, boxAt(player.position, player.height()))) {
+        constexpr float kUnstickReach = 2.0f;
+        constexpr float kUnstickStep = 0.25f;
+        for (float lift = kUnstickStep; lift <= kUnstickReach; lift += kUnstickStep) {
+            const glm::vec3 freed = player.position + glm::vec3{0.0f, lift, 0.0f};
+            if (!overlapsSolid(world, boxAt(freed, player.height()))) {
+                player.position = freed;
+                break;
+            }
+        }
+        player.velocity = glm::vec3{0.0f};
+        player.onGround = false;
+    }
+
     const glm::vec3 startedAt = player.position;
 
     if (input.sneak) {
@@ -589,7 +619,8 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
                          : player.sneaking ? kSneakSpeed
                          : sprinting       ? kSprintSpeed
                                            : kWalkSpeed) *
-                        stickScale * effects::moveSpeedScale(player.effects);
+                        stickScale * effects::moveSpeedScale(player.effects) *
+                        std::clamp(input.moveScale, 0.0f, 1.0f);
 
     glm::vec3 wish = input.moveDirection;
     wish.y = 0.0f;

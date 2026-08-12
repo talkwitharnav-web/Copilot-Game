@@ -1208,6 +1208,16 @@ $sources += 0..15 | ForEach-Object {
        Overlay = 'item\firework_star_overlay' }
 }
 
+# ---- The ten breaking stages, drawn over whatever is being mined. ----
+# Measured before staging them: each is 16x16 with **no fully clear texel and no
+# partial one worth the name** - the crack lines are alpha 255 and the field
+# between them is alpha 1. So they are effectively a cutout already, which is
+# what lets them go through the ordinary alpha-tested path with no blending, no
+# second pipeline and no depth trouble at all.
+$sources += 0..9 | ForEach-Object {
+    @{ Name = ('destroy_stage_{0}.png' -f $_); Path = ('block\destroy_stage_{0}' -f $_) }
+}
+
 $size = 16
 
 function Get-Frame {
@@ -1576,13 +1586,32 @@ foreach ($entry in $sources) {
 # out glass, leaves and every plant, and **most texels partly clear** rules out
 # ordinary art. Water is named because it is the one thing that really does go
 # through the blended pass.
+#
+# **The stained and tinted glass used to be flattened here and are not any
+# more.** Their whole appearance is in the alpha and nowhere else: a frame at
+# 200, a diagonal highlight streak at 155 and a centre panel at 110, measured
+# off `tinted_glass.png` and `white_stained_glass.png`. Flattening replaced all
+# three with one number and `translucentAlpha` then painted the whole face with
+# the average of them, which the user reported as "it looks like a ghost".
+# **The cutout alpha test was the reason it had to be flattened, and the
+# blended pass is now exempt from that test** - see `kDrawFlagBlended`.
 foreach ($entry in $staged) {
     # Water goes through the blended pass for real. The sun and moon are named
     # here too, and they are the one case the shape test genuinely cannot judge:
     # a sky body's halo is partly clear *everywhere*, which is exactly the
     # signature this rule reads as translucent block art. Flattening them turns
     # the moon back into an opaque tile with a picture on it.
-    if ($entry.Name -like 'water*' -or $entry.Name -eq 'sun.png' -or $entry.Name -like 'moon_*') {
+    #
+    # Glass is named for the same reason as water and is the reason this list
+    # exists at all now: it is blended, so its own alpha is what draws it.
+    #
+    # The breaking stages are named for the opposite reason: they are almost
+    # entirely alpha 1 with the crack lines at 255, which is exactly the
+    # signature this rule reads as translucent block art. Flattened, every
+    # stage becomes an opaque grey tile and mining paints the block solid grey.
+    if ($entry.Name -like 'water*' -or $entry.Name -eq 'sun.png' -or $entry.Name -like 'moon_*' -or
+        $entry.Name -eq 'tinted_glass.png' -or $entry.Name -like '*_stained_glass.png' -or
+        $entry.Name -like 'destroy_stage_*') {
         continue
     }
     $image = $entry.Image

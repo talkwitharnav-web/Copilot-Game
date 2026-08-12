@@ -217,7 +217,8 @@ void ItemEntities::reduce(std::size_t index, int taken) {
 }
 
 engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
-                                         const SpriteMask& sprites, const DrawRange& range) const {
+                                         const SpriteMask& sprites, const DrawRange& range,
+                                         engine::MeshData* blended) const {
     engine::MeshData mesh;
 
     for (const Drop& drop : m_drops) {
@@ -289,10 +290,19 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
                    forward * (z * 2.0f - 1.0f);
         };
         const auto part = [&](const BlockBox& b, const ModelBox* model) {
-            const float wallLayer =
-                model != nullptr && model->sideLayer >= 0.0f
-                    ? model->sideLayer
-                    : blockTextureLayer(block, BlockFace::Side, blockFacing(block));
+            // **Each side quad has to be told which side it is.**
+            // `blockTextureLayer` works out "is this the front" by comparing the
+            // direction it is given against the block's own facing, so one layer
+            // computed from `blockFacing` and handed to all four sides says
+            // "front" four times - which put a sticky piston's plate right round
+            // the block. The mesher and the inventory icon both already pass a
+            // real direction per face; this was the third place a block is drawn
+            // and the one that still did not.
+            const auto wallLayer = [&](FaceDirection direction) {
+                return model != nullptr && model->sideLayer >= 0.0f
+                           ? model->sideLayer
+                           : blockTextureLayer(block, BlockFace::Side, direction);
+            };
             const float capLayer = model != nullptr && model->lidLayer >= 0.0f
                                        ? model->lidLayer
                                        : blockTextureLayer(block, BlockFace::Top);
@@ -308,10 +318,17 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
 
             const auto face = [&](const glm::vec3& a, const glm::vec3& b2, const glm::vec3& d,
                                   const glm::vec3& e, const glm::vec2* rect, float layer, float shade) {
-                const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+                // **A dropped pane of stained glass is the fourth place a block
+                // is drawn**, and the one that would have been missed: its art
+                // keeps a real alpha now, so left in the opaque mesh the cutout
+                // test would throw away the 0.40 centre panel and drop a
+                // wireframe frame on the floor.
+                engine::MeshData& out =
+                    (blended != nullptr && isBlendedGlass(block)) ? *blended : mesh;
+                const auto base = static_cast<std::uint32_t>(out.vertices.size());
                 const glm::vec3 corners[4]{a, b2, d, e};
                 for (int i = 0; i < 4; ++i) {
-                    mesh.vertices.push_back(
+                    out.vertices.push_back(
                         engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
                                        engine::packVertexColor(sky, blockLight, shade, 1.0f),
                                        {rect[i].x, rect[i].y},
@@ -319,19 +336,23 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
                                        engine::kVertexSurfaceDefault});
                 }
                 // Both windings: it spins, so either side can face the camera.
-                mesh.indices.insert(mesh.indices.end(),
-                                    {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
-                                     base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
+                out.indices.insert(out.indices.end(),
+                                   {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
+                                    base + 2, base + 1, base + 0, base + 3, base + 2, base + 0});
             };
 
             face(corner(b.minX, b.minY, b.minZ), corner(b.maxX, b.minY, b.minZ),
-                 corner(b.maxX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.minZ), wall, wallLayer, 0.60f);
+                 corner(b.maxX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.minZ), wall,
+                 wallLayer(FaceDirection::NegZ), 0.60f);
             face(corner(b.maxX, b.minY, b.maxZ), corner(b.minX, b.minY, b.maxZ),
-                 corner(b.minX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.maxZ), wall, wallLayer, 0.86f);
+                 corner(b.minX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.maxZ), wall,
+                 wallLayer(FaceDirection::PosZ), 0.86f);
             face(corner(b.maxX, b.minY, b.minZ), corner(b.maxX, b.minY, b.maxZ),
-                 corner(b.maxX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.minZ), wall, wallLayer, 0.72f);
+                 corner(b.maxX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.minZ), wall,
+                 wallLayer(FaceDirection::PosX), 0.72f);
             face(corner(b.minX, b.minY, b.maxZ), corner(b.minX, b.minY, b.minZ),
-                 corner(b.minX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.maxZ), wall, wallLayer, 0.72f);
+                 corner(b.minX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.maxZ), wall,
+                 wallLayer(FaceDirection::NegX), 0.72f);
             face(corner(b.minX, b.maxY, b.maxZ), corner(b.maxX, b.maxY, b.maxZ),
                  corner(b.maxX, b.maxY, b.minZ), corner(b.minX, b.maxY, b.minZ), cap, capLayer, 1.0f);
             face(corner(b.minX, b.minY, b.minZ), corner(b.maxX, b.minY, b.minZ),
