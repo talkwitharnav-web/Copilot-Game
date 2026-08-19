@@ -46,8 +46,16 @@ struct OverlayStats {
     const char* toneMapper = "";
     const char* shadows = "";
     const char* clouds = "";
-    /// Seconds of breath left. The bubble bar arrives with player health at
-    /// M21; until then this is the only place the timer is visible.
+    /// Seconds of breath left.
+    ///
+    /// **This was documented as the only place the timer is visible "until the
+    /// bubble bar arrives at M21". It arrived** - `hud::makeStatusBars` draws
+    /// the row today, off `airRow(player.air / fluid::kAirSeconds)`, and the
+    /// HUD's own rebuild trigger compares against the same function. So this
+    /// row is now a convenience that reads the raw seconds rather than the only
+    /// window onto them, and nobody should treat it as load-bearing or go and
+    /// build the bar it says is missing (corrected 2026-08-19). What would make
+    /// this note false: the air row leaving `StatusBars.cpp`.
     float air = 0.0f;
 };
 
@@ -57,8 +65,18 @@ struct OverlayStats {
 /// because screen coordinates are relative to window height, so the left edge
 /// sits at -aspect.
 ///
-/// Frame *time* is the headline rather than frames per second: fps is an average
-/// that hides the single long frame which is what actually felt bad.
+/// Frame *time* is the headline rather than frames per second, because a figure
+/// in milliseconds can be held against a budget - 16.67 for 60 Hz, which is the
+/// one guide line the graph draws - and a reciprocal cannot.
+///
+/// **What the `fps` row is not, is an average** (corrected 2026-08-19). The
+/// header used to justify the ordering by saying fps is an average that hides
+/// the single long frame; ours is filled as `1 / deltaSeconds` off the raw
+/// frame delta, unsmoothed, from the *same* measurement as `frameMilliseconds`
+/// - so the two rows are one number in two units and the fps row hides nothing
+/// the cpu row shows. A reader who believed the old note would go looking for
+/// smoothing that has never existed, or add some, and the graph beside it -
+/// which is per-frame samples - would then disagree with the number above it.
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect);
 
 } // namespace game

@@ -33,19 +33,28 @@ engine::MeshData makeLoadingScreen(float progress, const char* phase, float aspe
     engine::MeshData mesh;
     const float shown = std::clamp(progress, 0.0f, 1.0f);
 
+    // **Flat colour comes off the white layer, not off the sprite sheet.**
+    // `appendQuad` with `textured = false` samples the middle of whatever layer
+    // it is given, and the middle of `hud.png` is #C6C6C6 - so every one of
+    // these was quietly multiplied by 0.776 and the whole loading screen was
+    // 22% darker than the colours below say. Nothing looked broken, because a
+    // dim loading screen is a plausible loading screen; it only shows up when
+    // the panel meets an in-game one drawn the same colour.
+    constexpr float kWhite = static_cast<float>(TextureLayer::White);
+
     // Coordinates are relative to window height, so the half-width needed to
     // cover the screen is the aspect ratio.
-    appendQuad(mesh, 0.0f, 0.0f, aspect, 1.0f, kPanelDepth, kBackground, kHudLayer, false);
+    appendQuad(mesh, 0.0f, 0.0f, aspect, 1.0f, kPanelDepth, kBackground, kWhite, false);
 
     appendQuad(mesh, 0.0f, 0.0f, kBarHalfWidth + kFrameThickness, kBarHalfHeight + kFrameThickness, kFrameDepth,
-               kFrame, kHudLayer, false);
-    appendQuad(mesh, 0.0f, 0.0f, kBarHalfWidth, kBarHalfHeight, kTrackDepth, kTrack, kHudLayer, false);
+               kFrame, kWhite, false);
+    appendQuad(mesh, 0.0f, 0.0f, kBarHalfWidth, kBarHalfHeight, kTrackDepth, kTrack, kWhite, false);
 
     // Grown from the left edge rather than the centre.
     if (shown > 0.0f) {
         const float width = kBarHalfWidth * 2.0f * shown;
         appendQuad(mesh, -kBarHalfWidth + width * 0.5f, 0.0f, width * 0.5f, kBarHalfHeight, kFillDepth, kFill,
-                   kHudLayer, false);
+                   kWhite, false);
     }
 
     const std::string label =

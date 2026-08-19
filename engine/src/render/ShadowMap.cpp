@@ -27,6 +27,18 @@ VkFormat ShadowMap::chooseFormat(VkPhysicalDevice physicalDevice) {
 
 ShadowMap::ShadowMap(const VulkanContext& context, std::uint32_t resolution, std::uint32_t cascades)
     : m_context(context), m_resolution(std::max(1u, resolution)) {
+    // See `DepthImage`: a constructor that throws gets no destructor. Rebuilt
+    // whenever shadow quality changes, so this is not a once-per-run leak.
+    try {
+        createResources(cascades);
+    } catch (...) {
+        destroy();
+        throw;
+    }
+}
+
+void ShadowMap::createResources(std::uint32_t cascades) {
+    const VulkanContext& context = m_context;
     cascades = std::clamp(cascades, 1u, kMaxCascades);
     m_format = chooseFormat(context.physicalDevice());
 
@@ -53,8 +65,6 @@ ShadowMap::ShadowMap(const VulkanContext& context, std::uint32_t resolution, std
     allocInfo.memoryTypeIndex =
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
-        vkDestroyImage(context.device(), m_image, nullptr);
-        m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for the shadow map");
     }
     vkCheck(vkBindImageMemory(context.device(), m_image, m_memory, 0), "vkBindImageMemory");
@@ -101,22 +111,29 @@ ShadowMap::ShadowMap(const VulkanContext& context, std::uint32_t resolution, std
     vkCheck(vkCreateSampler(context.device(), &samplerInfo, nullptr, &m_sampler), "vkCreateSampler");
 }
 
-ShadowMap::~ShadowMap() {
+ShadowMap::~ShadowMap() { destroy(); }
+
+void ShadowMap::destroy() noexcept {
     if (m_sampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_sampler, nullptr);
+        m_sampler = VK_NULL_HANDLE;
     }
     if (m_arrayView != VK_NULL_HANDLE) {
         vkDestroyImageView(m_context.device(), m_arrayView, nullptr);
+        m_arrayView = VK_NULL_HANDLE;
     }
     for (VkImageView view : m_cascadeViews) {
         if (view != VK_NULL_HANDLE) {
             vkDestroyImageView(m_context.device(), view, nullptr);
         }
     }
+    m_cascadeViews.clear();
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
+        m_image = VK_NULL_HANDLE;
     }
     freeDeviceMemory(m_context.device(), m_memory);
+    m_memory = VK_NULL_HANDLE;
 }
 
 } // namespace engine

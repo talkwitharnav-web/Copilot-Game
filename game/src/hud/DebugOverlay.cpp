@@ -25,7 +25,13 @@ constexpr float kPanelWidth = 0.56f;
 /// atlas can be swapped for one drawn at another resolution.
 constexpr float kCharHeight = 14.0f / 360.0f;
 constexpr float kLineHeight = 0.052f;
-constexpr float kValueColumn = 0.20f; // Values start here, so they line up.
+/// Space between the widest label and the column of values.
+///
+/// **The column itself is measured, not written down.** It was a flat 0.20,
+/// which is 41 texels at this character height, and `tone F10` alone is 44 -
+/// so the two longest labels ran straight into their own values with no gap at
+/// all. A literal cannot follow a label being renamed; `hud::textWidth` can.
+constexpr float kColumnGap = 0.024f;
 constexpr float kGraphHeight = 0.15f;
 constexpr float kGraphGap = 0.026f;
 
@@ -57,7 +63,12 @@ std::string formatFloat(float value, int decimals) {
     return std::string{buffer.data()};
 }
 
-/// Abbreviates large counts so a value never overflows its column.
+/// Abbreviates large counts so a long one stays a few characters wide.
+///
+/// **Only the rows that call it, and it is not a clip.** It was commented as
+/// though it stopped values overflowing the column, which put every other row
+/// beyond suspicion - `fitToWidth` is what actually enforces the width, and
+/// this only keeps triangle counts readable.
 std::string formatCount(std::uint32_t value) {
     if (value < 10'000) {
         return std::to_string(value);
@@ -66,6 +77,23 @@ std::string formatCount(std::uint32_t value) {
         return formatFloat(static_cast<float>(value) / 1'000.0f, 1) + "k";
     }
     return formatFloat(static_cast<float>(value) / 1'000'000.0f, 2) + "M";
+}
+
+/// The longest head of `text` that fits, with two dots marking what was cut.
+///
+/// Nothing clipped these before, and the overlay reports numbers that grow
+/// without limit - allocation counts, chunk totals, a biome name from a table
+/// that keeps getting longer. A value that outgrows the panel is drawn straight
+/// across the world with no border under it, which reads as corruption rather
+/// than as a long number.
+std::string fitToWidth(std::string text, float charHeight, float available) {
+    if (hud::textWidth(text, charHeight) <= available) {
+        return text;
+    }
+    while (!text.empty() && hud::textWidth(text + "..", charHeight) > available) {
+        text.pop_back();
+    }
+    return text + "..";
 }
 
 /// Draws a filled rectangle from its edges rather than its centre, which is how
@@ -86,7 +114,7 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 19> rows{{
+    const std::array<Row, 20> rows{{
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
@@ -107,8 +135,13 @@ engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<f
         {"retired", std::to_string(stats.retired)},
         {"draws", std::to_string(stats.drawCalls)},
         {"tris", formatCount(stats.triangles)},
-        {"gpu mem", std::to_string(stats.gpuMegabytes) + " MB  " +
-                       std::to_string(stats.deviceAllocations) + "/" +
+        // **Two facts, two rows.** Written as one, this was the longest value
+        // on the panel by half again - the megabytes, two allocation counts and
+        // a slash, which no plausible column width fits. They are also read for
+        // different reasons: the first is "am I near the memory budget", the
+        // second is "am I near the driver's allocation limit".
+        {"gpu mem", std::to_string(stats.gpuMegabytes) + " MB"},
+        {"allocs", std::to_string(stats.deviceAllocations) + "/" +
                        std::to_string(stats.deviceAllocationLimit)},
         {"workers", std::to_string(stats.workerThreads)},
         {"tone F10", stats.toneMapper},
@@ -161,11 +194,22 @@ engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<f
         }
     }
 
-    // Labels in a dim column, values aligned in a brighter one.
+    // Labels in a dim column, values aligned in a brighter one. **The column is
+    // the widest label plus a gap**, measured through the same function that
+    // draws the text, so renaming a row moves the values instead of running
+    // into them.
+    float widestLabel = 0.0f;
+    for (const Row& row : rows) {
+        widestLabel = std::max(widestLabel, hud::textWidth(row.label, kCharHeight));
+    }
+    const float valueColumn = contentLeft + widestLabel + kColumnGap;
+    const float valueRoom = contentRight - valueColumn;
+
     float rowCentre = rowsTop + kLineHeight * 0.5f;
     for (const Row& row : rows) {
         hud::appendText(mesh, row.label, contentLeft, rowCentre, kCharHeight, kTextDepth, kLabelColor);
-        hud::appendText(mesh, row.value, contentLeft + kValueColumn, rowCentre, kCharHeight, kTextDepth, kValueColor);
+        hud::appendText(mesh, fitToWidth(row.value, kCharHeight, valueRoom), valueColumn, rowCentre,
+                        kCharHeight, kTextDepth, kValueColor);
         rowCentre += kLineHeight;
     }
 

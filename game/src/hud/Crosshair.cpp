@@ -1,10 +1,9 @@
 #include "hud/Crosshair.hpp"
 
+#include "hud/HudPrimitives.hpp"
 #include "world/Block.hpp"
 
 #include <glm/glm.hpp>
-
-#include <cstdint>
 
 namespace game {
 namespace {
@@ -26,27 +25,15 @@ constexpr float kBorderDepth = 0.0001f;
 constexpr glm::vec4 kInnerColor{0.95f, 0.95f, 0.95f, 1.0f};
 constexpr glm::vec4 kBorderColor{0.04f, 0.04f, 0.05f, 1.0f};
 
-void appendQuad(engine::MeshData& mesh, float halfWidth, float halfHeight, float depth, const glm::vec4& color) {
-    const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
-    const float layer = static_cast<float>(TextureLayer::White);
-
-    const glm::vec2 corners[4]{
-        {-halfWidth, -halfHeight}, {halfWidth, -halfHeight}, {halfWidth, halfHeight}, {-halfWidth, halfHeight}};
-
-    for (const glm::vec2& corner : corners) {
-        mesh.vertices.push_back(engine::Vertex{{corner.x, corner.y, depth},
-                                               engine::packVertexColor(color.r, color.g, color.b, color.a),
-                                               {0.5f, 0.5f},
-                                               layer,
-                                               engine::kVertexSurfaceDefault});
-    }
-
-    // Both windings. Backface culling is on, and screen-space geometry skips the
-    // projection that establishes which way is front — rather than deriving that
-    // (and silently rendering nothing if it is backwards), emit the quad twice.
-    // Four extra triangles for the entire HUD is not worth reasoning about.
-    mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2, base + 0, base + 2, base + 3,
-                                             base + 0, base + 2, base + 1, base + 0, base + 3, base + 2});
+/// A bar of the reticle, always centred on the screen.
+///
+/// This file used to carry its own copy of `hud::appendQuad`, byte for byte
+/// including the both-windings index list `UI.md` R3 requires - so the one rule
+/// every quad in the HUD has to obey had two places to be got wrong. Nothing
+/// was wrong with the copy; the cost was that it existed.
+void appendBar(engine::MeshData& mesh, float halfWidth, float halfHeight, float depth, const glm::vec4& color) {
+    hud::appendQuad(mesh, 0.0f, 0.0f, halfWidth, halfHeight, depth, color,
+                    static_cast<float>(TextureLayer::White), false);
 }
 
 } // namespace
@@ -55,11 +42,11 @@ engine::MeshData makeCrosshair() {
     engine::MeshData mesh;
 
     // Border first, slightly larger and slightly further away.
-    appendQuad(mesh, kArmLength + kBorder, kArmThickness + kBorder, kBorderDepth, kBorderColor);
-    appendQuad(mesh, kArmThickness + kBorder, kArmLength + kBorder, kBorderDepth, kBorderColor);
+    appendBar(mesh, kArmLength + kBorder, kArmThickness + kBorder, kBorderDepth, kBorderColor);
+    appendBar(mesh, kArmThickness + kBorder, kArmLength + kBorder, kBorderDepth, kBorderColor);
 
-    appendQuad(mesh, kArmLength, kArmThickness, kInnerDepth, kInnerColor);
-    appendQuad(mesh, kArmThickness, kArmLength, kInnerDepth, kInnerColor);
+    appendBar(mesh, kArmLength, kArmThickness, kInnerDepth, kInnerColor);
+    appendBar(mesh, kArmThickness, kArmLength, kInnerDepth, kInnerColor);
 
     return mesh;
 }

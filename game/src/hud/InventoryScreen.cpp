@@ -42,6 +42,45 @@ constexpr float kHeldCountDepth = 0.0008f;
 // Nearest of everything: a label that anything can cover is not a label.
 constexpr float kTooltipDepth = 0.0006f;
 
+// **Three bands hold an icon and its own marks, and each one has to clear the
+// icon's reach rather than merely be a smaller number.** `appendBlockIcon`
+// spends `hud::kIconDepthSpan` in front of whatever depth it is handed for any
+// block drawn as boxes, and a count's shadow spends `hud::kFontShadowDepth`
+// behind its own - so the real gap is smaller than these lines look.
+//
+// The catalogue's is the tight one at 6e-5, and it is tight on purpose: 0.0034
+// is held free above it for the scrollbar. **Downstream of five blocks moving
+// from flat sprites to models this session** - a flat sprite spends none of the
+// icon budget and a model spends all of it, so this band went from unused to
+// nearly spent without a line of it changing.
+static_assert(hud::iconStaysBehindItsMarks(kCatalogueIconDepth, kCatalogueCountDepth),
+              "a catalogue icon now reaches in front of its own count - the free 0.0034 band "
+              "above is where to take the room from");
+static_assert(hud::iconStaysBehindItsMarks(kIconDepth, kCountDepth),
+              "a grid icon now reaches in front of its own stack count and durability bar");
+static_assert(hud::iconStaysBehindItsMarks(kHeldIconDepth, kHeldCountDepth),
+              "the icon on the cursor now reaches in front of its own stack count");
+static_assert(kTooltipDepth < kHeldCountDepth,
+              "the tooltip must stay nearer than the stack on the cursor - a label anything can "
+              "cover is not a label");
+
+/// **The hover highlight straddles the item it marks**, exactly as the
+/// reference's two sprites do: `back` behind the icon so a full slot still
+/// reads as full, `front` over the icon so the brightening lands on the picture
+/// rather than only in the gap around it.
+constexpr float kSlotHighlightBackDepth = 0.00305f;
+constexpr float kSlotHighlightFrontDepth = 0.0020f;
+static_assert(kSlotHighlightBackDepth < kCellDepth && kSlotHighlightBackDepth > kIconDepth,
+              "the back half of the hover highlight has to land between the cell art and the "
+              "icon - in front of the cell so it is visible at all, behind the icon so it never "
+              "washes out the very item it is marking");
+static_assert(kSlotHighlightFrontDepth < kCountDepth - hud::kDecorationSpan,
+              "the front half of the hover highlight has to clear the stack count and durability "
+              "bar, which reach kDecorationSpan in front of the depth they are handed - clearing "
+              "kCountDepth alone would leave it behind the marks it is meant to lie over");
+static_assert(kSlotHighlightFrontDepth > kHeldIconDepth,
+              "the stack on the cursor has to cover the hover highlight, not the other way round");
+
 constexpr glm::vec4 kDim{0.0f, 0.0f, 0.0f, 0.55f};
 constexpr glm::vec4 kCount{1.0f, 1.0f, 1.0f, 1.0f};
 constexpr glm::vec4 kLabel{0.24f, 0.24f, 0.24f, 1.0f};
@@ -73,6 +112,16 @@ constexpr glm::vec2 kDoubleChestPanelMin{0.0f, 1125.0f};
 /// rather than following the chests it sits beside in this list.
 constexpr glm::vec2 kHopperPanelMin{0.0f, 1355.0f};
 constexpr glm::vec2 kStonecutterPanelMin{0.0f, 1521.0f};
+
+// **A wrong sheet offset does not fail, it silently draws whatever sits there.**
+// The stonecutter is the last thing on the sheet, so its bottom edge is the
+// sheet's - which turns "every offset above me is still right" into one
+// arithmetic statement the compiler can check. The single edit that breaks it
+// is adding a strip to `tools/make-hud-sheet.ps1` without carrying the new
+// height into `hud::kSheetSize`.
+static_assert(kStonecutterPanelMin.y + kPanelPixelSize.y == hud::kSheetSize.y,
+              "the stonecutter panel is the last thing on the sheet, so it must end exactly at the "
+              "sheet's bottom edge");
 
 /// The hopper's one row: five cells on the usual pitch, centred in the card, so
 /// the run starts at 43 and the first centre lands on 52.
@@ -134,7 +183,15 @@ constexpr glm::vec2 cellSheetMin(CellState state) {
 
 /// The lit indicators, kept off the panel so they can be drawn over the spent
 /// versions baked into it and cut off part way.
-constexpr glm::vec2 kLitFlakeSheetMin{0.0f, 539.0f};
+///
+/// **The flame sat one row too high.** `ui-screens.json`
+/// `ours.strips.indicators.parts.flame_lit` gives y 540, and measuring
+/// `assets/textures/hud.png` agrees: rows 540-553 carry the flame and row 539
+/// is fully transparent, as is row 554. A row of nothing at the top and a
+/// missing row at the bottom is exactly what a furnace's flame burning down
+/// looks like when it is nearly out, so the symptom hides in the animation.
+/// The arrow beside it was already right.
+constexpr glm::vec2 kLitFlakeSheetMin{0.0f, 540.0f};
 constexpr glm::vec2 kLitFlameSize{14.0f, 14.0f};
 constexpr glm::vec2 kLitArrowSheetMin{16.0f, 540.0f};
 constexpr glm::vec2 kLitArrowSize{21.0f, 15.0f};
@@ -143,16 +200,19 @@ constexpr glm::vec2 kLitArrowSize{21.0f, 15.0f};
 constexpr glm::vec2 kFurnaceFlameArt{55.0f, 36.0f};
 constexpr glm::vec2 kFurnaceArrowArt{79.0f, 36.0f};
 
-/// How tall the panel is drawn, in screen units where the window is 2 tall.
-constexpr float kPanelHeight = 1.30f;
-
-/// One art pixel in screen units. Every position below is measured off the
-/// artwork in its own pixels and scaled through this, so the layout cannot
-/// drift away from the image it was taken from.
+/// One art pixel in screen units - **`hud::kArtPixel`, and nothing local**.
 ///
-/// **Fixed to the ordinary panel's height on purpose.** A taller screen grows
-/// downward at the same slot size rather than shrinking everything to fit.
-constexpr float kPixel = kPanelHeight / kPanelPixelSize.y;
+/// Every position below is measured off the artwork in its own pixels and
+/// scaled through this, so the layout cannot drift away from the image it was
+/// taken from.
+///
+/// This file used to derive its own, from a panel height of 1.30 over 166 art
+/// pixels, which came out 4.19% larger than the hotbar's. Both were live at
+/// once: every container screen was drawn 4.19% bigger than the bar it
+/// replaces, and because the hotbar is hidden while a screen is open, the eye
+/// only ever sees one of them at a time. `UI.md` R1 settles it on the hotbar,
+/// which is the thing that is on screen the rest of the time.
+constexpr float kPixel = hud::kArtPixel;
 
 /// The double chest carries three extra rows of nine, so its panel is 54 art
 /// pixels taller and everything below those rows moves down by the same.
@@ -174,7 +234,47 @@ constexpr float kFirstSlotCentreX = 16.0f;
 constexpr float kStorageTopCentreY = 92.0f;
 constexpr float kHotbarCentreY = 150.0f;
 
+/// **The armour column, measured off `assets/textures/hud.png` and not guessed
+/// from the reference's coordinates.**
+///
+/// The four cells sit at art top-left (7, 7), (7, 25), (7, 43) and (7, 61) -
+/// the same x as the storage grid, on the same 18-pixel pitch, starting 76
+/// pixels above it. Found by a detector that scans the panel for the 18x18 cell
+/// signature (dark border along the top and left, white highlight along the
+/// bottom and right, interior grey), and **the control is that the same
+/// detector reports the storage rows at centre y 92, 110 and 128 and the hotbar
+/// at 150** - the three constants above, which it had never been told. It also
+/// finds the 2x2 at (106, 26)/(124, 26)/(106, 44)/(124, 44) and the result at
+/// (162, 36), so its answers are non-uniform and it is measuring the sheet
+/// rather than echoing one number.
+///
+/// Our panel sits one pixel left of the reference's - `tools/make-hud-sheet.ps1`
+/// says so explicitly - which is exactly why this is measured. Porting the
+/// reference's x 8 would have put every armour cell one pixel out, in the
+/// direction nothing would notice until a click near the edge missed.
+constexpr float kArmourTopCentreY = 16.0f;
+static_assert(kArmourTopCentreY + 3.0f * kSlotPitchPixels + kSlotPitchPixels * 0.5f <
+                  kStorageTopCentreY - kSlotPitchPixels * 0.5f,
+              "the armour column must clear the storage rows, or two regions answer for one "
+              "point and which one wins is whichever loop slotAt happens to run first");
+
 constexpr float kSlotHalf = kSlotPitchPixels * kPixel * 0.5f;
+
+/// **The hover highlight, measured out of the reference rather than guessed.**
+/// `gui/sprites/container/slot_highlight_back.png` and `slot_highlight_front.png`
+/// are both 24x24 nine-slice with a border of 4, and all 320 border pixels are
+/// fully transparent - the only ink in either is a 16x16 core of flat white,
+/// alpha 96 on the back sheet and 32 on the front. **So the sprite carries no
+/// shape at all**, and reproducing it needs no art: it is two plain quads over
+/// the slot's interior. That is what let this be fixed in code without touching
+/// `tools/make-hud-sheet.ps1`, which an earlier reading had assumed was needed.
+constexpr float kSlotHighlightPixels = 16.0f;
+static_assert(kSlotHighlightPixels == kSlotPitchPixels - 2.0f,
+              "the highlight covers a slot's interior, which is the pitch less its one-pixel "
+              "border on each side - if the pitch ever moves, this is the line that catches it");
+constexpr float kSlotHighlightHalf = kSlotHighlightPixels * kPixel * 0.5f;
+constexpr glm::vec4 kSlotHighlightBack{1.0f, 1.0f, 1.0f, 96.0f / 255.0f};
+constexpr glm::vec4 kSlotHighlightFront{1.0f, 1.0f, 1.0f, 32.0f / 255.0f};
 /// Eight art pixels, so the label scales with the panel rather than the window.
 constexpr float kTooltipTextHeight = 8.0f * kPixel;
 
@@ -190,6 +290,16 @@ constexpr float kLayoutPixelWidth = kBookPixelSize.x + kCardGapPixels + kPanelPi
 constexpr float kInventoryShiftPixels = kLayoutPixelWidth * 0.5f - kPanelPixelSize.x * 0.5f;
 constexpr float kBookCentrePixels = kBookPixelSize.x * 0.5f - kLayoutPixelWidth * 0.5f;
 
+// The fold between the two cards is the one measurement the eye checks, and it
+// is the *difference* of two derived centres rather than either of them - so
+// both can be wrong by the same amount and still look plausible. **The single
+// edit that breaks this is writing either card's centre down as a literal**
+// instead of deriving it from the block.
+static_assert(kInventoryShiftPixels - kPanelPixelSize.x * 0.5f -
+                      (kBookCentrePixels + kBookPixelSize.x * 0.5f) ==
+                  kCardGapPixels,
+              "the catalogue and the inventory card must be exactly kCardGapPixels apart");
+
 constexpr float kPanelOffsetX(Kind kind) {
     return showsCatalogue(kind) ? kInventoryShiftPixels * kPixel : 0.0f;
 }
@@ -199,8 +309,20 @@ constexpr float panelHalfHeight(Kind kind) {
     return panelPixelHeight(kind) * kPixel * 0.5f;
 }
 constexpr float kBookHalfWidth = kBookPixelSize.x * kPixel * 0.5f;
-/// The catalogue card never grows - only the inventory card has taller variants.
-constexpr float kBookHalfHeight = kPanelHeight * 0.5f;
+/// The catalogue card never grows - only the inventory card has taller
+/// variants - so it is measured from **its own** art rather than from the
+/// inventory panel's height. The two happen to be the same 166 pixels tall,
+/// which is precisely why reading the wrong one costs nothing until somebody
+/// redraws one of them.
+constexpr float kBookHalfHeight = kBookPixelSize.y * kPixel * 0.5f;
+
+// The two cards are drawn as one centred block and share a vertical centre, so
+// the day they stop being the same height is the day the fold between them
+// stops lining up. **The single edit that breaks this is redrawing either card
+// without the other**, in `tools/make-hud-sheet.ps1`.
+static_assert(kBookPixelSize.y == kPanelPixelSize.y,
+              "the catalogue and the inventory card are drawn as one block about a shared centre, "
+              "so they must be the same height");
 
 /// Art pixel to screen space, for the inventory card. The card is centred
 /// vertically; horizontally it is wherever the layout block puts it, and
@@ -236,6 +358,73 @@ constexpr float kSearchFieldHeight = 13.0f;
 constexpr float kSearchBorderPixels = 1.0f;
 constexpr float kSearchTextHeight = 8.0f;
 
+/// How much room the text actually has: the field, less its border on both
+/// sides, less the same two-pixel inset the text is drawn at, less one pixel
+/// for the caret that follows it.
+constexpr float kSearchTextInset = 2.0f;
+constexpr float kSearchTextWidth =
+    kSearchFieldWidth - 2.0f * (kSearchBorderPixels + kSearchTextInset) - 1.0f;
+
+/// The caret at its far right still lands inside the field's inset box, and
+/// lands exactly as far from the right border as the text starts from the left.
+///
+/// The caret is one art pixel wide, drawn centred half a pixel past its offset,
+/// and its offset can reach `kSearchTextWidth` - so its right edge is
+/// `inset + kSearchTextWidth + 1`. **The single edit that makes this fail is
+/// dropping the `- 1.0f` above**, which is the caret's own column: the text
+/// would then fill the box to the border and the caret would be drawn on top of
+/// it, which is the state this field shipped in before it had one.
+static_assert(kSearchBorderPixels + kSearchTextInset + kSearchTextWidth + 1.0f ==
+                  kSearchFieldWidth - (kSearchBorderPixels + kSearchTextInset),
+              "the caret's rightmost column must sit inside the field, mirroring the left inset");
+
+/// What the field shows, and where the caret sits inside it.
+///
+/// **The visible window follows the caret, not the end of the string.** The
+/// first version of this trimmed to the tail, which is right while you are
+/// typing and wrong the moment an arrow key exists: walking the caret left
+/// would have taken it out through the left-hand edge of the box, drawn over
+/// the card, while the text under it never moved. A window that can only ever
+/// show the end is not a text field, it is a log.
+///
+/// Front-trimmed rather than back-trimmed when there is a choice, because the
+/// end of a query is the part you are still typing. Measured through
+/// `hud::textWidth` throughout - the font is proportional, so a character count
+/// is not a width, which is exactly why the caller's 22-character cap never
+/// stopped this overflowing on its own.
+struct SearchView {
+    std::string_view text;
+    /// From the field's text origin to the caret, in screen units.
+    float caretOffset;
+};
+
+SearchView searchView(std::string_view query, std::size_t caret, float textHeight, float available) {
+    // **The renderer does not trust `CatalogueState::caret`.** `build` takes
+    // that struct by const reference and so cannot repair it, and `query` is a
+    // public member that code with no idea a caret exists can shorten - so the
+    // clamp happens again here, where a stale index would otherwise be an
+    // out-of-bounds `substr` rather than a cosmetic slip.
+    caret = std::min(caret, query.size());
+
+    // Scroll right until the caret is inside the window. This is the half that
+    // makes the trim follow the caret.
+    std::size_t first = 0;
+    while (first < caret && hud::textWidth(query.substr(first, caret - first), textHeight) > available) {
+        ++first;
+    }
+
+    // Then show as much as fits from there. This cannot push the caret back out
+    // of the right-hand edge: the text up to the caret already fits by the loop
+    // above, so this one can never trim past it.
+    std::size_t count = query.size() - first;
+    while (count > 0 && hud::textWidth(query.substr(first, count), textHeight) > available) {
+        --count;
+    }
+
+    return SearchView{query.substr(first, count),
+                      hud::textWidth(query.substr(first, caret - first), textHeight)};
+}
+
 /// Tabs hang directly above the card, flush with its top edge.
 ///
 /// Measured off the capture: the first four pack on a 25-unit pitch and Search
@@ -267,6 +456,20 @@ glm::vec2 gridSlotCentre(Kind kind, std::size_t index) {
     }
     const auto row = static_cast<float>(index / kHotbarSlots) - 1.0f;
     return toScreen(kind, artX, kStorageTopCentreY + shift + row * kSlotPitchPixels);
+}
+
+/// Where one of the four worn pieces sits, in `ArmourSlot`'s own order - head,
+/// chest, legs, feet, top to bottom, which is the order the art draws them in
+/// and the order `Inventory::armourAt` indexes.
+///
+/// **No `storageShiftY`, deliberately.** That shift exists for the double
+/// chest's three extra rows, and the double chest has no armour column at all -
+/// `armourSlotCount` answers 0 for it. Adding the shift here would be a
+/// derivation that only ever fires on a screen this never runs on, which is a
+/// worse kind of dead code than none.
+glm::vec2 armourSlotCentre(Kind kind, std::size_t index) {
+    return toScreen(kind, kFirstSlotCentreX,
+                    kArmourTopCentreY + static_cast<float>(index) * kSlotPitchPixels);
 }
 
 /// Measured off the art the same way the storage grid was.
@@ -410,9 +613,15 @@ std::size_t catalogueCapacity() {
 }
 
 /// How many rows the card shows *whole*. The clipped one is deliberately not
-/// counted: it draws no icon and answers no click, so scrolling has to be able
-/// to bring every entry into a whole row or the last few are unreachable -
+/// counted, so scrolling can always bring every entry up into a whole row -
 /// which is exactly how the bucket arrived and could not be seen.
+///
+/// **It does draw, and it does answer a click**, which this comment used to
+/// deny on both counts. `catalogueCapacity` counts every cell `catalogueCell`
+/// calls visible, the clipped row included, and `catalogueCellAt` hit-tests
+/// that row against the height the scissor leaves it. A reader who believed the
+/// old wording would have "corrected" the capacity and deleted a working row of
+/// icons; the note predates the scissor that made both true.
 std::size_t catalogueWholeRows() {
     std::size_t rows = 0;
     while (catalogueCell(rows * static_cast<std::size_t>(kCatalogueColumns)).whole()) {
@@ -464,24 +673,47 @@ void appendCatalogue(engine::MeshData& mesh, engine::MeshData& clipped, const Ca
                         (kSearchFieldHeight - 2.0f * kSearchBorderPixels) * kPixel * 0.5f, kSearchFieldDepth,
                         kSearchBack, white, false);
 
-        const float textLeft = label.x + (kSearchBorderPixels + 2.0f) * kPixel;
+        const float textLeft = label.x + (kSearchBorderPixels + kSearchTextInset) * kPixel;
         const float textHeight = kSearchTextHeight * kPixel;
+
+        // **What fits, and where the caret is inside it.** A text field
+        // scrolls: while you are typing you have to see what you have just
+        // typed, so the head slides out of sight and the tail stays - but the
+        // moment arrow keys exist the window has to follow the *caret*, not the
+        // end, or walking left runs the caret out through the border while the
+        // text underneath it sits still.
+        //
+        // Nothing clipped this at all. The field is 122 art pixels of usable
+        // room and the caller lets 22 characters in, which at 6 pixels apiece
+        // is 132 - so a long query ran out through the border, across the
+        // catalogue's own tab strip and off the card, and the caret went with
+        // it. A cap in the caller is not a fix, because the glyphs are
+        // proportional and 22 of them are not a fixed width.
+        const SearchView view = searchView(state.query, state.caret, textHeight, kSearchTextWidth * kPixel);
+
         // The hint is what the field says when it is doing nothing. Clicking
         // into it is a statement that you are about to type, so it goes.
         const bool showHint = state.query.empty() && !state.searchFocused;
         if (showHint) {
             hud::appendText(mesh, "Search", textLeft, centre.y, textHeight, kLabelDepth, kSearchHint);
-        } else if (!state.query.empty()) {
-            hud::appendText(mesh, state.query, textLeft, centre.y, textHeight, kLabelDepth, kSearchText, true);
+        } else if (!view.text.empty()) {
+            hud::appendText(mesh, view.text, textLeft, centre.y, textHeight, kLabelDepth, kSearchText, true);
         }
 
         // A solid bar rather than an underscore, so it reads at this size, and
-        // **measured from the query alone** - with the field empty the caret
-        // belongs at the start, not after the hint standing in for it. Only
-        // while the field is focused, and only on the frames the caller says it
-        // is on: a caret that does not blink looks like part of the text.
+        // **placed from the same measurement that chose the window** - with the
+        // field empty the caret belongs at the start, not after the hint
+        // standing in for it, and mid-string it belongs between two glyphs
+        // rather than after the last one drawn. Only while the field is
+        // focused, and only on the frames the caller says it is on: a caret
+        // that does not blink looks like part of the text.
+        //
+        // `caretOffset` is measured from the same `first` character
+        // `view.text` starts at, so the two cannot disagree about where the
+        // window begins. The single edit that breaks this is returning the
+        // offset from the whole query instead of from the visible slice.
         if (state.searchFocused && state.caretVisible) {
-            const float caretX = textLeft + hud::textWidth(state.query, textHeight) + kPixel * 0.5f;
+            const float caretX = textLeft + view.caretOffset + kPixel * 0.5f;
             hud::appendQuad(mesh, caretX, centre.y, kPixel * 0.5f, textHeight * 0.5f, kLabelDepth,
                             kSearchText, white, false);
         }
@@ -650,6 +882,21 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
             return SlotHit{Region::Grid, i};
         }
     }
+    // **The four cells down the left, and the reason this was the last link in
+    // the armour chain.** `Region::Armour` existed as an enumerator and as two
+    // `case` labels, and was constructed by nothing anywhere in the repository -
+    // so `Inventory::armourSet()` could only ever answer `kNoArmour`, and the
+    // whole reduction curve, the durability charge and thirteen per-source
+    // verdicts were correct, asserted and unreachable. `CLAUDE.md` bug shape
+    // #15.
+    //
+    // Gated through `armourSlotCount` rather than on `kind` directly, so this
+    // and `build` ask the same question of the same owner.
+    for (std::size_t i = 0; i < armourSlotCount(kind); ++i) {
+        if (within(x, y, armourSlotCentre(kind, i), kSlotHalf)) {
+            return SlotHit{Region::Armour, i};
+        }
+    }
     if (isContainer(kind)) {
         for (std::size_t i = 0; i < chestSlotCount(kind); ++i) {
             if (within(x, y, chestSlotCentre(kind, i), kSlotHalf)) {
@@ -669,6 +916,40 @@ std::optional<SlotHit> slotAt(Kind kind, float x, float y) {
         if (within(x, y, resultSlotCentre(kind, layout, i), kSlotHalf)) {
             return SlotHit{Region::CraftResult, i};
         }
+    }
+    return std::nullopt;
+}
+
+/// The screen centre of a slot `slotAt` has just reported, for the hover
+/// highlight to sit on.
+///
+/// **Deliberately built from the same four centre functions `slotAt` tests**,
+/// rather than from a second set of coordinates that happen to agree today. A
+/// highlight that can drift from the region which produced it is exactly the
+/// "one thing drawn in two places" fault this project has paid for repeatedly;
+/// deriving both from one owner makes the drift impossible rather than merely
+/// unlikely, and costs nothing here because the functions already exist.
+std::optional<glm::vec2> hoveredSlotCentre(Kind kind, const Layout& layout, const SlotHit& hit) {
+    switch (hit.region) {
+    case Region::Grid:
+        return gridSlotCentre(kind, hit.index);
+    case Region::Chest:
+        return chestSlotCentre(kind, hit.index);
+    case Region::Craft:
+        return craftSlotCentre(kind, layout, hit.index);
+    case Region::CraftResult:
+        return resultSlotCentre(kind, layout, hit.index);
+    case Region::Armour:
+        return armourSlotCentre(kind, hit.index);
+    // **No `default:`**, for the same reason the tooltip switch gives further
+    // down: these three have no geometry of their own today, and naming them is
+    // what makes the compiler point at this switch the moment a fourth arrives.
+    // A catch-all would silently leave the newcomer with no hover feedback,
+    // which reads as the highlight being broken rather than as a case missed.
+    case Region::Offhand:
+    case Region::FurnaceInput:
+    case Region::FurnaceFuel:
+        break;
     }
     return std::nullopt;
 }
@@ -745,6 +1026,16 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
         hud::appendStack(mesh, inventory.slot(i), gridSlotCentre(kind, i), kSlotHalf, kIconDepth, kCountDepth);
     }
 
+    // **What is worn, drawn where it is worn.** Without this the hit test would
+    // equip in silence: the piece would leave your hand, reduce damage and wear
+    // out, and the cell it went into would stay empty - which is
+    // indistinguishable from the item having been destroyed, and is the reading
+    // a playtester would file.
+    for (std::size_t i = 0; i < armourSlotCount(kind); ++i) {
+        hud::appendStack(mesh, inventory.armourAt(i), armourSlotCentre(kind, i), kSlotHalf, kIconDepth,
+                         kCountDepth);
+    }
+
     for (std::size_t i = 0; i < slotsFor(kind); ++i) {
         hud::appendStack(mesh, craftSlots[i], craftSlotCentre(kind, layout, i), kSlotHalf, kIconDepth,
                          kCountDepth);
@@ -791,9 +1082,34 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
         }
     }
 
-    // Its own layer, drawn after the clipped catalogue: nearest is not enough
-    // when a blended fragment still writes depth, and being drawn *earlier*
-    // than the icons behind it punched a hole through them.
+    // **The hover highlight, on every slot rather than only the catalogue's.**
+    // The user's ruling recorded in `INTERFACE.md` 3.1 is that transient
+    // brightening on hover is wanted - "if i hover and it temporarily brightens
+    // then THAT is fine, persistent brightness isn't" - and until now exactly
+    // one family of cells had it, so every ordinary inventory, chest, craft and
+    // result slot gave no feedback at all about which one you were pointing at.
+    //
+    // **Drawn whether or not a stack is on the cursor.** The tooltip below
+    // deliberately stays away while carrying, because a label as well as an
+    // attached stack is noise; the highlight is the opposite case - while
+    // carrying is precisely when you need to see which slot you are about to
+    // drop into, so it is the one piece of hover feedback that must survive.
+    if (!hoveredEntry.has_value()) {
+        if (const std::optional<SlotHit> hover = slotAt(kind, cursorX, cursorY); hover.has_value()) {
+            if (const std::optional<glm::vec2> centre = hoveredSlotCentre(kind, layout, *hover);
+                centre.has_value()) {
+                hud::appendQuad(mesh, centre->x, centre->y, kSlotHighlightHalf, kSlotHighlightHalf,
+                                kSlotHighlightBackDepth, kSlotHighlightBack, 0.0f, false);
+                hud::appendQuad(mesh, centre->x, centre->y, kSlotHighlightHalf, kSlotHighlightHalf,
+                                kSlotHighlightFrontDepth, kSlotHighlightFront, 0.0f, false);
+            }
+        }
+    }
+
+    // Its own layer, drawn after the clipped catalogue. The UI pass has no
+    // depth attachment at all (`Renderer.cpp`, `recordUiPass`), so "nearest"
+    // only decides the sort key and being appended *earlier* than the icons
+    // behind it is what actually punched a hole through them.
     hud::appendStack(top, heldStack, {cursorX, cursorY}, kSlotHalf, kHeldIconDepth, kHeldCountDepth);
 
     // Only with an empty cursor: while carrying a stack the pointer already has
@@ -823,7 +1139,19 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
                     under = &craftResults[hover->index];
                 }
                 break;
-            default:
+            case Region::Armour:
+                if (hover->index < armourSlotCount(kind)) {
+                    under = &inventory.armourAt(hover->index);
+                }
+                break;
+            // **No `default:`.** The three regions below have no stack behind
+            // them today, and naming them is what makes the compiler point at
+            // this switch the moment a fourth arrives - a catch-all would
+            // silently give the new one no tooltip, which reads as the tooltip
+            // being broken rather than as a case being missed.
+            case Region::Offhand:
+            case Region::FurnaceInput:
+            case Region::FurnaceFuel:
                 break;
             }
         }

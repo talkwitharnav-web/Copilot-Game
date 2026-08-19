@@ -35,7 +35,7 @@ struct Recipe {
     /// on that.** "Do I have the materials?" is bipartite matching in general,
     /// not a greedy count: given a recipe wanting `any plank` + `oak plank`
     /// while the player holds one oak and one spruce, greedy spends the oak on
-    /// `any plank`, fails `oak plank`, and reports "not craftable" — wrongly.
+    /// `any plank`, fails `oak plank`, and reports "not craftable" - wrongly.
     /// A matcher reassigns `any plank` to the spruce and succeeds. Greedy is
     /// correct for exactly as long as no ingredient names a *set*, so the day
     /// this array stops holding plain `ItemId`s, the check has to be rewritten.
@@ -45,14 +45,6 @@ struct Recipe {
     bool shapeless = false;
 
     ItemStack result{};
-
-    /// Which catalogue tab this recipe is listed under.
-    ///
-    /// Per **recipe**, not per item: one item can be produced by recipes that
-    /// belong in different places. It defaults to the result item's own
-    /// category, so the item table stays the one owner and a recipe only says
-    /// anything when it disagrees.
-    ItemCategory category = ItemCategory::Items;
 
     /// Whether the pattern fits the player's own 2x2 grid.
     ///
@@ -84,8 +76,8 @@ void consumeIngredients(ItemStack* slots, int size);
 /// Everything the inventory could make right now on a grid this wide.
 ///
 /// **Shape is ignored entirely** - this is the other of the two questions in
-/// `INTERFACE.md` §4.1: whether you *have* nine cobblestone has nothing to do
-/// with where they go. `gridSize` still matters, because a 3x3 recipe is not
+/// `INTERFACE.md` section 4.1: whether you *have* nine cobblestone has nothing to
+/// do with where they go. `gridSize` still matters, because a 3x3 recipe is not
 /// craftable while you are standing at the inventory's own 2x2.
 ///
 /// Answered for the whole table at once rather than per item, because the
@@ -108,11 +100,12 @@ ItemStack smithingResult(const ItemStack& base, const ItemStack& addition);
 /// two ingredients into a third, and no grid pattern can express that. The rows
 /// are transcribed from Mojang's own shipped `brew_*.json` recipes.
 ///
-/// > **Named divergence: there is no twenty-second timer and no blaze powder.**
-/// > The reference brews over 400 ticks and burns a fuel charge doing it; ours
-/// > hands the potion over as soon as the two are in, exactly as the smithing
-/// > table and the stonecutter already do. Adding the timer means a block entity
-/// > that ticks and saves, which is the furnace's whole machinery over again.
+/// > **Named divergence: there is no twenty-second timer and no fuel charge.**
+/// > The reference brews over 400 ticks and burns a charge of cinder powder
+/// > doing it; ours hands the potion over as soon as the two are in, exactly as
+/// > the smithing table and the stonecutter already do. Adding the timer means a
+/// > block entity that ticks and saves, which is the furnace's whole machinery
+/// > over again.
 ItemStack brewingResult(const ItemStack& bottle, const ItemStack& reagent);
 
 /// Two damaged items of the same kind, combined into one.

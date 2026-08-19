@@ -46,14 +46,12 @@ ToolProperties toolFor(ItemId item);
 /// not: dirt is quick, stone is slow, and bedrock-like things are unbreakable.
 float blockHardness(BlockId block);
 
-/// Which tool this block gives way to, and the tier it demands before it will
-/// drop anything at all. **That demand is the whole progression** - stone mined
-/// by hand yields nothing, so a pickaxe is the gate to everything past wood.
-ToolKind harvestTool(BlockId block);
-int harvestTier(BlockId block);
-
-/// How long `item` takes to break `block`, in seconds.
-float breakSeconds(BlockId block, ItemId item);
+/// **`harvestTool`, `harvestTier` and `breakSecondsGrounded` were removed from
+/// this door on 2026-08-19 - a sweep with a control found all three had zero
+/// callers, and two of them were a second answer to a question `MiningRow`
+/// already owns.** Do not re-add one by reflex: `Tool.cpp` records the sweep,
+/// the control behind it, and the one-line shape to restore if a translation
+/// unit behind this door ever genuinely needs one.
 
 /// Whether breaking it with `item` actually yields its drop.
 bool yieldsDrop(BlockId block, ItemId item);

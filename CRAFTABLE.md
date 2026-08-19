@@ -8,15 +8,15 @@
 - **1** &middot; CRAFTABLE.md
   - **31** &middot; Grid notation
   - **41** &middot; What exists right now
-  - **87** &middot; Tier 0 — works with zero new art
-  - **121** &middot; Tier 1 — the critical path
-  - **156** &middot; Tier 2 — free variants
-  - **177** &middot; Tier 3 — smelting
-  - **193** &middot; Tier 4 — tools
-  - **207** &middot; Tier 5 — cheap wins, low priority
-  - **233** &middot; Deliberately excluded
-  - **244** &middot; Asset status summary
-  - **254** &middot; Update discipline
+  - **115** &middot; Tier 0 — works with zero new art
+  - **149** &middot; Tier 1 — the critical path
+  - **184** &middot; Tier 2 — free variants
+  - **205** &middot; Tier 3 — smelting
+  - **221** &middot; Tier 4 — tools
+  - **235** &middot; Tier 5 — cheap wins, low priority
+  - **261** &middot; Deliberately excluded
+  - **272** &middot; Asset status summary
+  - **282** &middot; Update discipline
 
 <!-- /INDEX -->
 
@@ -42,7 +42,11 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 *(Counts verified from the startup log, 2026-08-11.)*
 
-**Two thousand eight hundred and seventy-one block ids and 1343 catalogue entries, against 1152 recipes** — of which **521 fit a 2×2**. Most of the table is **generated in loops rather than written out**, because the families repeat: eleven woods × eleven shared shapes, fifty-two stair materials, fifty-five slab materials, sixteen colours × five dyed families, five tool shapes × fourteen materials, and seventeen stowbox colours each redyeable from any other. Written out by hand that is well over a thousand rows and a thousand chances to paste the wrong ingredient into one cell. **Every one of the 1152 is checked to make itself, with no two claiming the same pattern.**
+> ⚠️ **These counts are stale and one of them contradicts every other document — flagged 2026-08-19 10:09, not silently rewritten.** This line says **3,315** block ids from a 2026-08-11 startup log. `SYSTEM_MEMORY.md` and `GAPS.md` record `kBlockIdCount` going **3,225 → 3,269** (2026-08-18) → **3,309** (compile-time probe, 2026-08-19), which would mean the roster *shrank* by six between 08-11 and 08-18 and that is not what happened. **One of the two is measuring something other than `kBlockIdCount`** — the 08-11 figure came from a startup log rather than a probe, and eighteen duplicate items were deleted somewhere in that window. **I could not settle it: resolving it needs the game run or a compile-time probe, and both are unavailable under tonight's hardware throttle.** Treat the roster figure here as *unsourced* until one of them is re-run; the recipe counts below (1460 recipes, 779 fitting a 2×2, 0 broken and 0 shadowed) come from the same log and inherit the same doubt — and note `SYSTEM_MEMORY.md` says **1152** recipes, so that pair contradicts too. `GAPS.md` §6's headline verdict carries the current figure — **3,309 at the last probe, capped at 3,584 by `Mining.hpp`'s chunk assert**.
+>
+> **The measurement that settles the roster figure, so nobody has to invent one** (finding 9695, first item in the dispatcher's consolidated build): add `static_assert(kBlockIdCount == 0, "");` anywhere `Block.hpp` is included. It **cannot** pass, and MSVC prints the true value in the diagnostic — one deliberate build failure, no runtime, no probe harness, and it dates every sweep comment in the tree at the same time. The recipe pair needs its own and does not have one yet: **1460 and 1152 are counting different things or one is stale, and nothing here can tell which.** Until one is re-run, **treat every count on this page as unsourced as of 2026-08-19 10:09** — *this becomes false the moment either number is re-measured, and whoever does it should delete this blockquote rather than adding a third figure beside the other two.*
+
+**Three thousand three hundred and fifteen block ids, 832 of them canonical enough to hold, against 1460 recipes** — of which **779 fit a 2×2**. Most of the table is **generated in loops rather than written out**, because the families repeat: eleven woods × eleven shared shapes, fifty-two stair materials, fifty-five slab materials, sixteen colours × five dyed families, five tool shapes × fourteen materials, and seventeen stowbox colours each redyeable from any other. Written out by hand that is well over a thousand rows and a thousand chances to paste the wrong ingredient into one cell. **Every one of the 1460 is checked to make itself, with no two claiming the same pattern.**
 
 **Blocks (73):** the originals — Air, Stone, Dirt, Grass, Sand, Cobblestone, Gravel, Snow, Planks, Bricks, Glowstone, Log, Leaves, Water, Tall Grass, Stone Slab, Cobblestone Stairs, Plank Fence, Crafting Table, Furnace, Torch — plus **Andesite, Diorite, Granite, Smooth Stone, Stone Bricks, Mossy Cobblestone, Obsidian, Clay, Sandstone, Bookshelf, Glass, Dandelion, Poppy, Dead Bush, eight ores, Deepslate, Bedrock, Terracotta and Packed Ice**, and now **Ancient Debris, Block of Emberite, Smoker, Smithing Table and Chest**.
 
@@ -50,7 +54,7 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 **Cut shapes (640, none with a texture of its own).** Stairs in 52 materials, slabs in 55, walls in 25, fences in 12, gates in 11, carpets in 16 and glass panes in 17. Each is one row naming its **parent block**, and everything else — texture, tool, hardness, blast resistance, whether it burns — is forwarded to that parent. Recipes are the reference's: 6 → 4 stairs (both mirrorings), 3 → 6 slabs, 6 → 6 walls, 4 planks + 2 sticks → 3 fences, 2 sticks + 2 planks → 1 gate, 2 wool → 3 carpets, 6 glass → 16 panes.
 
-**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works** with twenty-two recipes, fuelled by coal, charcoal and **anything wooden** — logs, planks and every wooden cut shape, answered by `isFlammable` rather than by a list — and a **smoker** and a **blast furnace** each run the whole cycle at double speed. A **smithing table** upgrades a diamond tool to Emberite, and a **grindstone** or **anvil** repairs a pair of damaged items. A **stonecutter** turns one stone-family block straight into its stairs, slab or wall at the reference's own rates — which is strictly better than the grid for stairs.
+**Crafting:** the inventory's 2×2 and a crafting table's 3×3 both work, with shift-click and double-click. **Smelting works** with one hundred and fifteen input-to-output pairs, fuelled by coal, charcoal and **anything wooden** — logs, planks and every wooden cut shape, answered by `isFlammable` rather than by a list — and a **smoker** and a **blast furnace** each run the whole cycle at double speed. A **smithing table** upgrades a diamond tool to Emberite, and a **grindstone** or **anvil** repairs a pair of damaged items. A **stonecutter** turns one stone-family block straight into its stairs, slab or wall at the reference's own rates — which is strictly better than the grid for stairs.
 
 **Storage:** a **chest** holds 27, and two side by side holding the same facing open as one **54-slot double chest**. A **barrel**, **trapped chest** and **ender chest** are the same 27 slots by another name — the ender chest's being the *player's*, so every one in the world is the same window. A **hopper** holds 5 and moves an item every eight ticks. Seventeen **stowboxes** hold 27 each and **keep their contents when broken**.
 
@@ -62,6 +66,30 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 - **Ranged.** Three sticks and three string make a **bow**; flint, a stick and a feather make **four arrows**. Flint comes from gravel about one time in ten. A skeleton, stray or bogged fires the same arrow back at you.
 - **Light and access.** Lantern and soul lantern (iron + the matching torch), soul torch (coal, stick, soul sand), redstone torch, end rod, **iron bars** (6 iron → 16) and a **ladder** (7 sticks → 3) that you can actually climb.
 - **The rest.** Paper, sugar, book, glass bottle, bone block, slime block, dried kelp block, magma block, honeycomb block, the three raw-metal blocks, flint and steel, and TNT.
+
+> ⚠️ **"A recipe exists" is not "you can make it" — and this note's own falsifier fired fourteen
+> minutes after it was written. Both halves are kept, because the round trip is worth more than
+> either.**
+>
+> **10:09 — the claim.** The **honeycomb block**, **all seventeen candles** and **every waxed copper
+> form** are shapeless recipes taking `ItemId::Honeycomb`; honeycomb's only producer is shearing a
+> hive whose honey level is full; natural nests generate empty on purpose; and the drain that would
+> fill them (`Creatures::takePollinated`) had **no consumer**. So those recipes were correct,
+> checked, non-shadowing — and unmakeable outside creative. The note ended: *"What would make this
+> note false: a consumer of `takePollinated` appearing in `Main.cpp`, or any second source of
+> honeycomb."*
+>
+> ✅ **10:23 — exactly that happened.** `Main.cpp` now iterates `creatures.takePollinated()` and
+> writes `beeHomeAtLevel(home, level + 1)`. **All three families are makeable again.**
+> ⚠️ **Unverified by build:** `Main.cpp` source is 10:23:32; the newest object file is 09:56:27
+> (debug) / 09:55:25 (release). Nothing here has compiled — and **an mtime comparison could not have
+> proved it had, either**: an object file only proves its translation unit compiled with its headers
+> as they stood at that timestamp, and eleven headers are newer than every object in either preset.
+>
+> ⭐ **Keep the habit, not the verdict.** Naming the falsifier is the only reason this was caught
+> within the hour instead of misdirecting whoever read the page next. **The distinction the note
+> draws is still true and still worth checking** — a recipe list cannot tell you whether its
+> ingredients are reachable, and honeycomb was the case that proved it.
 - **Redstone components (41 families, ~700 states).** Wire, torches, levers, twelve buttons, fourteen pressure plates, repeaters, comparators, pistons, observers, dispensers, droppers, daylight detectors, targets, note blocks, lightning rods, tripwire and hooks, and four rail families - all craftable at the reference's own rates. **None of them carries a signal**; see DECISIONS.
 - **Signs and banners (38).** A sign and a hanging sign for each of the eleven woods, and sixteen banners from six wool and a stick. No art of their own: a sign is its planks and a banner is its wool.
 - **Collectibles (69).** Twenty-three pottery sherds and eight goat horns, which are found rather than made; twenty-two music discs, which a **jukebox** plays; and sixteen **firework stars**, one per dye - gunpowder and a dye makes the star, and paper, gunpowder and a star makes three coloured rockets.
@@ -72,9 +100,9 @@ A **2×2** recipe fits the player inventory's own grid. A **3×3** recipe needs 
 
 **Emberite tools are not in that table on purpose** — they are a smithing-table upgrade, not a recipe, because an upgrade *keeps* the item it is given and no grid pattern can say that.
 
-**Brewing (53 recipes, and it is not a grid).** A **brewing stand** takes a bottle and a reagent and previews the result, sharing the smithing screen because both are two inputs and an answer. `kBrews` is transcribed from Mojang's own `brew_*.json`, plus two rules that apply to any bottle at all: **gunpowder makes it a splash** and **dragon's breath makes it lingering**. Forty-one brews × four forms — drinkable, splash, lingering and tipped arrow — is 164 of the catalogue on its own. A splash lands its effect on everyone within four blocks; a lingering one leaves a cloud for thirty seconds. **Named divergences:** brewing is instant, with no fuel and no timer, and water breathing is brewed from a pufferfish bucket because there is no loose pufferfish item.
+**Brewing (53 recipes, and it is not a grid).** A **brewing stand** takes a bottle and a reagent and previews the result, sharing the smithing screen because both are two inputs and an answer. `kBrews` is transcribed from Mojang's own `brew_*.json`, plus two rules that apply to any bottle at all: **gunpowder makes it a splash** and **dragon's breath makes it lingering**. Forty-one brews × four forms — drinkable, splash, lingering and tipped arrow — is **160** of the catalogue on its own rather than 164, because the four effectless bottles are never tipped onto an arrow and that run is 37 rows, not 41. A splash lands its effect on everyone within four blocks; a lingering one leaves a cloud for thirty seconds. **Named divergences:** brewing is instant, with no fuel and no timer. Water breathing is brewed from **a loose pufferfish**, as the reference does it — an earlier draft of this line claimed we used the bucket "because there is no loose pufferfish item", and that premise was simply false: `ItemId::RawPufferfish` has existed all along and drops off the pufferfish.
 
-**Smelting shipped (22):** Cobblestone → Stone, Stone → Smooth Stone, Log → Charcoal, Sand → Glass, the three raw metals → their ingots, **Ancient Debris → Emberite Scrap**, Stone Bricks → Cracked, Sandstone → Smooth, Wet Sponge → Sponge, **Kelp → Dried Kelp**, raw rabbit and salmon → their cooked forms, **Clay → Terracotta**, **Clay Ball → Brick**, **Cactus → Green Dye**, Nether Quartz Ore → Quartz, Quartz Block → Smooth Quartz, Basalt → Smooth Basalt, Nether Bricks → Cracked, and **Netherrack → Nether Brick**. Every raw food cooks through `isRawFood`, and **the sixteen dyed terracottas fire into their glazed forms by arithmetic** rather than sixteen rows — both runs are declared white-first in the same order.
+**Smelting shipped (37 rows, 115 input-to-output pairs once the raw-food, terracotta and gear runs are counted):** Cobblestone → Stone, Stone → Smooth Stone, Log → Charcoal, Sand → Glass, the three raw metals → their ingots, **Ancient Debris → Emberite Scrap**, Stone Bricks → Cracked, Sandstone → Smooth, Wet Sponge → Sponge, **Kelp → Dried Kelp**, raw rabbit and salmon → their cooked forms, **Clay → Terracotta**, **Clay Ball → Brick**, **Cactus → Green Dye**, Nether Quartz Ore → Quartz, Quartz Block → Smooth Quartz, Basalt → Smooth Basalt, Nether Bricks → Cracked, and **Netherrack → Nether Brick**, plus **Red Sandstone → Smooth Red Sandstone**, **Polished Blackstone Bricks → Cracked**, **Potato → Baked Potato** and **Sea Pickle → Lime Dye**. Every raw food cooks through `isRawFood`, and **the sixteen dyed terracottas fire into their glazed forms by arithmetic** rather than sixteen rows — both runs are declared white-first in the same order. **Iron, gold and chainmail gear goes back to one nugget** through `nuggetFor`: the nine iron tools and pieces and the four chainmail pieces to an Iron Nugget, the four golden pieces to a Gold Nugget — seventeen enumerators named rather than a run walked, because the three metals are not one contiguous family. Bedrock smelts nine golden *tools* as well, which we cannot yet, there being no gold tier. All seventeen are tagged `[furnace, blast_furnace]` in the reference and correctly refused by the smoker and the campfire, which gate on the result being food; ours smelt in the **plain furnace only** until `blastFurnaceAccepts` learns to take something that is not a block.
 
 > ⚠️ **The entries that still cannot be obtained are all waiting on a *system*, not a recipe.** What is left is the nether and end materials whose dimensions do not exist, the pottery sherds and goat horns that are found rather than made, and a handful of mob and interaction drops. Farming closed the largest block of them on 2026-08-10; the workstation pass closed the rest of the village blocks, and the **stonecutter, lectern and grindstone had no recipe at all** until then, so all three were unobtainable in survival despite being finished. **Potions closed the brewing stand on 2026-08-11 and banners closed the loom.**
 

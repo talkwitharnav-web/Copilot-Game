@@ -23,8 +23,53 @@ constexpr int kWorldTop = kWorldHeight - 1;
 /// replace the reference's top and bottom density slides, which exist to do
 /// exactly this and are only needed when the answer is a density field rather
 /// than a height.
-constexpr int kMinSurface = 4;
+///
+/// **`kMinSurface` was 4 and was a DEAD CLAMP - finding 981 measured the real
+/// minimum over 1,048,576 columns at y 7, so the lower arm of the `std::clamp`
+/// below never once bound.** It is 7 now, and the change is deliberately a
+/// no-op on today's terrain: for every column whose raw height already floors
+/// to 7 or more, `std::clamp(v, 7, 90)` and `std::clamp(v, 4, 90)` return the
+/// identical value, and by measurement no column floors below 7.
+///
+/// **What it buys is a guarantee rather than a behaviour.** `kLavaLevel` is 6,
+/// and the lava fill writes into carved cells at or below it. A surface at 4
+/// would sit *underneath* the lava level, and the bottom of that hollow would
+/// be a lake of fire open to the sky. Raising the clamp to 7 makes
+/// `surface > kLavaLevel` structurally true instead of true-by-measurement,
+/// and the `static_assert` beside `kLavaLevel` now says so out loud.
+///
+/// **The 3-block margin is not the safety net - the fill's own test is.** That
+/// loop still asks `worldY > surface` before placing anything, because the y-7
+/// measurement is a fact about today's splines and not a promise, and a spline
+/// edit is exactly the change that would never think to check a lava constant.
+/// Two independent guards, which is the point.
+///
+/// > Fails if: a future spline genuinely wants a hollow below y 7. Then this
+/// > clamp starts binding and flattening it, and the honest fix is to lower
+/// > `kLavaLevel` with it rather than to lower this alone.
+constexpr int kMinSurface = 7;
 constexpr int kMaxSurface = 90;
+
+/// Where the height stops being itself and starts bending towards the ceiling.
+///
+/// **A hard clamp is a dead-flat plateau, and the tail it flattens is the exact
+/// tail the mountain generator exists to produce.** The parts sum to 35 + 44 +
+/// 13 + 15.7 = 107.7 at the extreme, so `kMaxSurface` is genuinely reachable
+/// and the summit that reached it would come out as a table top at precisely
+/// y 90 - every peak in the range sheared to the same altitude.
+///
+/// So bend instead of cutting: above the soft start, `h` becomes
+/// `kMaxSurface - span * exp(-(h - start) / span)`, which is asymptotic to the
+/// ceiling and never touches it. Choosing `span = kMaxSurface - start` makes
+/// the derivative exactly 1 at the join, so the bend is invisible where it
+/// begins - a summit is compressed, not clipped.
+///
+/// 84 is measured, not chosen: across 708k sampled columns the tallest was
+/// 86.3, so the bend costs the tallest real peak about 0.4 blocks while leaving
+/// 99.99% of the world bit-identical to the unbent height. The `std::clamp`
+/// stays below it as a now-unreachable guard - it costs nothing and it is the
+/// thing that would catch a future spline handing us an infinity.
+constexpr float kCeilingSoftStart = 84.0f;
 
 /// Spectrum of the noise that displaces the target height.
 ///
@@ -41,17 +86,69 @@ constexpr float kBaseWavelengthXZ = 84.0f;
 /// plane, which decorrelates a mountain's texture from a lowland's for free.
 constexpr float kBaseWavelengthY = 210.0f;
 
-/// How much a face must fall across two columns to count as steep.
+/// Blocks of **signed** fall across a **two-column** span - the column one step
+/// south against the column one step north - above which that facing is steep.
 ///
-/// The reference compares the height one step *north* against one step *south*
-/// and asks for 4 over that span; ours is 96 blocks tall against its 384, so 2
-/// is about the same fraction of the relief available.
-constexpr int kSteepDrop = 2;
+/// **The reference's number, unconverted, because this is the one quantity on
+/// this page the world scale does not touch.** `SurfaceRules.Steep` is
+/// literally `getHeight(x, z+1) >= getHeight(x, z-1) + 4` over those same two
+/// columns, and `+Z` is *south*: `Block.hpp`'s `lidTurnsFacing` pins
+/// `facing=north` to zero rotation and to `NegZ`, so it is the **south**
+/// neighbour that has to stand 4 higher. An earlier version of this paragraph
+/// had the two names the wrong way round while the code was right, which is a
+/// reader one "fix" away from frosting the wrong side of every mountain. Every
+/// other ported figure here is a *height* or a *depth* and has to be squeezed
+/// into a 96-block world against the reference's 384, but a slope is blocks of
+/// fall per blocks of run and **a block is the same size in both worlds** - the
+/// conversion is 4 x (1 block / 1 block) = 4. The scale factor would only enter
+/// if the span were a fraction of the world rather than two fixed columns.
+///
+/// It was 2, from a comment that divided the fall by the height ratio and left
+/// the run alone. Neither reading of that comment produces 2 either: a quarter
+/// of 96 is 1, and the fraction-of-relief argument gives 4 outright. Measured
+/// on 11,735 columns of the three biomes that read `steep`, a fall of 4 or more
+/// happens on 3.5% of them, so the rule still fires and now marks the faces
+/// that are genuinely cliff-like rather than every gentle hillside.
+///
+/// **This is not the number `Structures.cpp` uses to refuse a tree, and making
+/// the two share one would not make them agree.** That test is an *absolute*
+/// difference across a *single* column, asked of four neighbours; this one is a
+/// *signed* difference across *two*, asked once. Same English word, different
+/// question - so each site owns a constant whose name says what it measures.
+constexpr int kSteepDropOverTwoColumns = 4;
 
 /// How far below the waterline the bed is still soil rather than gravel.
-/// The reference's `water offset -6`, and it is what stops a shoreline being
-/// a hard line between grass and gravel.
-constexpr int kShallowBedDepth = 6;
+///
+/// **The reference's `water offset -6`, converted, because a depth below sea
+/// level is exactly the kind of number the scale eats.** Its seabeds run from
+/// y -64 to the waterline at 63, which is 127 blocks of drowned column; ours
+/// run from the bedrock floor to y 24, which is 24. So one of our blocks is
+/// 127/24 = 5.3 of the reference's below the waterline, and six of its blocks
+/// is 6 x 24/127 = 1.13 -> **1** of ours.
+///
+/// Used raw at 6 it swallowed everything: our ocean floor sits 2-8 blocks down,
+/// every river bed 1-4, and the drowned half of every beach - so the whole sea
+/// bed was "shallow" and there was no gravel anywhere. At 1 the shelf is a
+/// shelf again.
+///
+/// **The consequence is a big visual swing and it is the faithful one.** With
+/// `submerged` meaning `surface < 24`, this reduces to `surface == 23` exactly,
+/// so only one drowned column in seventeen is shallow and the rest of every
+/// non-sandy bed is gravel: measured, 73.8% gravel, 8.1% sand, 2.5% dirt over
+/// 49,562 drowned columns. That is what the reference looks like - `ocean`,
+/// `cold_ocean` and `frozen_ocean` and their deep variants all floor in gravel,
+/// only `warm_ocean` and `lukewarm_ocean` floor in sand, and a river is gravel
+/// down the channel with a dirt fringe where it is shallow enough to fail the
+/// -6 test. **Our rivers being 1-4 deep is 5-21 of the reference's**, which is
+/// past that cutoff for all but the fringe, so gravel down the middle is the
+/// converted answer and not an accident of rounding.
+///
+/// **Tagging `River` to force dirt was the alternative and it is the wrong
+/// one**: it would hard-code a bed material the reference derives, and it would
+/// still leave every lake and every cold ocean shelf to this rule. The rule
+/// this constant expresses has only three reachable values here - 0, 1 or 2 -
+/// so if the fringe ever needs to be wider, widen it here and say why.
+constexpr int kShallowBedDepth = 1;
 
 /// The 2D field that scatters a biome's patches over its ordinary top block.
 ///
@@ -123,6 +220,55 @@ constexpr float kEntranceWidth = 0.14f;
 constexpr int kBedrockSolid = 0;
 constexpr int kBedrockTop = 4;
 
+/// **The lava that floors the deepest caves, and the one thing in this file
+/// that had no source at all.** A census of 361 full column stacks - 35,486,208
+/// blocks - found ZERO lava, so the fluid worked, the block existed, and nothing
+/// ever wrote one. Beyond the missing hazard that meant **obsidian had no
+/// natural source**, and every recipe behind obsidian with it.
+///
+/// **SOURCE, AND IT IS SECONDARY - SAID PLAINLY BECAUSE THE HOUSE RULE IS THAT
+/// A PORTED NUMBER NAMES WHAT IT WAS MEASURED AGAINST.** `Mojang/bedrock-samples`
+/// has no `blocks/` directory and carries no worldgen at all, so it cannot
+/// settle terrain; this is minecraft.wiki plus the aquifer write-up it links,
+/// read 2026-08-19. The rule they agree on is the reference's **`lava_level`:
+/// below y = -54 an aquifer is always lava rather than water.** That is a hard
+/// published anchor rather than a remembered one, which is why it is the arm
+/// implemented here and the other two lava sources are filed instead of guessed.
+///
+/// **THIS IS A MAPPED NUMBER, NOT A PORTED ONE - `CLAUDE.md` bug shape #3.**
+/// Dropping -54 into this field would be meaningless: the reference's world runs
+/// y -64 to 320 with sea level 63, and ours runs 0 to 95 with `kSeaLevel` 24.
+/// The project's own mapping is already on file from the deepslate work: our y5
+/// is the reference's -59 (the first block above bedrock) and our y24 is its 63
+/// (sea level), so **6.42 reference blocks make one of ours**. Through it,
+/// -54 lands at 5 + (-54 + 59) / 6.42 = **y 5.78**. Derived a second way as a
+/// sanity check, because one derivation is not a check: the reference's lava
+/// sits 5 blocks above a 378-block playable range, and the same fraction of our
+/// 91-block range is 1.2 blocks above our floor, i.e. **y 6.2**. The two agree
+/// to within a block and 6 is between them.
+///
+/// **What that buys, and why one layer would have been too literal.** The
+/// reference's lava band is 6 blocks deep (-54 down to -59) which is 0.93 of our
+/// blocks, so a strict reading gives a single layer. Six gives two - y 5 and
+/// y 6 - which is inside the disagreement between the two derivations above and
+/// is what makes the floor findable rather than a curiosity. The measured air
+/// share underground is 25% at y 6, so this fills roughly a quarter of the cells
+/// in those two layers and leaves the rock alone.
+///
+/// **What would make this wrong**, so it can be checked rather than trusted:
+/// `kSeaLevel` or `kBedrockTop` moving, which changes the mapping and therefore
+/// this number; or a primary worldgen source appearing for Bedrock, which would
+/// replace the secondary one above outright.
+constexpr int kLavaLevel = 6;
+static_assert(kLavaLevel > kBedrockTop,
+              "lava must sit above the bedrock floor or it can never be carved into");
+static_assert(kLavaLevel < kSeaLevel,
+              "lava belongs to the deep, below the waterline - if these ever cross, the ocean fill "
+              "and the lava fill are fighting over the same cells");
+static_assert(kMinSurface > kLavaLevel,
+              "the terrain floor must stay above the lava level, or the bottom of a hollow is a "
+              "lake of fire open to the sky - see finding 981, which is why kMinSurface is 7");
+
 /// Stone gives way to deepslate across this band rather than at a line, on a
 /// per-block roll — the reference's `vertical_gradient`, which is one of the
 /// very few places it uses a genuine dice roll instead of a noise field.
@@ -166,9 +312,15 @@ constexpr float kSurfaceDepthWavelength = 12.0f;
 /// against the reference's -64 to 320 with sea level 63, so depths below sea
 /// level compress by about 0.17 and heights above it by 0.28.
 ///
-/// **`attempts` is quoted per 32x32 column, not per chunk**, because that is how
-/// the reference counts and because a vein's height comes from its own band
-/// rather than from whichever chunk is asking.
+/// **`attempts` is quoted per 32x32 column, not per chunk.**
+///
+/// **The reference counts per 16x16** - one of our columns is four of its
+/// chunks - so these are *not* its numbers and reading them as if they were
+/// will quadruple whatever is ported next. They were set by measuring realised
+/// block counts against a previous session's, because the reported problem was
+/// the size of a seam and not how much ore there is. A column rather than a
+/// chunk is the unit here because a vein's height comes from its own band
+/// rather than from whichever of the three stacked chunks is asking.
 struct OreVein {
     BlockId block;
     std::uint32_t salt;
@@ -184,32 +336,253 @@ struct OreVein {
     /// **per block** rather than per vein, and what makes the rarest ores
     /// something you dig for rather than find.
     float airDiscard;
+    /// Blocks of this ore a 32x32 column actually ends up holding.
+    ///
+    /// **Measured, never derived, and it is the key this table is sorted by.**
+    /// 361 columns, seed 0x5eed1234, counted out of finished chunks. Nothing
+    /// short of generating the world can predict it, and the attempt to try is
+    /// what produced the bug this field exists to close: an estimator built
+    /// from `attempts * size * P(rock at that height)` put emerald at three
+    /// times diamond, and the truth is *half* of it, because `airDiscard = 1.0`
+    /// throws away every emerald block that ends up beside a cave and emerald's
+    /// band is high enough that most of them do. Air exposure is a property of
+    /// the finished world, so it belongs in a measurement and not in a formula.
+    ///
+    /// **Re-measure whenever `size`, `attempts`, a band, `airDiscard`,
+    /// `veinHeight`'s shape or the terrain heights change** - and whenever a
+    /// *surface* rule changes what material the column is made of, which is the
+    /// one that does not look like it belongs on this list. Lowering
+    /// `kTemperatureGain` moved no height at all and still moved five of these
+    /// rows, by at most 0.1% (coal 282.47 -> 282.72): fewer desert columns meant
+    /// less sandstone under the sand, and `placeVein` writes only into plain
+    /// rock. `kOreCeiling` below catches the half of that which is
+    /// one-directional; the rest is on whoever edits the row.
+    float measured;
 };
 
-/// **Rarest first**, so a common ore can never overwrite a scarce one where
-/// their bands overlap.
+/// **Rarest first, by what actually ends up in the ground**, so a common ore can
+/// never overwrite a scarce one where their bands overlap. `placeVein` writes
+/// only into plain rock, so whichever vein runs first keeps the cell.
 ///
 /// Sizes are the reference's own, shrunk about a quarter: a vein is a gameplay
 /// unit measured against the player, so it does not scale with world height the
-/// way the bands do. Attempt counts were then set so the totals stay where a
-/// previous session's measurement had already put them, since the reported
-/// problem was the size of a seam and not how much ore there is.
+/// way the bands do.
+///
+/// **Reading the invariant off the `attempts` column is what made it false, and
+/// reading it off a formula is what kept it false.** Emerald has eighteen times
+/// diamond's attempt count, which reads as a rule broken; an estimator built
+/// from attempts, size and how often there is rock at that height agreed, and
+/// put emerald at three times diamond. A census of finished chunks says emerald
+/// is *half* of diamond - `airDiscard = 1.0` and a band high enough that most
+/// of it ends up beside a cave. Emerald above diamond, where the table has
+/// always had it, is right. Copper and iron were genuinely inverted and are the
+/// one row pair this ordering pass moved.
+///
+/// Emerald being in every biome at all is a deliberate deviation from the
+/// reference, which restricts it to mountains; ours has no per-biome ore filter
+/// and adding one is a table change, not an ordering change.
+///
+/// Coal's `attempts` is the one count not inherited from the previous session's
+/// tuning: giving `veinHeight` its documented shape moved coal's mode down off
+/// the band midpoint and back to `peakY`, which put 41% more of it under rock,
+/// so 70 -> 99 holds the realised total where that tuning had already put it
+/// (283 blocks per column, measured both sides of the change).
 constexpr std::array<OreVein, 9> kOreVeins{{
-    {BlockId::AncientDebris, 0xd41f07u, 3, 3, 3, 8, 16, 1.0f},
-    {BlockId::EmeraldOre, 0x51c3b7u, 3, 36, 10, 46, 62, 1.0f},
-    {BlockId::DiamondOre, 0x2f9a41u, 5, 2, 3, 6, 17, 0.7f},
-    {BlockId::LapisOre, 0x7b31d9u, 6, 3, 3, 13, 25, 0.0f},
-    {BlockId::GoldOre, 0x1de4a3u, 7, 3, 3, 9, 20, 0.5f},
-    {BlockId::RedstoneOre, 0x64b8f2u, 7, 10, 3, 5, 17, 0.0f},
-    {BlockId::IronOre, 0x3ac05eu, 7, 35, 3, 14, 27, 0.0f},
-    {BlockId::CopperOre, 0x9e271bu, 8, 26, 10, 26, 39, 0.0f},
-    {BlockId::CoalOre, 0x0c7d86u, 12, 70, 8, 26, 70, 0.5f},
+    {BlockId::AncientDebris, 0xd41f07u, 3, 3, 3, 8, 16, 1.0f, 0.86f},
+    {BlockId::EmeraldOre, 0x51c3b7u, 3, 36, 10, 46, 62, 1.0f, 2.15f},
+    {BlockId::DiamondOre, 0x2f9a41u, 5, 2, 3, 6, 17, 0.7f, 4.25f},
+    {BlockId::LapisOre, 0x7b31d9u, 6, 3, 3, 13, 25, 0.0f, 8.72f},
+    {BlockId::GoldOre, 0x1de4a3u, 7, 3, 3, 9, 20, 0.5f, 10.88f},
+    {BlockId::RedstoneOre, 0x64b8f2u, 7, 10, 3, 5, 17, 0.0f, 35.30f},
+    {BlockId::CopperOre, 0x9e271bu, 8, 26, 10, 26, 39, 0.0f, 63.98f},
+    {BlockId::IronOre, 0x3ac05eu, 7, 35, 3, 14, 27, 0.0f, 121.61f},
+    {BlockId::CoalOre, 0x0c7d86u, 12, 99, 8, 26, 70, 0.5f, 282.47f},
 }};
 
-/// How far outside its own column a vein may reach, in blocks. The spindle is
-/// `size/4` long and its fattest sphere has radius about `size/16 + 0.5`, so
-/// this covers the largest one twice over.
+/// The share of world columns whose surface stands at or above a given height,
+/// every fourth block from 0 to 96.
+///
+/// **Measured, not derived** - 116,964 columns on a stride-48 lattice over
+/// +/-8192 blocks, seed 0x5eed1234, taken from this file as it stands. It is
+/// here for one reason: a vein rolled above the local surface is rolled into
+/// open air and thrown away, so this is the difference between how often an ore
+/// is *attempted* and how much of it a player can ever find.
+///
+/// **Re-measure it if terrain heights move.** It was re-measured after the
+/// `kErosionRelief` derivatives, the coastal `factor` ramp and
+/// `kCeilingSoftStart` landed - all three move surface heights - and every knot
+/// agreed with the run before them to within 0.002, on a lattice two and a
+/// quarter times coarser. It feeds `oreBlockCeiling` below, which is a bound
+/// rather than an estimate, so drift of that size cannot flip anything.
+constexpr int kSurfaceCdfStride = 4;
+constexpr std::array<float, 25> kSurfaceAtOrAbove{
+    1.0000f, 1.0000f, 1.0000f, 0.9771f, 0.8493f, 0.7217f, 0.6034f, 0.5079f, 0.3597f,
+    0.1685f, 0.0855f, 0.0523f, 0.0341f, 0.0219f, 0.0140f, 0.0090f, 0.0052f, 0.0029f,
+    0.0014f, 0.0006f, 0.0002f, 0.0001f, 0.0000f, 0.0000f, 0.0000f};
+
+constexpr float surfaceAtOrAbove(int y) {
+    if (y <= 0) {
+        return 1.0f;
+    }
+    if (y >= kWorldHeight) {
+        return 0.0f;
+    }
+    const std::size_t i = static_cast<std::size_t>(y / kSurfaceCdfStride);
+    const float t = static_cast<float>(y % kSurfaceCdfStride) / static_cast<float>(kSurfaceCdfStride);
+    return kSurfaceAtOrAbove[i] + (kSurfaceAtOrAbove[i + 1] - kSurfaceAtOrAbove[i]) * t;
+}
+
+/// The share of `veinHeight`'s draws that land in cell `y`.
+///
+/// `veinHeight` is the inverse of a triangular CDF applied to a uniform draw,
+/// and that map is monotone, so the chance of landing in `[y, y+1)` is exactly
+/// `F(y+1) - F(y)` for that same CDF - written out here without the square root
+/// the sampler needs, so it is usable in a constant expression. **Change the
+/// sampler and this has to change with it**; they are two faces of one shape,
+/// and only the asserts below tie them together.
+constexpr float veinHeightCdf(const OreVein& vein, float y) {
+    const float a = static_cast<float>(vein.minY);
+    const float c = static_cast<float>(vein.maxY) + 1.0f;
+    const float b = static_cast<float>(vein.peakY) + 0.5f;
+    if (y <= a) {
+        return 0.0f;
+    }
+    if (y >= c) {
+        return 1.0f;
+    }
+    if (y <= b) {
+        return (y - a) * (y - a) / ((c - a) * (b - a));
+    }
+    return 1.0f - (c - y) * (c - y) / ((c - a) * (c - b));
+}
+
+constexpr float veinHeightWeight(const OreVein& vein, int y) {
+    return veinHeightCdf(vein, static_cast<float>(y) + 1.0f) - veinHeightCdf(vein, static_cast<float>(y));
+}
+
+/// The most blocks of this ore a 32x32 column could possibly hold.
+///
+/// `attempts * size` is the budget, and the sum weighs each height by how often
+/// there is any rock at all up there to write into - a vein rolled above the
+/// local surface is rolled into open sky and thrown away whole. Everything else
+/// that happens to a vein only ever *subtracts*: air discard, caves eaten out
+/// underneath it, and `placeVein` refusing to overwrite anything that is not
+/// plain stone or deepslate. **So this is an upper bound, not an estimate**,
+/// which is the only claim about realised counts a table can honestly make.
+constexpr float oreBlockCeiling(const OreVein& vein) {
+    float inRock = 0.0f;
+    for (int y = vein.minY; y <= vein.maxY; ++y) {
+        inRock += veinHeightWeight(vein, y) * surfaceAtOrAbove(y);
+    }
+    return static_cast<float>(vein.attempts) * static_cast<float>(vein.size) * inRock;
+}
+
+// A band whose peak sits outside it would make `veinHeight` take the square
+// root of a negative number. Moving any `peakY` outside its own `[minY, maxY]`
+// is the single edit that makes this fail, and it has to be checked before the
+// two asserts below, which evaluate the distribution.
+static_assert([] {
+    for (const OreVein& vein : kOreVeins) {
+        if (vein.minY >= vein.peakY || vein.peakY >= vein.maxY) {
+            return false;
+        }
+    }
+    return true;
+}(), "An ore band's peak is outside its own range.");
+
+// `peakY` is named for where the ore is densest, and this is what holds it to
+// that. **Restoring the sum form `minY + range(lowSpan+1) + range(highSpan+1)`
+// is the single edit that makes it fail** - the convolution of two uniforms
+// peaks at the band's *midpoint* whatever the split, so coal's mode would move
+// 26 -> 39, which is above the median surface and cost 47% of all coal when it
+// shipped that way. Diamond, redstone and emerald fail it too.
+static_assert([] {
+    for (const OreVein& vein : kOreVeins) {
+        int mode = vein.minY;
+        for (int y = vein.minY; y <= vein.maxY; ++y) {
+            if (veinHeightWeight(vein, y) > veinHeightWeight(vein, mode)) {
+                mode = y;
+            }
+        }
+        if (mode != vein.peakY) {
+            return false;
+        }
+    }
+    return true;
+}(), "veinHeight is not densest at peakY, so the table's middle column no longer means what it "
+     "is named.");
+
+// Every `measured` has to be something the row could physically have placed.
+// **Cutting an `attempts` without re-measuring is the single edit that makes
+// this fail** - which is the direction that matters, because that is the edit
+// that would otherwise leave the ordering below sorted on a number the table
+// can no longer produce. Raising an `attempts` is not caught here; it is caught
+// only if it moves the row past its neighbour.
+static_assert([] {
+    for (const OreVein& vein : kOreVeins) {
+        if (vein.measured > oreBlockCeiling(vein)) {
+            return false;
+        }
+    }
+    return true;
+}(), "An ore's measured block count is higher than its table row could ever place, so the "
+     "measurement is stale.");
+
+/// True when the row at `upper` really is scarcer than the row at `lower`.
+constexpr bool rarerThan(std::size_t upper, std::size_t lower) {
+    return kOreVeins[upper].measured < kOreVeins[lower].measured;
+}
+
+// One assert per adjacent pair, so a spline tweak that moves terrain names the
+// pair it broke instead of reading as an ore-table bug. Swapping either row of
+// a pair is the single edit that makes that pair fail.
+static_assert(kOreVeins.size() == 9, "A row was added or removed - add its pairwise ordering "
+                                     "assert too, or the new row is unprotected.");
+static_assert(rarerThan(0, 1), "AncientDebris must run before EmeraldOre.");
+static_assert(rarerThan(1, 2), "EmeraldOre must run before DiamondOre - it is the rarer of the "
+                               "two in realised blocks, because airDiscard 1.0 culls most of it.");
+static_assert(rarerThan(2, 3), "DiamondOre must run before LapisOre; their bands overlap at y 3-17.");
+static_assert(rarerThan(3, 4), "LapisOre must run before GoldOre; their bands overlap at y 3-20.");
+static_assert(rarerThan(4, 5), "GoldOre must run before RedstoneOre; their bands overlap at y 3-17.");
+static_assert(rarerThan(5, 6), "RedstoneOre must run before CopperOre.");
+static_assert(rarerThan(6, 7), "CopperOre must run before IronOre; their bands overlap at y 10-27.");
+static_assert(rarerThan(7, 8), "IronOre must run before CoalOre; their bands overlap at y 8-27.");
+
+/// The furthest, in blocks, that a vein of this size can write from its origin
+/// column - the bound the search radius has to beat.
+///
+/// The spindle runs `size/8` either side of the origin; the fattest sphere on
+/// it has radius `size/16 + 0.5`; the cell loop then walks `int(radius) + 1`
+/// cells outward from a `floor`ed centre, which can lose another whole block on
+/// the low side. That is `3*size/16 + 2.5`, and this rounds every part of it
+/// up so the answer is never optimistic.
+constexpr int veinExtent(int size) { return (3 * size + 15) / 16 + 3; }
+
+/// How far outside its own column a vein may reach, in blocks.
+///
+/// **Six is not a safety margin, it is exactly the largest vein in the table
+/// plus rounding, and the table is one edit away from outgrowing it.** At
+/// today's max `size = 12` the true reach is 4.75; at 16 it is 5.5; at 20 -
+/// vanilla's largest `vein_size` and the obvious number for someone adding a
+/// bigger ore - it is 6.25. The moment it passes `kVeinReach` the search below
+/// stops finding the vein from the far chunk, and **the same vein comes out as
+/// two mismatched halves either side of a chunk border**: the seam report that
+/// has cost two playtests, reachable by editing one integer in a table that
+/// says nothing about this constant.
 constexpr int kVeinReach = 6;
+
+// Raising any `size` in `kOreVeins` past 16 is the single edit that makes this
+// fail; the fix is to raise `kVeinReach` to match, which costs search time and
+// nothing else.
+static_assert([] {
+    int worst = 0;
+    for (const OreVein& vein : kOreVeins) {
+        worst = std::max(worst, veinExtent(vein.size));
+    }
+    return worst;
+}() <= kVeinReach,
+              "A vein can now write further than the neighbour search looks, so it will be cut in "
+              "half at a chunk border. Raise kVeinReach.");
 
 // ---------------------------------------------------------------------------
 // Height
@@ -243,11 +616,46 @@ float columnHeightFrom(std::uint32_t seed, int worldX, int worldZ, const Shape& 
     return shape.offsetY + wobble * kReliefBlocks / shape.factor;
 }
 
-int columnHeight(std::uint32_t seed, int worldX, int worldZ) {
-    const Climate climate = climateAt(seed, worldX, worldZ);
-    const Shape shape = shapeAt(seed, climate, worldX, worldZ);
-    const float height = columnHeightFrom(seed, worldX, worldZ, shape);
+/// The one place a float height becomes a block index.
+///
+/// The soft ceiling lives here rather than in `columnHeightFrom` so that
+/// *every* caller gets it - a second path that clamped for itself is how the
+/// plateau would come back.
+int surfaceFrom(float height) {
+    if (height > kCeilingSoftStart) {
+        constexpr float kCeilingSpan = kMaxSurface - kCeilingSoftStart;
+        height = kMaxSurface - kCeilingSpan * std::exp(-(height - kCeilingSoftStart) / kCeilingSpan);
+    }
     return std::clamp(static_cast<int>(std::floor(height)), kMinSurface, kMaxSurface);
+}
+
+/// A column's climate and its finished surface height, from one pass over the
+/// noise.
+///
+/// **The two belong together because the height is derived from the climate**,
+/// and asking for them separately - `columnHeight` for the height ring, then
+/// `climateAt` all over again for each interior column - was paying for the
+/// twenty noise evaluations behind `climateAt` twice for every column of every
+/// chunk.
+struct ColumnSample {
+    Climate climate;
+    int surface;
+};
+
+ColumnSample sampleColumn(std::uint32_t seed, int worldX, int worldZ) {
+    ColumnSample sample{};
+    sample.climate = climateAt(seed, worldX, worldZ);
+    const Shape shape = shapeAt(seed, sample.climate, worldX, worldZ);
+    sample.surface = surfaceFrom(columnHeightFrom(seed, worldX, worldZ, shape));
+    return sample;
+}
+
+/// **Defined in terms of `sampleColumn` rather than beside it**, so the height
+/// a chunk caches for itself and the height `surfaceHeightAt` hands a tree
+/// cannot drift apart - and drifting apart is exactly what leaves a tree
+/// hanging in the air.
+int columnHeight(std::uint32_t seed, int worldX, int worldZ) {
+    return sampleColumn(seed, worldX, worldZ).surface;
 }
 
 
@@ -350,17 +758,50 @@ bool isCave(std::uint32_t seed, int worldX, int worldY, int worldZ, int surfaceH
 // Ores
 // ---------------------------------------------------------------------------
 
-/// A height inside the vein's band, weighted toward its own depth.
+/// A height inside the vein's band, densest at `peakY` and tapering to nothing
+/// at both ends - an asymmetric triangle, sampled by inverting its CDF.
 ///
-/// The reference's `trapezoid` height provider with a zero plateau, which is
-/// just a triangle: the average of two uniform rolls. That is what makes a
-/// depth feel like a depth rather than like a floor you cross.
+/// **Three shapes were on the table and only this one lets `peakY` mean what it
+/// is named.** The reference's `TrapezoidHeight(plateau 0)` is a *sum* of two
+/// uniform rolls, `minY + nextInt(l+1) + nextInt(k+1)`, and vanilla splits the
+/// band into two *near-equal* halves (`l = (k - plateau) / 2; m = k - l`), so
+/// its peak is always the band's midpoint - it has no `peakY` parameter at all,
+/// and gets asymmetry instead by giving an ore two features (coal is a uniform
+/// upper band plus a triangular lower one). Hand that sum an *arbitrary* split
+/// and the convolution still peaks at `(minY + maxY) / 2` however the split
+/// moves; `peakY` would set only the width of the modal plateau. Measured, that
+/// cost 47% of all coal, because coal's mode slid from 26 to 39 and
+/// `surfaceAtOrAbove(39)` is 0.17 - most rolls landed in open sky.
+///
+/// The shape before that rolled both halves and picked one at 50/50, which is a
+/// *mixture*: flat within each half with a hard step at `peakY`. Coal came out
+/// 2.4x denser at y 25 than at y 27, a shelf you cross rather than a gradient.
+///
+/// A triangle is a strict generalisation rather than a departure: put `peakY`
+/// at the band's midpoint and it *is* vanilla's zero-plateau trapezoid, to
+/// within the discretisation. One row per ore then says what two vanilla
+/// features say, which is what our table has always been shaped to do.
+///
+/// Inversion, for `a = minY`, `c = maxY + 1`, mode `b = peakY + 0.5` (the half
+/// keeps `floor` landing on `peakY` rather than splitting the mode across two
+/// cells): draw `u` uniform, and take `a + sqrt(u (c-a)(b-a))` below the split
+/// `(b-a)/(c-a)`, `c - sqrt((1-u)(c-a)(c-b))` above it.
+///
+/// **The draw count per attempt falls from three to one, which moves every vein
+/// in the world - and that is safe.** `veinHeight` and the vein's own
+/// `noise::Stream` are both consumed *before* the "is this vein near this
+/// chunk" reject below, so every chunk that considers a given vein consumes
+/// exactly the same values in the same order. It is one `unit()` call for every
+/// row of the table, unconditionally, so nothing here can vary by chunk.
 int veinHeight(const OreVein& vein, noise::Stream& roll) {
-    const int lowSpan = vein.peakY - vein.minY;
-    const int highSpan = vein.maxY - vein.peakY;
-    const int low = vein.minY + roll.range(std::max(1, lowSpan + 1));
-    const int high = vein.peakY + roll.range(std::max(1, highSpan + 1));
-    return roll.range(2) == 0 ? low : high;
+    const float a = static_cast<float>(vein.minY);
+    const float c = static_cast<float>(vein.maxY) + 1.0f;
+    const float b = static_cast<float>(vein.peakY) + 0.5f;
+    const float split = (b - a) / (c - a);
+    const float u = roll.unit();
+    const float y = u < split ? a + std::sqrt(u * (c - a) * (b - a))
+                              : c - std::sqrt((1.0f - u) * (c - a) * (c - b));
+    return std::clamp(static_cast<int>(y), vein.minY, vein.maxY);
 }
 
 /// The reference's `OreFeature`: a spindle of overlapping spheres strung along a
@@ -451,6 +892,182 @@ void placeVein(Chunk& chunk, const ChunkCoord& coord, const OreVein& vein, int o
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plants
+// ---------------------------------------------------------------------------
+
+/// How tall each multi-block plant grows: `base` blocks plus `0 .. spread-1`.
+///
+/// **Named, and in one place, because `kMaxPlantHeight` is derived from them.**
+/// A species that grows taller than the overhang walk looks is a stalk sheared
+/// off at a chunk ceiling, and deriving the bound means adding a taller plant
+/// cannot reintroduce that - there is no second number to remember.
+constexpr int kBambooBase = 3;
+constexpr int kBambooSpread = 5;
+constexpr int kCactusBase = 1;
+constexpr int kCactusSpread = 3;
+constexpr int kSugarCaneBase = 2;
+constexpr int kSugarCaneSpread = 2;
+
+constexpr int tallestPlant(int base, int spread) { return base + spread - 1; }
+
+/// The furthest below itself a chunk has to look for a stalk rooted lower down.
+constexpr int kMaxPlantHeight = std::max({tallestPlant(kBambooBase, kBambooSpread),
+                                          tallestPlant(kCactusBase, kCactusSpread),
+                                          tallestPlant(kSugarCaneBase, kSugarCaneSpread)});
+
+/// One species and one height for a whole column.
+struct PlantColumn {
+    BlockId block = BlockId::Air;
+    int height = 0;
+};
+
+/// What grows on this column, from hashes and the column's own surface alone.
+///
+/// **Pure on purpose, and that is the whole fix for a bug this file has already
+/// paid for once.** A stalk whose base lands in one chunk and whose top lands
+/// in the next is written by *both* of them, independently, from this one
+/// answer. Generation may not read a neighbouring chunk - so the chunk above
+/// does not ask what was planted below, it re-derives it, and gets the same
+/// species and the same height because it feeds in the same numbers.
+///
+/// Before this, the growth loop stopped at the chunk ceiling and the chunk
+/// above rejected the column outright for having a negative base, so **the top
+/// of every tall stalk was simply lost.** Bamboo is 3-7 tall, so every stand
+/// rooted between y 25 and y 31 was sheared off at exactly y 31 - a dead flat
+/// horizontal line across a bamboo jungle, and the same again at y 63. It is
+/// the identical mistake as the one two comments below, which cost every plant
+/// at y 32 and y 64: the base placement was made pure and the stalk was not.
+///
+/// `waterAdjacent` is the one thing here that is not a hash, and it is still
+/// pure: it comes from the neighbouring *column heights*, which this chunk
+/// already computed for itself in its 34x34 ring.
+PlantColumn plantAt(std::uint32_t seed, int worldX, int worldZ, int surface, BiomeId biomeId,
+                    const Biome& biome, BlockId top, bool waterAdjacent) {
+    // **Sugar cane is asked first because it is the most specific rule here.**
+    // It stands on ground that is *level with* the sea and beside water - and
+    // that is not a taste, it is forced: our water fills every air cell at or
+    // below y 24, so the only dry supporting block that can have water against
+    // its own side is one at exactly y 24. The old test asked for `kSeaLevel +
+    // 1` and had no water test at all, so cane grew along any dry inland
+    // contour that happened to bottom out at y 25 and grew nowhere near an
+    // actual river.
+    if (surface == kSeaLevel && waterAdjacent &&
+        (top == BlockId::Grass || top == BlockId::Sand) &&
+        !biomeHasAny(biomeId, BiomeTag::Frozen | BiomeTag::Snowy) &&
+        noise::hashUnit2D(seed ^ 0x58c31a9u, worldX, worldZ) < 0.18f) {
+        return {BlockId::SugarCane,
+                kSugarCaneBase + static_cast<int>(noise::hashUnit2D(seed ^ 0x9b12f7u, worldX,
+                                                                    worldZ) *
+                                                  static_cast<float>(kSugarCaneSpread))};
+    }
+
+    const bool wetBiome = biomeHasAny(biomeId, BiomeTag::Wet | BiomeTag::Swamp);
+    const bool coldBiome = biomeHasAny(biomeId, BiomeTag::Cold | BiomeTag::Snowy);
+
+    // **Cover comes in patches, not as an even speckle.** A flat per-column
+    // probability spreads the same plant every N columns across a whole
+    // continent, which reads as noise rather than as meadow; the reference
+    // scatters ~32 tries inside a small radius and leaves the ground between
+    // them bare. One low-frequency field multiplying the density buys the same
+    // thing: thick stands with clearings between them, at the same average.
+    const float coverPatch =
+        noise::value2D(seed ^ 0x6d1e5a3u, static_cast<float>(worldX) / kCoverPatchWavelength,
+                       static_cast<float>(worldZ) / kCoverPatchWavelength);
+    const float coverDensity =
+        biome.grassDensity * (kCoverPatchFloor + (2.0f - kCoverPatchFloor) * coverPatch * coverPatch);
+
+    // Snow is a top block here rather than a layer over grass, so asking only
+    // for grass left the three snowy biomes with no ground cover at all - and
+    // their `grassDensity` rows unread.
+    if ((top == BlockId::Grass || top == BlockId::Snow) &&
+        noise::hashUnit2D(seed ^ 0x91a5eedu, worldX, worldZ) < coverDensity) {
+        const float pick = noise::hashUnit2D(seed ^ 0x5f3aa17u, worldX, worldZ);
+        BlockId cover = BlockId::TallGrass;
+        // A share of the plain cover is fern rather than grass, and only where
+        // it belongs - the reference puts it in forest and taiga, not on open
+        // plains.
+        if (biomeHasTag(biomeId, BiomeTag::Forest) &&
+            noise::hashUnit2D(seed ^ 0x3e5b1c9u, worldX, worldZ) < 0.35f) {
+            cover = BlockId::Fern;
+        }
+        if (pick < biome.flowerShare) {
+            // Which flower is a **regional** choice, so a meadow reads as a
+            // meadow rather than as confetti - but the region is a *discrete
+            // cell hash*, not a smooth field. A smooth field piles up around
+            // its midpoint, so mapping one across the list handed most of the
+            // world whichever species happened to sit in the middle of it. A
+            // hash is flat, so all of them are equally likely.
+            constexpr std::array<BlockId, 12> kFlowers{
+                BlockId::Dandelion,  BlockId::Poppy,          BlockId::Cornflower,
+                BlockId::OxeyeDaisy, BlockId::AzureBluet,     BlockId::Allium,
+                BlockId::RedTulip,   BlockId::OrangeTulip,    BlockId::PinkTulip,
+                BlockId::WhiteTulip, BlockId::LilyOfTheValley, BlockId::Cornflower};
+            const int cellX = worldX >> kFlowerRegionShift;
+            const int cellZ = worldZ >> kFlowerRegionShift;
+            std::size_t index = noise::hash2D(seed ^ 0x1f0e9a3u, cellX, cellZ) % kFlowers.size();
+
+            // A minority of every patch is something else. Without it each
+            // region is a monoculture with a hard seam at the cell edge.
+            if (noise::hashUnit2D(seed ^ 0x77c1a2bu, worldX, worldZ) < kFlowerStrays) {
+                index = noise::hash2D(seed ^ 0x2b90c17u, worldX, worldZ) % kFlowers.size();
+            }
+            cover = kFlowers[index];
+            // The blue orchid is the swamp's alone in the reference, and giving
+            // it a home is what stops it being one more face in the crowd.
+            if (biomeHasTag(biomeId, BiomeTag::Swamp)) {
+                cover = BlockId::BlueOrchid;
+            }
+        }
+        return {cover, 1};
+    }
+
+    if (biomeHasTag(biomeId, BiomeTag::Dry) && top == BlockId::Sand && surface > kSeaLevel + 2) {
+        const float scrub = noise::hashUnit2D(seed ^ 0x2c9b4d1u, worldX, worldZ);
+        // Clear of the shoreline, so a beach does not sprout scrub.
+        if (scrub < 0.010f) {
+            // Cactus stands in ones and twos, never in a thicket - the
+            // reference refuses to place one touching another, and a low enough
+            // roll is the same thing statistically without needing to read a
+            // neighbouring column.
+            return {BlockId::Cactus,
+                    kCactusBase + static_cast<int>(noise::hashUnit2D(seed ^ 0x7c2a91u, worldX,
+                                                                     worldZ) *
+                                                   static_cast<float>(kCactusSpread))};
+        }
+        if (scrub < 0.030f) {
+            return {BlockId::DeadBush, 1};
+        }
+        return {};
+    }
+
+    if (top == BlockId::Grass && (wetBiome || coldBiome) &&
+        noise::hashUnit2D(seed ^ 0x6b1f7a3u, worldX, worldZ) < 0.006f) {
+        // Mushrooms in the damp and the dark, and berries in the cold. Both
+        // existed as blocks and generated nowhere.
+        if (coldBiome) {
+            return {BlockId::SweetBerryBush, 1};
+        }
+        return {noise::hash2D(seed ^ 0x11c7e5u, worldX, worldZ) % 2u == 0u ? BlockId::BrownMushroom
+                                                                           : BlockId::RedMushroom,
+                1};
+    }
+
+    // Bamboo, which wants the wet forest rather than the open grassland, and
+    // stands taller than anything else here. Last, so it only takes ground
+    // nothing else claimed - which is what the old `chunk.at(...) == Air` test
+    // was doing, expressed as an order rather than as a read.
+    if (top == BlockId::Grass && biomeHasTag(biomeId, BiomeTag::Wet) &&
+        biomeHasTag(biomeId, BiomeTag::Forest) &&
+        noise::hashUnit2D(seed ^ 0x4d90b13u, worldX, worldZ) < 0.045f) {
+        return {BlockId::Bamboo,
+                kBambooBase + static_cast<int>(noise::hashUnit2D(seed ^ 0x2f77c1u, worldX, worldZ) *
+                                               static_cast<float>(kBambooSpread))};
+    }
+
+    return {};
+}
+
 } // namespace
 
 int surfaceHeightAt(std::uint32_t seed, int worldX, int worldZ) {
@@ -471,20 +1088,46 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
     const int baseZ = coord.z * Chunk::kSize;
 
     // The terrain top of every column in this chunk **and one ring around it**,
-    // because the `steep` rule has to ask its neighbours how far they drop.
+    // because the `steep` rule has to ask its neighbours how far they drop -
+    // and, for the columns of this chunk, the climate that produced it.
     //
     // This one array is the whole world model for the chunk: terrain is
     // single-valued, so "is this cell rock" is `y <= top` and nothing else.
+    //
+    // **Climate is cached rather than asked for twice.** It is about twenty
+    // noise evaluations - eighty hashes; the height ring already computes one
+    // for every column it touches, and the surface pass below used to throw
+    // that away and compute a second identical one. Keeping it is bit-for-bit
+    // the same answer, because it is the same call with the same arguments.
+    //
+    // **It is not the dominant cost of generating a chunk, which is what an
+    // earlier note here claimed, and the measurement is not close.** 144 column
+    // stacks (12 x 12, seed 0x5eed1234, /O2, this machine): a stack is 13.6 ms
+    // and this ring is ~1.1 ms of each of the three chunks in it, so rebuilding
+    // it per chunk rather than per stack wastes about 15% and hoisting it is a
+    // 1.18x win at best - which would also cost `generateChunk` its (seed,
+    // chunkCoord) signature. Binning the same stacks by height band says where
+    // the time actually is: **cy 0 (y 0-31) 66.9%, cy 1 25.2%, cy 2 8.2%.** The
+    // bottom third of the world is two thirds of generation, and it is `isCave`
+    // plus the ore, deepslate and bedrock passes grinding over solid rock. That
+    // is the place to optimise; this is not.
     constexpr int kSpan = Chunk::kSize + 2;
     std::array<int, static_cast<std::size_t>(kSpan) * kSpan> heights{};
+    std::array<Climate, static_cast<std::size_t>(kSpan) * kSpan> climates{};
     for (int z = -1; z <= Chunk::kSize; ++z) {
         for (int x = -1; x <= Chunk::kSize; ++x) {
-            heights[static_cast<std::size_t>(z + 1) * kSpan + static_cast<std::size_t>(x + 1)] =
-                columnHeight(seed, baseX + x, baseZ + z);
+            const std::size_t index =
+                static_cast<std::size_t>(z + 1) * kSpan + static_cast<std::size_t>(x + 1);
+            const ColumnSample sample = sampleColumn(seed, baseX + x, baseZ + z);
+            heights[index] = sample.surface;
+            climates[index] = sample.climate;
         }
     }
     const auto heightAt = [&](int lx, int lz) {
         return heights[static_cast<std::size_t>(lz + 1) * kSpan + static_cast<std::size_t>(lx + 1)];
+    };
+    const auto climateAtLocal = [&](int lx, int lz) -> const Climate& {
+        return climates[static_cast<std::size_t>(lz + 1) * kSpan + static_cast<std::size_t>(lx + 1)];
     };
 
     const int chunkTop = std::min(kWorldTop, baseY + Chunk::kSize - 1);
@@ -495,17 +1138,19 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
             const int worldZ = baseZ + z;
             const int surface = heightAt(x, z);
 
-            const Climate climate = climateAt(seed, worldX, worldZ);
+            const Climate& climate = climateAtLocal(x, z);
             const BiomeId biomeId = biomeFor(climate);
             const Biome& biome = biomeInfo(biomeId);
 
             // **Steep is one facing, not all four.** The reference's condition
-            // compares the column one step north against one step south and
-            // fires only when the north side is the high one, so a summit shows
-            // rock on one face and keeps its snow on the other. Testing all four
+            // compares the column one step south against one step north and
+            // fires only when the south side is the high one, so a summit shows
+            // rock on one face and keeps its snow on the other. `+Z` is south
+            // here, pinned by `lidTurnsFacing` in `Block.hpp`, so this reads
+            // exactly as `SurfaceRules.Steep` does. Testing all four
             // neighbours symmetrically, as ours did, fires on every slope from
             // either side and frosts the whole mountain in bare stone instead.
-            const bool steep = heightAt(x, z + 1) >= heightAt(x, z - 1) + kSteepDrop;
+            const bool steep = heightAt(x, z + 1) >= heightAt(x, z - 1) + kSteepDropOverTwoColumns;
 
             const bool submerged = surface < kSeaLevel;
 
@@ -532,8 +1177,16 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                 // across dry grassland. Sand never appears on a riverbed there.
                 const bool warm = biomeHasAny(biomeId, BiomeTag::Sandy | BiomeTag::Hot);
                 const bool shallow = (kSeaLevel - surface) <= kShallowBedDepth;
-                top = shallow ? BlockId::Dirt : (warm ? BlockId::Sand : BlockId::Gravel);
-                filler = shallow ? BlockId::Dirt : (warm ? BlockId::Sandstone : BlockId::Stone);
+
+                // **The biome's own material is asked first, and the depth rule
+                // only decides what a biome that has nothing to say gets.**
+                // That is the reference's ordering - a biome surface rule sits
+                // above the water-depth rule - and reversing it is what put a
+                // ring of brown dirt at the exact waterline of every sandy
+                // shore in the world: `shallow` matched first, so the sand a
+                // beach is made of was unreachable the moment it went under.
+                top = warm ? BlockId::Sand : (shallow ? BlockId::Dirt : BlockId::Gravel);
+                filler = warm ? BlockId::Sandstone : (shallow ? BlockId::Dirt : BlockId::Stone);
 
                 // The one bed material a biome may name for itself. Everything
                 // else about a seabed is decided by depth, so this is opt-in per
@@ -609,6 +1262,40 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                 chunk.set(x, y - baseY, z, block);
             }
 
+            // **Lava does for the floor of the world what the sea does for its
+            // top, and it is written in the same place and the same way.** The
+            // carve pass has just finished, so which cells are empty is settled;
+            // filling them is a decision about this column and nothing else, so
+            // it stays pure and two chunks that share a cave agree without
+            // either reading the other.
+            //
+            // **Only cells at or below the terrain top are filled**, which is
+            // the ocean rule read the other way round. There it fills what is
+            // *above* the ground and under the waterline; here it fills what the
+            // carver took out of ground that is still overhead. The measured
+            // minimum surface anywhere is y 7, so no column can reach down here
+            // and no lava can ever be open to the sky - but the test is written
+            // rather than assumed, because that measurement is a fact about
+            // today's splines and not a guarantee.
+            //
+            // **Source lava, exactly as the sea is all source.** `Lava0` is the
+            // level-0 id, so a cave floor does not drain into the first tunnel
+            // the player digs into it - the same reasoning that made the ocean
+            // all source, and the difference between a hazard and a slow flood
+            // that empties itself.
+            //
+            // **Bedrock is not special-cased and does not need to be.** The
+            // carve pass refuses to cut bedrock at all, so those cells are never
+            // empty, and the `!= BlockId::Air` test below already declines them.
+            const int lavaTop = std::min(kLavaLevel - baseY, Chunk::kSize - 1);
+            for (int y = 0; y <= lavaTop; ++y) {
+                const int worldY = y + baseY;
+                if (worldY > surface || chunk.at(x, y, z) != BlockId::Air) {
+                    continue;
+                }
+                chunk.set(x, y, z, BlockId::Lava0);
+            }
+
             // Everything the **uncarved** terrain leaves empty below sea level
             // is ocean. Testing against the terrain top rather than against what
             // is in the chunk now is the whole difference between a sea and a
@@ -659,142 +1346,50 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                 }
             }
 
-            // Ground cover, on whatever the surface turned out to be rather than
-            // on the biome's nominal top block: a snow line, a steep face or a
-            // shoreline may already have overridden it.
+            // Plants stand on the surface block, so **the decision belongs to
+            // the column and only the writing belongs to a chunk.** Every gate
+            // here is pure - a hash, this column's own surface, or a
+            // neighbouring column's height out of the ring - so the chunk that
+            // holds the root and the chunk that holds the tip reach the same
+            // answer without either one reading the other.
+            //
+            // **`plantY == 0` is a real placement, not an out-of-range guard.**
+            // It is the column whose surface is the last block of the chunk
+            // below, so the plant belongs to this chunk and the ground it stands
+            // on does not. Refusing it deleted every plant at y 32 and y 64 -
+            // two bare horizontal bands through every world, at each chunk
+            // boundary. **A negative `plantY` is a real placement too**, for the
+            // same reason read the other way round: a bamboo stalk rooted at
+            // y 28 has four blocks of itself in the chunk above, and rejecting
+            // the column there is what shaved every stand in the band flat at
+            // exactly y 31. The ground is asked for the pure way in both cases -
+            // this is `surfaceCarvedAt` with the height it already has, so it
+            // cannot disagree with the block the walk above wrote.
             const int plantY = surface + 1 - baseY;
-            if (plantY >= 1 && plantY < Chunk::kSize && surface > kSeaLevel + 1 &&
-                chunk.at(x, plantY, z) == BlockId::Air &&
-                chunk.at(x, plantY - 1, z) != BlockId::Air) {
-                // Grows a stalk upward, stopping at the top of the chunk. A
-                // stalk that runs off the top is simply shorter here; the cell
-                // above belongs to another chunk and writing it from this one
-                // would break generation purity.
-                const auto growColumn = [&](BlockId block, int height) {
-                    for (int i = 0; i < height && plantY + i < Chunk::kSize; ++i) {
-                        chunk.set(x, plantY + i, z, block);
+            if (plantY < Chunk::kSize && plantY + kMaxPlantHeight > 0 && surface >= kSeaLevel &&
+                !isCave(seed, worldX, surface, worldZ, surface)) {
+                // Water against the *supporting* block's own side, which is
+                // what the reference asks of sugar cane. A neighbour column
+                // lower than this one is flooded from its own top up to sea
+                // level, so it holds water at this column's surface height
+                // exactly when it is shorter - no block read needed, and the
+                // ring already has every height involved.
+                const bool waterAdjacent =
+                    surface <= kSeaLevel &&
+                    (heightAt(x - 1, z) < surface || heightAt(x + 1, z) < surface ||
+                     heightAt(x, z - 1) < surface || heightAt(x, z + 1) < surface);
+
+                const PlantColumn plant =
+                    plantAt(seed, worldX, worldZ, surface, biomeId, biome, top, waterAdjacent);
+
+                // Clipped at both ends rather than at the top only. The cells
+                // outside this chunk are not skipped work, they are another
+                // chunk's copy of the same stalk.
+                for (int i = 0; i < plant.height; ++i) {
+                    const int y = plantY + i;
+                    if (y >= 0 && y < Chunk::kSize) {
+                        chunk.set(x, y, z, plant.block);
                     }
-                };
-
-                const bool wetBiome = biomeHasAny(biomeId, BiomeTag::Wet | BiomeTag::Swamp);
-                const bool coldBiome = biomeHasAny(biomeId, BiomeTag::Cold | BiomeTag::Snowy);
-
-                // **Cover comes in patches, not as an even speckle.** A flat
-                // per-column probability spreads the same plant every N columns
-                // across a whole continent, which reads as noise rather than as
-                // meadow; the reference scatters ~32 tries inside a small radius
-                // and leaves the ground between them bare. One low-frequency
-                // field multiplying the density buys the same thing: thick
-                // stands with clearings between them, at the same average.
-                const float coverPatch =
-                    noise::value2D(seed ^ 0x6d1e5a3u,
-                                   static_cast<float>(worldX) / kCoverPatchWavelength,
-                                   static_cast<float>(worldZ) / kCoverPatchWavelength);
-                const float coverDensity =
-                    biome.grassDensity *
-                    (kCoverPatchFloor + (2.0f - kCoverPatchFloor) * coverPatch * coverPatch);
-
-                // Snow is a top block here rather than a layer over grass, so
-                // asking only for grass left the three snowy biomes with no
-                // ground cover at all - and their `grassDensity` rows unread.
-                if ((top == BlockId::Grass || top == BlockId::Snow) &&
-                    noise::hashUnit2D(seed ^ 0x91a5eedu, worldX, worldZ) < coverDensity) {
-                    const float pick = noise::hashUnit2D(seed ^ 0x5f3aa17u, worldX, worldZ);
-                    BlockId cover = BlockId::TallGrass;
-                    // A share of the plain cover is fern rather than grass, and
-                    // only where it belongs - the reference puts it in forest
-                    // and taiga, not on open plains.
-                    if (biomeHasTag(biomeId, BiomeTag::Forest) &&
-                        noise::hashUnit2D(seed ^ 0x3e5b1c9u, worldX, worldZ) < 0.35f) {
-                        cover = BlockId::Fern;
-                    }
-                    if (pick < biome.flowerShare) {                        // Which flower is a **regional** choice, so a meadow
-                        // reads as a meadow rather than as confetti - but the
-                        // region is a *discrete cell hash*, not a smooth field.
-                        // A smooth field piles up around its midpoint, so
-                        // mapping one across the list handed most of the world
-                        // whichever species happened to sit in the middle of it.
-                        // A hash is flat, so all of them are equally likely.
-                        constexpr std::array<BlockId, 12> kFlowers{
-                            BlockId::Dandelion,  BlockId::Poppy,      BlockId::Cornflower,
-                            BlockId::OxeyeDaisy, BlockId::AzureBluet, BlockId::Allium,
-                            BlockId::RedTulip,   BlockId::OrangeTulip, BlockId::PinkTulip,
-                            BlockId::WhiteTulip, BlockId::LilyOfTheValley, BlockId::Cornflower};
-                        const int cellX = worldX >> kFlowerRegionShift;
-                        const int cellZ = worldZ >> kFlowerRegionShift;
-                        std::size_t index =
-                            noise::hash2D(seed ^ 0x1f0e9a3u, cellX, cellZ) % kFlowers.size();
-
-                        // A minority of every patch is something else. Without
-                        // it each region is a monoculture with a hard seam at
-                        // the cell edge.
-                        if (noise::hashUnit2D(seed ^ 0x77c1a2bu, worldX, worldZ) < kFlowerStrays) {
-                            index = noise::hash2D(seed ^ 0x2b90c17u, worldX, worldZ) % kFlowers.size();
-                        }
-                        cover = kFlowers[index];
-                        // The blue orchid is the swamp's alone in the reference,
-                        // and giving it a home is what stops it being one more
-                        // face in the meadow crowd.
-                        if (biomeHasTag(biomeId, BiomeTag::Swamp)) {
-                            cover = BlockId::BlueOrchid;
-                        }
-                    }
-                    chunk.set(x, plantY, z, cover);
-                } else if (biomeHasTag(biomeId, BiomeTag::Dry) && top == BlockId::Sand &&
-                           surface > kSeaLevel + 2) {
-                    const float scrub = noise::hashUnit2D(seed ^ 0x2c9b4d1u, worldX, worldZ);
-                    // Clear of the shoreline, so a beach does not sprout scrub.
-                    if (scrub < 0.010f) {
-                        // Cactus stands in ones and twos, never in a thicket -
-                        // the reference refuses to place one touching another,
-                        // and a low enough roll is the same thing statistically
-                        // without needing to read a neighbouring column.
-                        growColumn(BlockId::Cactus,
-                                   1 + static_cast<int>(noise::hashUnit2D(seed ^ 0x7c2a91u, worldX,
-                                                                          worldZ) *
-                                                        3.0f));
-                    } else if (scrub < 0.030f) {
-                        chunk.set(x, plantY, z, BlockId::DeadBush);
-                    }
-                } else if (top == BlockId::Grass && (wetBiome || coldBiome) &&
-                           noise::hashUnit2D(seed ^ 0x6b1f7a3u, worldX, worldZ) < 0.006f) {
-                    // Mushrooms in the damp and the dark, and berries in the
-                    // cold. Both existed as blocks and generated nowhere.
-                    if (coldBiome) {
-                        chunk.set(x, plantY, z, BlockId::SweetBerryBush);
-                    } else {
-                        chunk.set(x, plantY, z,
-                                  noise::hash2D(seed ^ 0x11c7e5u, worldX, worldZ) % 2u == 0u
-                                      ? BlockId::BrownMushroom
-                                      : BlockId::RedMushroom);
-                    }
-                }
-
-                // Bamboo, which wants the wet forest rather than the open
-                // grassland, and stands taller than anything else here.
-                if (chunk.at(x, plantY, z) == BlockId::Air && top == BlockId::Grass &&
-                    biomeHasTag(biomeId, BiomeTag::Wet) &&
-                    biomeHasTag(biomeId, BiomeTag::Forest) &&
-                    noise::hashUnit2D(seed ^ 0x4d90b13u, worldX, worldZ) < 0.045f) {
-                    growColumn(BlockId::Bamboo,
-                               3 + static_cast<int>(
-                                       noise::hashUnit2D(seed ^ 0x2f77c1u, worldX, worldZ) * 5.0f));
-                }
-            }
-
-            // Sugar cane, which needs the waterline rather than open ground: it
-            // stands on sand or grass **one block above sea level**, which is
-            // exactly the strip a river or lake edge produces.
-            const int caneY = surface + 1 - baseY;
-            if (caneY >= 1 && caneY < Chunk::kSize && surface == kSeaLevel + 1 &&
-                chunk.at(x, caneY, z) == BlockId::Air &&
-                (top == BlockId::Grass || top == BlockId::Sand) &&
-                !biomeHasAny(biomeId, BiomeTag::Frozen | BiomeTag::Snowy) &&
-                noise::hashUnit2D(seed ^ 0x58c31a9u, worldX, worldZ) < 0.18f) {
-                const int height =
-                    2 + static_cast<int>(noise::hashUnit2D(seed ^ 0x9b12f7u, worldX, worldZ) * 2.0f);
-                for (int i = 0; i < height && caneY + i < Chunk::kSize; ++i) {
-                    chunk.set(x, caneY + i, z, BlockId::SugarCane);
                 }
             }
 
@@ -835,13 +1430,20 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
                open(wx, wy, wz + 1) || open(wx, wy + 1, wz) || open(wx, wy - 1, wz);
     };
 
+    // **The vein loop is outermost, so "rarest first" is a fact about the world
+    // rather than about one column.** With columns outside, a neighbouring
+    // column's coal ran before this column's diamond and could take a cell from
+    // it - the ordering held nine times over and never once between them.
+    // Nothing else moves: each vein's stream is seeded from its own salt and its
+    // own column, so the rolls are identical whichever way the loops nest, and
+    // only who wins a contested cell changes.
     const int columnSpan = (kVeinReach + Chunk::kSize - 1) / Chunk::kSize;
-    for (int nz = -columnSpan; nz <= columnSpan; ++nz) {
-        for (int nx = -columnSpan; nx <= columnSpan; ++nx) {
-            const int columnX = coord.x + nx;
-            const int columnZ = coord.z + nz;
+    for (const OreVein& vein : kOreVeins) {
+        for (int nz = -columnSpan; nz <= columnSpan; ++nz) {
+            for (int nx = -columnSpan; nx <= columnSpan; ++nx) {
+                const int columnX = coord.x + nx;
+                const int columnZ = coord.z + nz;
 
-            for (const OreVein& vein : kOreVeins) {
                 noise::Stream site{noise::hash2D(seed ^ vein.salt, columnX, columnZ)};
                 for (int attempt = 0; attempt < vein.attempts; ++attempt) {
                     const int originX = columnX * Chunk::kSize + site.range(Chunk::kSize);

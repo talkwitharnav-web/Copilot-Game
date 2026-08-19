@@ -65,8 +65,13 @@ public:
     /// frame spike when something dramatic happens.
     static constexpr std::size_t kMaxParticles = 3000;
 
-    /// The shower a block throws off when it breaks. `count` is scaled down
-    /// automatically when the budget is nearly spent.
+    /// The shower a block throws off when it breaks.
+    ///
+    /// `count` is spawned in full, every time. **There is no automatic scaling
+    /// against the remaining budget** - a comment here used to claim there was,
+    /// and a reader trusting it would size a caller's `count` on the assumption
+    /// that the system would trim it. What actually happens at the cap is in
+    /// `emplace`.
     void spawnBlockBreak(const glm::ivec3& block, BlockId id, int count = 24);
 
     /// Rain hitting a surface: a short-lived upward fleck of water.

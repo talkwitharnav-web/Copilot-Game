@@ -27,6 +27,13 @@ namespace {
 /// than queued, so a frame that forgets to drain cannot grow the buffer.
 constexpr std::size_t kMaxTypedText = 256;
 
+/// Enough repeats for a couple of seconds of a held editing key at any OS
+/// repeat rate - `repeatsWhenHeld` keeps movement and toggles out, so nothing
+/// but editing can spend this. Past it they are dropped rather than queued: a
+/// text field that has fallen this far behind wants nothing less than a burst
+/// of deletions arriving late.
+constexpr std::size_t kMaxKeyRepeats = 64;
+
 void glfwErrorCallback(int code, const char* description) {
     logError("GLFW error " + std::to_string(code) + ": " + (description ? description : "unknown"));
 }
@@ -179,6 +186,22 @@ int toGlfwKey(Key key) {
         return GLFW_KEY_BACKSPACE;
     case Key::Enter:
         return GLFW_KEY_ENTER;
+    case Key::Delete:
+        return GLFW_KEY_DELETE;
+    case Key::Left:
+        return GLFW_KEY_LEFT;
+    case Key::Right:
+        return GLFW_KEY_RIGHT;
+    case Key::Up:
+        return GLFW_KEY_UP;
+    case Key::Down:
+        return GLFW_KEY_DOWN;
+    case Key::Home:
+        return GLFW_KEY_HOME;
+    case Key::End:
+        return GLFW_KEY_END;
+    case Key::Count:
+        break;
     }
     return GLFW_KEY_UNKNOWN;
 }
@@ -296,6 +319,27 @@ bool fromGlfwKey(int glfwKey, Key& out) {
     case GLFW_KEY_ENTER:
         out = Key::Enter;
         return true;
+    case GLFW_KEY_DELETE:
+        out = Key::Delete;
+        return true;
+    case GLFW_KEY_LEFT:
+        out = Key::Left;
+        return true;
+    case GLFW_KEY_RIGHT:
+        out = Key::Right;
+        return true;
+    case GLFW_KEY_UP:
+        out = Key::Up;
+        return true;
+    case GLFW_KEY_DOWN:
+        out = Key::Down;
+        return true;
+    case GLFW_KEY_HOME:
+        out = Key::Home;
+        return true;
+    case GLFW_KEY_END:
+        out = Key::End;
+        return true;
     default:
         return false;
     }
@@ -328,7 +372,13 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
     });
 
     glfwSetKeyCallback(m_handle, [](GLFWwindow* handle, int key, int, int action, int) {
-        if (action != GLFW_PRESS) {
+        // **A repeat is kept, in its own queue, if the key is one that repeats.**
+        // Discarding it here is why holding Backspace in a text field deleted
+        // exactly one character and then nothing; folding it into the press
+        // queue instead would make holding `E` strobe the inventory, so the two
+        // are kept apart and `recordKeyRepeat` drops everything that is not an
+        // editing key.
+        if (action != GLFW_PRESS && action != GLFW_REPEAT) {
             return;
         }
         auto* self = static_cast<Window*>(glfwGetWindowUserPointer(handle));
@@ -336,8 +386,13 @@ Window::Window(std::uint32_t width, std::uint32_t height, const std::string& tit
             return;
         }
         Key mapped{};
-        if (fromGlfwKey(key, mapped)) {
+        if (!fromGlfwKey(key, mapped)) {
+            return;
+        }
+        if (action == GLFW_PRESS) {
             self->recordKeyPress(mapped);
+        } else {
+            self->recordKeyRepeat(mapped);
         }
     });
 
@@ -547,6 +602,26 @@ std::vector<Key> Window::consumeKeyPresses() {
     return presses;
 }
 
+void Window::recordKeyRepeat(Key key) {
+    // The gate lives here rather than at the callback so every path into the
+    // queue passes it. Without it the queue holds whatever is being leaned on -
+    // and `kMaxKeyRepeats` would then be spent by a held `W` that no caller can
+    // use, starving the editing keys it exists to protect.
+    if (!repeatsWhenHeld(key)) {
+        return;
+    }
+    if (m_keyRepeats.size() >= kMaxKeyRepeats) {
+        return;
+    }
+    m_keyRepeats.push_back(key);
+}
+
+std::vector<Key> Window::consumeKeyRepeats() {
+    std::vector<Key> repeats;
+    repeats.swap(m_keyRepeats);
+    return repeats;
+}
+
 bool Window::isKeyDown(Key key) const {
     return glfwGetKey(m_handle, toGlfwKey(key)) == GLFW_PRESS;
 }
@@ -582,6 +657,10 @@ void Window::clearInputState() {
     m_mouseButtonDown.fill(false);
     m_mouseButtonPresses.clear();
     m_keyPresses.clear();
+    // A key still held while focus goes elsewhere keeps repeating in the OS's
+    // eyes but not in ours; whatever has already arrived must not land in the
+    // field on the way back.
+    m_keyRepeats.clear();
     // A character typed while alt-tabbing away must not arrive on the way back.
     m_typedText.clear();
     m_scrollDelta = 0.0f;

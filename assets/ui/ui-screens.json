@@ -1,0 +1,859 @@
+{
+  "header": {
+    "schema_version": 1,
+    "measured_on": "2026-08-17",
+    "reference_version": "minecraft-assets-26.2",
+    "units": "1x GUI pixels. One texel of a legacy container sheet = one GUI pixel = one unit here. The integer GUI scale factor multiplies all of this at draw time; see gui_scale.",
+    "provenance": "MEASURED, not recalled. Every rectangle in this file was derived by scanning the pixels of the file named in its 'source' field with System.Drawing, by finding the runs of the slot bevel colours (#373737 top/left, #8B8B8B fill, #FFFFFF bottom/right) along rows and columns. Where a number could not be measured from an image it is marked 'from': 'code' and cited in the fragment. Do not edit a number here without re-measuring the file it claims to come from.",
+    "owner": "ui-04-cells (cell and screen geometry). assets/ui/ui-atlas.json and assets/ui/ui-palette.json are owned by other work and are not touched by this file.",
+    "fragment": "ui-04-cells.md",
+    "checked_by": "tools/check-ui-data.ps1 - re-opens the art and proves every cell and panel recorded here is still where it says. Run it after anything regenerates tools/make-hud-sheet.ps1's output or drops a new reference version in."
+  },
+
+  "roots": {
+    "java_gui": "reference/minecraft-assets-26.2/minecraft-assets-26.2/assets/minecraft/textures/gui",
+    "bedrock_icons": "reference/ui-icons",
+    "repo": "."
+  },
+
+  "path_rule": "Every record that names a file carries a 'root', naming one of the keys above, and a path relative to it. The repository-relative path is roots[root] + '/' + that path, concatenated as plain strings - no special knowledge and no rewriting. The same map with the same keys and the same strings is in assets/ui/ui-palette.json, and assets/ui/ui-atlas.json spells the same trees as referenceRoot + '/' + path; tools/check-ui-data.ps1 asserts the shared keys still agree. This replaces a header 'reference_root' that ended in '/gui/' while every source began with 'gui/', so every one of the 24 joins produced '.../gui/gui/container/...' and resolved to nothing.",
+
+  "join_key": "atlas_id is the id of the same art in assets/ui/ui-atlas.json, and is the only join key between the three files. It is what says that this file's 'generic_9x6' and the atlas's 'screen/generic_54' are one PNG. Where a size appears on both sides, check-ui-data.ps1 compares them.",
+
+  "conventions": {
+    "anchor": "item",
+    "anchor_note": "origin_x / origin_y are the top-left of the 16x16 ITEM AREA, which is what vanilla's Slot.x / Slot.y hold and what the game draws an item stack at. The painted bevel FRAME is 18x18 and sits one pixel up and left of it. Mixing the two anchors is the single easiest mistake to make here: a whole panel comes out one pixel off and still looks plausible.",
+    "frame_origin": "DERIVED, never stored: frame_origin = (origin_x, origin_y) - cell.item_offset_in_frame, and that offset is (1,1) on every cell of every sheet measured. frame_origin_x / frame_origin_y used to be written out beside 19 of the 128 regions and left off the other 109, so a consumer that read the field got the right answer on 15% of rows and a silent 0 - the panel's own corner - on the rest. One table owns it now: cell.item_offset_in_frame.",
+    "origin_space": "All coordinates are relative to the panel's top-left corner, NOT to the image file. Most legacy sheets are 256x256 with the panel drawn in the top-left, so 'panel' and 'file_size' are both recorded.",
+    "pitch_zero": "pitch_x / pitch_y are 0 for a single slot (cols = rows = 1). Zero is deliberate: origin + i * pitch is still correct for the only valid index, i = 0, and it cannot be mistaken for a measured grid step.",
+    "cell_size": "cell_size is the item area, always 16. frame_size is the painted bevel box, always 18.",
+    "well": "Some result slots sit in a larger recessed 'well' rather than a plain 18x18 frame. Where present, 'well' is the painted rectangle (panel-relative, outer edge included) and the item area is centred inside its interior."
+  },
+
+  "cell": {
+    "root": "java_gui",
+    "source": "sprites/container/slot.png",
+    "atlas_id": "container/slot",
+    "source_note": "The whole 18x18 file. The SHAPE - the 17-long dark L, the 17-long light L, the two #8B8B8B far corners - holds on all 26 legacy container sheets. The COLOURS hold on 25 of them: crafter.png draws its 3x3 grid with #383838 where every other sheet has #373737 (see screens[crafter].regions[grid]), so a detector that matches the dark bevel on an exact colour finds nine cells missing there and nowhere else.",
+    "frame_size": [18, 18],
+    "item_area": [16, 16],
+    "item_offset_in_frame": [1, 1],
+    "pitch": [18, 18],
+    "pitch_note": "Adjacent cells share their bevel edge, so there are exactly 2 pixels of border between two item areas and the pitch equals the frame size.",
+    "edges": {
+      "top": { "colour": "#373737", "from_x": 0, "length": 17, "at_y": 0 },
+      "left": { "colour": "#373737", "from_y": 0, "length": 17, "at_x": 0 },
+      "bottom": { "colour": "#FFFFFF", "from_x": 1, "length": 17, "at_y": 17 },
+      "right": { "colour": "#FFFFFF", "from_y": 1, "length": 17, "at_x": 17 },
+      "fill": "#8B8B8B",
+      "corner_note": "The two far corners (17,0) and (0,17) are #8B8B8B - neither dark nor white. The dark L and the light L are each 17 long, not 18. Any detector that assumes a closed 18-px box misses every slot."
+    },
+    "hover_box": { "size": [18, 18], "offset_from_item": [-1, -1], "from": "code" },
+    "empty_slot_icons": { "count": 31, "size": [16, 16], "root": "java_gui", "source": "sprites/container/slot/*.png", "drawn_at": "the item origin" },
+    "highlight": { "root": "java_gui", "sprites": ["sprites/container/slot_highlight_back.png", "sprites/container/slot_highlight_front.png"], "atlas_ids": ["container/slot_highlight_back", "container/slot_highlight_front"], "size": [24, 24], "nine_slice_border": 4, "drawn_at": "item origin minus (4,4)" }
+  },
+
+  "panel": {
+    "root": "java_gui",
+    "source": "container/inventory.png",
+    "atlas_id": "screen/inventory",
+    "source_note": "Rows and columns scanned at x=120 and y=78. Identical on every sheet measured, and on the Bedrock card at roots.bedrock_icons + '/card-right-full.png'.",
+    "border_top_left": [
+      { "offset": 0, "width": 1, "colour": "#000000" },
+      { "offset": 1, "width": 2, "colour": "#FFFFFF" }
+    ],
+    "border_bottom_right": [
+      { "offset": -3, "width": 2, "colour": "#555555" },
+      { "offset": -1, "width": 1, "colour": "#000000" }
+    ],
+    "fill": "#C6C6C6",
+    "content_inset": 3,
+    "plate_before_first_slot": 4,
+    "first_slot_frame_x": 7,
+    "first_item_x": 8,
+    "padding_note": "3 px of border + 4 px of bare plate puts the first slot FRAME at 7 and the first ITEM at 8. That is where the famous x = 8 comes from; it is not a free choice."
+  },
+
+  "rules": {
+    "player_inventory_vertical": {
+      "statement": "Let H be the panel height. Player storage first item row y = H - 82. Hotbar item y = H - 24. 'Inventory' label y = H - 94.",
+      "derivation": "storage rows occupy 3 * 18 = 54 px from H-82, ending at H-28; the hotbar sits 4 px below that (H-24). Label is 12 px above the first storage row.",
+      "verified_on": [
+        { "root": "java_gui", "source": "container/inventory.png", "H": 166, "storage_y": 84, "hotbar_y": 142 },
+        { "root": "java_gui", "source": "container/shulker_box.png", "H": 166, "storage_y": 84, "hotbar_y": 142 },
+        { "root": "java_gui", "source": "container/villager.png", "H": 166, "storage_y": 84, "hotbar_y": 142 },
+        { "root": "java_gui", "source": "container/hopper.png", "H": 133, "storage_y": 51, "hotbar_y": 109 },
+        { "root": "java_gui", "source": "container/generic_54.png", "H": 222, "storage_y": 140, "hotbar_y": 198 },
+        { "root": "java_gui", "source": "container/beacon.png", "H": 219, "storage_y": 137, "hotbar_y": 195 },
+        { "root": "java_gui", "source": "container/creative_inventory/tab_items.png", "H": 136, "hotbar_y": 112 }
+      ],
+      "hotbar_separator": 4,
+      "storage_top_to_hotbar_top": 58
+    },
+    "player_inventory_x": {
+      "default": 8,
+      "exceptions": { "beacon": 36, "villager": 108, "creative": 9 }
+    },
+    "chest_height": {
+      "formula_height": "panel_height = 114 + rows * 18",
+      "formula_storage_y": "player storage item y = rows * 18 + 32",
+      "measured_check": { "rows": 6, "height": 222, "storage_y": 140, "hotbar_y": 198, "root": "java_gui", "source": "container/generic_54.png" },
+      "blit_note": "The measured texture is reproduced by blitting the top rows*18+18 pixels of generic_54.png, then its v=126 h=96 strip at y = rows*18+18. A commonly quoted code listing uses rows*18+17 for the first blit, which does NOT reproduce this texture - it lands one pixel short. The texture is the owner.",
+      "divergence": "shulker_box.png is 176x166 with storage at y=84, i.e. 2 px shorter than 114 + 3*18 = 168 would give (which would put storage at 86). A real, measured exception - do not generate the shulker screen from the chest formula."
+    },
+    "result_well": {
+      "size": [26, 26],
+      "interior": [24, 24],
+      "item_offset_from_well": [5, 5],
+      "seen_on": ["crafting_table", "furnace", "blast_furnace", "smoker", "crafter", "loom", "stonecutter", "cartography_table", "villager"],
+      "seen_on_note": "Every id here is the id of a screen in this file, so the rule can be checked against the geometry it claims to describe. blast_furnace and smoker were cited before they had entries; they have them now.",
+      "note": "A result slot in an emphasised well: outer 26x26, interior 24x24 at +1,+1, and the 16x16 item centred in that interior at +5,+5 from the well's outer corner. Verified independently on 5 screens where the derived item origin matches the known menu coordinate exactly."
+    },
+    "progress_arrow": { "size": [22, 15], "note": "The large left-to-right progress arrow. Same size on crafting_table, furnace family, anvil, smithing, grindstone, cartography_table and villager." },
+    "labels": {
+      "from": "code",
+      "title": [8, 6],
+      "inventory_label": [8, "panel_height - 94"],
+      "line_height": 9,
+      "colour_note": "Colour belongs to ui-palette.json, not here.",
+      "overrides": {
+        "inventory": { "title_x": 97 },
+        "crafting_table": { "title_x": 29 },
+        "anvil": { "title_x": 60, "cost_text_y": 69 },
+        "smithing": { "title": [44, 15] },
+        "loom": { "title_y": 4 },
+        "cartography_table": { "title_y": 4 },
+        "stonecutter": { "title_y": 5 },
+        "furnace_family": "title centred",
+        "brewing_stand": "title centred",
+        "dispenser": "title centred",
+        "crafter": "title centred",
+        "beacon": "both labels replaced: centred, y = 10, no inventory label"
+      }
+    }
+  },
+
+  "screens": [
+    {
+      "id": "inventory",
+      "root": "java_gui", "source": "container/inventory.png",
+      "atlas_id": "screen/inventory",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "panel_origin_in_file": [0, 0],
+      "regions": [
+        { "id": "armour", "origin_x": 8, "origin_y": 8, "cols": 1, "rows": 4, "pitch_x": 0, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "offhand", "origin_x": 77, "origin_y": 62, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "crafting_grid", "origin_x": 98, "origin_y": 18, "cols": 2, "rows": 2, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "crafting_result", "origin_x": 154, "origin_y": 28, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "player_preview_well", "x": 25, "y": 7, "w": 51, "h": 72, "interior_x": 26, "interior_y": 8, "interior_w": 49, "interior_h": 70 },
+        { "id": "recipe_arrow", "x": 135, "y": 29, "w": 16, "h": 13 }
+      ]
+    },
+    {
+      "id": "crafting_table",
+      "root": "java_gui", "source": "container/crafting_table.png",
+      "atlas_id": "screen/crafting_table",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "grid", "origin_x": 30, "origin_y": 17, "cols": 3, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 124, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 119, "y": 30, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "arrow", "x": 90, "y": 35, "w": 22, "h": 15 } ]
+    },
+    {
+      "id": "crafter",
+      "root": "java_gui", "source": "container/crafter.png",
+      "atlas_id": "screen/crafter",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "grid", "origin_x": 26, "origin_y": 17, "cols": 3, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18, "bevel_dark": "#383838", "note": "The standard 18x18 cell in every respect but one: the dark L is #383838 rather than #373737. Measured at frame (25,16) - top-left #383838, bottom-right (+17,+17) #FFFFFF, fill #8B8B8B, both far corners #8B8B8B, next frame at x=43. #ADADAD and #737373 are NOT part of this bevel; they belong to inner_plate below.", "inner_plate": { "x": 1, "y": 1, "w": 16, "h": 16, "relative_to": "the cell frame, i.e. exactly the item area", "light": "#ADADAD", "dark": "#737373", "fill": "#8B8B8B", "note": "A second, INVERTED bevel baked into all nine grid cells: a 15-px #ADADAD L on the top and left, a 15-px #737373 L on the bottom and right, #8B8B8B fill and #8B8B8B at the two far corners. Light on the top-left is the opposite way round from a slot, so it reads as a plate raised into the recess - the crafter's baked 'this cell is switched off' look. Measured over (26,17)..(41,32) on crafter.png. It is not sprites/container/crafter/disabled_slot.png (atlas container/crafter/disabled_slot), which is a different 18x18 overlay - #FFFFFF L, #C6C6C6 fill, #8B8B8B L - drawn over the whole cell at runtime." } },
+        { "id": "result", "origin_x": 134, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 129, "y": 30, "w": 26, "h": 26, "outline": "#8B8B8B", "note": "a flat 1-px #8B8B8B outline, not a bevelled well - the only result slot on any sheet drawn this way" } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ]
+    },
+    {
+      "id": "furnace",
+      "root": "java_gui", "source": "container/furnace.png",
+      "atlas_id": "screen/furnace",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "identical_to": ["blast_furnace", "smoker"],
+      "identical_to_note": "blast_furnace.png and smoker.png have their own entries below. All three panels were compared pixel by pixel over the whole 176x166 rectangle on 2026-08-17 and 0 of 29,216 pixels differ, so every slot, well and art rectangle here is theirs unchanged. tools/check-ui-data.ps1 re-runs that comparison, so the claim cannot rot into a guess.",
+      "regions": [
+        { "id": "input", "origin_x": 56, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "fuel", "origin_x": 56, "origin_y": 53, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "36 below the input - two cell pitches, with the flame between them" },
+        { "id": "result", "origin_x": 116, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 111, "y": 30, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "flame", "x": 56, "y": 36, "w": 14, "h": 14 },
+        { "id": "arrow", "x": 80, "y": 35, "w": 22, "h": 15 },
+        { "id": "arrow_box", "x": 79, "y": 34, "w": 24, "h": 16 }
+      ]
+    },
+    {
+      "id": "blast_furnace",
+      "root": "java_gui", "source": "container/blast_furnace.png",
+      "atlas_id": "screen/blast_furnace",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "identical_to": ["furnace"],
+      "identical_to_note": "Identical to furnace.png over the whole 176x166 panel: 0 of 29,216 pixels differ, measured 2026-08-17. Written out in full rather than left as a cross-reference because rules.result_well.seen_on cites this screen as verified, and a rule that cites a screen with no entry cannot be checked against anything.",
+      "regions": [
+        { "id": "input", "origin_x": 56, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "fuel", "origin_x": 56, "origin_y": 53, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 116, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 111, "y": 30, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "flame", "x": 56, "y": 36, "w": 14, "h": 14 },
+        { "id": "arrow", "x": 80, "y": 35, "w": 22, "h": 15 },
+        { "id": "arrow_box", "x": 79, "y": 34, "w": 24, "h": 16 }
+      ]
+    },
+    {
+      "id": "smoker",
+      "root": "java_gui", "source": "container/smoker.png",
+      "atlas_id": "screen/smoker",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "identical_to": ["furnace"],
+      "identical_to_note": "Identical to furnace.png over the whole 176x166 panel: 0 of 29,216 pixels differ, measured 2026-08-17. The smoker and blast furnace differ from the furnace in the BLOCK model and the recipe set, not in the screen.",
+      "regions": [
+        { "id": "input", "origin_x": 56, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "fuel", "origin_x": 56, "origin_y": 53, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 116, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 111, "y": 30, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "flame", "x": 56, "y": 36, "w": 14, "h": 14 },
+        { "id": "arrow", "x": 80, "y": 35, "w": 22, "h": 15 },
+        { "id": "arrow_box", "x": 79, "y": 34, "w": 24, "h": 16 }
+      ]
+    },
+    {
+      "id": "dispenser",
+      "root": "java_gui", "source": "container/dispenser.png",
+      "atlas_id": "screen/dispenser",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "also_applies_to_note": "The dropper reuses this sheet; there is no dropper.png in 26.2.",
+      "regions": [
+        { "id": "grid", "origin_x": 62, "origin_y": 17, "cols": 3, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ]
+    },
+    {
+      "id": "brewing_stand",
+      "root": "java_gui", "source": "container/brewing_stand.png",
+      "atlas_id": "screen/brewing_stand",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "measurement_note": "The stand art is drawn OVER the slot bevels, so an automatic detector finds only two of the three potion slots. The left potion slot and the fuel/ingredient slots were recovered by scanning individual rows for the #8B8B8B interior runs.",
+      "regions": [
+        { "id": "fuel", "origin_x": 17, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "ingredient", "origin_x": 79, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "potion_left", "origin_x": 56, "origin_y": 51, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "potion_middle", "origin_x": 79, "origin_y": 58, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "potion_right", "origin_x": 102, "origin_y": 51, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "fuel_bar", "x": 60, "y": 44, "w": 18, "h": 4 } ],
+      "geometry_note": "The three potion slots are symmetric about x = 87 (the panel's own centre line is 88): the outer two are 23 px either side of the middle one's item origin, and the middle one hangs 7 px lower."
+    },
+    {
+      "id": "enchanting_table",
+      "root": "java_gui", "source": "container/enchanting_table.png",
+      "atlas_id": "screen/enchanting_table",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "item", "origin_x": 15, "origin_y": 47, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "lapis", "origin_x": 35, "origin_y": 47, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "20 px to the right of the item slot, not 18 - the only pair of adjacent slots on any sheet that does not touch" },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "book_display_well", "x": 59, "y": 13, "w": 110, "h": 59 } ],
+      "sprites": { "enchantment_rows": { "root": "java_gui", "source": "sprites/container/enchanting_table/enchantment_slot*.png", "size": [108, 19], "count_note": "three rows, drawn from sprites, not on the sheet" }, "level_icons": { "size": [16, 16] } }
+    },
+    {
+      "id": "anvil",
+      "root": "java_gui", "source": "container/anvil.png",
+      "atlas_id": "screen/anvil",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "base", "origin_x": 27, "origin_y": 47, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "addition", "origin_x": 76, "origin_y": 47, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 134, "origin_y": 47, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "a plain 18x18 cell, not a 26x26 well" },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "plus", "x": 53, "y": 49, "w": 13, "h": 13 }, { "id": "arrow", "x": 102, "y": 48, "w": 22, "h": 15 } ]
+    },
+    {
+      "id": "smithing",
+      "root": "java_gui", "source": "container/smithing.png",
+      "atlas_id": "screen/smithing",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "template", "origin_x": 8, "origin_y": 48, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "base", "origin_x": 26, "origin_y": 48, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "addition", "origin_x": 44, "origin_y": 48, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 98, "origin_y": 48, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "arrow", "x": 68, "y": 49, "w": 22, "h": 15 } ],
+      "geometry_note": "The three input slots are a contiguous 3x1 run at pitch 18 starting at the panel's own left margin (x = 8), which is why they line up exactly with the storage grid below."
+    },
+    {
+      "id": "grindstone",
+      "root": "java_gui", "source": "container/grindstone.png",
+      "atlas_id": "screen/grindstone",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "input_top", "origin_x": 49, "origin_y": 19, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "input_bottom", "origin_x": 49, "origin_y": 40, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "21 below the top slot, not 18" },
+        { "id": "result", "origin_x": 129, "origin_y": 34, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "arrow", "x": 95, "y": 34, "w": 22, "h": 15 } ]
+    },
+    {
+      "id": "loom",
+      "root": "java_gui", "source": "container/loom.png",
+      "atlas_id": "screen/loom",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "banner", "origin_x": 13, "origin_y": 26, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "dye", "origin_x": 33, "origin_y": 26, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "20 to the right of the banner slot, as on the enchanting table" },
+        { "id": "pattern", "origin_x": 23, "origin_y": 45, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 143, "origin_y": 57, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 138, "y": 52, "w": 26, "h": 26 }, "note": "The well was measured on column 150: dark edge at y=52, 24 px of #8B8B8B interior, white at y=77. Centring the 16x16 item in that interior gives y=57. This is the one result slot where the measured well centre and the commonly quoted menu coordinate (58) disagree by a pixel - draw from the well, hit-test from the menu, and say which you used." },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "pattern_list_well", "x": 118, "y": 12, "w": 14, "h": 58, "interior_x": 119, "interior_y": 13, "interior_w": 12, "interior_h": 56 } ]
+    },
+    {
+      "id": "stonecutter",
+      "root": "java_gui", "source": "container/stonecutter.png",
+      "atlas_id": "screen/stonecutter",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "input", "origin_x": 20, "origin_y": 33, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 143, "origin_y": 33, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 138, "y": 28, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "recipe_list_well", "x": 118, "y": 14, "w": 14, "h": 56, "interior_x": 119, "interior_y": 15, "interior_w": 12, "interior_h": 54 } ],
+      "recipe_buttons": { "size": [16, 18], "cols": 4, "rows": 3, "note": "drawn from java_gui + /sprites/container/stonecutter/recipe_selected|highlighted|... at runtime; the well above is the clipping rectangle they scroll inside" }
+    },
+    {
+      "id": "cartography_table",
+      "root": "java_gui", "source": "container/cartography_table.png",
+      "atlas_id": "screen/cartography_table",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "map", "origin_x": 15, "origin_y": 15, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "additional", "origin_x": 15, "origin_y": 52, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "result", "origin_x": 145, "origin_y": 39, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 140, "y": 34, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "plus", "x": 16, "y": 35, "w": 13, "h": 13 }, { "id": "arrow", "x": 38, "y": 34, "w": 22, "h": 15 } ]
+    },
+    {
+      "id": "villager",
+      "root": "java_gui", "source": "container/villager.png",
+      "atlas_id": "screen/villager",
+      "file_size": [512, 256],
+      "panel": [276, 166],
+      "panel_note": "The widest legacy container sheet, and the only one in a 512-wide file.",
+      "regions": [
+        { "id": "input_first", "origin_x": 136, "origin_y": 37, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "input_second", "origin_x": 162, "origin_y": 37, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "note": "26 to the right - the two trade inputs are spaced by a whole result-well width" },
+        { "id": "result", "origin_x": 220, "origin_y": 37, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "well": { "x": 215, "y": 32, "w": 26, "h": 26 } },
+        { "id": "storage", "origin_x": 108, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 108, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "trade_list", "x": 5, "y": 18, "w": 88, "h": 140 },
+        { "id": "scroll_track", "x": 94, "y": 18, "w": 6, "h": 140 },
+        { "id": "arrow", "x": 186, "y": 38, "w": 22, "h": 15 }
+      ],
+      "sprites": { "scroller": [6, 27], "experience_bar": [102, 5], "trade_arrow": [10, 9] }
+    },
+    {
+      "id": "beacon",
+      "root": "java_gui", "source": "container/beacon.png",
+      "atlas_id": "screen/beacon",
+      "file_size": [256, 256],
+      "panel": [230, 219],
+      "regions": [
+        { "id": "payment", "origin_x": 136, "origin_y": 110, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 36, "origin_y": 137, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 36, "origin_y": 195, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "tier_marks", "x": 36, "y": 108, "w": 5, "h": 18, "cols": 4, "pitch_x": 22, "note": "four recessed marks at x = 36, 58, 80, 102 - the anchors for the 22x22 effect buttons drawn from sprites" } ],
+      "sprites": { "effect_button": [22, 22], "confirm": [18, 18], "cancel": [18, 18] },
+      "geometry_note": "The only screen whose player inventory is not at x = 8: it is at 36, because the panel is 230 wide and 8 + 36 centres the 162-px-wide 9-column grid (36 + 162 + 32 = 230, and 230 - 162 = 68, 68/2 = 34 - so it is off-centre by 2, a real measured quirk)."
+    },
+    {
+      "id": "hopper",
+      "root": "java_gui", "source": "container/hopper.png",
+      "atlas_id": "screen/hopper",
+      "file_size": [256, 256],
+      "panel": [176, 133],
+      "regions": [
+        { "id": "hopper_row", "origin_x": 44, "origin_y": 20, "cols": 5, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 51, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 109, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "geometry_note": "The shortest container panel: 133, not 166. The five slots are centred - 44 + 5*18 = 134, and 176 - 134 = 42, versus 44 on the left, so they sit one pixel left of true centre."
+    },
+    {
+      "id": "generic_9x6",
+      "root": "java_gui", "source": "container/generic_54.png",
+      "atlas_id": "screen/generic_54",
+      "file_size": [256, 256],
+      "panel": [176, 222],
+      "regions": [
+        { "id": "container", "origin_x": 8, "origin_y": 18, "cols": 9, "rows": 6, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 140, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 198, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "derived_variants": [
+        { "id": "generic_9x1", "panel": [176, 132], "container_rows": 1, "storage_y": 50, "hotbar_y": 108 },
+        { "id": "generic_9x2", "panel": [176, 150], "container_rows": 2, "storage_y": 68, "hotbar_y": 126 },
+        { "id": "generic_9x3", "panel": [176, 168], "container_rows": 3, "storage_y": 86, "hotbar_y": 144 },
+        { "id": "generic_9x4", "panel": [176, 186], "container_rows": 4, "storage_y": 104, "hotbar_y": 162 },
+        { "id": "generic_9x5", "panel": [176, 204], "container_rows": 5, "storage_y": 122, "hotbar_y": 180 }
+      ],
+      "derived_note": "Variants are DERIVED from the measured 9x6 sheet by the 114 + rows*18 rule, not measured - only the 6-row case exists as an image. Container origin is (8,18) for every row count."
+    },
+    {
+      "id": "shulker_box",
+      "root": "java_gui", "source": "container/shulker_box.png",
+      "atlas_id": "screen/shulker_box",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "container", "origin_x": 8, "origin_y": 18, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "geometry_note": "MEASURED 176x166 with storage at 84 - two pixels shorter than the chest formula's 168/86 for the same 3 rows. Do not generate this screen from the chest rule."
+    },
+    {
+      "id": "horse",
+      "root": "java_gui", "source": "container/horse.png",
+      "atlas_id": "screen/horse",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "saddle", "origin_x": 8, "origin_y": 18, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "from": "code", "drawn": false, "note": "NOT drawn on the 26.2 sheet - the saddle and armour cells are blitted from java_gui + /sprites/container/slot.png at runtime, so this origin cannot be measured from the image." },
+        { "id": "armour", "origin_x": 8, "origin_y": 36, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18, "from": "code", "drawn": false, "note": "Same as the saddle above: blitted at runtime, absent from the sheet, so there is nothing here to measure or to check." },
+        { "id": "chest", "origin_x": 80, "origin_y": 18, "cols": 5, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18, "drawn": false, "drawn_note": "The 90x54 recess is on the sheet but the fifteen cell bevels inside it are not - they arrive with chest_slots.png at runtime, so only 5 of the 15 frame corners read #373737 and none of the bottom-right corners read #FFFFFF. Measured 2026-08-17.", "note": "Confirmed twice: the recessed area on the sheet is 90x54 at (79,17), and java_gui + /sprites/container/horse/chest_slots.png is exactly 90x54 - 5x3 cells of 18." },
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "entity_preview_well", "x": 25, "y": 17, "w": 54, "h": 54 } ]
+    },
+    {
+      "id": "nautilus",
+      "root": "java_gui", "source": "container/nautilus.png",
+      "atlas_id": "screen/nautilus",
+      "file_size": [256, 256],
+      "panel": [176, 166],
+      "regions": [
+        { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "entity_preview_well", "x": 25, "y": 17, "w": 54, "h": 54 } ],
+      "geometry_note": "A 26.2 sheet carrying only the 54x54 entity preview well plus the player inventory; no container slots are drawn on it."
+    },
+    {
+      "id": "creative_inventory",
+      "root": "java_gui", "source": "container/creative_inventory/tab_inventory.png",
+      "atlas_id": "screen/creative_inventory/tab_inventory",
+      "file_size": [256, 256],
+      "panel": [195, 136],
+      "regions": [
+        { "id": "storage", "origin_x": 9, "origin_y": 54, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 9, "origin_y": 112, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "destroy", "origin_x": 173, "origin_y": 112, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+        { "id": "loose_slot", "origin_x": 35, "origin_y": 20, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "player_preview_well", "x": 72, "y": 5, "w": 34, "h": 45, "interior_x": 73, "interior_y": 6, "interior_w": 32, "interior_h": 43 } ],
+      "geometry_note": "The only screen whose player inventory x is 9 rather than 8: the panel is 195 wide, one wider than 176 + 18 would give, and everything shifts a pixel right."
+    },
+    {
+      "id": "creative_items",
+      "root": "java_gui", "source": "container/creative_inventory/tab_items.png",
+      "atlas_id": "screen/creative_inventory/tab_items",
+      "file_size": [256, 256],
+      "panel": [195, 136],
+      "regions": [
+        { "id": "item_grid", "origin_x": 9, "origin_y": 18, "cols": 9, "rows": 5, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 9, "origin_y": 112, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [ { "id": "scroll_track", "x": 174, "y": 17, "w": 14, "h": 112, "interior_x": 175, "interior_y": 18, "interior_w": 12, "interior_h": 110 } ],
+      "sprites": { "scroller": [12, 15], "tab": [26, 32], "tab_count": "7 top + 7 bottom, selected and unselected" }
+    },
+    {
+      "id": "creative_search",
+      "root": "java_gui", "source": "container/creative_inventory/tab_item_search.png",
+      "atlas_id": "screen/creative_inventory/tab_item_search",
+      "file_size": [256, 256],
+      "panel": [195, 136],
+      "regions": [
+        { "id": "item_grid", "origin_x": 9, "origin_y": 18, "cols": 9, "rows": 5, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+        { "id": "hotbar", "origin_x": 9, "origin_y": 112, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+      ],
+      "art": [
+        { "id": "search_field", "x": 80, "y": 4, "w": 90, "h": 12, "interior_x": 81, "interior_y": 5, "interior_w": 88, "interior_h": 10, "note": "A softer #555555 top-left bevel instead of the slots' #373737 - a text field reads as shallower than a slot." },
+        { "id": "scroll_track", "x": 174, "y": 17, "w": 14, "h": 112, "interior_x": 175, "interior_y": 18, "interior_w": 12, "interior_h": 110 }
+      ]
+    },
+    {
+      "id": "gamemode_switcher",
+      "root": "java_gui", "source": "container/gamemode_switcher.png",
+      "atlas_id": "screen/gamemode_switcher",
+      "file_size": [128, 128],
+      "panel": [125, 75],
+      "regions": [],
+      "geometry_note": "No slot wells at all. Recorded so the catalogue of the 26 legacy sheets is complete."
+    }
+  ],
+
+  "hud": {
+    "root": "java_gui", "source": "sprites/hud/*.png, sizes read from the files; placement rules marked 'from': 'code'",
+    "placement_space": "C = guiScaledWidth / 2, H = guiScaledHeight, W = guiScaledWidth. All values in 1x GUI pixels after the scale divide.",
+    "hotbar": {
+      "atlas_id": "hud/hotbar",
+      "size": [182, 22],
+      "cols": 9,
+      "pitch_x": 20,
+      "cell_size": 16,
+      "item_offset_in_sprite": [3, 3],
+      "border": 3,
+      "divider_width": 4,
+      "width_check": "3 + 9*16 + 8*4 + 3 = 182",
+      "screen_position": ["C - 91", "H - 22"],
+      "item_position": ["C - 90 + 20*i + 2", "H - 19"],
+      "from": "code"
+    },
+    "hotbar_selection": {
+      "atlas_id": "hud/hotbar_selection",
+      "size": [24, 23],
+      "hole": { "x": 4, "y": 4, "w": 16, "h": 16 },
+      "screen_position": ["C - 92 + 20*i", "H - 23"],
+      "note": "23 tall, not 24 - there is no dark bottom row. Drawn at hotbar origin minus (1,1) so the transparent 16x16 hole lands exactly on the cell.",
+      "from": "code"
+    },
+    "crosshair": {
+      "atlas_id": "hud/crosshair",
+      "size": [15, 15],
+      "drawn_cross": { "x": 3, "y": 3, "w": 9, "h": 9, "note": "a 9x9 plus centred on pixel (7,7) inside the 15x15 sprite" },
+      "screen_position": ["(W - 15) / 2", "(H - 15) / 2"],
+      "from": "code"
+    },
+    "experience_bar": {
+      "atlas_ids": ["hud/experience_bar_background", "hud/experience_bar_progress"],
+      "size": [182, 5],
+      "screen_position": ["(W - 182) / 2", "H - 29"],
+      "progress_width": "(int)(progress * 183)",
+      "level_text_y": "H - 35",
+      "from": "code"
+    },
+    "jump_bar": { "atlas_ids": ["hud/jump_bar_background", "hud/jump_bar_progress"], "size": [182, 5] },
+    "status_icons": {
+      "size": [9, 9],
+      "which": ["heart_*", "armor_*", "food_*", "air_*"],
+      "x_left": "C - 91",
+      "x_right": "C + 91",
+      "y_line_base": "H - 39",
+      "pitch_x": 8,
+      "pitch_y": 10,
+      "rows": { "armour": "one row above hearts", "hearts": "H - 39, growing leftwards", "food": "H - 39, right side, growing right-to-left", "air": "H - 49, right side" },
+      "pitch_note": "8 px horizontal pitch on a 9 px icon: the icons overlap by one pixel, which is why ten hearts span 81 and not 90.",
+      "from": "code"
+    },
+    "other_sprites": {
+      "effect_background": [24, 24],
+      "hotbar_offhand_left": [29, 24],
+      "hotbar_offhand_right": [29, 24],
+      "hotbar_attack_indicator_background": [18, 18],
+      "hotbar_attack_indicator_progress": [18, 18],
+      "crosshair_attack_indicator_full": [16, 16],
+      "crosshair_attack_indicator_background": [16, 4],
+      "crosshair_attack_indicator_progress": [16, 4]
+    }
+  },
+
+  "widgets": {
+    "root": "java_gui", "source": "sprites/widget/*.png and sprites/**/*.png.mcmeta - the .mcmeta nine-slice borders are declarative and authoritative, not measured",
+    "button": { "size": [200, 20], "nine_slice_border": 3, "states": { "button.png": 3, "button_highlighted.png": 3, "button_disabled.png": 1 } },
+    "slider": { "size": [200, 20], "nine_slice_border": 1, "handle": { "size": [8, 20], "border": { "left": 2, "top": 2, "right": 2, "bottom": 3 } } },
+    "text_field": { "size": [200, 20], "nine_slice_border": 1 },
+    "preedit": { "size": [200, 20], "nine_slice_border": 1 },
+    "tab": { "size": [130, 24], "nine_slice_border": { "left": 2, "top": 2, "right": 2, "bottom": 0 }, "note": "bottom border 0 on all four states - a tab has no bottom edge because it merges into the page below it" },
+    "scroller": { "size": [6, 32], "nine_slice_border": 1 },
+    "scroller_background": { "size": [6, 32], "nine_slice_border": 1 },
+    "checkbox": { "size": [20, 20] },
+    "cross_button": { "size": [14, 14] },
+    "locked_button": { "size": [20, 20] },
+    "unlocked_button": { "size": [20, 20] },
+    "page_forward": { "size": [23, 13] },
+    "page_backward": { "size": [23, 13] },
+    "slot_frame": { "size": [80, 80], "note": "a thin outline used for large previews, not a slot" },
+    "tooltip": {
+      "background": { "size": [100, 100], "nine_slice_border": 9 },
+      "frame": { "size": [100, 100], "nine_slice_border": 10, "stretch_inner": true },
+      "mouse_offset": 12,
+      "padding": 3,
+      "margin": 9,
+      "line_pitch": 10,
+      "first_line_extra": 2,
+      "note": "The sprites extend 12 px beyond the text box on all sides; the positioner places the box at (mouseX + 12, mouseY - 12) and clamps it to the screen.",
+      "from": "code (offsets) + .mcmeta (borders)"
+    },
+    "recipe_book": {
+      "overlay_recipe": { "size": [32, 32], "nine_slice_border": 4 },
+      "slot_craftable": { "size": [25, 25] },
+      "slot_uncraftable": { "size": [25, 25] },
+      "tab": { "size": [35, 27] },
+      "filter": { "size": [26, 16] },
+      "crafting_overlay": { "size": [24, 24] },
+      "page_arrow": { "size": [12, 17] },
+      "button": { "size": [20, 18] },
+      "note": "The recipe book is the one place with a 25x25 cell instead of 18x18 - it is not a slot, it is a button that happens to hold an item."
+    },
+    "bundle": { "slot_background": { "size": [24, 24], "nine_slice_border": 4 }, "progressbar_border": 2 },
+    "inventory_effect_background": { "size": [32, 32], "nine_slice_border": 4 }
+  },
+
+  "gui_scale": {
+    "from": "code / documentation, cited in fragment 4.9 - not measurable from an image",
+    "base_width": 320,
+    "base_height": 240,
+    "algorithm": "scale = 1; while (scale != maxScale && scale < fbWidth && scale < fbHeight && fbWidth / (scale + 1) >= 320 && fbHeight / (scale + 1) >= 240) scale++; if (enforceUnicode && scale % 2 != 0) scale++;",
+    "auto": "GUI Scale 0 means auto, which is maxScale unclamped - the loop runs until the 320x240 test fails.",
+    "scaled_size": "guiScaledWidth = ceil(framebufferWidth / scale), guiScaledHeight = ceil(framebufferHeight / scale)",
+    "consequence": "Every number in this file is an integer GUI pixel, multiplied by an integer scale at draw time. Screens are therefore pixel-exact at every scale, and the panel is centred with leftPos = (guiScaledWidth - panelWidth) / 2, topPos = (guiScaledHeight - panelHeight) / 2 in integer arithmetic.",
+    "minimum_resolution_note": "The 320x240 constants are what the auto-scale loop protects, and a hard 320x240 minimum WINDOW size is a 26.3 change (the SDL3 switch), not a long-standing 1.13 feature.",
+    "bedrock_note": "Bedrock does not use this loop - its GUI scale is a percentage modifier on a computed base, which is why a Bedrock screenshot can land on non-integer scale factors. Our reference crops in reference/ui-icons are at 1x and 3x."
+  },
+
+  "ours": {
+    "note": "Our own screens, measured from our own art with the same tools, in the same vocabulary, so the two can be compared without deriving anything twice.",
+    "sheet": { "root": "repo", "source": "assets/textures/hud.png", "size": [185, 1687], "built_by": "tools/make-hud-sheet.ps1", "strip_note": "Every screen below names the strip it is cut from by id rather than repeating its y offset; strips[].y is the one place that number lives." },
+    "panel_frame": "Identical to the reference: 1 px #000000, 2 px #FFFFFF, #C6C6C6 fill, 2 px #555555, 1 px #000000. Content inset 3, first slot frame at 7, first item at 8.",
+    "known_divergences": [
+      {
+        "id": "crafting_grid_one_px_left",
+        "screen": "ours_crafting",
+        "regions": ["grid", "result"],
+        "recorded": { "grid": [29, 17], "result": [123, 35] },
+        "reference": { "screen": "crafting_table", "grid": [30, 17], "result": [124, 35] },
+        "shift": [-1, 0],
+        "kind": "art bug",
+        "owner": "tools/make-hud-sheet.ps1 (see ours.anchor_trap)",
+        "status": "recorded as measured, not fixed - this file does not edit source",
+        "on_fix": "When the sheet is rebuilt with the anchor trap fixed, tools/check-ui-data.ps1 will fail on these two regions. That failure is the fix landing: re-measure and set them to the reference numbers above."
+      },
+      {
+        "id": "furnace_column_one_px_left",
+        "screen": "ours_furnace",
+        "regions": ["input", "fuel", "result"],
+        "recorded": { "input": [55, 17], "fuel": [55, 53], "result": [115, 35] },
+        "reference": { "screen": "furnace", "input": [56, 17], "fuel": [56, 53], "result": [116, 35] },
+        "shift": [-1, 0],
+        "kind": "art bug",
+        "owner": "tools/make-hud-sheet.ps1 (see ours.anchor_trap)",
+        "status": "recorded as measured, not fixed",
+        "on_fix": "Same as above, and the indicators strip moves with it: strips[indicators].parts[*].draws_over.x is measured against the spent art on this panel, so a one-pixel correction there is a one-pixel correction here."
+      },
+      {
+        "id": "double_chest_two_px_short",
+        "screen": "ours_double_chest",
+        "recorded": { "panel": [176, 220], "storage_y": 138, "hotbar_y": 196 },
+        "reference": { "screen": "generic_9x6", "panel": [176, 222], "storage_y": 140, "hotbar_y": 198 },
+        "kind": "art bug",
+        "owner": "tools/make-hud-sheet.ps1",
+        "status": "recorded as measured, not fixed",
+        "on_fix": "Ours is internally consistent - the H-82 / H-24 rule holds exactly on 220 - so nothing looks wrong on screen and only a comparison finds it. When the sheet grows to 222, storage becomes 140 and the hotbar 198."
+      }
+    ],
+    "divergence_note": "Three places where our art disagrees with the reference and the disagreement is a bug rather than a decision. They are recorded here as MEASURED FACTS ABOUT TODAY'S ART, which is the only thing this file ever records. Everything else marked 'divergence' on a screen below - the smithing layout, the full-height hopper card, the stonecutter's fixed cut cells - is a deliberate design difference and is not listed here.",
+    "strips": [
+      { "id": "widgets", "y": 0, "h": 41, "w": 185 },
+      { "id": "inventory", "y": 41, "h": 166, "w": 176 },
+      { "id": "crafting", "y": 207, "h": 166, "w": 176 },
+      { "id": "furnace", "y": 373, "h": 166, "w": 176 },
+      { "id": "indicators", "y": 539, "h": 16, "w": 176, "transparent_ground": true, "note": "The LIT furnace indicators, on transparent ground, drawn over the spent ones baked into the furnace panel and clipped to progress. Sixteen rows with the art starting on the second: the flame is 14 rows from y+1, the arrow 15. This strip is real art that had no recorded geometry until 2026-08-17, and without it an animated furnace - a core screen - cannot be drawn at all. Measured off the sheet, not read off the comment in tools/make-hud-sheet.ps1.", "parts": [
+        { "id": "flame_lit", "x": 0, "y": 540, "w": 14, "h": 14, "opaque": { "x": 2, "y": 540, "w": 10, "h": 14 }, "colours": ["#E06414", "#FFC81E", "#FFE87A"], "draws_over": { "screen": "ours_furnace", "x": 55, "y": 36 }, "note": "Blit the whole 14x14 cell, not the opaque box: the two transparent columns on its left are exactly what lands the art on the spent flame. The spent flame on the furnace panel measures x 57..66, y 36..49 and the lit art is x 2..11 of this cell, so a cell origin of 55 puts one precisely on the other. Clip it vertically to show fuel remaining; only the rectangle is measured here, not which end the game clips." },
+        { "id": "arrow_lit", "x": 16, "y": 540, "w": 21, "h": 15, "opaque": { "x": 16, "y": 540, "w": 21, "h": 15 }, "colours": ["#FFFFFF"], "draws_over": { "screen": "ours_furnace", "x": 79, "y": 36 }, "note": "Every pixel of this cell is opaque, so the cell and the art are the same box. The spent arrow on the furnace panel is #555555 over the identical 21x15 at x 79..99, y 36..50, so cook progress is a left-to-right clip of this over that. One pixel narrower than the reference sheet's 22x15 arrow." }
+      ] },
+      { "id": "book_card", "y": 555, "h": 166, "w": 146 },
+      { "id": "tabs", "y": 721, "h": 52, "w": 118, "cell": [22, 25], "cols": 5, "pitch_x": 24, "selected_row_offset_y": 27 },
+      { "id": "cells", "y": 773, "h": 18, "w": 78, "cell": [18, 18], "cols": 4, "pitch_x": 20, "note": "four cell states; the 20 px pitch is sheet packing, not layout - the drawn pitch is still 18" },
+      { "id": "smithing", "y": 793, "h": 166, "w": 176 },
+      { "id": "chest", "y": 959, "h": 166, "w": 176 },
+      { "id": "double_chest", "y": 1125, "h": 220, "w": 176 },
+      { "id": "status_icons", "y": 1345, "h": 9, "w": 99, "cell": [9, 9], "cols": 10, "pitch_x": 10 },
+      { "id": "hopper", "y": 1355, "h": 166, "w": 176 },
+      { "id": "stonecutter", "y": 1521, "h": 166, "w": 176 }
+    ],
+    "screens": [
+      {
+        "id": "ours_inventory", "strip": "inventory", "panel": [176, 166],
+        "regions": [
+          { "id": "armour", "origin_x": 8, "origin_y": 8, "cols": 1, "rows": 4, "pitch_x": 0, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "offhand", "origin_x": 77, "origin_y": 62, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "crafting_grid", "origin_x": 98, "origin_y": 18, "cols": 2, "rows": 2, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "crafting_result", "origin_x": 154, "origin_y": 28, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "art": [ { "id": "player_preview_well", "x": 25, "y": 7, "w": 51, "h": 72 } ],
+        "matches_reference": true
+      },
+      {
+        "id": "ours_crafting", "strip": "crafting", "panel": [176, 166],
+        "regions": [
+          { "id": "grid", "origin_x": 29, "origin_y": 17, "cols": 3, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "result", "origin_x": 123, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "Grid is 1 px left of the reference (29 vs 30) and the result is a plain 18x18 cell 1 px left of the reference's well-centred item (123 vs 124)."
+      },
+      {
+        "id": "ours_furnace", "strip": "furnace", "panel": [176, 166],
+        "regions": [
+          { "id": "input", "origin_x": 55, "origin_y": 17, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "fuel", "origin_x": 55, "origin_y": 53, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "result", "origin_x": 115, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "Input, fuel and result are each 1 px left of the reference (55/55/115 vs 56/56/116). The 36 px input-to-fuel gap matches."
+      },
+      {
+        "id": "ours_smithing", "strip": "smithing", "panel": [176, 166],
+        "regions": [
+          { "id": "inputs", "origin_x": 37, "origin_y": 35, "cols": 2, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "result", "origin_x": 123, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "A different screen entirely: two inputs at (37,35) and (55,35) with the result at (123,35), against the reference's three inputs at (8,48)/(26,48)/(44,48) and result at (98,48). Ours has no smithing template slot."
+      },
+      {
+        "id": "ours_chest", "strip": "chest", "panel": [176, 166],
+        "regions": [
+          { "id": "container", "origin_x": 8, "origin_y": 18, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "matches_reference": "matches shulker_box.png exactly (176x166, storage 84), i.e. it follows the measured shulker geometry rather than the 114+18N formula"
+      },
+      {
+        "id": "ours_double_chest", "strip": "double_chest", "panel": [176, 220],
+        "regions": [
+          { "id": "container", "origin_x": 8, "origin_y": 18, "cols": 9, "rows": 6, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 138, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 196, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "Panel is 220 tall against the reference's 222, so storage is at 138 and the hotbar at 196 rather than 140/198. The H-82 / H-24 rule still holds exactly - ours is internally consistent, just two pixels shorter."
+      },
+      {
+        "id": "ours_hopper", "strip": "hopper", "panel": [176, 166],
+        "regions": [
+          { "id": "hopper_row", "origin_x": 44, "origin_y": 35, "cols": 5, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "Ours is a full-height 176x166 card with the row at y=35; the reference is a short 176x133 card with the row at y=20. The x origin (44) matches."
+      },
+      {
+        "id": "ours_stonecutter", "strip": "stonecutter", "panel": [176, 166],
+        "regions": [
+          { "id": "input", "origin_x": 20, "origin_y": 35, "cols": 1, "rows": 1, "pitch_x": 0, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "cuts", "origin_x": 86, "origin_y": 35, "cols": 3, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 },
+          { "id": "storage", "origin_x": 8, "origin_y": 84, "cols": 9, "rows": 3, "pitch_x": 18, "pitch_y": 18, "cell_size": 16, "frame_size": 18 },
+          { "id": "hotbar", "origin_x": 8, "origin_y": 142, "cols": 9, "rows": 1, "pitch_x": 18, "pitch_y": 0, "cell_size": 16, "frame_size": 18 }
+        ],
+        "divergence": "Three fixed 'cut' cells at x = 86, 104, 122 against the reference's 12x54 scrolling recipe list at (119,15) and a single 26x26 result well. Input x matches (20); input y is 35 against 33."
+      },
+      {
+        "id": "ours_book_card", "strip": "book_card", "panel": [146, 166],
+        "regions": [],
+        "content_area": { "x": 3, "y": 3, "w": 140, "h": 160 },
+        "note": "An empty plate: the catalogue grid, tabs and search field are composed at runtime from the tabs and cells strips. Width 146 matches the Bedrock left card exactly; height 166 is 24 shorter than Bedrock's ~190."
+      }
+    ],
+    "two_card_layout": {
+      "source": "INTERFACE.md section 5.7 (3x screenshot) and reference/ui-icons/*.png (1x crops)",
+      "left_card": [146, 166],
+      "gap": 4,
+      "right_card": [176, 166],
+      "total_width": 326,
+      "bedrock_measured": {
+        "left_card": [146, 190],
+        "right_card": [176, 167],
+        "note": "Measured from reference/ui-icons/card-left-full.png (149x193 file, panel x 1..146, y 1..190) and card-right-full.png (178x169 file, panel x 1..176). The crops carry 1-2 px of surrounding screen, so the heights carry +/-1; the widths are exact because the black border pixel is unambiguous.",
+        "slot_pitch": 18,
+        "first_item_x": 8,
+        "confirmation": "The right card's row at y=113 shows dark edges at x = 8, 26, 44, 62, 80, 98, 116, 134, 152 with 16 px of #8B8B8B between them - the same 18/16 cell and the same 3+4 left margin as Java. Bedrock and Java agree on the cell."
+      }
+    },
+    "bedrock_icons": {
+      "source": "reference/ui-icons/*.png at 1x and *@3x.png",
+      "slot_empty": [18, 18],
+      "slot_red_uncraftable": [18, 18],
+      "slot_output_red": [20, 20],
+      "tab": [22, 25],
+      "panel_corner": [22, 22],
+      "scrollbar": [15, 133],
+      "toolbar_strip": [97, 23],
+      "armour_slot_glyphs": [19, 73],
+      "layout_book_inventory": [29, 19],
+      "layout_inventory_only": [27, 19],
+      "button_close": [15, 15],
+      "button_help": [15, 15],
+      "toggle_craftable": [28, 19],
+      "bumper": [22, 19],
+      "scale_note": "The @3x files are exactly 3x the 1x ones (54x54 for an 18x18 slot), which is the check that the 1x crops are on the right pixel grid. slot-empty.png is 18x18 but its bevel phase is shifted one pixel (light at x=0, dark at x=1) - a crop offset, not a different cell.",
+      "correction": "layout-book-inventory.png and layout-inventory-only.png are NOT layout diagrams. They are the two Bedrock layout-toggle button glyphs, 29x19 and 27x19."
+    },
+    "anchor_trap": {
+      "where": "tools/make-hud-sheet.ps1, comment above the container panel builders",
+      "claim": "'our slot borders sit at x 7, 25, 43 where the reference's sit at 8, 26, 44'",
+      "finding": "Both are the same. 7/25/43 are FRAME origins and 8/26/44 are ITEM origins of the very same cells - the reference's frames are also at 7, 25, 43. The comment compares two different anchors, and the 'shift left by one' it justifies is what puts our crafting grid and furnace column 1 px left of the reference. Recorded here, not fixed: this file does not edit source."
+    }
+  }
+}

@@ -1,13 +1,46 @@
 // The cloud layer, as a field rather than as geometry.
 //
-// Two shaders need the same answer: the raymarch that draws them, and the
-// lighting pass that darkens the ground under them. Sharing the function is
-// what stops a cloud and its own shadow drifting apart.
+// Three shaders need the same answer: the raymarch that draws them
+// (`clouds.frag`), the lighting pass that darkens the ground under them
+// (`deferred.frag`), and the forward pass that darkens water and glass to match
+// (`triangle.frag`). Sharing the function is what stops a cloud and its own
+// shadow drifting apart.
 //
-// **Procedural, not the reference's 256x256 mask.** The reference's numbers are
-// used - cells 12 blocks across, about 28% of the sky covered, drifting west -
-// but the coverage itself is noise, which costs no texture, no descriptor and
-// no staging, and lets the lighting pass evaluate it for free.
+// **This file must declare no `layout()` of any kind - no binding, no sampler,
+// no uniform, no push constant - and that is a hard constraint rather than a
+// stylistic one.** It is included by fragment shaders belonging to *different*
+// descriptor set layouts, and a binding declared here would be injected into
+// all of them. The forward and lighting passes do not offer the same bindings,
+// so the same number would name two different resources, or none: that is not
+// a compile error, it is a wrong sampler read at runtime with no diagnostic.
+// Everything here therefore takes its inputs as function parameters, and any
+// new input must be a parameter too.
+//
+// Checked 2026-08-19 11:30, and the falsifier is one grep - but it must be run
+// with comments stripped, because the paragraph above names all three forbidden
+// tokens and a raw search therefore hits its own documentation. Measured both
+// ways at the time of writing: 6 raw hits, 0 over the 50 lines of actual code.
+// A positive control on `frame.glsl` through the identical filter returns 1, so
+// a zero here means the file is clean rather than the search being blind. Note
+// the third consumer is recent - `triangle.frag` began including this file on
+// 2026-08-19 - so a reader who remembers only two callers is remembering a
+// state this file has left.
+//
+// **Procedural, not the reference's 256x256 mask.** Some of the reference's
+// numbers are used - cells 12 blocks across (`kCloudCell`), drifting west - but
+// the coverage itself is noise, which costs no texture, no descriptor and no
+// staging, and lets the lighting pass evaluate it for free.
+//
+// **How much sky is covered is NOT one of the reference's numbers.** An earlier
+// version of this comment said "about 28% of the sky covered" as though that
+// were configured here; it is not. Coverage is a runtime parameter - the engine
+// falls back to 0.5 (`Renderer::m_cloudCoverage`) and the game supplies its own
+// setting - and neither is 0.28. Measured over 360,000 cells: coverage 0.28
+// gives 27.94% of sky, 0.36 gives 35.31%, 0.50 gives 49.37%. So the claim was
+// describing the reference while sitting beside a knob set to something else,
+// which invites exactly one bad edit: "correcting" the setting down to 0.28,
+// thinning every sky by a fifth and taking the cloud shadow on the ground with
+// it, because `cloudSunShadow` thresholds the same field.
 
 /// The reference puts its deck at y 192 with the player around y 64, so it is
 /// roughly 128 blocks overhead and a cloud subtends a useful angle.
@@ -70,6 +103,19 @@ float cloudCoverage(vec2 world, float wind, float coverage) {
 
     // One base feature spans about nine cells, which at a hundred blocks
     // overhead is a cloud rather than either a speck or the whole sky.
+    //
+    // **The clamp floor puts a ceiling on coverage, and it is not 100%.**
+    // 9.47% of cells (34,099 of 360,000 measured) have an fbm below 0.30, so
+    // `normalised` clamps to exactly 0.0 - and 0.0 does not satisfy a strict
+    // `>` even when `coverage` is 1.0 and the threshold is 0.0. A fully
+    // overcast sky is therefore unreachable: 1.0 tops out at 90.53%, and the
+    // holes are in fixed places because the hash is deterministic.
+    //
+    // Left as it is on purpose. Relaxing to `>=` would buy the top end at the
+    // cost of the bottom: coverage 0.0 would then paint 8.88% of the sky,
+    // because the same clamped cells all tie the threshold at once. Cloudless
+    // weather matters more than perfectly overcast weather, and the ramp the
+    // game drives reaches about 0.86 (82.16%), which reads as a storm anyway.
     float normalised = clamp((cloudFbm(cell / 9.0) - 0.30) / 0.34, 0.0, 1.0);
     return normalised > (1.0 - coverage) ? 1.0 : 0.0;
 }

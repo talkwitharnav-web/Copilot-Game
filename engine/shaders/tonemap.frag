@@ -94,8 +94,26 @@ vec3 graded(vec2 uv) {
 
     // A lerp, not an add. Adding brightens the entire image and is very hard to
     // balance in a dark scene; mixing toward a blurred copy of the same image
-    // changes nothing where the picture is already flat and only shows where
-    // there is contrast - which is what light bleeding actually looks like.
+    // shows where there is contrast, which is what light bleeding actually
+    // looks like.
+    //
+    // **It does not leave a flat field alone, and an earlier note here claiming
+    // it "changes nothing where the picture is already flat" was false.** That
+    // would hold only if the bloom texture had unit gain. It does not: the
+    // up-chain is additive (ONE/ONE) at weight 0.6 across 8 mips, so on a flat
+    // field bloom mip 0 comes back at **2.458x** the scene rather than 1x. This
+    // `mix` at the default 0.12 therefore multiplies *everything* by
+    // 1 + 0.12 * (2.458 - 1) = **1.175**. A mid-grey wall moves from 116 to 127
+    // codes; an sRGB 200 gains 15.5. So toggling bloom changes exposure, not
+    // just glow. Control: at weight 0 the factor is exactly 1.000000 and the
+    // shift is +0.0 codes, which is what makes the 1.175 real and not an
+    // artefact of the measurement.
+    //
+    // **Left as it stands, deliberately.** Making it exposure-preserving is a
+    // one-line change - divide the bloom sample by its DC gain, or make the
+    // up-chain a lerp - but it darkens the whole picture by 15% and every other
+    // image setting has been tuned by eye against today's output. That is a
+    // look decision for the person who can see the screen, not a silent fix.
     float bloomStrength = post.imageParams.z;
     if (bloomStrength > 0.0) {
         color = mix(color, texture(bloomTexture, uv).rgb, bloomStrength);

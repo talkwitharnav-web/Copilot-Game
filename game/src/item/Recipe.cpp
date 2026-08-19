@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -14,7 +16,12 @@ namespace {
 
 constexpr ItemId kNone = ItemId::None;
 
-Recipe shaped(int width, int height, std::array<ItemId, kMaxCraftSlots> pattern, ItemId result, int count) {
+/// **Every builder here is `constexpr`, and that is load-bearing rather than
+/// tidiness.** It is what lets `patternsUnique()` further down evaluate the
+/// whole table at compile time and prove no two recipes claim the same shape -
+/// a collision the matcher resolves silently, by declaration order.
+constexpr Recipe shaped(int width, int height, std::array<ItemId, kMaxCraftSlots> pattern,
+                        ItemId result, int count) {
     Recipe recipe;
     recipe.pattern = pattern;
     recipe.width = width;
@@ -23,7 +30,8 @@ Recipe shaped(int width, int height, std::array<ItemId, kMaxCraftSlots> pattern,
     return recipe;
 }
 
-Recipe shapeless(std::array<ItemId, kMaxCraftSlots> ingredients, int used, ItemId result, int count) {
+constexpr Recipe shapeless(std::array<ItemId, kMaxCraftSlots> ingredients, int used, ItemId result,
+                           int count) {
     Recipe recipe;
     recipe.pattern = ingredients;
     recipe.width = used;
@@ -36,11 +44,11 @@ Recipe shapeless(std::array<ItemId, kMaxCraftSlots> ingredients, int used, ItemI
 /// The two shapes that repeat most: four of a thing in a square, and nine of it
 /// filling the grid. Written once because thirty of these by hand is thirty
 /// chances to fill one cell with the wrong item.
-Recipe square4(ItemId input, ItemId result, int count) {
+constexpr Recipe square4(ItemId input, ItemId result, int count) {
     return shaped(2, 2, {input, input, input, input}, result, count);
 }
 
-Recipe square4(BlockId input, BlockId result, int count) {
+constexpr Recipe square4(BlockId input, BlockId result, int count) {
     return square4(itemForBlock(input), itemForBlock(result), count);
 }
 
@@ -56,27 +64,30 @@ constexpr int slabFamilyOf(BlockId parent) {
     return -1;
 }
 
-Recipe square9(ItemId input, ItemId result) {
+constexpr Recipe square9(ItemId input, ItemId result) {
     return shaped(3, 3, {input, input, input, input, input, input, input, input, input}, result, 1);
 }
 
-Recipe square9(ItemId input, BlockId result) { return square9(input, itemForBlock(result)); }
+constexpr Recipe square9(ItemId input, BlockId result) { return square9(input, itemForBlock(result)); }
 
-/// A row of three, which is the shape the reference uses for slabs, paper and
-/// glass bottles alike.
-Recipe row3(ItemId input, ItemId result, int count) {
+/// A row of three, which is the shape the reference uses for slabs and paper.
+///
+/// **Not the glass bottle**, which this comment claimed for four milestones: a
+/// bottle is a V, `[[Glass Bottle]]` on the wiki, and it is written out at its
+/// own call site because of it.
+constexpr Recipe row3(ItemId input, ItemId result, int count) {
     return shaped(3, 1, {input, input, input}, result, count);
 }
 
 /// Eight around an empty middle, and the same eight around something. Both have
 /// to be stored at 3x3 rather than trimmed, because the hole is part of the
 /// shape.
-Recipe ring8(ItemId input, ItemId result, int count) {
+constexpr Recipe ring8(ItemId input, ItemId result, int count) {
     return shaped(3, 3, {input, input, input, input, kNone, input, input, input, input}, result,
                   count);
 }
 
-Recipe ring8Around(ItemId input, ItemId centre, ItemId result, int count) {
+constexpr Recipe ring8Around(ItemId input, ItemId centre, ItemId result, int count) {
     return shaped(3, 3, {input, input, input, input, centre, input, input, input, input}, result,
                   count);
 }
@@ -92,21 +103,107 @@ struct Wood {
     BlockId log;
     BlockId stripped;
     BlockId planks;
+
+    /// Planks from one log, or from one stripped log - **the two always agree,
+    /// and bamboo is the only wood that is not 4.**
+    ///
+    /// Source: `Mojang/bedrock-samples` `behavior_pack/recipes/oak_planks.json`
+    /// and the nine like it state `"count": 4`; `bamboo_planks.json` and
+    /// `bamboo_planks_from_stripped.json` both state `"count": 2`. That is not
+    /// an oversight in the reference - a bamboo block is itself nine bamboo, so
+    /// four planks from one would make bamboo the cheapest wood in the game
+    /// rather than the dearest.
+    ///
+    /// **This lives in the table because it is a fact about a wood.** It was a
+    /// literal `4` in the generating loop, which is bug shape #1 exactly: a
+    /// value derived somewhere other than the one table that owns it. Every
+    /// bamboo plank, and so every bamboo stair, slab, door, sign, fence and
+    /// raft below it, cost half what the reference charges.
+    int plankYield;
 };
 
 constexpr std::array<Wood, 11> kWoods{{
-    {BlockId::Log, BlockId::StrippedOakLog, BlockId::Planks},
-    {BlockId::SpruceLog, BlockId::StrippedSpruceLog, BlockId::SprucePlanks},
-    {BlockId::BirchLog, BlockId::StrippedBirchLog, BlockId::BirchPlanks},
-    {BlockId::JungleLog, BlockId::StrippedJungleLog, BlockId::JunglePlanks},
-    {BlockId::AcaciaLog, BlockId::StrippedAcaciaLog, BlockId::AcaciaPlanks},
-    {BlockId::DarkOakLog, BlockId::StrippedDarkOakLog, BlockId::DarkOakPlanks},
-    {BlockId::CherryLog, BlockId::StrippedCherryLog, BlockId::CherryPlanks},
-    {BlockId::MangroveLog, BlockId::StrippedMangroveLog, BlockId::MangrovePlanks},
-    {BlockId::CrimsonStem, BlockId::StrippedCrimsonStem, BlockId::CrimsonPlanks},
-    {BlockId::WarpedStem, BlockId::StrippedWarpedStem, BlockId::WarpedPlanks},
-    {BlockId::BambooBlock, BlockId::StrippedBambooBlock, BlockId::BambooPlanks},
+    {BlockId::Log, BlockId::StrippedOakLog, BlockId::Planks, 4},
+    {BlockId::SpruceLog, BlockId::StrippedSpruceLog, BlockId::SprucePlanks, 4},
+    {BlockId::BirchLog, BlockId::StrippedBirchLog, BlockId::BirchPlanks, 4},
+    {BlockId::JungleLog, BlockId::StrippedJungleLog, BlockId::JunglePlanks, 4},
+    {BlockId::AcaciaLog, BlockId::StrippedAcaciaLog, BlockId::AcaciaPlanks, 4},
+    {BlockId::DarkOakLog, BlockId::StrippedDarkOakLog, BlockId::DarkOakPlanks, 4},
+    {BlockId::CherryLog, BlockId::StrippedCherryLog, BlockId::CherryPlanks, 4},
+    {BlockId::MangroveLog, BlockId::StrippedMangroveLog, BlockId::MangrovePlanks, 4},
+    {BlockId::CrimsonStem, BlockId::StrippedCrimsonStem, BlockId::CrimsonPlanks, 4},
+    {BlockId::WarpedStem, BlockId::StrippedWarpedStem, BlockId::WarpedPlanks, 4},
+    {BlockId::BambooBlock, BlockId::StrippedBambooBlock, BlockId::BambooPlanks, 2},
 }};
+
+/// **Bamboo yields two planks and every other wood yields four - stated as an
+/// iff, so both directions are proved.**
+///
+/// Written as a biconditional rather than as kWoods[10].plankYield == 2,
+/// because that form compares one side of the derivation against itself and
+/// proves nothing (bug shape #11). This one fails if bamboo is ever set back to
+/// 4, fails if any other wood is dropped to 2, and fails if a twelfth wood
+/// arrives carrying some third number nobody checked.
+constexpr bool onlyBambooYieldsTwoPlanks() {
+    for (const Wood& wood : kWoods) {
+        const bool isBamboo = wood.planks == BlockId::BambooPlanks;
+        if (isBamboo != (wood.plankYield == 2)) {
+            return false;
+        }
+        if (wood.plankYield != 2 && wood.plankYield != 4) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(onlyBambooYieldsTwoPlanks(),
+              "Every wood yields 4 planks except bamboo, which yields 2 - see "
+              "bedrock-samples behavior_pack/recipes/bamboo_planks.json");
+
+/// **The eleven woods lead all four switch-and-opening family tables, in
+/// `kWoods` order, with the non-wood families behind them.**
+///
+/// Four files state this in prose - here, `Block.hpp` at both family runs, and
+/// `Village.cpp` - and until now nothing stated it in code. The tail was proved
+/// (the stone button and the three weighted plates, further down) and the head
+/// was not, which is this project's "a rule that did not travel" shape wearing
+/// a different hat.
+///
+/// **What it costs to be wrong:** add a twelfth wood to `kWoods` without
+/// extending `kDoorFamilies`, and `family = 11` is no longer the bamboo door -
+/// it is `kDoorFamilyCount - 1`, which *is* iron. Six birch planks would then
+/// yield an **iron door**, the twelfth wood's door would be uncraftable, and
+/// two recipes would produce the same item. **`patternsUnique()` cannot see
+/// it**: six planks and six ingots are genuinely different patterns, so the
+/// keys differ and the collision is invisible to it.
+///
+/// Buttons and plates carry `.parent`, so those two get an **exact** order
+/// proof. Doors and trapdoors carry no parent block, so theirs is the count
+/// relation plus the `metal` flag: the woods fill the front, exactly one family
+/// sits behind them, and it is the only one marked metal.
+constexpr bool woodsLeadEveryFamilyTable() {
+    for (std::size_t w = 0; w < kWoods.size(); ++w) {
+        if (kButtonFamilies[w].parent != kWoods[w].planks ||
+            kPressurePlateFamilies[w].parent != kWoods[w].planks) {
+            return false;
+        }
+        if (kDoorFamilies[w].metal || kTrapdoorFamilies[w].metal) {
+            return false;
+        }
+    }
+    if (kDoorFamilyCount != static_cast<int>(kWoods.size()) + 1 ||
+        kTrapdoorFamilyCount != static_cast<int>(kWoods.size()) + 1) {
+        return false;
+    }
+    return kDoorFamilies[kDoorFamilyCount - 1].metal &&
+           kTrapdoorFamilies[kTrapdoorFamilyCount - 1].metal;
+}
+
+static_assert(woodsLeadEveryFamilyTable(),
+              "kWoods and the door, trapdoor, button and pressure-plate family tables have gone "
+              "out of step - the recipe loops index straight across all five, so a wood would "
+              "get another wood's recipe, and a twelfth wood with no twelfth door family would "
+              "craft the iron one");
 
 /// Which flower yields which dye. The reference's own pairings; everything not
 /// named here is mixed from two others.
@@ -139,6 +236,19 @@ enum DyeColour {
 constexpr ItemId dye(int colour) {
     return static_cast<ItemId>(static_cast<int>(kFirstDye) + colour);
 }
+
+/// **The arithmetic against the names, at both ends and in the middle.**
+/// `dye()` is the one place a colour index becomes a dye id, and nothing about
+/// it is checkable by eye - the offsets above are an unbroken run of sixteen
+/// bare enumerators, so inserting a seventeenth colour anywhere but the end
+/// renames every dye after it and no compiler would say a word. Naming the
+/// enumerator on the right is what makes this a proof rather than a restatement
+/// of the same sum.
+static_assert(dye(kWhite) == ItemId::WhiteDye && dye(kGreen) == ItemId::GreenDye &&
+                  dye(kBrown) == ItemId::BrownDye && dye(kBlack) == ItemId::BlackDye &&
+                  static_cast<int>(kBlack) == kDyeColours - 1,
+              "the DyeColour offsets no longer land on the dye ids they are named after - a "
+              "colour was inserted into one run and not the other");
 
 constexpr std::array<FlowerDye, 12> kFlowerDyes{{
     {BlockId::Dandelion, kYellow},
@@ -187,7 +297,58 @@ constexpr ItemId tinted(BlockId first, int colour) {
 /// actually fills**, because the matcher compares a recipe against the bounding
 /// box of what is in the grid. Padded to 3x3, every shape with an empty column
 /// - the axe, shovel, sword and hoe - could never match anything.
-Recipe tool(ItemId material, ItemId result, const char* pattern) {
+struct ToolShape {
+    const char* pattern;
+    ItemId wooden;
+    ItemId stone;
+    ItemId iron;
+    ItemId diamond;
+    ItemId emberite;
+};
+
+/// The five shapes, at namespace scope so `toolPatternsAreLegible` can be
+/// proved against them. Every one is the reference's own - `[[Pickaxe]]`,
+/// `[[Axe]]`, `[[Shovel]]`, `[[Sword]]` and `[[Hoe]]` on the wiki.
+constexpr std::array<ToolShape, 5> kToolShapes{{
+    {"MMM.S..S.", ItemId::WoodenPickaxe, ItemId::StonePickaxe, ItemId::IronPickaxe,
+     ItemId::DiamondPickaxe, ItemId::EmberitePickaxe},
+    {"MM.MS..S.", ItemId::WoodenAxe, ItemId::StoneAxe, ItemId::IronAxe, ItemId::DiamondAxe,
+     ItemId::EmberiteAxe},
+    {".M..S..S.", ItemId::WoodenShovel, ItemId::StoneShovel, ItemId::IronShovel,
+     ItemId::DiamondShovel, ItemId::EmberiteShovel},
+    {".M..M..S.", ItemId::WoodenSword, ItemId::StoneSword, ItemId::IronSword,
+     ItemId::DiamondSword, ItemId::EmberiteSword},
+    {"MM..S..S.", ItemId::WoodenHoe, ItemId::StoneHoe, ItemId::IronHoe, ItemId::DiamondHoe,
+     ItemId::EmberiteHoe},
+}};
+
+/// Every picture is exactly nine cells of `M`, `S` or `.`, and nothing else.
+///
+/// **This is what stops `tool`'s `default:` being silent.** A mistyped letter
+/// still counts as *occupied* when the bounding box is measured, so it would
+/// widen the shape and then leave that cell empty - a recipe nobody can craft
+/// and nothing to say so. A short string does the same from the other end, by
+/// reading the picture after it.
+constexpr bool toolPatternsAreLegible() {
+    for (const ToolShape& shape : kToolShapes) {
+        for (std::size_t c = 0; c < kMaxCraftSlots; ++c) {
+            const char cell = shape.pattern[c];
+            if (cell != 'M' && cell != 'S' && cell != '.') {
+                return false;
+            }
+        }
+        if (shape.pattern[kMaxCraftSlots] != '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(toolPatternsAreLegible(),
+              "a tool pattern is not nine characters of 'M', 'S' and '.' - which would widen the "
+              "shape by a cell it then leaves empty, and make the tool uncraftable in silence");
+
+constexpr Recipe tool(ItemId material, ItemId result, const char* pattern) {
     int minX = kMaxCraftSize;
     int minY = kMaxCraftSize;
     int maxX = -1;
@@ -216,7 +377,11 @@ Recipe tool(ItemId material, ItemId result, const char* pattern) {
             case 'S':
                 cells[static_cast<std::size_t>(y * width + x)] = ItemId::Stick;
                 break;
+            case '.':
             default:
+                // Unreachable, and `toolPatternsAreLegible` above is the proof
+                // rather than a comment: the only characters that can arrive
+                // here are the three, and this one is the gap.
                 break;
             }
         }
@@ -230,14 +395,318 @@ Recipe tool(ItemId material, ItemId result, const char* pattern) {
     return recipe;
 }
 
-} // namespace
+/// The copper forms that can still oxidise, in the order the waxed run repeats
+/// them - the loop below adds the offset to `WaxedCopperBlock`, so this order
+/// is load-bearing.
+///
+/// **At namespace scope on purpose.** A `static constexpr` local inside a
+/// `constexpr` function is a C++23 relaxation, not a C++20 one; MSVC accepts
+/// the declaration and then quietly refuses to constant-evaluate the whole
+/// function, which is exactly the kind of silence `patternsUnique()` exists to
+/// end. Three arrays lived there and cost the assert its proof.
+constexpr BlockId kUnwaxed[] = {
+    BlockId::CopperBlock,        BlockId::ExposedCopper,
+    BlockId::WeatheredCopper,    BlockId::OxidizedCopper,
+    BlockId::CutCopper,          BlockId::ExposedCutCopper,
+    BlockId::WeatheredCutCopper, BlockId::OxidizedCutCopper,
+    BlockId::ChiseledCopper,
+};
+
+/// **The ninth entry, which nothing else pins.** `copperCutsAreSound` below
+/// checks indices 0-3 and 4-7 against `kCopperCuts`, and that is where it
+/// stops - but the waxing loop walks all nine and derives its result as
+/// `WaxedCopperBlock + i`, so chiselled copper's row has been riding on the
+/// enum order with no check under it at all. Insert one enumerator anywhere in
+/// the nine-long waxed run and a honeycomb on chiselled copper produces some
+/// other block entirely, silently, with no other symptom.
+///
+/// Written as the **whole expression the loop evaluates, base and all** - the
+/// cast off `WaxedCopperBlock`, not a comparison of one side of the derivation
+/// against itself. This project has had eleven `static_assert`s pass while
+/// pointing at the wrong texture for exactly that reason.
+static_assert(std::size(kUnwaxed) == 9 && kUnwaxed[8] == BlockId::ChiseledCopper &&
+                  static_cast<BlockId>(static_cast<int>(BlockId::WaxedCopperBlock) + 8) ==
+                      BlockId::WaxedChiseledCopper,
+              "the last unwaxed form and the last waxed one must stay at the same offset - "
+              "chiselled copper is the only entry in kUnwaxed that kCopperCuts does not also "
+              "carry, so this line is the whole of its protection");
+
+constexpr BlockId kBarkLogs[] = {
+    BlockId::Log,         BlockId::SpruceLog,   BlockId::BirchLog,
+    BlockId::JungleLog,   BlockId::AcaciaLog,   BlockId::DarkOakLog,
+    BlockId::CherryLog,   BlockId::MangroveLog, BlockId::CrimsonStem,
+    BlockId::WarpedStem,
+};
+
+constexpr BlockId kStrippedLogs[] = {
+    BlockId::StrippedOakLog,      BlockId::StrippedSpruceLog,
+    BlockId::StrippedBirchLog,    BlockId::StrippedJungleLog,
+    BlockId::StrippedAcaciaLog,   BlockId::StrippedDarkOakLog,
+    BlockId::StrippedCherryLog,   BlockId::StrippedMangroveLog,
+    BlockId::StrippedCrimsonStem, BlockId::StrippedWarpedStem,
+};
+
+static_assert(std::size(kBarkLogs) == std::size(kStrippedLogs),
+              "the two log runs are walked by one index, so a wood in one and not the other would "
+              "give a stripped block its unstripped recipe");
+
+/// The four copper grates, which `kUnwaxed` above cannot reach and must not be
+/// added to.
+///
+/// That loop derives its result by adding a table index to `WaxedCopperBlock`,
+/// and the grates are **a separate enum run** with their own waxed forms four
+/// ids along - so the nine-stage offset walks straight past them and all four
+/// waxed grates had no recipe at all. Same shape as the copper-bulb gap: a
+/// table-driven derivation that covers one run and silently misses a sibling.
+///
+/// Mojang's own `behavior_pack/recipes/waxing_copper_grate.json` seals a grate
+/// with a honeycomb on exactly the same terms as every other copper form, so
+/// this is a primary-source fact rather than a reading of the reference's wiki.
+///
+/// **The published files are named `waxing_*`, not `waxed_*`.** A glob for the
+/// latter matches nothing at all, which reads as "the reference does not
+/// publish waxing" - a wrong conclusion this audit reached once and had to
+/// withdraw. Search the recipe list by substring, never by a guessed prefix.
+constexpr int kCopperGrateStages = 4;
+
+static_assert(static_cast<int>(BlockId::OxidizedCopperGrate) -
+                      static_cast<int>(BlockId::CopperGrate) + 1 == kCopperGrateStages &&
+                  static_cast<int>(BlockId::WaxedCopperGrate) -
+                      static_cast<int>(BlockId::CopperGrate) == kCopperGrateStages &&
+                  static_cast<int>(BlockId::WaxedOxidizedCopperGrate) -
+                      static_cast<int>(BlockId::OxidizedCopperGrate) == kCopperGrateStages,
+              "the four grates and their four waxed forms must stay one contiguous run, waxed "
+              "second - insert one enumerator between OxidizedCopperGrate and WaxedCopperGrate "
+              "and a honeycomb would seal a grate into some other block entirely");
+
+/// **The reference publishes 25 shaped waxed-copper recipes and this is where
+/// 8 of them live. Audited 2026-08-19 against the primary source, not the
+/// wiki.** A listing of all 1756 files in `behavior_pack/recipes` contains 27
+/// paths matching `*waxed*`, of which 25 are `crafting_table_waxed_*.json`:
+/// 6 shapes over 4 oxidation stages (chiselled, bulb, grate, cut, cut slab,
+/// cut stairs) plus a single `crafting_table_waxed_copper_door.json`. Four of
+/// the 25 are the copper bulbs, which want a blaze rod and are Nether and
+/// therefore out of scope, leaving **21 in scope**. Of those 21:
+///
+///  - **8 are here**, and they are the two families this table drives: waxed
+///    cut copper (2x2 -> 4) and the waxed grate (diamond -> 4), four stages
+///    each. Shapes and yields read off `crafting_table_waxed_cut_copper.json`
+///    and `crafting_table_waxed_copper_grate.json`, which are identical to the
+///    unwaxed files beside them and differ only in the block named.
+///  - **13 cannot be written at all**, because their output has no `BlockId`.
+///    Four waxed cut copper **slabs** and four waxed cut copper **stairs**:
+///    `kStairFamilies` and `kSlabFamilies` in `Block.hpp` carry the four
+///    *bare* cut coppers as parents and nothing waxed. Four waxed **chiselled**
+///    coppers: only stage 0 exists (`WaxedChiseledCopper`), and even that one
+///    cannot use the reference's shape because its input is a waxed cut copper
+///    slab. One waxed copper **door**: there is no copper door in this game in
+///    any form, waxed or bare.
+///
+/// **A missing id is a `Block.hpp` finding, not a recipe waiting to be typed.**
+/// Do not stand a different block in for a missing output - that is inventing a
+/// recipe, and the honeycomb route already reaches `WaxedChiseledCopper`
+/// anyway, so nothing here is unobtainable for want of these rows.
+///
+/// **AND WHEN THOSE IDS DO ARRIVE, DO NOT COME BACK HERE AND TYPE THIRTEEN
+/// ROWS.** That is the whole point of the paragraph above and it is easy to
+/// miss: the blocker is upstream, so the *fix* is upstream too, and this file
+/// should need no new rows at all. `Copper.hpp` already exports `waxedForm`
+/// and `unwaxedForm`, they already cover derived stairs and slabs, and the
+/// stair and slab families in `Block.hpp` are what gain the new parents. Once
+/// a waxed cut copper stair has an id, it is a stair whose parent is a waxed
+/// cut copper, and the loop below already emits a recipe for every family
+/// member it is given. **Thirteen hand-written waxed rows would be a second
+/// answer to a question `waxedForm` already answers** - bug shape #1, and
+/// precisely what collapsing the oxidation matrix into one table was built to
+/// prevent. If landing the ids does not make these recipes appear by itself,
+/// the bug is that the new ids were not put in the families, and the repair is
+/// there rather than a table of literals here.
+///
+/// The stock block each cut form and each grate is cut from, both families and
+/// all eight oxidation stages in one table, because the rows differ by exactly
+/// one thing: which stock they name.
+///
+/// **Written out rather than walked by arithmetic, and that is not caution.**
+/// `CopperBlock` does not sit next to its own oxidation run - `ExposedCopper`
+/// and the two after it are a separate contiguous block hundreds of ids away -
+/// so a `CopperBlock + stage` walk lands in unrelated blocks from its very
+/// first step. The waxed stock *is* contiguous, which is the trap rather than
+/// the reassurance: writing one family as arithmetic because it happens to be
+/// adjacent and the other as a table is how the two drift apart. The assert
+/// below ties this table back to the runs that already own those facts.
+///
+/// Shapes and yields are Mojang's own published recipes, not the wiki:
+/// `behavior_pack/recipes/crafting_table_cut_copper.json` and
+/// `crafting_table_copper_grate.json`, plus the oxidised and waxed files beside
+/// them, which are identical in shape and differ only in the block named.
+///
+/// **The grate is a diamond, not a square** - a hole, a block, a hole over a
+/// block, a hole, a block over the first row again: four blocks around an empty
+/// centre, yielding 4. That is the one value here a reader would otherwise
+/// assume wrong, because every other 4-in-4-out copper recipe on this page is a
+/// 2x2 and a grate looks like one in the inventory.
+struct CopperCut {
+    BlockId stock; ///< the solid block both products are cut from
+    BlockId cut;   ///< `stock` as a 2x2 -> 4 of these
+    BlockId grate; ///< `stock` as a diamond -> 4 of these
+};
+
+constexpr std::array<CopperCut, 8> kCopperCuts{{
+    {BlockId::CopperBlock, BlockId::CutCopper, BlockId::CopperGrate},
+    {BlockId::ExposedCopper, BlockId::ExposedCutCopper, BlockId::ExposedCopperGrate},
+    {BlockId::WeatheredCopper, BlockId::WeatheredCutCopper, BlockId::WeatheredCopperGrate},
+    {BlockId::OxidizedCopper, BlockId::OxidizedCutCopper, BlockId::OxidizedCopperGrate},
+    {BlockId::WaxedCopperBlock, BlockId::WaxedCutCopper, BlockId::WaxedCopperGrate},
+    {BlockId::WaxedExposedCopper, BlockId::WaxedExposedCutCopper, BlockId::WaxedExposedCopperGrate},
+    {BlockId::WaxedWeatheredCopper, BlockId::WaxedWeatheredCutCopper,
+     BlockId::WaxedWeatheredCopperGrate},
+    {BlockId::WaxedOxidizedCopper, BlockId::WaxedOxidizedCutCopper,
+     BlockId::WaxedOxidizedCopperGrate},
+}};
+
+/// Checks the table against the runs that already own those ids, rather than
+/// against itself.
+///
+/// Takes the table as an argument for one reason: a check that can only ever be
+/// handed the real table cannot be shown to fail, and an assert comparing one
+/// side of a derivation against itself proves nothing. The negative assert below
+/// feeds it a table with one row corrupted and requires a `false`.
+constexpr bool copperCutsAreSound(const std::array<CopperCut, 8>& table) {
+    for (std::size_t a = 0; a < table.size(); ++a) {
+        // No stock may be its own product, and no id may appear in two columns
+        // of one row - that is what a copy-paste slip looks like here.
+        if (table[a].stock == table[a].cut || table[a].cut == table[a].grate ||
+            table[a].stock == table[a].grate) {
+            return false;
+        }
+        for (std::size_t b = a + 1; b < table.size(); ++b) {
+            if (table[a].stock == table[b].stock || table[a].cut == table[b].cut ||
+                table[a].grate == table[b].grate) {
+                return false;
+            }
+        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        const std::size_t plain = static_cast<std::size_t>(i);
+        const std::size_t waxed = plain + 4;
+        // The unwaxed stock and its cut form are the first and fifth quarters of
+        // `kUnwaxed`, which is the table the waxing loop already walks.
+        if (table[plain].stock != kUnwaxed[i] || table[plain].cut != kUnwaxed[i + 4]) {
+            return false;
+        }
+        // The waxed halves are the offsets that same loop derives, so if a new
+        // enumerator ever splits either run this stops agreeing with it.
+        if (table[waxed].stock !=
+                static_cast<BlockId>(static_cast<int>(BlockId::WaxedCopperBlock) + i) ||
+            table[waxed].cut !=
+                static_cast<BlockId>(static_cast<int>(BlockId::WaxedCopperBlock) + i + 4)) {
+            return false;
+        }
+        // And the grates are their own contiguous run, unwaxed then waxed, which
+        // is precisely what `kCopperGrateStages` asserts above.
+        if (table[plain].grate != static_cast<BlockId>(static_cast<int>(BlockId::CopperGrate) + i) ||
+            table[waxed].grate !=
+                static_cast<BlockId>(static_cast<int>(BlockId::CopperGrate) + kCopperGrateStages +
+                                     i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// One row deliberately broken, so the check above is shown to be able to fail.
+/// Copies a neighbour's grate over row 5's, which is the exact mistake a hand
+/// edit to the waxed half would make.
+constexpr std::array<CopperCut, 8> copperCutsWithADuplicateGrate() {
+    std::array<CopperCut, 8> broken = kCopperCuts;
+    broken[5].grate = broken[4].grate;
+    return broken;
+}
+
+static_assert(copperCutsAreSound(kCopperCuts),
+              "a copper cut row disagrees with kUnwaxed, with the waxed offsets or with the grate "
+              "run - one of the eight stages is cutting into the wrong block");
+
+static_assert(!copperCutsAreSound(copperCutsWithADuplicateGrate()),
+              "the copper cut check cannot fail, so the assert above proves nothing");
+
+/// The four chiselled blocks the reference makes from two of their own slabs
+/// stacked, rather than from the whole block - wiki `[[Chiseled Deepslate]]`,
+/// `[[Chiseled Tuff]]` and `[[Chiseled Quartz Block]]` all show the same 1x2.
+///
+/// Chiselled copper is the same shape and is sourced primarily rather than from
+/// the wiki: `behavior_pack/recipes/crafting_table_chiseled_copper.json` is two
+/// `cut_copper_slab` stacked, and it **omits** the `count` field, so the yield
+/// is 1. That omission is meaningful rather than an oversight - the cut copper
+/// file beside it states `"count": 4` explicitly.
+///
+/// The **parent** is stored, not the slab, so the slab id is read out of
+/// `kSlabFamilies` at the recipe rather than named twice.
+struct ChiselledFromSlabs {
+    BlockId parent;
+    BlockId result;
+};
+
+constexpr ChiselledFromSlabs kChiselledFromSlabs[] = {
+    {BlockId::CobbledDeepslate, BlockId::ChiseledDeepslate},
+    {BlockId::Tuff, BlockId::ChiseledTuff},
+    {BlockId::QuartzBlock, BlockId::ChiseledQuartz},
+    // Chiselled copper had no recipe at all, so the only chiselled block in the
+    // game that a honeycomb can seal was itself unobtainable.
+    {BlockId::CutCopper, BlockId::ChiseledCopper},
+};
+
+constexpr bool everyChiselledParentHasASlab() {
+    for (const ChiselledFromSlabs& row : kChiselledFromSlabs) {
+        if (slabFamilyOf(row.parent) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// **Delete `{BlockId::Tuff, "Tuff Slab"}` from `kSlabFamilies` and this
+/// fires.** Without it the loop below would take the `-1`, quietly skip the
+/// row, and leave the block uncraftable again with a clean build - which is
+/// precisely the state this recipe is fixing.
+static_assert(everyChiselledParentHasASlab(),
+              "each chiselled block is two slabs of its own family, so every parent named here "
+              "must still have a slab family to be cut from");
+
+/// The pane family table's colours must sit one along from its plain glass, in
+/// the same white-first order as every other dyed run - which is what lets the
+/// stained-pane dye recipe below say `paneAt(colour + 1)`.
+constexpr bool paneColoursFollowTheDyeRun() {
+    if (kPaneFamilyCount != kDyeColours + 1 || kPaneFamilies[0].parent != BlockId::Glass) {
+        return false;
+    }
+    for (int colour = 0; colour < kDyeColours; ++colour) {
+        if (itemForBlock(kPaneFamilies[static_cast<std::size_t>(colour) + 1].parent) !=
+            tinted(BlockId::WhiteStainedGlass, colour)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// **Swap any two rows in `kPaneFamilies` and this fires.** Nothing else would:
+/// both panes exist, both recipes are unique, and eight glass panes round a red
+/// dye would simply produce the wrong colour.
+static_assert(paneColoursFollowTheDyeRun(),
+              "the pane family table must be plain glass followed by the sixteen stained glasses "
+              "in white-first order, because the dye recipe indexes it as colour + 1");
 
 /// Every recipe in the game.
 ///
 /// Shapes and yields are taken from the reference recipe data - see
 /// `CRAFTABLE.md`, which records each one and where it came from.
-const std::vector<Recipe>& recipes() {
-    static const std::vector<Recipe> table = [] {
+///
+/// **`constexpr`, and its own function rather than an initialiser**, so
+/// `patternsUnique()` below can run the whole thing at compile time and prove
+/// the table has no shape in it twice. There is exactly one builder, so what is
+/// proved is what ships.
+constexpr std::vector<Recipe> buildRecipes() {
+    return []() constexpr {
         std::vector<Recipe> all{
             // A ring of eight, hollow in the middle - which is why the pattern
             // has to be stored at 3x3 and cannot be trimmed to its filled cells.
@@ -278,6 +747,20 @@ const std::vector<Recipe>& recipes() {
             square4(BlockId::Andesite, BlockId::PolishedAndesite, 4),
             square4(BlockId::Diorite, BlockId::PolishedDiorite, 4),
             square4(BlockId::Granite, BlockId::PolishedGranite, 4),
+            // And the three base stones themselves, which were worldgen-only.
+            // The reference builds all three out of cobblestone and nether
+            // quartz, which is the one overworld use quartz has - wiki
+            // `[[Diorite]]` is the 2x2 checker yielding two, `[[Andesite]]` is
+            // a diorite and a cobblestone yielding two, `[[Granite]]` is a
+            // diorite and a quartz yielding one.
+            shaped(2, 2,
+                   {itemForBlock(BlockId::Cobblestone), ItemId::Quartz, ItemId::Quartz,
+                    itemForBlock(BlockId::Cobblestone)},
+                   itemForBlock(BlockId::Diorite), 2),
+            shapeless({itemForBlock(BlockId::Diorite), itemForBlock(BlockId::Cobblestone)}, 2,
+                      itemForBlock(BlockId::Andesite), 2),
+            shapeless({itemForBlock(BlockId::Diorite), ItemId::Quartz}, 2,
+                      itemForBlock(BlockId::Granite), 1),
             square4(BlockId::CobbledDeepslate, BlockId::PolishedDeepslate, 4),
             square4(BlockId::PolishedDeepslate, BlockId::DeepslateBricks, 4),
             square4(BlockId::DeepslateBricks, BlockId::DeepslateTiles, 4),
@@ -286,8 +769,11 @@ const std::vector<Recipe>& recipes() {
             shapeless({itemForBlock(BlockId::StoneBricks), itemForBlock(BlockId::TallGrass)}, 2,
                       itemForBlock(BlockId::MossyStoneBricks), 1),
 
-            // Nine into one, the storage-block shape. Reversible in the
-            // reference; here it is one way until a 1x1 unpack recipe exists.
+            // Nine into one, the storage-block shape, **and back out again** -
+            // the reference makes every one of these reversible and the note
+            // that used to sit here ("one way until a 1x1 unpack recipe
+            // exists") was describing a missing row rather than a decision.
+            // Nine loose in, one block out; one block in, nine loose out.
             square9(ItemId::Coal, BlockId::CoalBlock),
             square9(ItemId::IronIngot, BlockId::IronBlock),
             square9(ItemId::GoldIngot, BlockId::GoldBlock),
@@ -296,7 +782,35 @@ const std::vector<Recipe>& recipes() {
             square9(ItemId::LapisLazuli, BlockId::LapisBlock),
             square9(ItemId::Redstone, BlockId::RedstoneBlock),
             square9(ItemId::CopperIngot, BlockId::CopperBlock),
+            shapeless({itemForBlock(BlockId::CoalBlock)}, 1, ItemId::Coal, 9),
+            shapeless({itemForBlock(BlockId::IronBlock)}, 1, ItemId::IronIngot, 9),
+            shapeless({itemForBlock(BlockId::GoldBlock)}, 1, ItemId::GoldIngot, 9),
+            shapeless({itemForBlock(BlockId::DiamondBlock)}, 1, ItemId::Diamond, 9),
+            shapeless({itemForBlock(BlockId::EmeraldBlock)}, 1, ItemId::Emerald, 9),
+            shapeless({itemForBlock(BlockId::LapisBlock)}, 1, ItemId::LapisLazuli, 9),
+            shapeless({itemForBlock(BlockId::RedstoneBlock)}, 1, ItemId::Redstone, 9),
+            shapeless({itemForBlock(BlockId::CopperBlock)}, 1, ItemId::CopperIngot, 9),
+            // **And the waxed copper block, which is the one that did not
+            // travel.** The reference publishes two unpack recipes for copper,
+            // not one: `behavior_pack/recipes/ingots_from_copper.json` is the
+            // line above and `ingots_from_waxed_copper.json` is this one, both
+            // 1 block -> 9 `minecraft:copper_ingot`. Wax is a promise a block
+            // will not oxidise, not a promise it can never be spent, so sealing
+            // a block of copper used to strand nine ingots for good.
+            //
+            // **Only the un-oxidised waxed block, and that is the reference's
+            // own line rather than an omission here.** A listing of all 1756
+            // published recipes has four files naming copper and an ingot -
+            // `copper_block_from_ingots`, `copper_ingot_from_nuggets`,
+            // `ingots_from_copper` and `ingots_from_waxed_copper` - and the
+            // last two are the only unpack pair there is. There is no
+            // `ingots_from_exposed_copper` and no waxed-exposed one either, so
+            // an oxidised block stays oxidised: weathering is one-way in both
+            // editions, and only pristine copper goes back to ingots.
+            shapeless({itemForBlock(BlockId::WaxedCopperBlock)}, 1, ItemId::CopperIngot, 9),
 
+            // The two ices are the deliberate exception: the reference has no
+            // way back from packed or blue ice either, so these stay one-way.
             square9(itemForBlock(BlockId::Ice), BlockId::PackedIce),
             square9(itemForBlock(BlockId::PackedIce), BlockId::BlueIce),
             // Three ingots in a V. Stored 3x2 rather than trimmed, because the
@@ -388,12 +902,22 @@ const std::vector<Recipe>& recipes() {
                              {kNone, kNone, ItemId::Stick, kNone, ItemId::Stick, ItemId::String,
                               ItemId::Stick, kNone, ItemId::String},
                              ItemId::FishingRod, 1));
+        // **The centre is a tripwire hook, not a fourth stick.**
+        // `recipes/crossbow.json`: pattern `#I#` / `STS` / ` # `, with
+        // `#` stick, `I` iron ingot, `S` string and **`T` tripwire hook**
+        // at B2. Ours put a stick there, which made the crossbow a strictly
+        // cheaper bow and left the tripwire hook - which has its own recipe
+        // just above - with no use but the tripwire itself.
         all.push_back(shaped(3, 3,
                              {ItemId::Stick, ItemId::IronIngot, ItemId::Stick, ItemId::String,
-                              ItemId::Stick, ItemId::String, kNone, ItemId::Stick, kNone},
+                              itemForBlock(tripwireHookAt(FaceDirection::NegZ, false, false)),
+                              ItemId::String, kNone, ItemId::Stick, kNone},
                              ItemId::Crossbow, 1));
+        // The shard goes on **top**, which is the end you look through: the
+        // wiki's `[[Spyglass]]` is B1 amethyst over B2 and B3 copper, and ours
+        // had it upside down, so the recipe could not be found at all.
         all.push_back(shaped(1, 3,
-                             {ItemId::CopperIngot, ItemId::CopperIngot, ItemId::AmethystShard},
+                             {ItemId::AmethystShard, ItemId::CopperIngot, ItemId::CopperIngot},
                              ItemId::Spyglass, 1));
         all.push_back(shaped(1, 3, {ItemId::Feather, ItemId::CopperIngot, ItemId::Stick},
                              ItemId::Brush, 1));
@@ -402,18 +926,26 @@ const std::vector<Recipe>& recipes() {
         // one carries that colour up with it. **The loop reads the dye run**,
         // so a seventeenth dye would be a seventeenth star without an edit here.
         for (int colour = 0; colour < kDyeColours; ++colour) {
-            const ItemId dye = static_cast<ItemId>(static_cast<int>(kFirstDye) + colour);
             const ItemId star =
                 static_cast<ItemId>(static_cast<int>(ItemId::FireworkStarFirst) + colour);
-            all.push_back(shapeless({ItemId::Gunpowder, dye}, 2, star, 1));
+            all.push_back(shapeless({ItemId::Gunpowder, dye(colour)}, 2, star, 1));
             all.push_back(shapeless({ItemId::Paper, ItemId::Gunpowder, star}, 3,
                                     ItemId::FireworkRocket, 3));
         }
         all.push_back(shapeless({ItemId::Book, ItemId::Feather, ItemId::InkSac}, 3,
                                 ItemId::BookAndQuill, 1));
-        all.push_back(shapeless({ItemId::String, ItemId::String, ItemId::String, ItemId::String,
-                                 ItemId::Slimeball},
-                                5, ItemId::Lead, 2));
+        // **Five string, and no slimeball - this is the edition split, not a
+        // simplification.** `recipes/lead.json` is shaped `~~ ` / `~~ ` /
+        // `  ~` with `~` string throughout, `"count": 2`. It is the only
+        // recipe in the whole pack whose result is `minecraft:lead`, and
+        // `slime_ball` appears in exactly four recipes there - magma cream,
+        // slime block, slime ball and sticky piston - none of them this one.
+        // **The four-string-plus-a-slimeball form is Java's**, and carrying it
+        // gated every lead behind a slime, which spawns in one biome.
+        all.push_back(shaped(3, 3,
+                             {ItemId::String, ItemId::String, kNone, ItemId::String, ItemId::String,
+                              kNone, kNone, kNone, ItemId::String},
+                             ItemId::Lead, 2));
         // The bowls. Every one of them is the reference's own, and all four
         // reduce to "something in a bowl", which is why they share no shape.
         all.push_back(shapeless({itemForBlock(BlockId::RedMushroom),
@@ -429,9 +961,6 @@ const std::vector<Recipe>& recipes() {
                                  itemForBlock(BlockId::BrownMushroom), ItemId::Bowl,
                                  itemForBlock(BlockId::Dandelion)},
                                 4, ItemId::SuspiciousStew, 1));
-        // The gilded pair are built from nuggets, above, which is the
-        // reference's own recipe and a ninth of the cost.
-
 
         // Candles and waxed copper, both generated because both are one shape
         // repeated over a colour or an oxidation stage - and both runs are
@@ -439,11 +968,13 @@ const std::vector<Recipe>& recipes() {
         // *is* the mapping.
         all.push_back(shapeless({ItemId::String, ItemId::Honeycomb}, 2,
                                 itemForBlock(BlockId::Candle), 1));
-        // **Named divergence: redstone where the reference wants a tripwire
-        // hook.** There is no hook in the game, and adding one to serve a single
-        // recipe would be a whole block for no other purpose.
-        all.push_back(shapeless({itemForBlock(BlockId::Chest), ItemId::Redstone}, 2,
-                                itemForBlock(BlockId::TrappedChest), 1));
+        // A hook and a chest, which is the reference's own recipe -
+        // `[[Trapped Chest]]`. It had stood redstone in for the hook and said
+        // in a comment that no hook existed; one is crafted eighty lines down,
+        // and has been for as long as the comment claimed otherwise.
+        all.push_back(shapeless({itemForBlock(tripwireHookAt(FaceDirection::NegZ, false, false)),
+                                 itemForBlock(BlockId::Chest)},
+                                2, itemForBlock(BlockId::TrappedChest), 1));
 
         // **Named divergence: obsidian where the reference wants two shulker
         // shells.** The shell drops from a mob that belongs to a dimension we
@@ -473,47 +1004,48 @@ const std::vector<Recipe>& recipes() {
         }
         // Wax is a promise the block will not oxidise any further, so every
         // waxed form is its own unwaxed form plus a honeycomb.
-        for (int stage = 0; stage < 9; ++stage) {
-            static constexpr BlockId kUnwaxed[9] = {
-                BlockId::CopperBlock,        BlockId::ExposedCopper,
-                BlockId::WeatheredCopper,    BlockId::OxidizedCopper,
-                BlockId::CutCopper,          BlockId::ExposedCutCopper,
-                BlockId::WeatheredCutCopper, BlockId::OxidizedCutCopper,
-                BlockId::ChiseledCopper,
-            };
-            all.push_back(shapeless({itemForBlock(kUnwaxed[stage]), ItemId::Honeycomb}, 2,
-                                    itemForBlock(static_cast<BlockId>(
-                                        static_cast<int>(BlockId::WaxedCopperBlock) + stage)),
-                                    1));
+        {
+            // The bound is the table's own length rather than a nine written
+            // out beside it, so a tenth unwaxed form is one row and no edit.
+            for (std::size_t stage = 0; stage < std::size(kUnwaxed); ++stage) {
+                all.push_back(shapeless({itemForBlock(kUnwaxed[stage]), ItemId::Honeycomb}, 2,
+                                        itemForBlock(static_cast<BlockId>(
+                                            static_cast<int>(BlockId::WaxedCopperBlock) +
+                                            static_cast<int>(stage))),
+                                        1));
+            }
+            // **And the four grates, which that loop cannot reach.** They are
+            // their own enum run with their own waxed forms, so the offset
+            // above lands nowhere near them - see `kCopperGrateStages`. Same
+            // recipe, same reference.
+            for (int stage = 0; stage < kCopperGrateStages; ++stage) {
+                all.push_back(shapeless(
+                    {itemForBlock(static_cast<BlockId>(static_cast<int>(BlockId::CopperGrate) +
+                                                       stage)),
+                     ItemId::Honeycomb},
+                    2,
+                    itemForBlock(static_cast<BlockId>(static_cast<int>(BlockId::WaxedCopperGrate) +
+                                                      stage)),
+                    1));
+            }
         }
         // Bark blocks: four logs in a square, the reference's own recipe, and
         // the one thing that made a *wood* block worth having.
         {
-            static constexpr BlockId kBarkLogs[10] = {
-                BlockId::Log,         BlockId::SpruceLog,   BlockId::BirchLog,
-                BlockId::JungleLog,   BlockId::AcaciaLog,   BlockId::DarkOakLog,
-                BlockId::CherryLog,   BlockId::MangroveLog, BlockId::CrimsonStem,
-                BlockId::WarpedStem,
-            };
-            static constexpr BlockId kStrippedLogs[10] = {
-                BlockId::StrippedOakLog,      BlockId::StrippedSpruceLog,
-                BlockId::StrippedBirchLog,    BlockId::StrippedJungleLog,
-                BlockId::StrippedAcaciaLog,   BlockId::StrippedDarkOakLog,
-                BlockId::StrippedCherryLog,   BlockId::StrippedMangroveLog,
-                BlockId::StrippedCrimsonStem, BlockId::StrippedWarpedStem,
-            };
-            for (int wood = 0; wood < 10; ++wood) {
+            for (std::size_t wood = 0; wood < std::size(kBarkLogs); ++wood) {
+                const int step = static_cast<int>(wood);
                 all.push_back(square4(
                     kBarkLogs[wood],
-                    static_cast<BlockId>(static_cast<int>(BlockId::OakWood) + wood), 3));
+                    static_cast<BlockId>(static_cast<int>(BlockId::OakWood) + step), 3));
                 all.push_back(square4(
                     kStrippedLogs[wood],
-                    static_cast<BlockId>(static_cast<int>(BlockId::StrippedOakWood) + wood), 3));
+                    static_cast<BlockId>(static_cast<int>(BlockId::StrippedOakWood) + step), 3));
             }
         }
 
         // Nuggets, both ways. Nine to an ingot, which is what makes the two
-        // gilded foods below cost a ninth of what whole ingots would.
+        // gilded foods below cost a ninth of what whole ingots would, and the
+        // lanterns further down a ninth of what an ingot each would.
         all.push_back(shapeless({ItemId::IronIngot}, 1, ItemId::IronNugget, 9));
         all.push_back(shapeless({ItemId::GoldIngot}, 1, ItemId::GoldNugget, 9));
         all.push_back(square9(ItemId::IronNugget, ItemId::IronIngot));
@@ -521,6 +1053,13 @@ const std::vector<Recipe>& recipes() {
         all.push_back(ring8Around(ItemId::GoldNugget, ItemId::Carrot, ItemId::GoldenCarrot, 1));
         all.push_back(
             ring8Around(ItemId::GoldNugget, ItemId::MelonSlice, ItemId::GlisteringMelonSlice, 1));
+        // **The third gilded food, and it is whole ingots rather than nuggets.**
+        // `recipes/golden_apple.json`: eight gold ingots round an apple, one out.
+        // It had no recipe and no drop, so the item, its four-minute
+        // Absorption and `RESEARCH.md`'s own row for it were all unreachable.
+        // The enchanted one stays absent on purpose - the reference has had no
+        // recipe for it since 1.9 and it is a chest-loot item there too.
+        all.push_back(ring8Around(ItemId::GoldIngot, ItemId::Apple, ItemId::GoldenApple, 1));
 
         // Doors and trapdoors. **The family index is the wood index** - both
         // tables are declared in `kWoods` order for exactly this, so there is
@@ -566,24 +1105,13 @@ const std::vector<Recipe>& recipes() {
                               ItemId::IronIngot, kNone},
                              itemForBlock(BlockId::Hopper), 1));
 
-        // The three village workstations that had no source at all. All the
-        // reference's own shapes.
+        // The village workstation that answers to no wood. The lectern and the
+        // grindstone are per-plank recipes and are generated with the rest of
+        // the wood ones below.
         all.push_back(shaped(3, 2, {kNone, ItemId::IronIngot, kNone,
                                     itemForBlock(BlockId::Stone), itemForBlock(BlockId::Stone),
                                     itemForBlock(BlockId::Stone)},
                              itemForBlock(BlockId::Stonecutter), 1));
-        {
-            const ItemId slab = itemForBlock(BlockId::StoneSlab);
-            all.push_back(shaped(3, 3,
-                                 {slab, slab, slab, kNone, itemForBlock(BlockId::Bookshelf), kNone,
-                                  kNone, slab, kNone},
-                                 itemForBlock(BlockId::Lectern), 1));
-        }
-        all.push_back(shaped(2, 3,
-                             {itemForBlock(BlockId::Planks), itemForBlock(BlockId::Planks),
-                              ItemId::Stick, ItemId::Stick, itemForBlock(BlockId::Planks),
-                              itemForBlock(BlockId::Planks)},
-                             itemForBlock(BlockId::Grindstone), 1));
 
         // Beds: three wool over three planks, the reference's own recipe. The
         // wool colour picks the bed colour, so this is one loop rather than a
@@ -601,8 +1129,9 @@ const std::vector<Recipe>& recipes() {
         // to paste the wrong plank into one cell.
         for (const Wood& wood : kWoods) {
             const ItemId planks = itemForBlock(wood.planks);
-            all.push_back(shapeless({itemForBlock(wood.log)}, 1, planks, 4));
-            all.push_back(shapeless({itemForBlock(wood.stripped)}, 1, planks, 4));
+            all.push_back(shapeless({itemForBlock(wood.log)}, 1, planks, wood.plankYield));
+            all.push_back(
+                shapeless({itemForBlock(wood.stripped)}, 1, planks, wood.plankYield));
             all.push_back(shaped(1, 2, {planks, planks}, ItemId::Stick, 4));
             all.push_back(square4(planks, itemForBlock(BlockId::CraftingTable), 1));
             all.push_back(ring8(planks, itemForBlock(BlockId::Chest), 1));
@@ -614,20 +1143,47 @@ const std::vector<Recipe>& recipes() {
                                  {planks, planks, planks, ItemId::Book, ItemId::Book, ItemId::Book,
                                   planks, planks, planks},
                                  itemForBlock(BlockId::Bookshelf), 1));
+            // **The campfire, which the beehive rule already depends on.**
+            // `recipes/campfire.json`: B1 stick, A2/C2 stick, and row three
+            // `minecraft:logs`, with `minecraft:coals` in the middle - two
+            // recipes per wood rather than an ingredient naming a set, which is
+            // this file's standing rule. The block was finished, lit,
+            // light-emitting and named as the way to calm bees, and nothing
+            // could make one.
+            //
+            // The soul variant swaps the fuel for soul sand or soul soil, per
+            // `recipes/soul_campfire.json`'s `soul_fire_base_blocks` - same shape.
+            const ItemId logForFire = itemForBlock(wood.log);
+            for (const ItemId fuel : {ItemId::Coal, ItemId::Charcoal}) {
+                all.push_back(shaped(3, 3,
+                                     {kNone, ItemId::Stick, kNone, ItemId::Stick, fuel,
+                                      ItemId::Stick, logForFire, logForFire, logForFire},
+                                     itemForBlock(BlockId::Campfire), 1));
+            }
+            for (const BlockId soul : {BlockId::SoulSand, BlockId::SoulSoil}) {
+                all.push_back(shaped(3, 3,
+                                     {kNone, ItemId::Stick, kNone, ItemId::Stick,
+                                      itemForBlock(soul), ItemId::Stick, logForFire, logForFire,
+                                      logForFire},
+                                     itemForBlock(BlockId::SoulCampfire), 1));
+            }
             // Two iron over four planks.
             all.push_back(shaped(2, 3,
                                  {ItemId::IronIngot, ItemId::IronIngot, planks, planks, planks, planks},
                                  itemForBlock(BlockId::SmithingTable), 1));
-            // Six planks round a hollow: the reference's own composter, and a
-            // shield with an iron boss.
-            all.push_back(shaped(3, 3,
-                                 {planks, kNone, planks, planks, kNone, planks, planks, planks,
-                                  planks},
-                                 itemForBlock(BlockId::Composter0), 1));
+            // A shield with an iron boss.
             all.push_back(shaped(3, 3,
                                  {planks, ItemId::IronIngot, planks, planks, planks, planks, kNone,
                                   planks, kNone},
                                  ItemId::Shield, 1));
+            // Two sticks over a stone slab, on plank shoulders - the wiki's
+            // `[[Grindstone]]`, A1/C1 stick, B1 stone slab, A2/C2 any planks.
+            // It had been six cells of a 2x3 with the sticks across the middle,
+            // which is not a shape the reference has anywhere.
+            all.push_back(shaped(3, 2,
+                                 {ItemId::Stick, itemForBlock(BlockId::StoneSlab), ItemId::Stick,
+                                  planks, kNone, planks},
+                                 itemForBlock(BlockId::Grindstone), 1));
             // A barrel is planks walled round two slabs of the same wood, which
             // is the reference's own recipe and the one that makes a slab worth
             // cutting for something other than stairs.
@@ -637,6 +1193,30 @@ const std::vector<Recipe>& recipes() {
                                      {planks, slab, planks, planks, kNone, planks, planks, slab,
                                       planks},
                                      itemForBlock(BlockId::Barrel), 1));
+                // **Seven slabs, not six planks.** The wiki's `[[Composter]]`
+                // is A1/C1, A2/C2 and the whole of row three, every one of them
+                // "Any Wooden Slab" - so it costs three and a half planks
+                // rather than six, and the bottom is closed.
+                all.push_back(shaped(3, 3,
+                                     {slab, kNone, slab, slab, kNone, slab, slab, slab, slab},
+                                     itemForBlock(BlockId::Composter0), 1));
+                // And the lectern, which is four of the same slab round a
+                // bookshelf - `[[Lectern]]`, A1/B1/C1 and B3 "Any Wooden Slab".
+                // It had been cut from *stone*, which is not a slab the
+                // reference accepts here at all.
+                all.push_back(shaped(3, 3,
+                                     {slab, slab, slab, kNone, itemForBlock(BlockId::Bookshelf),
+                                      kNone, kNone, slab, kNone},
+                                     itemForBlock(BlockId::Lectern), 1));
+                // And the chiselled one, which is the plain bookshelf's shape
+                // with its own wood's slabs where the books go - wiki
+                // `recipes/chiseled_bookshelf.json`: planks, slabs, planks.
+                // Silk touch is the only way to pick one up again, so without
+                // this the block was creative-only.
+                all.push_back(shaped(3, 3,
+                                     {planks, planks, planks, slab, slab, slab, planks, planks,
+                                      planks},
+                                     itemForBlock(BlockId::ChiseledBookshelf), 1));
             }
             // A furnace wrapped in logs. Logs rather than planks because the
             // fuel is the point of the block.
@@ -701,15 +1281,37 @@ const std::vector<Recipe>& recipes() {
             const ItemId gold = ItemId::GoldIngot;
             const ItemId torch = itemForBlock(BlockId::RedstoneTorch);
 
-            // Stone answers to the same two shapes the woods do.
-            all.push_back(shapeless({stone}, 1, itemForBlock(buttonAt(11, 0, false)), 1));
-            all.push_back(shaped(2, 1, {stone, stone}, itemForBlock(pressurePlateAt(11, 0)), 1));
+            // Stone answers to the same two shapes the woods do. **The family
+            // index is derived from the tables' own lengths**, not the 11, 12
+            // and 13 that used to sit here: the woods fill the front of both
+            // runs and these three are what is left at the back, so a twelfth
+            // wood moves every one of them and nothing would have said so.
+            constexpr int kStoneButtonFamily = kButtonFamilyCount - 1;
+            constexpr int kStonePlateFamily = kPressurePlateFamilyCount - 3;
+            constexpr int kGoldPlateFamily = kPressurePlateFamilyCount - 2;
+            constexpr int kIronPlateFamily = kPressurePlateFamilyCount - 1;
+            static_assert(kButtonFamilies[kStoneButtonFamily].parent == BlockId::Stone &&
+                              kPressurePlateFamilies[kStonePlateFamily].parent == BlockId::Stone &&
+                              kPressurePlateFamilies[kGoldPlateFamily].parent == BlockId::GoldBlock &&
+                              kPressurePlateFamilies[kIronPlateFamily].parent == BlockId::IronBlock,
+                          "the four non-wood switch families are not where counting back from the "
+                          "end of kButtonFamilies and kPressurePlateFamilies says they are");
+            all.push_back(
+                shapeless({stone}, 1, itemForBlock(buttonAt(kStoneButtonFamily, 0, false)), 1));
+            all.push_back(shaped(2, 1, {stone, stone},
+                                 itemForBlock(pressurePlateAt(kStonePlateFamily, 0)), 1));
             // The two that weigh what stands on them are cut from the metal
             // they measure with.
-            all.push_back(shaped(2, 1, {gold, gold}, itemForBlock(pressurePlateAt(12, 0)), 1));
-            all.push_back(shaped(2, 1, {iron, iron}, itemForBlock(pressurePlateAt(13, 0)), 1));
+            all.push_back(shaped(2, 1, {gold, gold},
+                                 itemForBlock(pressurePlateAt(kGoldPlateFamily, 0)), 1));
+            all.push_back(shaped(2, 1, {iron, iron},
+                                 itemForBlock(pressurePlateAt(kIronPlateFamily, 0)), 1));
 
-            // A torch is a stick with dust on the end of it.
+            // A torch is a stick with dust on the end of it. **The only one** -
+            // this exact recipe was written a second time three hundred lines
+            // down, among the ordinary torches, and which of the two the
+            // matcher found was decided by declaration order and by nothing
+            // else. `patternsUnique` below is now what stops the third.
             all.push_back(shaped(1, 2, {redstone, stick}, torch, 1));
             all.push_back(shaped(1, 2, {stick, cobble},
                                  itemForBlock(leverAt(LeverFloorX, false)), 1));
@@ -742,8 +1344,15 @@ const std::vector<Recipe>& recipes() {
             all.push_back(shaped(1, 3, {iron, stick, itemForBlock(BlockId::Planks)},
                                  itemForBlock(tripwireHookAt(FaceDirection::NegZ, false, false)),
                                  2));
-            all.push_back(ring8Around(redstone, itemForBlock(BlockId::Glowstone),
-                                      itemForBlock(BlockId::RedstoneLamp), 1));
+            // **Four dust in a cross, not eight in a ring.** The wiki's
+            // `[[Redstone Lamp]]` is B1, A2, C2 and B3 dust round a B2
+            // glowstone; the ring cost twice the redstone and left the corners
+            // filled, so a correctly laid-out lamp would not craft either.
+            all.push_back(shaped(3, 3,
+                                 {kNone, redstone, kNone, redstone,
+                                  itemForBlock(BlockId::Glowstone), redstone, kNone, redstone,
+                                  kNone},
+                                 itemForBlock(BlockId::RedstoneLamp), 1));
 
             // The four rails, all six of a metal round a spine. Sixteen plain
             // ones and six of each of the rest, which is the reference's own
@@ -754,11 +1363,19 @@ const std::vector<Recipe>& recipes() {
                                  {gold, kNone, gold, gold, stick, gold, gold, redstone, gold},
                                  itemForBlock(railAt(1, 0, false)), 6));
             all.push_back(shaped(3, 3,
-                                 {iron, kNone, iron, iron, itemForBlock(pressurePlateAt(11, 0)),
-                                  iron, iron, redstone, iron},
+                                 {iron, kNone, iron, iron,
+                                  itemForBlock(pressurePlateAt(kStonePlateFamily, 0)), iron, iron,
+                                  redstone, iron},
                                  itemForBlock(railAt(2, 0, false)), 6));
+            // **The activator rail's centre is a redstone torch, not dust.**
+            // `recipes/activator_rail.json` is `XSX` / `X#X` / `XSX` with
+            // `X` iron, `S` stick and `#` `minecraft:redstone_torch`. The
+            // other three above are cell-for-cell correct against `rail.json`,
+            // `golden_rail.json` and `detector_rail.json`; this was the only
+            // one that was not, and it made the rail a dust cheaper than the
+            // reference charges.
             all.push_back(shaped(3, 3,
-                                 {iron, stick, iron, iron, redstone, iron, iron, stick, iron},
+                                 {iron, stick, iron, iron, torch, iron, iron, stick, iron},
                                  itemForBlock(railAt(3, 0, false)), 6));
         }
 
@@ -777,20 +1394,19 @@ const std::vector<Recipe>& recipes() {
         // same family tables the blocks themselves come from, so a new material
         // is one row there and needs nothing here.
         //
-        // **Stairs get both mirrorings.** The reference matches either hand of
-        // the staircase and our matcher does not mirror, so the second pattern
-        // is what stops half the players finding stairs uncraftable.
+        // **One staircase, not two.** The second, mirrored pattern that used to
+        // sit here is gone because `matchesShaped` now flips a recipe itself -
+        // which is the reference's own rule ("ingredients in shaped recipes ...
+        // can be flipped horizontally, but not vertically", wiki `[[Crafting]]`)
+        // and covers the axe, the hoe, the shears, the bow, the fishing rod,
+        // the observer and coarse dirt in the same stroke. Every one of those
+        // was uncraftable left-handed while only the stairs carried a twin.
         for (int family = 0; family < kStairFamilyCount; ++family) {
             const ItemId material = itemForBlock(kStairFamilies[static_cast<std::size_t>(family)].parent);
-            const ItemId result = itemForBlock(stairsAt(family, Facing::North, false));
             all.push_back(shaped(3, 3,
                                  {material, kNone, kNone, material, material, kNone, material,
                                   material, material},
-                                 result, 4));
-            all.push_back(shaped(3, 3,
-                                 {kNone, kNone, material, kNone, material, material, material,
-                                  material, material},
-                                 result, 4));
+                                 itemForBlock(stairsAt(family, Facing::North, false)), 4));
         }
         for (int family = 0; family < kSlabFamilyCount; ++family) {
             all.push_back(row3(itemForBlock(kSlabFamilies[static_cast<std::size_t>(family)].parent),
@@ -835,9 +1451,11 @@ const std::vector<Recipe>& recipes() {
         all.push_back(shapeless({ItemId::BoneMeal}, 1, dye(kWhite), 1));
         all.push_back(shapeless({ItemId::InkSac}, 1, dye(kBlack), 1));
         all.push_back(shapeless({ItemId::LapisLazuli}, 1, dye(kBlue), 1));
-        // **Named divergence:** the reference's brown dye is cocoa, which needs
-        // a jungle crop we have no source for. The brown mushroom is the only
-        // brown thing that grows here.
+        // Two brown things, both of them real. Cocoa is the reference's own
+        // brown dye and is added further down; the mushroom stays as a second
+        // source because a jungle is a long way to walk. The comment that used
+        // to sit here called the mushroom a divergence "because we have no
+        // source for cocoa", which stopped being true when the bean did.
         all.push_back(shapeless({itemForBlock(BlockId::BrownMushroom)}, 1, dye(kBrown), 1));
         for (const DyeMix& mix : kDyeMixes) {
             all.push_back(shapeless({dye(mix.a), dye(mix.b)}, 2, dye(mix.result), 2));
@@ -847,10 +1465,18 @@ const std::vector<Recipe>& recipes() {
         // declared white-first in the same order, so a colour is one offset.
         all.push_back(square4(ItemId::String, itemForBlock(BlockId::WhiteWool), 1));
         for (int colour = 0; colour < kDyeColours; ++colour) {
-            if (colour != kWhite) {
-                all.push_back(
-                    shapeless({itemForBlock(BlockId::WhiteWool), dye(colour)}, 2,
-                              tinted(BlockId::WhiteWool, colour), 1));
+            // **Any wool re-dyes to any colour, not white to any colour.** Wiki
+            // `[[Wool]]`: "Wool of any color can be re-dyed into any other
+            // color", and the recipe is stated as *Any Wool* + *Matching Dye*.
+            // The input was hard-wired to white, so a player holding blue wool
+            // had a dead end - which is the same shape the stowbox loop two
+            // hundred lines up already gets right, and the two families sitting
+            // beside each other disagreeing is what gave it away.
+            for (int from = 0; from < kDyeColours; ++from) {
+                if (from != colour) {
+                    all.push_back(shapeless({tinted(BlockId::WhiteWool, from), dye(colour)}, 2,
+                                            tinted(BlockId::WhiteWool, colour), 1));
+                }
             }
             all.push_back(ring8Around(itemForBlock(BlockId::Terracotta), dye(colour),
                                       tinted(BlockId::WhiteTerracotta, colour), 8));
@@ -870,9 +1496,39 @@ const std::vector<Recipe>& recipes() {
         all.push_back(square4(BlockId::PolishedTuff, BlockId::TuffBricks, 4));
         all.push_back(square4(BlockId::Basalt, BlockId::PolishedBasalt, 4));
         all.push_back(square4(BlockId::EndStone, BlockId::EndStoneBricks, 4));
-        all.push_back(square4(BlockId::CopperBlock, BlockId::CutCopper, 4));
+        // Cut copper and the copper grates, both families, all four oxidation
+        // stages and the waxed half of each, from `kCopperCuts`.
+        //
+        // Only the plain 2x2 cut copper used to be here. The other three cut
+        // stages were reachable solely by waiting for an already-cut block to
+        // oxidise, every waxed cut form had no recipe at all, and **no grate of
+        // any kind was obtainable by any means** - all four had no recipe, and a
+        // sweep for the id found it only in `Block.hpp` and `Copper.hpp`, so
+        // nothing in worldgen or any structure ever places one either. A block
+        // dropping itself is not an independent source when nothing can put one
+        // in the world to be broken.
+        for (const CopperCut& row : kCopperCuts) {
+            all.push_back(square4(row.stock, row.cut, 4));
+            const ItemId stock = itemForBlock(row.stock);
+            all.push_back(shaped(3, 3,
+                                 {kNone, stock, kNone, stock, kNone, stock, kNone, stock, kNone},
+                                 itemForBlock(row.grate), 4));
+        }
         all.push_back(square4(ItemId::Quartz, itemForBlock(BlockId::QuartzBlock), 1));
         all.push_back(square4(BlockId::QuartzBlock, BlockId::QuartzBricks, 4));
+        // Four of a loose mineral in a square, same 4-in/1-out shape as the
+        // quartz block above - wiki `[[Block of Amethyst]]` and
+        // `[[Dripstone Block]]`. Both were the only way to store or build with
+        // what they compact, and neither existed.
+        all.push_back(square4(ItemId::AmethystShard, itemForBlock(BlockId::AmethystBlock), 1));
+        all.push_back(square4(BlockId::PointedDripstone, BlockId::DripstoneBlock, 1));
+        // Two slabs of a family stacked, which is the reference's own shape for
+        // all three chiselled blocks. The slab is read out of `kSlabFamilies`
+        // rather than named, so it stays whatever that table says it is.
+        for (const ChiselledFromSlabs& row : kChiselledFromSlabs) {
+            const ItemId half = itemForBlock(slabAt(slabFamilyOf(row.parent), false));
+            all.push_back(shaped(1, 2, {half, half}, itemForBlock(row.result), 1));
+        }
         all.push_back(square4(ItemId::PoppedChorusFruit, itemForBlock(BlockId::PurpurBlock), 4));
         all.push_back(square4(ItemId::NetherBrickItem, itemForBlock(BlockId::NetherBricks), 1));
         all.push_back(square4(ItemId::Brick, itemForBlock(BlockId::Bricks), 1));
@@ -881,13 +1537,20 @@ const std::vector<Recipe>& recipes() {
         all.push_back(shaped(1, 2, {itemForBlock(BlockId::PurpurBlock), itemForBlock(BlockId::PurpurBlock)},
                              itemForBlock(BlockId::PurpurPillar), 2));
 
-        // Nine into one, for everything whose loose form exists.
+        // Nine into one, for everything whose loose form exists - and back out
+        // again, same as the metals above.
         all.push_back(square9(ItemId::BoneMeal, BlockId::BoneBlock));
         all.push_back(square9(ItemId::Slimeball, BlockId::SlimeBlock));
         all.push_back(square9(ItemId::DriedKelp, BlockId::DriedKelpBlock));
         all.push_back(square9(ItemId::RawIron, BlockId::RawIronBlock));
         all.push_back(square9(ItemId::RawGold, BlockId::RawGoldBlock));
         all.push_back(square9(ItemId::RawCopper, BlockId::RawCopperBlock));
+        all.push_back(shapeless({itemForBlock(BlockId::BoneBlock)}, 1, ItemId::BoneMeal, 9));
+        all.push_back(shapeless({itemForBlock(BlockId::SlimeBlock)}, 1, ItemId::Slimeball, 9));
+        all.push_back(shapeless({itemForBlock(BlockId::DriedKelpBlock)}, 1, ItemId::DriedKelp, 9));
+        all.push_back(shapeless({itemForBlock(BlockId::RawIronBlock)}, 1, ItemId::RawIron, 9));
+        all.push_back(shapeless({itemForBlock(BlockId::RawGoldBlock)}, 1, ItemId::RawGold, 9));
+        all.push_back(shapeless({itemForBlock(BlockId::RawCopperBlock)}, 1, ItemId::RawCopper, 9));
         all.push_back(square4(ItemId::MagmaCream, itemForBlock(BlockId::MagmaBlock), 1));
         all.push_back(square4(ItemId::Honeycomb, itemForBlock(BlockId::HoneycombBlock), 1));
 
@@ -908,6 +1571,17 @@ const std::vector<Recipe>& recipes() {
             all.push_back(ring8Around(itemForBlock(BlockId::Glass), dye(colour),
                                       tinted(BlockId::WhiteStainedGlass, colour), 8));
         }
+        // **And the same ring made of panes, which is the reference's second
+        // route to a stained pane** - wiki `[[Stained Glass Pane]]` gives both
+        // "6 matching stained glass -> 16 panes" (the loop above) and "8 glass
+        // panes + 1 matching dye -> 8 matching panes" (this one). Only the
+        // first existed, so a player holding plain panes and a dye had to melt
+        // back through blocks. `paneAt(colour + 1)` is the stained pane for
+        // this colour; `paneColoursFollowTheDyeRun` is what proves it.
+        for (int colour = 0; colour < kDyeColours; ++colour) {
+            all.push_back(ring8Around(itemForBlock(paneAt(0)), dye(colour),
+                                      itemForBlock(paneAt(colour + 1)), 8));
+        }
         all.push_back(shaped(3, 2,
                              {ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot,
                               ItemId::IronIngot, ItemId::IronIngot, ItemId::IronIngot},
@@ -917,20 +1591,19 @@ const std::vector<Recipe>& recipes() {
                              {ItemId::Stick, kNone, ItemId::Stick, ItemId::Stick, ItemId::Stick,
                               ItemId::Stick, ItemId::Stick, kNone, ItemId::Stick},
                              itemForBlock(BlockId::LadderNorth), 3));
-        // **Named divergence on both lanterns**: the reference cages a torch in
-        // eight iron nuggets, and there is no nugget here. One ingot stands in
-        // for the eight, which keeps the shape of the idea - metal around a
-        // flame - at a price a player can actually pay.
-        all.push_back(shapeless({ItemId::IronIngot, itemForBlock(BlockId::Torch)}, 2,
-                                itemForBlock(BlockId::Lantern), 1));
-        all.push_back(shapeless({ItemId::IronIngot, itemForBlock(BlockId::SoulTorch)}, 2,
-                                itemForBlock(BlockId::SoulLantern), 1));
+        // Eight iron nuggets caged round a torch, the reference's own lantern.
+        // The comment that used to sit here declared a divergence - "there is
+        // no nugget here" - that stopped being true when `IronNugget` was
+        // added; one ingot was standing in for the eight, at a ninth of the
+        // price, and nothing said so.
+        all.push_back(ring8Around(ItemId::IronNugget, itemForBlock(BlockId::Torch),
+                                  itemForBlock(BlockId::Lantern), 1));
+        all.push_back(ring8Around(ItemId::IronNugget, itemForBlock(BlockId::SoulTorch),
+                                  itemForBlock(BlockId::SoulLantern), 1));
         // A torch over soul sand, which is exactly how the reference makes one.
         all.push_back(shaped(1, 3,
                              {ItemId::Coal, ItemId::Stick, itemForBlock(BlockId::SoulSand)},
                              itemForBlock(BlockId::SoulTorch), 4));
-        all.push_back(shaped(1, 2, {ItemId::Redstone, ItemId::Stick},
-                             itemForBlock(BlockId::RedstoneTorch), 1));
         all.push_back(shaped(1, 2, {ItemId::CinderRod, ItemId::PoppedChorusFruit},
                              itemForBlock(BlockId::EndRod), 4));
 
@@ -961,11 +1634,30 @@ const std::vector<Recipe>& recipes() {
         // The small things that had no recipe and no other source.
         all.push_back(row3(itemForBlock(BlockId::SugarCane), ItemId::Paper, 3));
         all.push_back(shapeless({itemForBlock(BlockId::SugarCane)}, 1, ItemId::Sugar, 1));
+        // **The one reagent the whole corrupting half of the brewing tree
+        // stands on.** `recipes/fermented_spider_eye.json`: spider eye + brown
+        // mushroom + sugar, shapeless, one out. It had no recipe, and
+        // `kBrews` names it in **fifteen** rows - so every potion of Weakness,
+        // Slowness, Harming and Invisibility, drinkable and splash alike, was
+        // unreachable while the brewing stand, the screen and the table all
+        // worked perfectly.
+        all.push_back(shapeless({ItemId::SpiderEye, itemForBlock(BlockId::BrownMushroom),
+                                 ItemId::Sugar},
+                                3, ItemId::FermentedSpiderEye, 1));
+        // `recipes/pumpkin_pie.json`: a pumpkin, sugar and an egg, shapeless. The
+        // egg comes from a village fletcher's chest, which is the only source
+        // of one here - chickens do not lay.
+        all.push_back(shapeless({itemForBlock(BlockId::Pumpkin), ItemId::Sugar, ItemId::Egg}, 3,
+                                ItemId::PumpkinPie, 1));
         all.push_back(shapeless({ItemId::Paper, ItemId::Paper, ItemId::Paper, ItemId::Leather}, 4,
                                 ItemId::Book, 1));
-        all.push_back(shaped(3, 1,
-                             {itemForBlock(BlockId::Glass), itemForBlock(BlockId::Glass),
-                              itemForBlock(BlockId::Glass)},
+        // **A V, not a row.** Wiki `[[Glass Bottle]]` is A2, C2 and B3 glass -
+        // three panes leaning into a base. Written as a row it read as a
+        // plausible-looking shape that nothing in the reference makes, and it
+        // meant a correctly laid-out bottle would not craft.
+        all.push_back(shaped(3, 2,
+                             {itemForBlock(BlockId::Glass), kNone, itemForBlock(BlockId::Glass),
+                              kNone, itemForBlock(BlockId::Glass), kNone},
                              ItemId::GlassBottle, 3));
         all.push_back(square4(ItemId::ClayBall, itemForBlock(BlockId::Clay), 1));
         all.push_back(square4(ItemId::GlowstoneDust, itemForBlock(BlockId::Glowstone), 1));
@@ -1013,17 +1705,283 @@ const std::vector<Recipe>& recipes() {
             // `smithingResult`.
         }
 
-        // Derived here rather than at each recipe, so neither can be forgotten
-        // on a new row. A shapeless recipe keeps its ingredient *count* in
+        // Derived here rather than at each recipe, so it cannot be forgotten on
+        // a new row. A shapeless recipe keeps its ingredient *count* in
         // `width`, so it fits the player's grid when it uses four or fewer -
         // comparing it against the pattern extents would be wrong.
         for (Recipe& recipe : all) {
-            recipe.category = categoryFor(recipe.result.item);
             recipe.fitsInTwoByTwo =
                 recipe.shapeless ? recipe.width <= 4 : recipe.width <= 2 && recipe.height <= 2;
         }
         return all;
     }();
+}
+
+/// The key two recipes would have to share to be indistinguishable to
+/// `findMatch`, and it is deliberately built the way the matcher reads rather
+/// than the way the table is written:
+///
+/// * a shapeless recipe's ingredients are **sorted**, because `matchesShapeless`
+///   does not care what order they were listed in;
+/// * a shaped recipe takes the smaller of its pattern and its **mirror**,
+///   because `matchesShaped` now accepts either hand.
+///
+/// So two rows collide under this key exactly when a player could lay out one
+/// grid that both claim - which is the thing that has no defined answer.
+struct MatchKey {
+    std::array<ItemId, kMaxCraftSize * kMaxCraftSize> cells{};
+    int width = 0;
+    int height = 0;
+    bool shapeless = false;
+
+    constexpr bool operator==(const MatchKey& other) const {
+        return width == other.width && height == other.height &&
+               shapeless == other.shapeless && cells == other.cells;
+    }
+};
+
+constexpr MatchKey matchKeyOf(const Recipe& recipe) {
+    MatchKey key;
+    key.width = recipe.width;
+    key.height = recipe.height;
+    key.shapeless = recipe.shapeless;
+    if (recipe.shapeless) {
+        for (int i = 0; i < recipe.width; ++i) {
+            key.cells[static_cast<std::size_t>(i)] = recipe.pattern[static_cast<std::size_t>(i)];
+        }
+        // Insertion sort: `std::sort` is not constexpr before C++20's ranges
+        // land everywhere, and nine elements do not need better.
+        for (int i = 1; i < recipe.width; ++i) {
+            const ItemId held = key.cells[static_cast<std::size_t>(i)];
+            int j = i - 1;
+            while (j >= 0 && static_cast<int>(key.cells[static_cast<std::size_t>(j)]) >
+                                 static_cast<int>(held)) {
+                key.cells[static_cast<std::size_t>(j + 1)] = key.cells[static_cast<std::size_t>(j)];
+                --j;
+            }
+            key.cells[static_cast<std::size_t>(j + 1)] = held;
+        }
+        return key;
+    }
+    bool mirrorIsSmaller = false;
+    for (int i = 0; i < recipe.width * recipe.height; ++i) {
+        const int x = i % recipe.width;
+        const int y = i / recipe.width;
+        const ItemId here = recipe.pattern[static_cast<std::size_t>(i)];
+        const ItemId there =
+            recipe.pattern[static_cast<std::size_t>(y * recipe.width + (recipe.width - 1 - x))];
+        if (here != there) {
+            mirrorIsSmaller = static_cast<int>(there) < static_cast<int>(here);
+            break;
+        }
+    }
+    for (int y = 0; y < recipe.height; ++y) {
+        for (int x = 0; x < recipe.width; ++x) {
+            const int source = mirrorIsSmaller ? y * recipe.width + (recipe.width - 1 - x)
+                                               : y * recipe.width + x;
+            key.cells[static_cast<std::size_t>(y * recipe.width + x)] =
+                recipe.pattern[static_cast<std::size_t>(source)];
+        }
+    }
+    return key;
+}
+
+constexpr std::size_t hashOf(const MatchKey& key) {
+    std::size_t hash = 1469598103934665603ull;
+    for (const ItemId cell : key.cells) {
+        hash = (hash ^ static_cast<std::size_t>(cell)) * 1099511628211ull;
+    }
+    hash = (hash ^ static_cast<std::size_t>(key.width * 16 + key.height)) * 1099511628211ull;
+    return (hash ^ static_cast<std::size_t>(key.shapeless ? 1 : 0)) * 1099511628211ull;
+}
+
+/// **No two recipes claim the same grid.** Proved at compile time over the
+/// *generated* table, not a hand-written list, so the eleven-wood and
+/// sixteen-colour loops are covered along with everything typed out by hand.
+///
+/// This is worth a `static_assert` rather than a test because a collision is
+/// silent: `findMatch` returns the first row that matches, so whichever of the
+/// two was pushed earlier wins, and the loser simply never happens. That is
+/// exactly how a second redstone torch recipe lived three hundred lines from
+/// the first one without anybody noticing.
+///
+/// Open-addressed rather than a nested loop: 1,150 recipes compared pairwise is
+/// two thirds of a million steps and MSVC gives us 100,000 by default.
+constexpr bool noRecipeSharesAGrid(const std::vector<Recipe>& all) {
+    constexpr std::size_t kBuckets = 4096;
+    if (all.size() * 2 >= kBuckets) {
+        return false;  // load factor too high; the probe below could not terminate
+    }
+    std::array<MatchKey, kBuckets> table{};
+    std::array<bool, kBuckets> used{};
+    for (const Recipe& recipe : all) {
+        const MatchKey key = matchKeyOf(recipe);
+        std::size_t slot = hashOf(key) % kBuckets;
+        while (used[slot]) {
+            if (table[slot] == key) {
+                return false;
+            }
+            slot = (slot + 1) % kBuckets;
+        }
+        used[slot] = true;
+        table[slot] = key;
+    }
+    return true;
+}
+
+/// The **multiset** of what a recipe consumes, with the arrangement thrown
+/// away: sorted ingredients for a shapeless row, sorted non-empty cells for a
+/// shaped one.
+constexpr MatchKey ingredientMultisetOf(const Recipe& recipe) {
+    MatchKey key;
+    key.shapeless = true;
+    for (int i = 0; i < (recipe.shapeless ? recipe.width : recipe.width * recipe.height); ++i) {
+        const ItemId cell = recipe.pattern[static_cast<std::size_t>(i)];
+        if (cell != kNone) {
+            key.cells[static_cast<std::size_t>(key.width++)] = cell;
+        }
+    }
+    for (int i = 1; i < key.width; ++i) {
+        const ItemId held = key.cells[static_cast<std::size_t>(i)];
+        int j = i - 1;
+        while (j >= 0 &&
+               static_cast<int>(key.cells[static_cast<std::size_t>(j)]) > static_cast<int>(held)) {
+            key.cells[static_cast<std::size_t>(j + 1)] = key.cells[static_cast<std::size_t>(j)];
+            --j;
+        }
+        key.cells[static_cast<std::size_t>(j + 1)] = held;
+    }
+    return key;
+}
+
+/// **No shapeless recipe shadows a shaped one.**
+///
+/// The other half of the question, and it is not covered by the key above -
+/// that one carries `shapeless` as a field, so a shapeless row and a shaped row
+/// can never compare equal however alike they are. They still collide: a
+/// shapeless recipe matches *any* arrangement of exactly its ingredients, so if
+/// a shaped recipe's non-empty cells are the same multiset, the shaped
+/// recipe's own layout satisfies both and whichever was pushed first wins.
+/// Shapeless `{Redstone, Stick}` beside shaped 1x2 `{Redstone, Stick}` is
+/// precisely that, and to the player they are one craft.
+///
+/// Multiset equality is the exact condition, in both directions: if the
+/// multisets differ, no grid can satisfy both, because a shapeless match
+/// requires the filled slots to be its multiset and nothing else.
+///
+/// Shaped-against-shaped is deliberately *not* checked this way - six planks in
+/// a 3x2 and six planks in a 2x3 are the same multiset and two honestly
+/// different crafts.
+constexpr bool noShapelessShadowsAShape(const std::vector<Recipe>& all) {
+    constexpr std::size_t kBuckets = 4096;
+    if (all.size() * 2 >= kBuckets) {
+        return false;
+    }
+    std::array<MatchKey, kBuckets> shapes{};
+    std::array<bool, kBuckets> used{};
+    for (const Recipe& recipe : all) {
+        if (recipe.shapeless) {
+            continue;
+        }
+        const MatchKey key = ingredientMultisetOf(recipe);
+        std::size_t slot = hashOf(key) % kBuckets;
+        while (used[slot] && !(shapes[slot] == key)) {
+            slot = (slot + 1) % kBuckets;
+        }
+        used[slot] = true;
+        shapes[slot] = key;
+    }
+    for (const Recipe& recipe : all) {
+        if (!recipe.shapeless) {
+            continue;
+        }
+        const MatchKey key = ingredientMultisetOf(recipe);
+        std::size_t slot = hashOf(key) % kBuckets;
+        while (used[slot]) {
+            if (shapes[slot] == key) {
+                return false;
+            }
+            slot = (slot + 1) % kBuckets;
+        }
+    }
+    return true;
+}
+
+constexpr bool patternsUnique(const std::vector<Recipe>& all) {
+    return noRecipeSharesAGrid(all) && noShapelessShadowsAShape(all);
+}
+
+/// **Every shaped pattern must fill its own outer edges**, or it can never be
+/// crafted at all.
+///
+/// `occupiedBounds` trims the player's grid to the box that actually holds
+/// items, and `matchesShaped` refuses unless that box is exactly `width` by
+/// `height`. So a recipe *declared* three wide whose last column is empty, or
+/// three tall whose top row is empty, is unreachable by any arrangement of any
+/// items: the player can never produce a bounding box with a blank edge,
+/// because a blank edge is precisely what the trim removes. The result item is
+/// simply uncraftable.
+///
+/// **Only the outermost row and column each way can be wrong.** An empty
+/// *interior* column is perfectly fine and several real recipes have one - a
+/// boot's `X.X / X.X` leaves the middle column blank, and the bounds still
+/// measure three wide because the outer cells are what set them. Testing every
+/// column instead of the outer two is a stricter rule than the matcher's, and
+/// it wrongly condemns the boots, the bucket, the bowl and the glass bottle.
+///
+/// **Neither uniqueness proof covers this.** Such a recipe has a perfectly
+/// unique key and perfectly real ingredients; it collides with nothing and the
+/// build is clean. The only symptom is a player reporting that one item cannot
+/// be made.
+constexpr bool everyShapedPatternIsTight(const std::vector<Recipe>& all) {
+    const auto cell = [](const Recipe& recipe, int x, int y) constexpr {
+        return recipe.pattern[static_cast<std::size_t>(y * recipe.width + x)];
+    };
+    for (const Recipe& recipe : all) {
+        if (recipe.shapeless) {
+            continue;
+        }
+        bool top = false;
+        bool bottom = false;
+        for (int x = 0; x < recipe.width; ++x) {
+            top = top || cell(recipe, x, 0) != kNone;
+            bottom = bottom || cell(recipe, x, recipe.height - 1) != kNone;
+        }
+        bool left = false;
+        bool right = false;
+        for (int y = 0; y < recipe.height; ++y) {
+            left = left || cell(recipe, 0, y) != kNone;
+            right = right || cell(recipe, recipe.width - 1, y) != kNone;
+        }
+        if (!top || !bottom || !left || !right) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The three proofs the recipe table gets, over **one** build of it - a second
+/// `buildRecipes()` call would be a second run of the whole generator against
+/// the compiler's step budget, which is what forced the hashed scans below to
+/// be linear in the first place.
+constexpr bool patternsAreSound() {
+    const std::vector<Recipe> all = buildRecipes();
+    return patternsUnique(all) && everyShapedPatternIsTight(all);
+}
+
+static_assert(patternsAreSound(),
+              "either two recipes claim the same grid - findMatch would silently pick whichever "
+              "was pushed first - or a shaped recipe has an entirely empty edge row or column, "
+              "which occupiedBounds trims away and matchesShaped then rejects, leaving the item "
+              "uncraftable. Restore the second redstone torch row, or the mirrored stairs "
+              "pattern, to watch the first fire; write a shapeless row whose ingredients are "
+              "some shaped row's cells to watch the second; widen any recipe's declared width "
+              "by one without filling the new column to watch the third.");
+
+}  // namespace
+
+const std::vector<Recipe>& recipes() {
+    static const std::vector<Recipe> table = buildRecipes();
     return table;
 }
 
@@ -1058,13 +2016,14 @@ Bounds occupiedBounds(const ItemStack* slots, int size) {
     return bounds;
 }
 
-bool matchesShaped(const Recipe& recipe, const ItemStack* slots, int size, const Bounds& bounds) {
-    if (bounds.width() != recipe.width || bounds.height() != recipe.height) {
-        return false;
-    }
+/// One hand of a shaped recipe against the grid.
+bool matchesOneHand(const Recipe& recipe, const ItemStack* slots, int size, const Bounds& bounds,
+                    bool mirrored) {
     for (int y = 0; y < recipe.height; ++y) {
         for (int x = 0; x < recipe.width; ++x) {
-            const ItemId wanted = recipe.pattern[static_cast<std::size_t>(y * recipe.width + x)];
+            const int column = mirrored ? recipe.width - 1 - x : x;
+            const ItemId wanted =
+                recipe.pattern[static_cast<std::size_t>(y * recipe.width + column)];
             const ItemStack& have =
                 slots[static_cast<std::size_t>((bounds.minY + y) * size + bounds.minX + x)];
             if (wanted == kNone) {
@@ -1077,6 +2036,24 @@ bool matchesShaped(const Recipe& recipe, const ItemStack* slots, int size, const
         }
     }
     return true;
+}
+
+/// **Either hand.** The reference's rule, from wiki `[[Crafting]]`: "ingredients
+/// in shaped recipes can be moved up, down, left, or right ... they can also be
+/// flipped horizontally, but not vertically". Doing it here rather than by
+/// writing a second row per recipe is what stopped the axe, the hoe, the shears,
+/// the bow, the fishing rod, the observer and coarse dirt being uncraftable
+/// left-handed - only the stairs had ever been given a twin, and one twin per
+/// asymmetric recipe is a rule nothing was enforcing.
+///
+/// Vertical flipping stays refused, which is why the ladder, the bucket and the
+/// spyglass keep their up-down order.
+bool matchesShaped(const Recipe& recipe, const ItemStack* slots, int size, const Bounds& bounds) {
+    if (bounds.width() != recipe.width || bounds.height() != recipe.height) {
+        return false;
+    }
+    return matchesOneHand(recipe, slots, size, bounds, false) ||
+           matchesOneHand(recipe, slots, size, bounds, true);
 }
 
 bool matchesShapeless(const Recipe& recipe, const ItemStack* slots, int size) {
@@ -1237,15 +2214,29 @@ constexpr std::array<Brew, 53> kBrews{{
     // Awkward into every effect there is.
     {3, ItemId::GoldenCarrot, 4},
     {3, ItemId::RabbitFoot, 8},
-    {3, ItemId::BlazePowder, 31},
+    {3, ItemId::CinderPowder, 31},
     {3, ItemId::MagmaCream, 11},
     {3, ItemId::Sugar, 13},
-    // **Named divergence: the reference brews water breathing from a raw
-    // pufferfish, and we have no loose pufferfish item** - only the bucket the
-    // live one swims in. The bucket is what this costs instead.
-    {3, ItemId::PufferfishBucket, 19},
+    // **The reference's pufferfish, and it is a loose one.**
+    // `recipes/brew_awkward_puffer_fish.json` states it outright:
+    // `"input": "minecraft:potion_type:awkward"`,
+    // `"reagent": "minecraft:pufferfish"`, `"output":
+    // "minecraft:potion_type:water_breathing"` - a **loose item, not a
+    // bucket.** This row said `PufferfishBucket` under a comment claiming "we
+    // have no loose pufferfish item" - `ItemId::RawPufferfish` has existed all
+    // along and is a live common drop off the pufferfish in `Creature.cpp`'s
+    // `kLoot`, while **nothing in the game produces a bucket of anything**, so
+    // the divergence made water breathing, its extended form and both splash
+    // forms unobtainable rather than merely dearer. `CRAFTABLE.md` repeats the
+    // same false premise and needs the same correction.
+    //
+    // **The whole table is now checked against that source, not the wiki**: all
+    // 61 rows it shares with the shipped `brew_*.json` agree exactly, reagent
+    // and output both. The nine it lacks are the four 1.21 potions and their
+    // water-junk rows, which need effects this game has no machinery for.
+    {3, ItemId::RawPufferfish, 19},
     {3, ItemId::GlisteringMelonSlice, 21},
-    {3, ItemId::GhastTear, 28},
+    {3, ItemId::DrifterTear, 28},
     {3, ItemId::SpiderEye, 25},
     {3, ItemId::PhantomMembrane, 39},
     {3, ItemId::TurtleHelmet, 36},
@@ -1300,8 +2291,8 @@ constexpr std::array<Brew, 53> kBrews{{
 /// reagent the reference bothers to have a recipe for that leads nowhere.
 constexpr bool brewsToMundane(ItemId reagent) {
     return reagent == ItemId::Redstone || reagent == ItemId::Sugar ||
-           reagent == ItemId::SpiderEye || reagent == ItemId::GhastTear ||
-           reagent == ItemId::MagmaCream || reagent == ItemId::BlazePowder ||
+           reagent == ItemId::SpiderEye || reagent == ItemId::DrifterTear ||
+           reagent == ItemId::MagmaCream || reagent == ItemId::CinderPowder ||
            reagent == ItemId::GlisteringMelonSlice || reagent == ItemId::RabbitFoot;
 }
 
@@ -1310,10 +2301,22 @@ ItemStack brewingResult(const ItemStack& bottle, const ItemStack& reagent) {
         return ItemStack{};
     }
     const bool splash = isSplashPotion(bottle.item);
-    // **The water bottle you brew from is the one that was already in the
-    // game**, not a forty-second potion that happens to be water. Two items
-    // with the same name in the catalogue would be the wart, and the filled
-    // bottle predates every potion here.
+    // **The water bottle you brew from is `WaterBottle`, the filled bottle that
+    // predates every potion here** - and the duplicate this comment used to
+    // call hypothetical is already in the catalogue. Index 0 of the potion run
+    // is a real row, "Bottle of Water" sitting beside `WaterBottle`'s "Water
+    // Bottle", and the `index` line below is what makes it unreachable: water
+    // enters *as* index 0, so nothing ever names index 0 as a result. Measured
+    // 2026-08-19 - 0 brew pairs and 0 recipes produce it, against 11 recipes
+    // for a stick.
+    //
+    // **It is not a spare row to delete.** `potionAt` addresses four parallel
+    // runs off one index, and index 0's other forms are live: splash water is
+    // gunpowder on this bottle, lingering water is dragon's breath on that, and
+    // the tipped run deliberately starts past it at `kFirstTippedPotion`.
+    // Dropping the enumerator slides every id above it in all four runs -
+    // through both `potionAt` static_asserts in `Item.hpp` and through every
+    // potion already sitting in a saved inventory.
     const bool water = bottle.item == ItemId::WaterBottle;
     if (!water && !isDrinkablePotion(bottle.item) && !splash) {
         return ItemStack{};

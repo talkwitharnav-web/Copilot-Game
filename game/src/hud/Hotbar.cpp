@@ -3,8 +3,6 @@
 #include "hud/HudPrimitives.hpp"
 #include "world/Projectile.hpp"
 
-#include <string>
-
 #include <glm/glm.hpp>
 
 namespace game {
@@ -32,9 +30,26 @@ constexpr CellSprite kSelectedCell{{0.0f, 16.0f}, {25.0f, 25.0f}, {6.0f, 6.0f}, 
 /// the frame overhangs its neighbours exactly as the artwork intends.
 constexpr float kSelectedScale = kSelectedCell.tileSize.x / kNormalCell.tileSize.x;
 
+// `kHotbarSelectedOverhang` is what the status bars clear, and it has to be the
+// overhang the frame actually has. **The single edit that breaks this is
+// remeasuring kSelectedCell from a redrawn sheet** without carrying the new
+// ratio into the header - which puts the hearts back underneath the frame,
+// where they were for the whole life of the selected-cell art.
+static_assert(kHotbarSelectedOverhang == kHotbarSlotSize * (kSelectedScale - 1.0f) * 0.5f,
+              "the overhang the status bars clear must be the overhang the selected frame draws");
+
 /// Half-height of a block icon as a fraction of the cell's half-size, leaving
 /// clear margin between the icon and the bevel.
 constexpr float kIconScale = 0.56f;
+
+// Our cell art is 21 texels across with a 14-texel interior, and the icon must
+// stay inside that interior or it draws over the bevel and the slot stops
+// reading as a frame. **The single edit that breaks this is raising kIconScale
+// to match the container screens' 0.72** - which is the right number for a
+// reference-proportioned slot and the wrong one for ours.
+static_assert(kIconScale <= kNormalCell.interiorSize.x / kNormalCell.tileSize.x,
+              "a hotbar icon must fit the cell's interior - see kNormalCell, whose bevel is thicker "
+              "than the reference's");
 
 /// How much of its size a fully drawn bow gives up. **The whole of the draw
 /// animation**, because the icon stays centred: a fraction of itself is a limit
@@ -58,9 +73,28 @@ constexpr float kIconDepth = 0.00085f;
 // Nearer than the icon, so a count is never swallowed by the block behind it.
 constexpr float kCountDepth = 0.00080f;
 constexpr float kSelectedCountDepth = 0.00060f;
-constexpr float kCountHeight = 0.042f;
-constexpr float kCountInset = 0.004f;
-constexpr glm::vec4 kCountColor{1.0f, 1.0f, 1.0f, 1.0f};
+
+// **"Nearer than the icon" is a claim about a number the icon owns, and this is
+// where it stops being taken on trust.** An icon does not sit at one depth: a
+// block drawn as boxes reaches `hud::kIconDepthSpan` in front of the depth it
+// is handed, and the count's own shadow reaches `hud::kFontShadowDepth` behind
+// it, so the gap that matters is 5e-6 rather than the 5e-5 these two lines
+// look like they leave.
+//
+// **This is downstream of five blocks changing shape.** Candles, bamboo, sea
+// pickles, lecterns and dragon eggs were flat sprites until this session and
+// spent none of the icon's depth budget; they are model-shaped now and spend
+// all of it. Nothing would have reported that - the count would simply have
+// come out behind a candle.
+static_assert(hud::iconStaysBehindItsMarks(kIconDepth, kCountDepth),
+              "an unselected hotbar icon now reaches in front of its own stack count and "
+              "durability bar - widen the gap between kIconDepth and kCountDepth");
+static_assert(hud::iconStaysBehindItsMarks(kSelectedIconDepth, kSelectedCountDepth),
+              "the selected hotbar icon now reaches in front of its own stack count and "
+              "durability bar - widen the gap between kSelectedIconDepth and kSelectedCountDepth");
+static_assert(kSelectedIconDepth < kIconDepth && kSelectedCountDepth < kCountDepth,
+              "the selected cell must sit nearer than its neighbours, or its oversized frame is "
+              "clipped by the cells either side of it");
 
 /// Places a sub-rectangle of a cell sprite at the right spot on screen.
 void appendCellPiece(engine::MeshData& mesh, const CellSprite& cell, float cellCentreX, float cellCentreY,
@@ -162,14 +196,19 @@ engine::MeshData makeHotbar(const Inventory& inventory, std::size_t selected, fl
             continue;
         }
 
-        // A lone item shows no number, matching how a count of one reads as
-        // simply having the thing.
-        if (stack.count > 1) {
-            const std::string label = std::to_string(stack.count);
-            hud::appendText(mesh, label, interiorCentre.x - interiorHalf.x + kCountInset,
-                            interiorCentre.y + interiorHalf.y - kCountHeight * 0.5f - kCountInset, kCountHeight,
-                            isSelected ? kSelectedCountDepth : kCountDepth, kCountColor);
-        }
+        // The count and the durability bar, through **the one function that
+        // places both**, so a stack reads the same in the bar as it does in the
+        // inventory a keypress later. This used to be a private copy that put
+        // the number bottom *left* at a flat 0.042 screen units - 41% larger
+        // than the container screens' - and had no bar at all, so a pick's wear
+        // was invisible in the only place you actually hold it.
+        //
+        // Measured against the **icon**, not the cell: our hotbar art has a
+        // thicker bevel than the reference's, so the icon inside it is smaller
+        // than a container slot's, and marks placed against the cell would drift
+        // off the picture they annotate.
+        hud::appendStackDecorations(mesh, stack, interiorCentre, iconHalf,
+                                    isSelected ? kSelectedCountDepth : kCountDepth);
     }
 
     return mesh;

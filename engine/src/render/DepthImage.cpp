@@ -15,14 +15,38 @@ VkFormat DepthImage::chooseFormat(VkPhysicalDevice physicalDevice) {
     for (VkFormat candidate : candidates) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
-        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+        // **Both bits, the same pair `ShadowMap::chooseFormat` asks for.** This
+        // image is created `SAMPLED` a few lines below and the deferred lighting
+        // pass does sample it, so a format that can only be rendered to is no
+        // use here - and asking for the attachment bit alone would have accepted
+        // one. Latent on this machine, where `D32_SFLOAT` reports both, which is
+        // exactly why it needed writing down rather than leaving to luck.
+        constexpr VkFormatFeatureFlags kNeeded =
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((properties.optimalTilingFeatures & kNeeded) == kNeeded) {
             return candidate;
         }
     }
-    throw std::runtime_error("No supported depth attachment format");
+    throw std::runtime_error("No depth format supports being both rendered to and sampled");
 }
 
 DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_context(context) {
+    // **C++ does not run a destructor for an object whose constructor threw**,
+    // so every handle taken before the throw leaks - and this class is rebuilt
+    // on every window resize and every render-scale change, so the leak repeats
+    // within a session rather than being reclaimed at exit. Routing the failure
+    // path through the same `destroy()` the destructor uses means there is one
+    // place that knows what has to be released, instead of two that can drift.
+    try {
+        createResources(extent);
+    } catch (...) {
+        destroy();
+        throw;
+    }
+}
+
+void DepthImage::createResources(VkExtent2D extent) {
+    const VulkanContext& context = m_context;
     m_format = chooseFormat(context.physicalDevice());
 
     VkImageCreateInfo imageInfo{};
@@ -51,8 +75,6 @@ DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_cont
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
-        vkDestroyImage(context.device(), m_image, nullptr);
-        m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for depth image");
     }
 
@@ -67,23 +89,22 @@ DepthImage::DepthImage(const VulkanContext& context, VkExtent2D extent) : m_cont
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
 
-    if (vkCreateImageView(context.device(), &viewInfo, nullptr, &m_view) != VK_SUCCESS) {
-        vkDestroyImage(context.device(), m_image, nullptr);
-        freeDeviceMemory(context.device(), m_memory);
-        m_image = VK_NULL_HANDLE;
-        m_memory = VK_NULL_HANDLE;
-        throw std::runtime_error("vkCreateImageView failed for depth image");
-    }
+    vkCheck(vkCreateImageView(context.device(), &viewInfo, nullptr, &m_view), "vkCreateImageView");
 }
 
-DepthImage::~DepthImage() {
+DepthImage::~DepthImage() { destroy(); }
+
+void DepthImage::destroy() noexcept {
     if (m_view != VK_NULL_HANDLE) {
         vkDestroyImageView(m_context.device(), m_view, nullptr);
+        m_view = VK_NULL_HANDLE;
     }
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
+        m_image = VK_NULL_HANDLE;
     }
     freeDeviceMemory(m_context.device(), m_memory);
+    m_memory = VK_NULL_HANDLE;
 }
 
 } // namespace engine

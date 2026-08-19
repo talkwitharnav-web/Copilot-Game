@@ -22,7 +22,7 @@ class VulkanContext;
 /// reading it.
 ///
 /// Copies are submitted on the graphics queue **before** the frame that reads
-/// them, and end with a barrier from transfer writes to vertex input reads.
+/// them, and end with a barrier from transfer writes to every graphics read.
 /// Queue submission order plus that barrier is what makes the data visible;
 /// there is no separate transfer queue and no semaphore.
 class UploadContext {
@@ -44,8 +44,6 @@ public:
     /// Blocks until submitted copies have completed. Only needed before
     /// destroying something they write into.
     void waitForCompletion();
-
-    bool hasPendingWork() const { return m_recording; }
 
     /// Submissions made, for confirming that batching is actually happening.
     std::size_t submissionCount() const { return m_submissions; }

@@ -83,6 +83,15 @@ constexpr float kTerminalVelocity = 78.4f;
 /// not high enough to clear two.
 constexpr float kJumpVelocity = 8.944f;
 
+/// The apex the line above claims, checked rather than asserted in prose:
+/// `v² / 2g` against the reference's own 1.2522 m (`RESEARCH.md` §1.5).
+/// **Changing either constant on its own fires this** - taking `kGravity` down
+/// to the 26 m/s² creatures currently use puts the apex at 1.54 blocks, which
+/// clears a block-and-a-half and turns every one-block wall into a step.
+static_assert(kJumpVelocity * kJumpVelocity / (2.0f * kGravity) > 1.24f &&
+                  kJumpVelocity * kJumpVelocity / (2.0f * kGravity) < 1.26f,
+              "the jump must clear one block and not two: apex ~1.25 m");
+
 } // namespace player_constants
 
 /// Position is the centre of the player's feet, which is the natural anchor for
@@ -152,6 +161,35 @@ struct Player {
     /// are never mistaken for one another.
     float hurtFlash = 0.0f;
 
+    /// **Durability owed to each worn armour piece, waiting to be collected.**
+    ///
+    /// The damage rule knows how much wear a blow caused; it does not know what
+    /// the player is wearing, because the armour lives in an `Inventory` and
+    /// `world/` has no business reaching into `item/` storage. So this is the
+    /// project's own "separate computing the result from applying it" rule made
+    /// concrete: the simulation banks what is owed, and whoever owns the
+    /// inventory drains it with `Inventory::wearArmour` and zeroes this.
+    ///
+    /// **A point here is per piece, not shared between them** - four pieces each
+    /// pay this whole number, which is the reference's rule and which
+    /// `wearArmour` implements.
+    ///
+    /// **Drained, and this said the opposite until 2026-08-19 evening.** It read
+    /// "Nothing drains it yet, so it climbs and is harmless: `wearArmour` is the
+    /// only consumer and it has no caller until the inventory screen can put
+    /// armour on." All three clauses are false. `Main.cpp` runs
+    /// `if (inventory.wearArmour(player.armourWear) > 0)` every frame, guarded on
+    /// positive, and armour goes on either by clicking an armour cell or by
+    /// right-clicking a held piece, both through `inventory.equipArmour`.
+    /// Cited by symbol rather than by line, deliberately - `Survival.hpp`'s armour
+    /// block explains why, but the short version is that the line numbers that
+    /// stood here had drifted by roughly +50 within hours of being written.
+    ///
+    /// **Still deliberately not saved.** Wear is banked between one frame and the
+    /// next and collected the same frame; there is nothing to persist. The
+    /// durability itself lives on the stacks, which are saved.
+    int armourWear = 0;
+
     /// How far it has dropped since it last stood on something. Fall damage is
     /// **change in Y, not speed**, which is why this is a distance.
     float fallDistance = 0.0f;
@@ -165,15 +203,91 @@ struct Player {
     float regenTimer = 0.0f;
     float starveTimer = 0.0f;
 
-    /// Everything a potion has put on the player. **Not saved**, which is the
-    /// reference's behaviour on death and ours on quitting; persisting it needs
-    /// a `player.dat` format bump and would drop existing inventories.
+    /// **How frozen, in seconds of exposure, and it is not a countdown.**
+    ///
+    /// Rises at real time while any cell the body occupies holds powder snow and
+    /// falls at `survival::kFreezeRecoveryRate` times real time once out, capped
+    /// at `survival::kFreezeOnsetSeconds` - which is Bedrock's `TicksFrozen`
+    /// counted in this file's own unit rather than in ticks (minecraft.wiki,
+    /// *Powder Snow*: "+1 every tick, to a maximum of 140 ... decreases at a
+    /// rate of 2 per tick after the entity leaves"). Damage starts at the cap,
+    /// so re-entering before it has drained resumes where it left off, which is
+    /// the sentence immediately after that one.
+    ///
+    /// **A ratio of this to the onset is what the frosty vignette and the cyan
+    /// hearts are drawn from**, and neither exists yet - both are the HUD's, and
+    /// this is the field they will want.
+    ///
+    /// **Not saved, deliberately.** Bedrock persists `TicksFrozen` on the
+    /// entity; quitting here thaws you. That is a divergence of at most seven
+    /// seconds of exposure, in the player's favour, and adding it to
+    /// `SavedPlayer` would cost a format rung for it.
+    float freezeSeconds = 0.0f;
+    /// The damage cadence once fully frozen. Its own timer rather than the
+    /// shared `hazardTimer`, because freezing is 40 ticks and every contact
+    /// hazard is 10 - `Survival.hpp` asserts the two apart.
+    ///
+    /// **It rests at `survival::kFreezeInterval`, not at zero**, so that the
+    /// first point lands *at* the seven-second onset rather than two seconds
+    /// after it. Anything that resets it to zero - the Creative early-out,
+    /// `respawnPlayer` - is resetting `freezeSeconds` to zero at the same time,
+    /// and the next frame primes this from the same branch, so zero is a
+    /// transient rather than a state the damage path can ever see.
+    float freezeTimer = 0.0f;
+
+    /// Everything a potion has put on the player.
+    ///
+    /// **Saved since 2026-08-19, and this note used to say the opposite.** It
+    /// read "Not saved, and that is a divergence rather than a match", went on
+    /// for three paragraphs about what the save record would need, and every
+    /// word of it is now false: `SavedPlayer` (`WorldStore.hpp`) carries
+    /// `std::array<SavedEffect, kSavedEffectSlots>` with `kSavedEffectSlots` =
+    /// 32, plus `absorption` and `absorptionSeconds` as plain floats, and
+    /// `Main.cpp` fills all three. Drink an eight-minute potion, quit, and it is
+    /// still running when you come back, with its amplifier and its remaining
+    /// duration - which is Bedrock's behaviour.
+    ///
+    /// **Clearing on death is still right and is a different rule.**
+    /// minecraft.wiki, *Death*, no edition tag: "The player also loses all
+    /// effects upon respawning, even when the game rule
+    /// `keep_inventory`/`keepinventory` is set to `true`." `respawnPlayer`
+    /// below does that; the save path does not, and the two must not be
+    /// confused for one another.
+    ///
+    /// **Nothing on this side is measured on disk, but this class's *count* is.**
+    /// The round trip runs on the public API - `Effects::all()` out,
+    /// `Effects::apply()` back in - so no field here is a record field. What
+    /// does cross over is `effects::kMaxActive`: the save site carries
+    /// `static_assert(effects::kMaxActive <= game::kSavedEffectSlots)`, so
+    /// widening `Effect` past 32 storable ids fails the build rather than
+    /// silently dropping effects from every save. `Effects.hpp` says so at
+    /// `kMaxActive`.
     effects::Effects effects;
     /// Their own cadences, because regeneration, poison and wither each run at
     /// an interval that depends on how strong they are - a shared timer would
     /// make Regeneration II tick at Regeneration I's rate.
     float effectHealTimer = 0.0f;
     float effectHurtTimer = 0.0f;
+
+    /// Absorption points still held, and the effect's remaining seconds as this
+    /// file last saw them.
+    ///
+    /// **A balance, not a level**, which is the whole reason it needs a field
+    /// rather than a call: `effects::absorptionPoints` returns what a grant is
+    /// *worth*, and the wiki says these points "cannot be replenished by
+    /// natural regeneration or other effects" (`minecraft.wiki/w/Absorption`).
+    /// So they are spent once and only a fresh grant restores them - which a
+    /// function of the running effects cannot express, because the effect is
+    /// still running at full level when the pool is empty.
+    ///
+    /// The second field is how a *fresh grant* is recognised without a hook at
+    /// the eat site (which lives in `Main.cpp` and is not ours to reach into):
+    /// `Effects::apply` is the only thing that can make the remaining seconds
+    /// go **up**, and the tick is the only thing that brings them down. A rise
+    /// is therefore exactly "it was applied again", and it catches the upgrade
+    /// (I to IV) and the top-up at the same level with one comparison.
+    float absorption = 0.0f;
+    float absorptionSeconds = 0.0f;
 
     /// How long the meal in hand has been going. Reset the moment the button
     /// comes up or the stack changes.
@@ -234,6 +348,66 @@ struct PlayerInput {
     /// rather than being read from the settings, because the physics has no
     /// business knowing what a game mode is.
     bool invulnerable = false;
+
+    /// **What the player is wearing, for the frame's hazards.** Same reasoning
+    /// as `invulnerable` directly above, and it is the reason this is an input
+    /// rather than a field on `Player`: the physics has no business knowing what
+    /// an `Inventory` is, and a copy living on `Player` would be saved to
+    /// `player.dat` and could come back stale against the armour actually worn.
+    ///
+    /// Refreshed from `Inventory::armourSet()` every frame by whoever owns the
+    /// inventory, exactly as `invulnerable` is refreshed from the game mode.
+    /// **Left at `kNoArmour` it means "naked", which is today's behaviour
+    /// exactly** - so nothing changes until it is filled in.
+    ///
+    /// Only the hazards armour actually reduces read it - lava, standing in
+    /// fire, magma and cactus. Suffocation, drowning, burning-over-time,
+    /// falling, starvation, freezing and the void ignore it by passing
+    /// `survival::kNoArmour` at their own call sites rather than by being
+    /// filtered here.
+    survival::ArmourSet armour{};
+
+    /// **Whether any worn piece is leather, and whether the boots specifically
+    /// are.** Two flags rather than one, because powder snow states two
+    /// different rules against two different sets and they are not
+    /// interchangeable - a leather cap with iron boots is immune to freezing and
+    /// still falls in. minecraft.wiki, *Powder Snow*: "Wearing any piece of
+    /// leather armor stops the freezing effect", and separately "Entities
+    /// wearing leather boots ... do not fall through powder snow."
+    ///
+    /// **Why they are not derivable from `armour` above.** That carries defence
+    /// points and toughness - a number, not a material - so the set that gives 3
+    /// defence could be leather boots or gold ones, and `ArmourSet` must not
+    /// grow a material field for the same reason it has none now: the physics
+    /// has no business knowing what an `ItemId` is. These are two booleans for
+    /// the same reason `invulnerable` is one.
+    ///
+    /// **Boots imply leather, and the reader ORs them rather than trusting a
+    /// filler to know that** - `Player.cpp` tests `leatherBoots || leatherArmour`
+    /// for freezing immunity, so a caller that sets only the narrower flag still
+    /// gets the wider rule. Belt as well as braces, and it costs one `||`.
+    ///
+    /// **Filled since 2026-08-19 11:27, and this note used to say they were
+    /// not.** It read *"nothing changes until whoever owns the inventory fills
+    /// them"* - true when written, and a trap the moment it stopped being.
+    /// `Main.cpp` now sets both in the same frame as `armour` above; grep
+    /// `move.leatherArmour` for the pair. **Do not add a second filling site** -
+    /// an unmet-looking spec in a header is exactly how one field acquires two
+    /// writers, and this paragraph was one reader away from causing it.
+    ///
+    /// **The filler is careful in a way worth not undoing.** It walks all
+    /// `kArmourSlots` and compares `armourMaterial(worn.item)` against
+    /// `armourMaterial(ItemId::LeatherHelmet)` rather than against `0`, guarding
+    /// that test with `isArmour` - because `armourMaterial` is
+    /// `(item - LeatherHelmet) / 4` and C++ truncates a negative quotient toward
+    /// zero, so any id in the three slots below `LeatherHelmet` would otherwise
+    /// read as leather out of a hand-edited `player.dat`.
+    ///
+    /// **What would falsify this note:** more than one assignment to
+    /// `move.leatherArmour`, or `Player.cpp` ceasing to test
+    /// `leatherBoots || leatherArmour`.
+    bool leatherArmour = false;
+    bool leatherBoots = false;
 };
 
 /// Advances the player by one frame against the world.
@@ -246,10 +420,27 @@ void updatePlayer(Player& player, const PlayerInput& input, const World& world, 
 /// **The one way the player takes damage**, and the only place the half-second
 /// invulnerability window is applied.
 ///
-/// Returns whether anything actually landed. `bypassInvulnerability` is for the
-/// handful of sources the reference exempts - starvation and the void - which
-/// are not blows and must not be shrugged off by having just taken one.
-bool damagePlayer(Player& player, int amount, bool bypassInvulnerability = false);
+/// **`true` means "a hit landed", not "health went down"**, and the two have
+/// genuinely come apart: Resistance can round a small blow to nothing, and
+/// Absorption can swallow a large one whole, while both still flash, still cost
+/// exhaustion and still arm the window. That is the reference's own split
+/// between deciding a hit happened and deciding what it costs (`RESEARCH.md`
+/// §2.4), and it is the answer every plausible consumer wants - knockback,
+/// aggro, hit sounds and statistics all follow the *hit*, which is why the
+/// reference knocks you back under Resistance. A caller that genuinely needs
+/// "did the health bar move" must compare `player.health` across the call;
+/// nothing does today, so this returns one value rather than two.
+///
+/// `bypassInvulnerability` is for the handful of sources the reference exempts
+/// - starvation and the void - which are not blows and must not be shrugged off
+/// by having just taken one.
+/// `armour` is **what protects against this particular blow**, not simply what
+/// is worn: a source armour does not reduce passes `survival::kNoArmour`, and
+/// so does a naked player. See `survival::ArmourSet` for why those two are
+/// deliberately the same value. Passing a real set also charges durability into
+/// `player.armourWear` for the inventory's owner to collect.
+bool damagePlayer(Player& player, int amount, bool bypassInvulnerability = false,
+                  survival::ArmourSet armour = survival::kNoArmour);
 
 void healPlayer(Player& player, int amount);
 

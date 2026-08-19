@@ -97,7 +97,72 @@ constexpr std::uint8_t professionForJobSite(BlockId id) {
     return 0;
 }
 
-/// What a villager is called, for the debug overlay and nothing else.
+/// What a villager is called.
+///
+/// **Nothing calls this, and in particular it is NOT in the debug overlay -
+/// which is what this comment claimed until 2026-08-19.** The claim was false
+/// and it is the dangerous kind of false, because it describes a feature a
+/// reader can go and look for: `CLAUDE.md` bug shape #16, a comment that is
+/// wrong while the code is right, which every review passes. Anyone checking
+/// "can I tell a Farmer from a Toolsmith?" would have read this line, gone to
+/// the overlay, found nothing, and been left doubting the overlay rather than
+/// the note.
+///
+/// **The profession itself is entirely live** - which is why this is a missing
+/// reader and not dead code. `professionForJobSite` resolves thirteen trades
+/// plus Nitwit from the claimed job block, `Creature.cpp` assigns it when a
+/// villager takes a station and clears it when the station goes, it is written
+/// to and read from the save, and `villagerSkinRow` already dresses the
+/// villager in the right outfit. So the game knows this one is a Cleric and
+/// draws it as a Cleric, and has no way to say so in words.
+///
+/// **Player consequence:** you can tell professions apart by robe colour and by
+/// nothing else - no name plate, no overlay line, no trade screen title.
+///
+/// The reader belongs in `Main.cpp`, which owns every screen; see the finding
+/// filed against it. Kept here rather than deleted because this is the one file
+/// that knows what a profession is called, and because deleting it would mean
+/// writing the same fourteen strings again the day the overlay wants them.
+///
+/// **What would make this note wrong**, in one grep: any hit for
+/// `professionName` outside this definition and the comment in `Creature.cpp`
+/// that discusses the `default:` arm below. **Re-run 2026-08-19 11:29 against
+/// `Main.cpp` with a two-sided control: still zero hits, so the claim holds.**
+/// Re-run it rather than trusting this line — a negative claim is the kind that
+/// rots, because the world only has to move once and nothing tells the comment.
+///
+/// **An absence claim can never have a claim control**, because the whole
+/// content of the claim is that there is nothing there to measure. So the only
+/// evidence available is *instrument* controls — probes with known answers,
+/// proving the detector can see. Two are needed and neither alone is enough:
+///   1. **Same symbol, different file** — search `professionName` where it is
+///      known present, which is the definition below. Measured 1. This is the
+///      strongest kind, because it is the only probe that proves the detector
+///      can see *this exact token*; a different-symbol control cannot, and would
+///      fire happily while a broken pattern for this name returned zero.
+///   2. **Different symbol, same file** — search a name known present in
+///      `Main.cpp`, proving the probe can read that file at all. `CreatureKind`
+///      measured 12 over 12118 comment-stripped lines.
+/// Control 2 alone is how a sister finding was wrongly refuted on 2026-08-19: a
+/// true count of a *neighbouring* symbol is the most persuasive way to be wrong,
+/// because every digit checks out. **Print the lines probed as well as the
+/// hits**, and *compute* that figure rather than narrating it — a hardcoded
+/// "3 of 4" was written here at 11:32 when the answer was 2 of 4.
+///
+/// ⚠️ **And ask one question before either control, because no control can
+/// reach it: is this token the only way the concept could be spelled?** Measured
+/// the same day: `BeeNest` returns 0 in `Structures.cpp` while both controls
+/// fire correctly (45 in-file, 39 same-symbol elsewhere) — and the feature is
+/// right there, spelled `beeNestChance` and `beeNestAtLevel`, 11 hits
+/// case-insensitively. Claim false, instrument perfect, both controls green.
+/// **Search case-insensitively first and narrow afterwards**, and list the hits
+/// rather than counting them.
+///
+/// ⚠️ **And do not read "1 in the header, 0 in the .cpp" as a missing
+/// definition** — that inference was drawn and retracted on 2026-08-19 11:30.
+/// This is `constexpr` and defined inline right here, so a caller links fine;
+/// the count cannot tell a declaration from an inline definition, and the
+/// disambiguator is one character, `;` against `{`.
 constexpr const char* professionName(std::uint8_t profession) {
     switch (profession) {
     case 1:
@@ -166,6 +231,27 @@ constexpr VillagerPhase villagerPhaseAt(float dayFraction) {
 }
 
 /// Which animal this is.
+///
+/// ⚠️ **`Village.hpp` forward-declares this enum** — `enum class CreatureKind :
+/// std::uint8_t;` — so a pen can name the species standing in it without
+/// pulling this header into every translation unit that builds a tree.
+/// `Structures.hpp` includes `Village.hpp`, so the include would cost far more
+/// than the one field is worth.
+///
+/// **The constraint, stated rather than the world:** this enum must keep a
+/// fixed underlying type identical to the one in that declaration, and must
+/// stay directly in `namespace game`. Changing either is the edit that breaks
+/// it — which is why the warning is here, in the file that would do the
+/// breaking, rather than only over there where it would never be read.
+///
+/// **It cannot break silently.** `Village.cpp` includes both headers, so the
+/// compiler sees the opaque declaration and this definition together and a
+/// disagreement is a hard error. The reason to read this first is that the
+/// error will name a file you did not edit.
+///
+/// **Falsified by:** `Village.hpp` losing its `CreatureKind` declaration, or
+/// gaining `#include "world/Creature.hpp"` — either makes this note dead
+/// weight and it should be deleted. Written 2026-08-19.
 enum class CreatureKind : std::uint8_t {
     Sheep,
     Cow,
@@ -258,6 +344,36 @@ enum class CreatureKind : std::uint8_t {
     Count,
 };
 
+/// Whether a raw number off a save is a real `CreatureKind`.
+///
+/// **One owner for "is this id legal", because four readers each remembering
+/// the range is four chances to forget it.** `SavedCreature::kind` is a plain
+/// `std::int32_t` on purpose - a number off a disk is not an enumerator, and a
+/// truncated, stale or hand-edited record can hold anything at all. Casting one
+/// out of range to `CreatureKind` and handing it to `speciesInfo` indexes the
+/// species table past its end, which is a read of whatever memory follows an
+/// eight-hundred-row constant array: not a crash you can find, just a creature
+/// with someone else's health and a body box out of nowhere.
+///
+/// Signed and widened deliberately. Taking `std::int32_t` is what lets this
+/// catch a **negative** id, which is the half a naive `< Count` test on an
+/// unsigned or enum-typed value silently converts into a very large positive
+/// one and waves through.
+///
+/// The single edit that makes the asserts below fail is giving `CreatureKind` a
+/// value after `Count`, or changing this to take the enum type - either turns
+/// the negative case back into the hole it used to be.
+constexpr bool isKnownCreatureKind(std::int32_t kind) {
+    return kind >= 0 && kind < static_cast<std::int32_t>(CreatureKind::Count);
+}
+
+static_assert(isKnownCreatureKind(0), "the first species is a legal id");
+static_assert(isKnownCreatureKind(static_cast<std::int32_t>(CreatureKind::Count) - 1),
+              "the last species is a legal id");
+static_assert(!isKnownCreatureKind(static_cast<std::int32_t>(CreatureKind::Count)),
+              "one past the end is not");
+static_assert(!isKnownCreatureKind(-1), "and neither is a negative off a corrupt record");
+
 /// What a creature currently wants to attack.
 ///
 /// **Written by the targeting behaviours and read by the attacking ones.** That
@@ -347,6 +463,39 @@ struct CreatureSpecies {
 
     /// Collision box. Deliberately narrower than the body looks, so a creature
     /// never wedges in a gap the player can walk through.
+    ///
+    /// **`height` is `minecraft:collision_box.height` from `Mojang/bedrock-samples`,
+    /// raw and unscaled. `modelScale` is `minecraft:scale`. The two are
+    /// INDEPENDENT and neither is ever folded into the other** (2026-08-19).
+    ///
+    /// That is measured rather than asserted stylistically: `height` is read by
+    /// the collision box, the eye at `height * 0.85f`, `kUnstickReach`, the
+    /// cramming span and the light sample - always against `creature.scale`, the
+    /// per-entity baby factor, and **never against `modelScale`**. `modelScale`
+    /// appears only inside the model builder, on `netW/netH/netD * kTexel`
+    /// geometry. **Villager is the proof they are independent**: height 1.9 with
+    /// modelScale 0.92, and 1.9 is Bedrock's box exactly, so the scale plainly
+    /// is not baked in.
+    ///
+    /// **Two rows had the scale multiplied into `height` and both were wrong**,
+    /// found and fixed 2026-08-19: pufferfish carried 0.96 = 0.8 x 1.2 and
+    /// tropical fish 0.52 = 0.4 x 1.3, against JSON boxes of 0.8 and 0.4. It is
+    /// `CLAUDE.md` bug shape #3 - a number ported into a field measured in a
+    /// different unit - and it is invisible, because a slightly tall hitbox
+    /// looks like nothing at all. **Both rows' `halfWidth` was already correct
+    /// (0.28 and 0.20), which is what made the pair diagnosable**: a scale folded
+    /// into one axis and not the other cannot be a deliberate choice.
+    ///
+    /// So when adding or checking a row, read `collision_box` out of that
+    /// entity's JSON and put it here unmultiplied. What would make this note
+    /// false: a reader of `height` appearing that also multiplies by
+    /// `modelScale`, at which point the fields are no longer independent and
+    /// every row wants revisiting together.
+    ///
+    /// **Widths are NOT all Bedrock and that is a separate, open gap** - sheep
+    /// is 0.64 against 0.9, pufferfish 0.56 against 0.8, Blackbone 0.60 against
+    /// 0.72. Filed rather than swept in with the heights, because a width change
+    /// moves what fits through a gap and wants its own decision.
     float halfWidth;
     float height;
 
@@ -395,6 +544,22 @@ struct CreatureSpecies {
     /// Spawning. Nocturnal species appear only when the sun is down and refuse
     /// to spawn near a light source, which is what makes torches worth placing.
     bool nocturnal;
+    /// The brightest **block light**, 0-15, a species will still spawn in, and
+    /// it is an **inclusive maximum** - `manage` rejects a candidate cell when
+    /// `blockLightAt(...) > maxBlockLight`, so 6 means "spawns at 6, not at 7".
+    /// 15 is the way a row says "no light rule at all".
+    ///
+    /// **The reference's own field is `minecraft:spawn_rules`'
+    /// `brightness_filter`, whose hostile default is `{min: 0, max: 7}`**
+    /// (`Mojang/bedrock-samples`, `behavior_pack/spawn_rules/zombie.json` and
+    /// `creeper.json`; Microsoft's schema documents `max` as inclusive). Our
+    /// hostile rows sit at 6 rather than 7, which is one level stricter.
+    /// **That gap is deliberate only in the sense that it is unresolved**:
+    /// minecraft.wiki's *Mob spawning* prose contradicts the schema, saying
+    /// monsters cannot spawn when "the block light level is greater than 0" at
+    /// all, which would be stricter still. Two sources, three answers - so the
+    /// rows were left where they play well and this note records why, rather
+    /// than one of the three being picked and dressed up as the reference.
     int maxBlockLight;
     /// Relative likelihood among the species allowed at a candidate spot.
     float weight;
@@ -485,6 +650,18 @@ struct CreatureSpecies {
     /// fleece there, and it is why a flock leaves bare dirt behind it.
     bool grazes = false;
 
+    /// Works a flower for nectar and carries it home to a hive, which on the
+    /// shipped roster is the **bee alone**. Bedrock spells this as four goals
+    /// on `bee.json` - `look_for_food`, `go_home`, `find_hive` and the
+    /// `has_nectar` component group - and ours is one behaviour holding the
+    /// same state machine, for the same reason `Work` is one row rather than
+    /// the villager's five.
+    ///
+    /// **This is the only thing in the game that puts honey in a hive.** Clear
+    /// it and honeycomb becomes unobtainable again, taking the honeycomb block,
+    /// the candle and all four waxed-copper stages with it.
+    bool pollinates = false;
+
     /// How high a rise it simply walks up, and how high it can jump when one is
     /// taller than that. **These are two different mechanisms and the reference
     /// keeps them apart deliberately**: `step_height` is 0.6 for almost
@@ -504,13 +681,36 @@ struct CreatureSpecies {
     /// What a descent is multiplied by each tick while airborne, or 1 for a
     /// normal fall. **This is the chicken**, and it is the whole of why one can
     /// be dropped off a cliff and walk away: 0.6 per tick gives a terminal
-    /// descent under 2 m/s against the 60 everything else reaches. It flaps
+    /// descent of 2.4 m/s against the 78.4 everything else reaches. It flaps
     /// while it does it, and the flapping is driven by the same airborne state
     /// rather than being a separate animation.
+    ///
+    /// **Fall damage is `ignoresFallDamage` below, not this.** It used to be
+    /// charged against `fallDrag < 1` on the reasoning that a parachute and an
+    /// immunity should not be separable - which read well and was wrong, because
+    /// the reference's immunity list has nine of ours on it and only one of them
+    /// glides.
     ///
     /// Applies to chicks exactly as it does to adults - `scale` never enters
     /// into it, which is the reference's behaviour too.
     float fallDrag = 1.0f;
+
+    /// Takes no fall damage at all, however far it drops.
+    ///
+    /// **A list, not a derivation**, because the reference's is: `RESEARCH.md`
+    /// §1.10's "fully immune" line names magma cube, bee, cat, chicken, iron
+    /// golem and ocelot among the species we have - and pointedly *not* the
+    /// slime, which is the ordinary-looking neighbour a derivation would have
+    /// swept in. Nine species, six rows, no rule connecting them.
+    bool ignoresFallDamage = false;
+
+    /// Health subtracted from a fall before it is charged, in points.
+    ///
+    /// The reference's two named softenings, `RESEARCH.md` §1.10: a goat takes
+    /// ten less and a frog five, always. It is a subtraction from the *damage*
+    /// rather than from the distance, which is what "takes 10 HP less" says and
+    /// is not the same thing as the safe distance below it.
+    int fallDamageReduction = 0;
 
     // --- Water. Bedrock keeps these on two different components and they mean
     // --- genuinely different things, so they are four flags rather than one
@@ -767,6 +967,11 @@ static_assert(kSpawnEggItems == static_cast<int>(CreatureKind::Count),
 /// The egg that produces this species, and the species an egg produces. The two
 /// runs are deliberately the same order, so this is arithmetic rather than a
 /// thirty-six row table nobody would keep in step.
+///
+/// **That sentence used to be the only thing standing behind the pair**, and a
+/// claim of correctness with nothing testing it is `CLAUDE.md` bug shape #11 -
+/// the shape where eleven `static_assert`s passed while pointing at the wrong
+/// texture. `spawnEggsRoundTrip` below is the test it was missing.
 constexpr ItemId spawnEggFor(CreatureKind kind) {
     return spawnEggForIndex(static_cast<int>(kind));
 }
@@ -775,6 +980,91 @@ constexpr ItemId spawnEggFor(CreatureKind kind) {
 constexpr CreatureKind creatureForSpawnEgg(ItemId item) {
     return static_cast<CreatureKind>(spawnEggIndex(item));
 }
+
+/// **Every species' egg maps back to that species.** Walks all of
+/// `CreatureKind` rather than sampling, because the failure this guards against
+/// is a one-place slip that is invisible on either side of itself.
+///
+/// **Why the pair genuinely can break, which is what stops this being
+/// ceremony.** The eggs are not one run: `kSpawnEggLayers` is 36 and
+/// `kExtraSpawnEggLayers` is 22, and **thirteen ids sit between them** - eleven
+/// resources from `Coal` to `Redstone`, then `Bucket` and `WaterBucket`. Both
+/// directions therefore carry the same piecewise arithmetic written twice, in
+/// opposite directions, in a file that cannot see this one. Add a species and
+/// the second run grows; add a resource in the wrong place and the runs move
+/// apart. Nothing in either file compares them.
+///
+/// **This asserts the expression the real readers evaluate**, not one side of
+/// it against itself. `Item.hpp`'s creative-inventory build calls
+/// `spawnEggForIndex`, and `Main.cpp`'s place path calls `creatureForSpawnEgg`;
+/// composing them is exactly what the game does when you take an egg out of the
+/// menu and put it on the ground. `isSpawnEgg` is in the loop for the same
+/// reason - `creatureForSpawnEgg` is documented as meaningful only where that
+/// holds, so a round trip through an id the game would not recognise as an egg
+/// is not a round trip the player can make.
+///
+/// **A `constexpr` assert over two `constexpr` functions can never rot.** It is
+/// the same argument `foodTablesAgree()` rests on, and it is why this is worth
+/// more than the comment it replaces.
+constexpr bool spawnEggsRoundTrip() {
+    for (int i = 0; i < static_cast<int>(CreatureKind::Count); ++i) {
+        const ItemId egg = spawnEggFor(static_cast<CreatureKind>(i));
+        if (!isSpawnEgg(egg) || spawnEggIndex(egg) != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// **THE CONTROL, and it differs from the claim in exactly one variable**: the
+/// forward run, and nothing else. Same loop, same `spawnEggIndex`, same
+/// `isSpawnEgg`, same bound - only the two-run formula is replaced by the
+/// single-run one somebody would write if they forgot the eggs are in two
+/// pieces.
+///
+/// **It is not vacuous, and here is the arithmetic that says so.** It agrees
+/// with the real formula for the first 36 species and disagrees for the
+/// remaining 22, so it fires on 22 of 58 rather than on none or on all. The
+/// first disagreement is at index 36, where the real run gives the drowned's
+/// egg and this one gives `Coal`; by index 49 it has walked into the *second*
+/// egg run and starts returning real eggs belonging to the wrong species, which
+/// is the failure that would actually reach a player.
+///
+/// **A control that passed here would mean the second run is empty**, so the
+/// bound is asserted separately below rather than left to be assumed.
+constexpr ItemId spawnEggForIndexOneRun(int kindIndex) {
+    return static_cast<ItemId>(static_cast<int>(ItemId::SpawnEggFirst) + kindIndex);
+}
+
+constexpr bool spawnEggsRoundTripOneRun() {
+    for (int i = 0; i < static_cast<int>(CreatureKind::Count); ++i) {
+        const ItemId egg = spawnEggForIndexOneRun(i);
+        if (!isSpawnEgg(egg) || spawnEggIndex(egg) != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(spawnEggsRoundTrip(),
+              "every spawn egg must produce the species whose egg it is");
+static_assert(!spawnEggsRoundTripOneRun(),
+              "the control must FAIL - if a single-run formula round trips, this file is "
+              "proving nothing about the two-run one the game actually uses");
+static_assert(kExtraSpawnEggLayers > 0,
+              "the control above is only non-vacuous while there is a second egg run");
+
+/// The seam itself, named rather than merely covered by the loop. `Princepin`
+/// is index 35 and the last egg of the first run; `Drowned` is 36 and the first
+/// of the second. **A whole-range loop passes just as happily when the boundary
+/// is off by one in both directions at once**, so the two ids either side of it
+/// are worth stating outright - and stating them is what makes a later reader
+/// who moves a species see which two rows they have to re-check.
+static_assert(creatureForSpawnEgg(spawnEggFor(CreatureKind::Princepin)) ==
+                      CreatureKind::Princepin &&
+                  creatureForSpawnEgg(spawnEggFor(CreatureKind::Drowned)) ==
+                      CreatureKind::Drowned,
+              "the last egg of the first run and the first of the second both round trip");
 
 /// "Sheep Spawn Egg". Lives here because this is the one place that knows what
 /// a species is called, and returns a stable pointer so the tooltip can hold it.
@@ -804,6 +1094,29 @@ struct CreatureAttack {
 /// rewrites terrain, and **only the main thread may mutate the world**. So the
 /// creature decides *that* it went off and where, and somebody else decides
 /// what that does to the blocks.
+///
+/// **DO NOT ADD `bool fromTnt` HERE. It was asked for, it is no longer needed,
+/// and adding it now would be a second answer to a question that already has
+/// one.** The history is worth two lines because the request is written down in
+/// another file and a reader will meet it: a charge drops everything it breaks
+/// and a creeper drops one block in `power`, so the roll site has to tell them
+/// apart, and for a while the only way to say so was a field on this struct.
+/// `Explosion.hpp`'s `explosionDropChance` still describes that as the missing
+/// piece. **It is stale.** `Main.cpp` solved it without touching this type, and
+/// solved it better: that file owns the vector, appends every creeper first and
+/// every charge afterwards, records the boundary in `creeperBlasts`, and reads
+/// `blastIndex >= creeperBlasts` at the one site that needs the answer.
+///
+/// So a field here would not be wired to anything. It would sit at its default,
+/// look authoritative, and the next reader to set it at a `push_back` would
+/// believe the roll had read it - while the roll went on reading the index.
+/// That is `CLAUDE.md` bug shape #1 exactly, a value derived somewhere other
+/// than the one place that owns it, and it is worse than the gap it closes.
+///
+/// **What would make this note wrong**, so it can be checked rather than
+/// trusted: `creeperBlasts` disappearing from `Main.cpp`, or a second producer
+/// appending to that vector after it is taken. Verified by enumeration on
+/// 2026-08-19 - the vector has exactly one `push_back` in the file.
 struct CreatureExplosion {
     glm::vec3 centre{0.0f};
     float power = 0.0f;
@@ -842,6 +1155,112 @@ struct CreatureVoiceEvent {
     float scale = 1.0f;
 };
 
+/// What took the last point of health.
+///
+/// **`Unknown` existing at all is the whole point of this enum.** `threatId`
+/// below cannot answer "did a player do this?", because zero there means both
+/// *the player* and *nobody ever hurt it* - so a sheep that drowned, a zombie
+/// that burned off at dawn and a rabbit the player shot all end up looking
+/// identical. Reading `threatId == 0` as a player kill would hand every
+/// environmental death a rare-drop roll. Here the two are separate values, and
+/// nothing that did not actually strike a blow can ever read as `Player`.
+enum class DeathCause : std::uint8_t {
+    /// Nothing has hurt it, or nothing has hurt it since it was created.
+    Unknown,
+    /// A player's own swing or a player's arrow. **Not** an id of zero: this is
+    /// written positively, by the site that landed the blow.
+    Player,
+    /// Another creature - `DeathContext::killerId` names which.
+    Creature,
+    Burning,
+    Drowning,
+    DryingOut,
+    /// Buried in solid terrain and unable to climb out. Distinct from drowning
+    /// even though both are "cannot breathe", because the drops differ by cause
+    /// and a body dug out of a hillside is not a body pulled from a lake.
+    Suffocation,
+    Lightning,
+    Explosion,
+    /// A landing hard enough to hurt. Recorded by `step`, which is the only
+    /// site that knows how far the body actually fell.
+    Falling,
+    /// Crushed where it stood by a block that fell **on** it - an anvil, today.
+    ///
+    /// **Deliberately not `Falling`.** That one means the body's own landing and
+    /// its comment names `step` as the only site that writes it; a second writer
+    /// would have made that true sentence false, which is this project's most
+    /// expensive kind of defect because every review passes it. The two are also
+    /// genuinely different events - one is a mob hitting the ground, the other
+    /// is the ground hitting a mob - and nothing that reads a cause should have
+    /// to guess which happened.
+    ///
+    /// No loot flag tests this, so an anvil kill pays ordinary drops and no
+    /// player rares, which is correct: `LootFlag::PlayerKill` fires only on
+    /// `DeathCause::Player`.
+    ///
+    /// **Staged, and unreferenced apart from this line as of 2026-08-19** - a
+    /// bare-name search finds exactly one hit, which is this definition. That is
+    /// deliberate and is not the "one call site short of existing" shape three
+    /// separate findings hit tonight: `hurtInBox` takes the cause as an
+    /// *argument*, so the only place this name can appear is the caller, and
+    /// the caller is `Main.cpp`'s falling-block drain, which belongs to another
+    /// owner. **What would make this note false:** that one line landing. Until
+    /// it does, an anvil hurts the player and nothing else - so if you are
+    /// reading this because a pig survived an anvil, the gap is there and not
+    /// here.
+    CrushedByBlock,
+};
+
+/// The facts about a death that are gone by the time it pays out.
+///
+/// `cause` and `killerId` are overwritten by **every** blow, so the last one
+/// wins - which is the reference's rule: what a mob drops is decided by the
+/// killing blow and not by whatever hurt it first. `burning` and `place` are
+/// latched once, on the tick health crosses zero, and read a full second later
+/// when the body is retired (`kDeathSeconds`).
+///
+/// Latched rather than asked for, because by then there is nothing left to ask.
+/// A corpse skips `think` entirely, so no clock on it still runs; the sun-burn
+/// branch that set it alight is behind a `health > 0` test and would have put
+/// it out; and the blow that killed it was resolved a second ago in a function
+/// that has already returned.
+struct DeathContext {
+    DeathCause cause = DeathCause::Unknown;
+    /// Which creature struck the last blow, when `cause` is `Creature`. Zero
+    /// otherwise - and unlike `threatId`, a zero here is **never** the player,
+    /// because `cause` says that instead.
+    std::uint32_t killerId = 0;
+    /// Where it died, in sixteenths of a block, x and z. **The drop hash reads
+    /// this and never `position`**, and that is the whole reason a drop is a
+    /// pure function of the death rather than of how long the body lay there.
+    ///
+    /// `separate` shoves corpses exactly as it shoves the living - a body in a
+    /// herd drifts for the full `kDeathSeconds` before it is retired - and that
+    /// shove is per-frame explicit Euler, so hashing the position at retirement
+    /// put the frame-rate dependence straight back into the one case that
+    /// matters most: killing one animal inside a herd.
+    glm::ivec2 place{0};
+    /// Was it on fire as it died? Bedrock's whole `burn` condition is this one
+    /// bit - "only when on fire" - and it is what turns raw meat into cooked.
+    /// Java additionally counts a Fire Aspect weapon; we have no enchanting, so
+    /// the simpler rule is also the complete one.
+    bool burning = false;
+
+    /// Set on the tick health crosses zero, after which `cause` and `killerId`
+    /// stop moving.
+    ///
+    /// **The last-blow-wins rule has an end, and it did not have one.** A body
+    /// lies there for `kDeathSeconds` before it pays out, and `step` keeps
+    /// running on it - so anything in `step` that records a cause was still
+    /// rewriting the answer a second after the fight was over. Drowning was the
+    /// live case: a cow killed at the water's edge toppled in, went on taking a
+    /// point a second, and paid out as the sea's kill with `killerId` cleared,
+    /// which costs the player every rare drop. The hazards refuse a corpse
+    /// outright now; this makes the *record* immutable as well, so the next one
+    /// added cannot reopen it.
+    bool latched = false;
+};
+
 /// A living thing in the world.
 ///
 /// The **general entity** dropped items deliberately were not: it has size, so
@@ -869,7 +1288,21 @@ struct Creature {
     /// Who last hurt it. Zero means the player, which is the common case and
     /// the one the whole grudge system was built around. Only meaningful while
     /// `provokedTimer` is running.
+    ///
+    /// **Not what the drop table reads** - see `death` below and the note on
+    /// `DeathCause::Unknown` for why zero cannot answer that question.
     std::uint32_t threatId = 0;
+
+    /// What last hurt it, and how. Written by every one of the **eight** sites
+    /// that reduces `health`, so the killing blow is still known a second later
+    /// when the body is retired and pays out.
+    ///
+    /// The eighth was missed and cost a music disc: a Bramble that detonates
+    /// sets its own health to zero, and recorded nothing - so a Bramble a
+    /// skeleton had merely wounded, minutes earlier, still read as a skeleton
+    /// kill when it blew itself up beside the player. **Any site that lowers
+    /// `health` records, including the ones that do it to themselves.**
+    DeathContext death{};
 
     /// Counts down the 1.8 s of a graze. The reference's `time_until_eat`, and
     /// the block is taken when it reaches zero rather than when it starts, so
@@ -901,9 +1334,9 @@ struct Creature {
 
     /// Where a jetting creature is in its pulse, from 0 to two pi, and how much
     /// push it still has from the last one. Only `jets` species use them. The
-    /// phase is seeded at random on the first tick so a group does not pulse in
-    /// unison, which is the one thing that would make eight squid read as one
-    /// machine.
+    /// phase is seeded at random **when the creature enters the population**, so
+    /// a group does not pulse in unison, which is the one thing that would make
+    /// eight squid read as one machine.
     float jetPhase = 0.0f;
     float jetPower = 0.0f;
 
@@ -1044,7 +1477,10 @@ struct Creature {
 
     /// How long this individual has been alive, for idle motion that runs
     /// whether or not it is going anywhere. Per creature rather than a world
-    /// clock so a crowd does not sway in unison.
+    /// clock so a crowd does not sway in unison - which needs it **seeded**, not
+    /// merely stored: `add` starts every creature at a random point in the sway
+    /// cycle, because starting them all at zero is a world clock with extra
+    /// steps. Nothing reads it as a duration, so it is not worth saving.
     float age = 0.0f;
 
     /// How far the **drawn** body is still lagging below where the collision
@@ -1076,6 +1512,24 @@ struct Creature {
     int health = 6;
     /// Brief flash after being struck.
     float hurtTimer = 0.0f;
+
+    /// The damage window, and the pair that make it work - **the same rule the
+    /// player pays, and now literally the same code**: both go through
+    /// `survival::chargeDamageWindow` and `survival::tickDamageWindow`, which
+    /// own the rule so that neither entity has to restate it. Inside the window
+    /// a blow no larger than `lastDamage` is ignored outright and a larger one
+    /// lands only the difference; the timer is not restarted by either, or a
+    /// stream of escalating blows holds the creature immune forever.
+    ///
+    /// Deliberately **not** `hurtTimer`, which is 0.35 s and cosmetic. The two
+    /// were one number here for twenty milestones, which is why a pack could
+    /// delete an animal in a single tick while the player standing beside it
+    /// took two hits a second from the same pack.
+    float invulnerableSeconds = 0.0f;
+    /// The blow the running window is measured against. Cleared with the window
+    /// by `survival::tickDamageWindow`, so it can never suppress a hit after it
+    /// has expired.
+    int lastDamage = 0;
     /// How long it has been dead, in seconds. `health <= 0` is what starts it
     /// running; the body tips over onto its side while it counts, and is
     /// retired by `manage` once it is done. Alive creatures leave it at zero.
@@ -1141,6 +1595,14 @@ struct Creature {
     /// real escape.
     float burnTimer = 0.0f;
 
+    /// Seconds accumulated toward the next point of suffocation damage, for a
+    /// body that is inside solid terrain **and could not climb out of it**.
+    ///
+    /// Reset the moment it is free rather than paused, exactly as `burnTimer`
+    /// is: being briefly clipped by a closing door should cost nothing, and
+    /// only a burial that persists across the interval should ever land a hit.
+    float suffocateTimer = 0.0f;
+
     /// Struck by lightning, in the reference. **Doubles the blast power and
     /// nothing else** - a charged creeper has the same twenty health as any
     /// other, which is worth stating because the obvious guess is that it is
@@ -1192,6 +1654,38 @@ struct Creature {
     /// lockstep.
     float phaseDelay = 0.0f;
 
+    /// A bee's home hive or nest, on the same `y < 0 means none` convention as
+    /// the three village cells above - which is why it is spelled the same way
+    /// rather than carrying a `bool` beside it.
+    ///
+    /// **Deliberately not saved.** `SavedCreature` is a fixed, trivially
+    /// copyable record and widening it costs a `kCreatureVersion` bump that
+    /// throws away every existing population; a reloaded bee simply searches
+    /// again and re-latches within a few seconds, and the hive's honey level is
+    /// in the chunk, which *is* saved. Nothing about the honey chain depends on
+    /// this surviving a restart.
+    glm::ivec3 hiveCell{0, -1, 0};
+    /// The flower it is working, on the same convention. Remembered rather than
+    /// re-scanned, so the box search runs on a cadence instead of every frame,
+    /// and cleared the moment the flower is picked out from under it.
+    glm::ivec3 flowerCell{0, -1, 0};
+    /// Whether it is carrying nectar. Bedrock's `minecraft:has_nectar` boolean
+    /// property, and it is the switch the whole cycle turns on: without it the
+    /// bee looks for flowers, with it the bee looks for home.
+    bool hasNectar = false;
+    /// Counts down `look_for_food`'s `stay_duration` while the bee is settled on
+    /// a flower. Like `eatTimer` the payoff lands when it **reaches zero**, so a
+    /// bee knocked off its flower half way through gets no nectar.
+    float pollinateTimer = 0.0f;
+    /// Rate-limits the hive search, which is the one expensive scan a bee does.
+    /// Only ever runs while `hiveCell.y < 0`, so a bee that has a home never
+    /// pays for it at all.
+    float hiveSearchTimer = 0.0f;
+    /// And the flower search, on the wander cadence rather than the hive's - a
+    /// far smaller box, and a bee that has lost its flower should find the next
+    /// one in seconds rather than in tens of them.
+    float flowerSearchTimer = 0.0f;
+
     /// Which behaviours were running last tick, one bit per row of the table
     /// in `Creature.cpp`. Opaque outside the selector, and it exists for one
     /// reason: a behaviour that is already running is asked whether it may
@@ -1213,6 +1707,34 @@ public:
     /// to read it, so this stays on the main thread with the drops. Returns any
     /// blow landed on the player for the caller to apply, and appends any blast
     /// that went off to `blasts` for the same reason.
+    ///
+    /// **The `const World&` is not a wall, and two features have now been filed
+    /// as blocked by it when neither was.** Work crossing this seam runs in one
+    /// of two directions and they want different shapes:
+    ///
+    /// **Inbound - the world acts on a creature.** A falling anvil landing on a
+    /// pig, a piston shoving one. This needs no `World` at all: it reads the
+    /// roster and writes creature health, both of which live here. It is a plain
+    /// mutating method, and `hurtInBox` below is the first one. Nothing about
+    /// the const reference ever stood in its way; the anvil was filed as blocked
+    /// by it because "damage something in the world" *sounds* like world work.
+    ///
+    /// **Outbound - a creature acts on the world.** A bee pollinating a crop,
+    /// which is the one still open. This genuinely cannot take a mutable
+    /// `World&`, and not for want of an entry point: the architecture rule is
+    /// that exactly one owner mutates the world, on the main thread, and handing
+    /// the roster a mutable reference is how that rule dies.
+    ///
+    /// **The shape it wants already exists here, twice.** This function returns
+    /// `CreatureAttack` for the caller to apply and appends to `blasts` for the
+    /// caller to drain - compute the result, hand it over, let the owner apply
+    /// it. A bee's crop edit is a third of exactly that rather than a new seam;
+    /// and it is the same pattern `FallingBlocks::update(world, dt, &landings)`
+    /// uses to deliver the very landings `hurtInBox` was written to consume.
+    ///
+    /// So: **one entry point cannot serve both, and neither of them needs a
+    /// mutable `World&`.** Written here because the question has now been asked
+    /// twice and the second asker had no way to see the first answer.
     CreatureAttack update(const World& world, const glm::vec3& playerFeet, float deltaSeconds, bool night,
                           bool playerSneaking, float timeOfDay,
                           std::vector<CreatureExplosion>& blasts);
@@ -1264,6 +1786,11 @@ public:
         /// wrong. **The default is what keeps every existing archer shot
         /// compiling and meaning exactly what it did.**
         ItemId payload = ItemId::None;
+        /// Who fired it. **Must be carried through to whatever resolves the
+        /// hit**, or an arrow that clips a bystander blames the player for it -
+        /// which turned a wolf, and its whole pack, on the one person who did
+        /// not shoot it. Zero names the player, as everywhere else here.
+        std::uint32_t fromId = 0;
     };
     std::vector<Launch> takeLaunches();
 
@@ -1275,6 +1802,47 @@ public:
     /// reads it and never writes it. Same arrangement as `takeLoot`,
     /// `takeLaunches` and the blast list.
     std::vector<glm::ivec3> takeGrazed();
+
+    /// A hive a bee has just flown home to with nectar, waiting for the owner
+    /// of the world to raise its honey level.
+    ///
+    /// **Same arrangement and the same reason as `takeGrazed` above**: this
+    /// file is handed a `const World&` everywhere and never writes to it, so
+    /// the only way a creature changes a block is to name the cell and let the
+    /// main thread apply it. A drain that is never written is a complete
+    /// feature one call site short of being reachable, which is why the
+    /// requirement is spelled out here rather than left to be inferred:
+    ///
+    /// > For each cell, read the block. If `isBeehive` and
+    /// > `beehiveHoneyLevel` is below `kBeehiveFullHoney`, write
+    /// > `beeHomeAtLevel(id, level + 1)`. A cell that no longer holds a hive is
+    /// > simply dropped.
+    ///
+    /// **THAT CALL SITE NOW EXISTS: `Main.cpp:10247`, `for (const glm::ivec3&
+    /// cell : creatures.takePollinated())`, landed 2026-08-19.** Verified by
+    /// reading the call site rather than by trusting this note, and recorded
+    /// here because a spec that does not say it has been met is how a second
+    /// writer gets built: the reader arrives, finds a requirement written in
+    /// the imperative and no statement that anyone honoured it, and honours it
+    /// again. **`WorldStore.hpp` carried "Not yet written by anyone" about two
+    /// call sites that had landed hours earlier, and acting on it would have
+    /// produced two writers for one field.** So if you are here to wire this
+    /// up: it is wired. Check `Main.cpp` before adding anything.
+    ///
+    /// **`beeHomeAtLevel` and not `beehiveAtLevel(beehiveFacing(id), ...)`.**
+    /// The second reads correctly and is wrong: a bare facing carries no record
+    /// of which half of the family the block came from, so it quietly rebuilds
+    /// every natural nest as a crafted hive. `Block.hpp` keeps that exact call
+    /// as a named control and a `static_assert` rejects it.
+    ///
+    /// **A cell may appear twice in one list and both entries must be applied.**
+    /// That is not a duplicate to be filtered: Bedrock's rule is "when the bee
+    /// exits, the hive increments its honey level by 1 and has a 1% chance to
+    /// increment it by 2" (minecraft.wiki/w/Beehive/Usage), and the 1% is rolled
+    /// here, where the random stream already lives, by pushing the cell a second
+    /// time. De-duplicating this list silently deletes that rule and also merges
+    /// two different bees arriving in the same tick.
+    std::vector<glm::ivec3> takePollinated();
 
     /// Every noise the population made this tick.
     std::vector<CreatureVoiceEvent> takeVoices();
@@ -1290,7 +1858,28 @@ public:
 
     /// Strikes the first creature the aim ray reaches. Returns true if one was
     /// hit, so the caller can spend a swing on it instead of the block behind.
-    bool strike(const glm::vec3& eye, const glm::vec3& forward, float reach, int damage);
+    ///
+    /// `fromId` is who struck, and it is what the victim and its neighbours go
+    /// after. **It defaults to the player**, because zero names the player and
+    /// the melee caller has nothing else to say - but a projectile must name
+    /// its shooter, or a skeleton's stray arrow makes an enemy of you on its
+    /// behalf. `ignoreId` is who cannot be hit, for the launch window a shot
+    /// spends inside its own thrower; zero skips nobody, since ids start at one.
+    ///
+    /// `hitDistance` and `hitIndex`, when given, name **where** and **who** -
+    /// how far along the ray the body was entered, and its index in `all()`.
+    /// Both are written whenever a creature was found, including the case where
+    /// the immunity window absorbs the blow and no damage lands, because the
+    /// caller asked what the ray hit and that is true either way.
+    ///
+    /// They exist so a projectile does not have to run `findAimed` itself to
+    /// recover them. Doing that would walk the same ray twice and, worse, would
+    /// decide *who was hit* in a second place - and a value derived somewhere
+    /// other than the one function that owns it is this project's single most
+    /// expensive bug shape. One ray, one answer, handed out.
+    bool strike(const glm::vec3& eye, const glm::vec3& forward, float reach, int damage,
+                std::uint32_t fromId = 0, std::uint32_t ignoreId = 0,
+                float* hitDistance = nullptr, std::size_t* hitIndex = nullptr);
 
     /// Damages and throws everything caught in a blast. Returns how many were
     /// hit, which is the number that makes "did the explosion reach anything?"
@@ -1310,6 +1899,68 @@ public:
     /// A charged Bramble is *supposed* to come from a storm; until there was
     /// weather, a share of them spawned that way instead.
     int applyLightning(const glm::vec3& at);
+
+    /// **Damages every creature standing in a box.** Returns how many were hit.
+    ///
+    /// The entry point the world needs when something lands *on* a mob rather
+    /// than a mob walking into something. Written for the falling anvil, whose
+    /// damage path reached the player and stopped there - `Main.cpp` said so at
+    /// its own call site rather than improvising a loop over the roster, which
+    /// was the right call and is why this is here instead of there.
+    ///
+    /// **Takes no `World`, and that is the point of the shape.** `Creatures` is
+    /// handed a `const World&` everywhere else by design, and the reason a
+    /// falling anvil looked blocked by that is that it was assumed to need one.
+    /// It does not: damaging a creature touches the roster and nothing else.
+    /// The const-`World` seam is a real constraint for *outbound* work - a bee
+    /// that wants to change a crop - and no constraint at all for inbound work
+    /// like this one. See the note above `update` for why those two want
+    /// different shapes rather than one shared one.
+    ///
+    /// **The box is the caller's, and the damage is the caller's**, because
+    /// this must not learn the anvil's ladder. `anvilLandingDamage` already owns
+    /// it, is `constexpr`, and answers 0 for every other block - so the caller
+    /// passes what it computed and gravel stays harmless without this function
+    /// knowing gravel exists.
+    ///
+    /// **Judge creatures against the same box the player is judged against.**
+    /// `applyLightning` above carries the same warning for the same reason: a
+    /// blow that hits you and spares the pig beside you is worse than one that
+    /// misses both. Today `Main.cpp` tests the player against the unit cube at
+    /// the landing cell, so pass exactly that.
+    ///
+    /// **Through the damage window, like every other blow.** Lightning and
+    /// blasts go through `damageCreature` and so does this, which is what makes
+    /// a collapsing stack of ten anvils land as one hit - precisely what the
+    /// player's own path says it relies on. Routing it around the window would
+    /// have charged a mob ten times for what charges the player once.
+    int hurtInBox(const glm::vec3& low, const glm::vec3& high, int damage, DeathCause cause);
+
+    /// **Angers every creature of one kind near a point, without touching a
+    /// hair on any of them.** Returns how many were roused.
+    ///
+    /// The verb the world needs when something provokes a group rather than a
+    /// blow doing it: shearing a hive angers its bees, and the only public route
+    /// before this was `strike`, which would have *hurt* them. Rousing and
+    /// hurting are different verbs and this is the one that was missing.
+    ///
+    /// **Takes a `CreatureKind` rather than provoking everything in range, and
+    /// that is a decision rather than an oversight.** "Anger the bees at this
+    /// hive" and "anger everything standing near this hive" are different
+    /// features; the caller wants the first, and letting it filter the second
+    /// afterwards would put the knowledge of *which* creatures a hive belongs to
+    /// in the wrong file. There is no all-kinds mode because nothing asks for
+    /// one, and an unused mode is a thing that is built, clean and never called.
+    ///
+    /// A true sphere, unlike `alertNeighbours`' cylinder. The caller supplies
+    /// one radius and one radius means a sphere; that function's `kAlertHeight`
+    /// exists because its horizontal reach comes from the species row and is
+    /// about how far a *call* carries, which is a different question.
+    ///
+    /// `threatId` is who gets blamed, defaulting to the player exactly as
+    /// `strike` does. Corpses are skipped - a dead bee is not angry.
+    int provokeNear(const glm::vec3& centre, float radius, CreatureKind kind,
+                    std::uint32_t threatId = 0);
 
     /// Whether a creature stands in the way of the aim ray. Asked every frame,
     /// where `strike` only lands once a swing is ready - the block behind a
@@ -1380,8 +2031,42 @@ public:
     const std::vector<Creature>& all() const { return m_creatures; }
     /// Puts one back exactly as it was saved, bypassing every spawn rule. The
     /// population cap still applies from the next `manage` onward.
+    ///
+    /// The three cells are a villager's claimed bed, workstation and meeting
+    /// point. **They have to come back with it**: `workStart` needs
+    /// `jobCell.y >= 0` and re-claiming is closed to anyone who already has a
+    /// profession, so a reloaded armourer stood at no anvil for the rest of the
+    /// world's life - and, because the claim scan saw the station as free, the
+    /// next villager to wake up became a second one.
     void restore(CreatureKind kind, const glm::vec3& feet, float yaw, int health, float scale,
-                 bool charged = false, bool playerBuilt = false, std::uint8_t profession = 0);
+                 bool charged = false, bool playerBuilt = false, std::uint8_t profession = 0,
+                 const glm::ivec3& bedCell = glm::ivec3{0, -1, 0},
+                 const glm::ivec3& jobCell = glm::ivec3{0, -1, 0},
+                 const glm::ivec3& meetCell = glm::ivec3{0, -1, 0});
+
+    /// Every chunk column whose one-off animal pass has already run, as
+    /// **unpacked** `(chunkX, chunkZ)` pairs, for the caller to write to disk.
+    ///
+    /// The pair is handed over rather than the packed key deliberately: the
+    /// packing is `populatedKey`'s alone, and a store that wrote the key would
+    /// become a second owner of it - so a later change to the packing would
+    /// silently stop matching everything already on disk, which is precisely the
+    /// failure `populatedKey` exists as one function to prevent.
+    ///
+    /// **This set is not derivable from the creatures.** A column stays
+    /// populated after everything in it has been eaten, and a village spans
+    /// many columns, so it belongs beside the creature list rather than on any
+    /// record within it.
+    std::vector<glm::ivec2> populatedColumns() const;
+
+    /// Puts one such column back. The counterpart of `populatedColumns`, taking
+    /// the same unpacked form, so the store never sees a key.
+    ///
+    /// The `glm::ivec2` overload is the one to reach for when feeding back
+    /// exactly what `populatedColumns` returned - the round trip is then a loop
+    /// with no unpacking at either end.
+    void restorePopulatedColumn(int chunkX, int chunkZ);
+    void restorePopulatedColumn(const glm::ivec2& column);
 
     /// Places the villagers a freshly generated village comes with.
     ///
@@ -1401,6 +2086,12 @@ private:
     void separate(const World& world, float deltaSeconds);
     /// Lands every creature-on-creature blow collected this tick.
     void applyHits();
+    /// Fills `m_loot` with everything one killed creature leaves behind.
+    ///
+    /// Split out of `manage`'s retirement loop rather than left inline: it now
+    /// reads a table, a death context and four kinds of roll, and none of that
+    /// is about retiring a creature.
+    void emitLoot(const Creature& creature);
     /// **The one way a creature enters the population**, and the only place an
     /// id is handed out. There were five creation sites and two of them were
     /// patched by hand when ids arrived, which left everything spawned by the
@@ -1417,7 +2108,15 @@ private:
     /// given chunk always produces the same herd.
     void populateChunks(const World& world, const glm::vec3& playerFeet);
     /// Index of the nearest creature on the aim ray, or `size()` for none.
-    std::size_t findAimed(const glm::vec3& eye, const glm::vec3& forward, float reach) const;
+    /// `ignoreId` is skipped outright; zero skips nobody, because ids start at
+    /// one.
+    ///
+    /// `entryDistance`, when given, receives how far along the ray the winning
+    /// body was entered - the number the slab test already computes to decide
+    /// "nearest" and used to throw away. A caller that needs it would otherwise
+    /// have to run the ray a second time to recover it.
+    std::size_t findAimed(const glm::vec3& eye, const glm::vec3& forward, float reach,
+                          std::uint32_t ignoreId = 0, float* entryDistance = nullptr) const;
     /// The live creature carrying this id, or null. Linear across a population
     /// capped in the tens, which is cheaper than keeping a map in step.
     const Creature* creatureById(std::uint32_t id) const;
@@ -1428,7 +2127,34 @@ private:
     /// coordinate. Only grows, which is correct: a chunk gets its animals once
     /// per session, and re-populating on re-entry would breed a herd out of
     /// walking back and forth.
+    ///
+    /// **"Per session" was the bug, and it is now fixed.** This used never to be
+    /// written to disk while every living creature was - so every reload re-ran
+    /// the one-off pass over chunks whose animals had just been restored, and
+    /// the herd doubled. `restore` marks what it brings back, which closed the
+    /// common case; the set itself is now persisted by `WorldStore` in its own
+    /// table in `creatures.dat`, through `populatedColumns` and
+    /// `restorePopulatedColumn`, which closes the rest. It is keyed by column
+    /// rather than hung off a creature record because a column stays populated
+    /// after everything in it has been eaten.
     std::unordered_set<std::uint64_t> m_populated;
+    /// Packs a chunk coordinate into an `m_populated` key. **One owner**, or the
+    /// producer and the consumer are free to pack it differently and the set
+    /// silently never matches.
+    static std::uint64_t populatedKey(int chunkX, int chunkZ);
+    /// Marks the chunk containing a world position as already populated.
+    void markPopulated(const glm::vec3& feet);
+    /// The world's own seed, kept as it arrived. **Separate from `m_random`**,
+    /// which is `seed | 1` and is consumed by everything that draws: a drop
+    /// roll has to be a pure function of the death, so it hashes this instead
+    /// of drawing from a stream whose position depends on how many frames the
+    /// animal happened to live for.
+    ///
+    /// That claim was **not** true until `DeathContext::place` existed - the
+    /// hash read the corpse's live position, and `separate` shoves a corpse for
+    /// the whole second it lies there, per frame. The seed was never the leak;
+    /// the position was.
+    std::uint32_t m_seed;
     std::uint32_t m_random;
     /// Handed out by `place` and `restore`. Starts at one so that zero can mean
     /// "nobody" everywhere it is stored.
@@ -1437,6 +2163,7 @@ private:
     std::vector<Loot> m_loot;
     std::vector<Launch> m_launches;
     std::vector<glm::ivec3> m_grazed;
+    std::vector<glm::ivec3> m_pollinated;
     std::vector<CreatureVoiceEvent> m_voices;
     std::vector<CreatureHit> m_hits;
     /// Overwritten at startup from the render distance; the default only covers
@@ -1450,6 +2177,10 @@ private:
     /// not be able to cost a frame on its own, so the population shares a
     /// budget exactly as light propagation and water flow already do.
     int m_pathBudget = 0;
+    /// The fractional searches not yet handed out, carried between frames.
+    /// **This is what makes the budget a rate rather than a per-frame quota** -
+    /// see `kPathsPerSecond`.
+    float m_pathCredit = 0.0f;
 };
 
 } // namespace game

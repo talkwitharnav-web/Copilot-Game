@@ -131,11 +131,20 @@ void UploadContext::flush() {
     // Makes the copies visible to the draws that follow on this queue. Without
     // it the data is in the right buffers but the vertex fetch may not see it,
     // which shows up as flickering or missing geometry rather than an error.
+    //
+    // **The read masks cover more than the current callers need on purpose.**
+    // Only vertex and index buffers are staged today, so vertex input alone is
+    // correct - but the first uniform or storage buffer routed through
+    // `stage()` would be copied, submitted, and then read through a stage this
+    // barrier never named, and the symptom is stale data on some drivers and
+    // correct data on others. Widening it costs nothing here (one submission
+    // per frame, at its end) and removes a trap that gives no warning.
     VkMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
-    vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1,
+    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                            VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1,
                          &barrier, 0, nullptr, 0, nullptr);
 
     vkCheck(vkEndCommandBuffer(m_commandBuffer), "vkEndCommandBuffer");

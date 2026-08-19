@@ -73,6 +73,11 @@ struct Shape {
 
     /// Extra high-frequency height added at peaks only. Zero everywhere else,
     /// because applying it globally just makes the whole world noisy.
+    ///
+    /// **A 0-to-1 weight, not a number of blocks** - `shapeAt` multiplies it by
+    /// `kJaggedBlocks` before adding it to `offsetY`, and uses the same weight a
+    /// second time to blend `factor` toward `kRuggedFactor`. Reading it as a
+    /// height and adding it straight to a y would be off by that factor of 13.
     float jaggedness;
 };
 

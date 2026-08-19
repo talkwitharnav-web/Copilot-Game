@@ -12,7 +12,22 @@
 // reflects the world by marching a ray through a copy of that image, and it can
 // only tell a hit from a miss if each pixel says what distance it stands at.
 // The sky is parked past anything a ray will travel, so it can never be a hit.
-const float kSkyDistance = 1.0e6;
+//
+// **Finite on purpose, and 65504 is the reason.** The scene image is
+// `VK_FORMAT_R16G16B16A16_SFLOAT`, so alpha is a half. This was 1.0e6, which is
+// fifteen times the largest finite half and stores as `+Inf` - and the reader's
+// `straight.a < kSkyDistance * 0.5` test was then satisfiable by no finite half
+// at all, working only because IEEE overflow happens to put the sky on the
+// right side of it. On any path that clamps instead of overflowing, the sky
+// would arrive as 65504, read as a hit at 65504 blocks, and a waterfall in
+// front of open sky would turn fully opaque and erase the sun, moon and clouds
+// behind it - the exact failure these lines exist to prevent.
+//
+// 60000 is exactly representable as a half (the spacing there is 32, and
+// 60000/32 is a whole number), leaves the threshold at 30000, and still sits
+// far beyond any distance real geometry can report: render distance is capped
+// in blocks, not tens of thousands of them.
+const float kSkyDistance = 60000.0;
 
 /// Rayleigh scattering per channel, in the reference's own proportions: it goes
 /// as one over the fourth power of wavelength, which is why blue scatters about
@@ -73,6 +88,27 @@ vec3 atmosphericScatter(vec3 direction, vec3 sunDirection, float density) {
 
     vec3 extinction = kRayleigh + vec3(kMie);
     vec3 sunTransmit = exp(-kRayleigh * sunMass * 0.55 - vec3(kMie) * sunMass * 0.22);
+    // The 5.0 is a unit bridge, not a fudge, and it is why the two phase
+    // functions above are normalised differently on purpose. `rayleighPhase`
+    // averages one over the sphere; `henyeyGreenstein` carries its 4pi and so
+    // *integrates* to one, averaging 1/4pi. Adding them therefore needs the Mie
+    // term scaled by about 4pi = 12.566 before the two are in the same units,
+    // and 5.0 supplies 0.398 of that. Why it is short of full strength is not
+    // recorded anywhere and is not known - `kMie` is a free tuning constant, so
+    // the pair was almost certainly settled by eye.
+    //
+    // **Do not "correct" this to 12.566** - that is the edit this comment
+    // exists to prevent, and it multiplies the haze around the sun by 2.5.
+    // The curve is confirmed, twice and independently: hand-evaluated at
+    // g = 0.76 it gives 2.4315 / 0.016963 / 0.0061658 at cos = +1 / 0 / -1,
+    // matching finding 1022's separately computed 2.431534 / 0.016964 /
+    // 0.006166, and the forward-to-back ratio 394.3 matches the analytic
+    // ((1+g)/(1-g))^3 = 394.4 - an identity that holds whatever the
+    // normalisation, so it checks the shape rather than the scale. The balance
+    // is right too: at the sun Mie 2.19 beats Rayleigh 1.50 and the aureole is
+    // white, at 90 degrees Rayleigh wins 49:1 and the sky is deep blue. An
+    // inverted curve - CLAUDE.md bug shape #9 - would read as a blue halo on a
+    // white sky, which is not what this computes.
     vec3 inscatter = kRayleigh * rayleighPhase(cosTheta) +
                      vec3(kMie) * henyeyGreenstein(cosTheta, kMieG) * 5.0;
     return sunTransmit * inscatter * (1.0 - exp(-extinction * viewMass * 0.6)) / extinction;
@@ -111,7 +147,16 @@ vec3 skyRadiance(vec3 direction) {
     vec3 scattered = atmosphericScatter(above, sun, density);
     // The same azimuth at the horizon, so the ratio is one exactly along the
     // skyline in every direction - including the bright part behind the sun.
-    vec3 alongHorizon = normalize(vec3(direction.x, 0.0, direction.z) + vec3(1e-5));
+    //
+    // The epsilon is on x and z only, the two the `normalize` can be handed a
+    // zero pair of. It used to be `vec3(1e-5)`, which also put 1e-5 back into
+    // the y this line has just deliberately set to 0.0 - harmless for any
+    // ordinary direction, and at the exact zenith texel, where x and z are both
+    // 0, it returned (0.577, 0.577, 0.577): a reference sampled 35 degrees up
+    // rather than along the horizon, which is the one place the comment above
+    // promises a ratio of one. The twin ten lines up already writes its epsilon
+    // on the single axis that needs it.
+    vec3 alongHorizon = normalize(vec3(direction.x, 0.0, direction.z) + vec3(1e-5, 0.0, 1e-5));
     vec3 atHorizon = atmosphericScatter(alongHorizon, sun, density);
 
     vec3 shaped = scattered / max(atHorizon, vec3(1e-5));

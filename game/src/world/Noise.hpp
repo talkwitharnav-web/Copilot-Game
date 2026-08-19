@@ -14,33 +14,46 @@ namespace noise {
 
 /// Value noise in the range [0, 1]. Nearby positions give similar results, which
 /// is what separates this from plain randomness.
+///
+/// **Unsigned.** Anything wanting a field that swings either side of zero must
+/// go through `octaves2D`, which applies the `* 2 - 1` recentring. Do not sum
+/// this directly and expect a signed result - see the note on `octaves2D`.
 float value2D(std::uint32_t seed, float x, float z);
 
-/// Several octaves of `value2D` summed, each at double the frequency and half
-/// the strength. One octave is smooth blobs; four or five gives large landforms
-/// with believable finer detail on top. Returns [0, 1].
-float fbm2D(std::uint32_t seed, float x, float z, int octaves);
-
 /// Value noise in three dimensions, [0, 1]. Needed for anything that varies with
-/// height as well as position — caves and overhangs cannot come from a heightmap.
+/// height as well as position - caves and overhangs cannot come from a heightmap.
+///
+/// Unsigned, exactly as `value2D`. `octaves3D` is the signed form.
 float value3D(std::uint32_t seed, float x, float y, float z);
-
-/// Octaves of `value3D`, same rules as `fbm2D`. Returns [0, 1].
-float fbm3D(std::uint32_t seed, float x, float y, float z, int octaves);
 
 /// Octaved value noise in roughly [-1, 1], centred on zero.
 ///
+/// **Measured, not asserted:** over 160000 samples this returns
+/// [-0.902, +0.897], mean -0.002, and is negative 50.2% of the time.
+/// `octaves3D` measures [-0.820, +0.821], negative 49.4%.
+///
 /// `amplitudes[i]` weights the octave running at `2^i` times the base
-/// frequency, and **a zero entry drops that octave outright** — which is how
+/// frequency, and **a zero entry drops that octave outright** - which is how
 /// the reference leaves deliberate holes in a spectrum instead of always
 /// halving. Continentalness is `{1,1,2,2,2,1,1,1,1}` and temperature is
 /// `{1.5,0,1,0,0,0}`; neither is expressible as "n octaves".
 ///
 /// The sum divides out, so editing the array changes the *shape* of the field
 /// and never its range.
+///
+/// **A near-homonym pair used to sit here and was deleted on 2026-08-19.**
+/// `fbm2D`/`fbm3D` were octaved value noise too, they read as interchangeable
+/// with these, and they returned **[0, 1]** because they summed `value2D`
+/// without the `* 2 - 1`. Both had zero callers tree-wide while these had five
+/// and four. Measured: a `> 0` threshold passes **49.8%** of the time on
+/// `octaves2D` and **100.0%** on the deleted `fbm2D`, so reaching for the
+/// obvious-sounding name would have made every such test always-true and
+/// silently changed the shape of the world. **Do not reintroduce an unsigned
+/// octave sum under a name that reads like these two.**
 float octaves2D(std::uint32_t seed, float x, float z, const float* amplitudes, int count);
 
-/// `octaves2D` in three dimensions. Same range, same normalisation.
+/// `octaves2D` in three dimensions. Same range, same normalisation, same sign
+/// convention - the `* 2 - 1` is applied in both, deliberately.
 float octaves3D(std::uint32_t seed, float x, float y, float z, const float* amplitudes, int count);
 
 /// Raw integer hash of a grid cell, for decisions that must be discrete rather

@@ -27,6 +27,18 @@ constexpr float kHotbarHalfWidth = kHotbarWidth * 0.5f;
 /// What anything stacked above the bar lines up against.
 constexpr float kHotbarTopY = kHotbarCentreY - kHotbarSlotSize * 0.5f;
 
+/// How far the selected cell's oversized frame reaches above `kHotbarTopY`.
+///
+/// The sheet's selected cell is 25 texels where an ordinary one is 21, and it is
+/// drawn larger by that same ratio so the frame overhangs its neighbours exactly
+/// as the artwork intends. That overhang is **above the bar as well as beside
+/// it**, and the hearts sat 0.007 units inside it - drawn first, so the frame
+/// covered the bottom of the leftmost heart whenever slot 1 was selected.
+///
+/// One owner, because two files place things against it: `Hotbar.cpp` draws the
+/// frame and `StatusBars.cpp` has to clear it.
+constexpr float kHotbarSelectedOverhang = kHotbarSlotSize * (25.0f / 21.0f - 1.0f) * 0.5f;
+
 /// The row of carried items along the bottom of the screen.
 ///
 /// Rebuilt whenever the selection or its contents change rather than animated,

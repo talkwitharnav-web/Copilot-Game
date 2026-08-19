@@ -12,9 +12,31 @@
 namespace game {
 namespace {
 
+/// Trims a value or a key down to something safe to put in a log line.
+///
+/// **Because a corrupt `settings.cfg` is a file of arbitrary bytes.** The
+/// warnings below quote what they refused, which is the right thing to do for
+/// the typo they were written for and the wrong thing for a file that came back
+/// from a bad shutdown as two megabytes of one line: measured, a single junk
+/// value put a 2,097,232-character line through `logWarn`. Control characters
+/// go too, since a stray escape sequence in a terminal does more than look bad.
+std::string forLog(const std::string& text) {
+    constexpr std::size_t kMost = 48;
+    std::string safe;
+    safe.reserve(std::min(text.size(), kMost));
+    for (std::size_t i = 0; i < text.size() && i < kMost; ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        safe.push_back(c >= 0x20 && c < 0x7f ? text[i] : '?');
+    }
+    if (text.size() > kMost) {
+        safe += "... (" + std::to_string(text.size()) + " characters)";
+    }
+    return safe;
+}
+
 /// Deliberately not a real config format. One key per line, `key=value`, `#`
 /// starts a comment. A parser small enough to read in one sitting cannot hide a
-/// bug, and there is exactly one setting so far.
+/// bug, and the file is meant to be edited by hand.
 std::string trim(const std::string& text) {
     const auto first = text.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
@@ -83,7 +105,129 @@ bool parseFloat(const std::string& text, float& out) {
     }
 }
 
+/// The same "say no rather than guess" rule as the three above, applied to the
+/// nine boolean keys - which had it in neither of the two places that needed
+/// it.
+///
+/// **This used to be `value == "1" || value == "true"` written out nine
+/// times**, so every other spelling meant `false` with nothing in the log. That
+/// is silent for the keys that default to off, and actively wrong for the four
+/// that default to on: `creative_mode=yes` put the player into survival, and
+/// `bloom=TRUE` turned bloom off. Both are exactly what a person editing a file
+/// whose own banner says "Edit by hand" would write.
+///
+/// Case-insensitive, because `True` is the other thing they would write.
+bool parseBool(const std::string& text, bool& out) {
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") {
+        out = true;
+        return true;
+    }
+    if (lower == "0" || lower == "false" || lower == "no" || lower == "off") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+/// Writes `text` over `file` without ever leaving a half-file behind.
+///
+/// **The world save has had this rule since it was written; this file did
+/// not.** `saveSettings` opened the real file with `trunc` and streamed into
+/// it, so the entire write was a window in which `settings.cfg` was incomplete
+/// - and it is written during play, not only at shutdown: six hotkeys in the
+/// frame loop save on every render-distance, tone-map, bloom, shadow, cloud and
+/// input-mode change.
+///
+/// It matters more than the size of the file suggests. Measured on a file this
+/// writer produced: 6,479 of its 7,245 bytes are the comment banner, ahead of
+/// every key. So a file torn anywhere in the first nine tenths loads as *every*
+/// setting back at its default, with nothing in the log - and the next hotkey
+/// save writes that back as a complete, healthy-looking 44-key config. The
+/// damage launders itself into something indistinguishable from a deliberate
+/// choice, which is worse than a file that fails to open.
+///
+/// **Unlike `WorldStore`'s equivalent this falls back to writing in place** when
+/// the rename is refused, which on Windows it is whenever anything holds the
+/// target open. Measured rather than assumed: `std::filesystem::rename` onto a
+/// file open for reading answers "Access is denied", and a text editor left
+/// open on a file whose own banner says "Edit by hand" is not a strange thing
+/// to have. For 7 KB of settings, losing the change the player just made is the
+/// worse outcome; for a 100 KB world table it would not be, which is why the
+/// two are allowed to differ here.
+///
+/// Text mode, not binary, so the line endings stay what this file has always
+/// had on this platform.
+bool writeWholeFile(const std::filesystem::path& file, const std::string& text) {
+    const std::filesystem::path temporary = file.string() + ".tmp";
+
+    {
+        std::ofstream out(temporary, std::ios::trunc);
+        if (out) {
+            out << text;
+            out.close();
+            if (out) {
+                std::error_code error;
+                std::filesystem::rename(temporary, file, error);
+                if (!error) {
+                    return true;
+                }
+                engine::logWarn("Could not replace " + file.string() + ": " + error.message() +
+                                "; writing in place instead");
+            } else {
+                // A full disk fails here, on the flush, rather than at open.
+                engine::logWarn("Could not finish writing " + temporary.string() +
+                                "; writing in place instead");
+            }
+        }
+    }
+
+    std::error_code cleanup;
+    std::filesystem::remove(temporary, cleanup);
+
+    std::ofstream direct(file, std::ios::trunc);
+    if (!direct) {
+        engine::logWarn("Could not write settings to " + file.string());
+        return false;
+    }
+    direct << text;
+    direct.close();
+    if (!direct) {
+        engine::logWarn("Could not finish writing settings to " + file.string());
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+/// **What stops the writer and the reader drifting apart.**
+///
+/// `loadSettings` and `saveSettings` are two hand-written lists of the same 44
+/// keys, in a file with no shared table between them, which is the classic
+/// shape for one of them quietly gaining a field the other never learns about.
+/// Two things now catch that, and it is worth being precise about which:
+///
+///   * This assert fires the moment a 45th setting is added - every one of the
+///     44 is four bytes wide or a `bool`, and a new one of either kind moves
+///     the total. Whoever re-derives the number then has both function names in
+///     front of them. It does **not** catch a `bool` slipped into one of the
+///     existing three-byte padding holes; nothing here does, and saying it does
+///     would be worse than not having it.
+///   * The unknown-key warning in `loadSettings` catches the direction that
+///     actually matters. `saveSettings` writes all 44 keys and the game writes
+///     its own config, so a setting added to the writer but forgotten in the
+///     reader announces itself as `settings: unknown key 'new_thing'` on the
+///     very next launch, on the machine of whoever made the mistake.
+///
+/// The number is the compiler's, not a wish: 35 four-byte members and 9 bools
+/// interleaved between them, so the padding is part of the answer.
+static_assert(sizeof(Settings) == 172,
+              "Settings changed size - update loadSettings AND saveSettings, both of them, "
+              "then re-derive this number");
 
 Settings loadSettings(const std::filesystem::path& file) {
     Settings settings;
@@ -91,8 +235,13 @@ Settings loadSettings(const std::filesystem::path& file) {
 
     std::ifstream in(file);
     if (!in) {
-        saveSettings(file, settings);
-        engine::logInfo("Wrote default settings to " + file.string());
+        // **The truth, not the intention.** This said "Wrote default settings"
+        // whatever happened, so a read-only directory produced a warning that
+        // the write had failed and a confirmation that it had succeeded, one
+        // line apart, and only the cheerful one named the file.
+        if (saveSettings(file, settings)) {
+            engine::logInfo("Wrote default settings to " + file.string());
+        }
         return settings;
     }
 
@@ -111,15 +260,22 @@ Settings loadSettings(const std::filesystem::path& file) {
         const std::string key = trim(line.substr(0, equals));
         const std::string value = trim(line.substr(equals + 1));
 
+        // Set by whichever reader below owns this key. Derived from the readers
+        // themselves rather than from a second list of names, because a list of
+        // names kept beside the code that already names them is one more thing
+        // to forget - and forgetting it would make the warning lie.
+        bool known = false;
+
         const auto read = [&](const char* name, unsigned limit, unsigned& target) {
             if (key != name) {
                 return;
             }
+            known = true;
             unsigned parsed = 0;
             if (parseUnsigned(value, limit, parsed)) {
                 target = parsed;
             } else {
-                engine::logWarn(std::string("settings: ") + name + " '" + value +
+                engine::logWarn(std::string("settings: ") + name + " '" + forLog(value) +
                                 "' is not usable; keeping the default");
             }
         };
@@ -140,27 +296,33 @@ Settings loadSettings(const std::filesystem::path& file) {
             if (key != name) {
                 return;
             }
+            known = true;
             int parsed = 0;
             if (parseInt(value, parsed)) {
                 target = parsed;
             } else {
-                engine::logWarn(std::string("settings: ") + name + " '" + value +
+                engine::logWarn(std::string("settings: ") + name + " '" + forLog(value) +
                                 "' is not usable; keeping the default");
             }
         };
 
         readInt("spawn_x", settings.spawnX);
         readInt("spawn_z", settings.spawnZ);
-
+        // **Through the validated parser like everything else.** This was the
+        // one key still on `std::atoi`, which answers 0 for anything it cannot
+        // read - so `creature_showcase=on` silently meant "off" with nothing in
+        // the log to say a setting had been ignored.
+        readInt("creature_showcase", settings.creatureShowcase);
         const auto readFloat = [&](const char* name, float& target) {
             if (key != name) {
                 return;
             }
+            known = true;
             float parsed = 0.0f;
             if (parseFloat(value, parsed)) {
                 target = parsed;
             } else {
-                engine::logWarn(std::string("settings: ") + name + " '" + value +
+                engine::logWarn(std::string("settings: ") + name + " '" + forLog(value) +
                                 "' is not usable; keeping the default");
             }
         };
@@ -187,39 +349,39 @@ Settings loadSettings(const std::filesystem::path& file) {
         readFloat("controller_deadzone", settings.controllerDeadzone);
         readFloat("controller_rumble", settings.controllerRumble);
 
-        if (key == "controller_invert_y") {
-            settings.controllerInvertY = (value == "1" || value == "true");
-        }
+        const auto readBool = [&](const char* name, bool& target) {
+            if (key != name) {
+                return;
+            }
+            known = true;
+            bool parsed = false;
+            if (parseBool(value, parsed)) {
+                target = parsed;
+            } else {
+                engine::logWarn(std::string("settings: ") + name + " '" + forLog(value) +
+                                "' is not usable; keeping the default");
+            }
+        };
 
-        if (key == "bloom") {
-            settings.bloom = (value == "1" || value == "true");
-        }
+        readBool("controller_invert_y", settings.controllerInvertY);
+        readBool("bloom", settings.bloom);
+        readBool("weather", settings.weather);
+        readBool("particles", settings.particles);
+        readBool("spawn_underground", settings.spawnUnderground);
+        readBool("drop_showcase", settings.dropShowcase);
+        readBool("creative_mode", settings.creativeMode);
+        readBool("worldgen_probe", settings.worldgenProbe);
+        readBool("block_probe", settings.blockProbe);
 
-        if (key == "weather") {
-            settings.weather = (value == "1" || value == "true");
-        }
-
-        if (key == "particles") {
-            settings.particles = (value == "1" || value == "true");
-        }
-
-        if (key == "spawn_underground") {
-            settings.spawnUnderground = (value == "1" || value == "true");
-        }
-        if (key == "creature_showcase") {
-            settings.creatureShowcase = std::atoi(value.c_str());
-        }
-        if (key == "drop_showcase") {
-            settings.dropShowcase = (value == "1" || value == "true");
-        }
-        if (key == "creative_mode") {
-            settings.creativeMode = (value == "1" || value == "true");
-        }
-        if (key == "worldgen_probe") {
-            settings.worldgenProbe = (value == "1" || value == "true");
-        }
-        if (key == "block_probe") {
-            settings.blockProbe = (value == "1" || value == "true");
+        // **A misspelled key used to do nothing, and say nothing.** A bad value
+        // has warned since this parser was written; a bad *name* was silent, so
+        // `render_distence=24` looked exactly like a setting the game ignores.
+        // Same rule, the other half of the same line.
+        //
+        // An empty key is a malformed line rather than a misspelled setting -
+        // `=16` names nothing to correct - so it stays quiet as it always has.
+        if (!known && !key.empty()) {
+            engine::logWarn("settings: unknown key '" + forLog(key) + "' ignored");
         }
     }
 
@@ -227,6 +389,18 @@ Settings loadSettings(const std::filesystem::path& file) {
     settings.renderDistance = std::max(1u, settings.renderDistance);
     settings.detailDistance = std::max(1u, settings.detailDistance);
     settings.dayLengthSeconds = std::max(10u, settings.dayLengthSeconds);
+    // **The two numeric keys that had no bound at all until now.** Nothing here
+    // is about taste: world code derives a chunk base from the spawn column and
+    // then adds constants to it, so a spawn near `INT_MAX` overflows a signed
+    // int - undefined behaviour that `/W4` cannot see and that would show up as
+    // terrain generated somewhere else entirely rather than as a crash.
+    settings.spawnX = std::clamp(settings.spawnX, -Settings::kMaxSpawn, Settings::kMaxSpawn);
+    settings.spawnZ = std::clamp(settings.spawnZ, -Settings::kMaxSpawn, Settings::kMaxSpawn);
+    // Negative would be a showcase of nothing; the upper end is only a sanity
+    // bound, since the roster index is clamped again against the real species
+    // count where it is used.
+    settings.creatureShowcase =
+        std::clamp(settings.creatureShowcase, 0, Settings::kMaxCreatureShowcase);
     settings.soundVolume = std::clamp(settings.soundVolume, 0.0f, 1.0f);
     settings.musicVolume = std::clamp(settings.musicVolume, 0.0f, 1.0f);
     settings.exposure = std::clamp(settings.exposure, 0.05f, 8.0f);
@@ -254,16 +428,11 @@ Settings loadSettings(const std::filesystem::path& file) {
     return settings;
 }
 
-void saveSettings(const std::filesystem::path& file, const Settings& settings) {
+bool saveSettings(const std::filesystem::path& file, const Settings& settings) {
     std::error_code ec;
     std::filesystem::create_directories(file.parent_path(), ec);
 
-    std::ofstream out(file, std::ios::trunc);
-    if (!out) {
-        engine::logWarn("Could not write settings to " + file.string());
-        return;
-    }
-
+    std::ostringstream out;
     out << "# Voxel Game settings. Edit by hand; the game reads this at startup.\n"
         << "#\n"
         << "# worker_threads: background threads for world generation and meshing.\n"
@@ -281,7 +450,8 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "# frame_cap: frames per second to aim for; 0 means uncapped.\n"
         << "# day_length_seconds: real seconds for a full day and night.\n"
         << "#\n"
-        << "# spawn_x / spawn_z: which column to start in.\n"
+        << "# spawn_x / spawn_z: which column to start in. Either way from the\n"
+        << "#   origin, up to 30,000,000 blocks.\n"
         << "# spawn_underground: start on the floor of the deepest cave in that\n"
         << "#   column instead of on the surface. Only useful for testing.\n"
         << "#\n"
@@ -299,8 +469,9 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#   runs a stack down. 0 starts you empty-handed. Blocks drop when\n"
         << "#   broken either way.\n"
         << "#\n"
-        << "# sound_volume / music_volume: 0 to 1. Two buses, so the music can\n"
-        << "#   be turned down without silencing the world.\n"
+        << "# sound_volume / music_volume: 0 to 1. Two buses, and neither one\n"
+        << "#   scales the other: silencing the world leaves the music playing\n"
+        << "#   and silencing the music leaves the world alone.\n"
         << "#\n"
         << "# tone_map: which curve squashes the bright end of the image into\n"
         << "#   what a monitor can show. 0 Khronos PBR Neutral (keeps colours\n"
@@ -427,6 +598,8 @@ void saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "controller_rumble=" << settings.controllerRumble << "\n"
         << "worldgen_probe=" << (settings.worldgenProbe ? 1 : 0) << "\n"
         << "block_probe=" << (settings.blockProbe ? 1 : 0) << "\n";
+
+    return writeWholeFile(file, out.str());
 }
 
 } // namespace game

@@ -54,7 +54,17 @@ vec3 surfaceNormal() {
     default:
         // A rotated creature limb or a plant blade at forty-five degrees has no
         // axis to name, so the triangle's own geometry answers instead.
-        axis = normalize(cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition)));
+        //
+        // **Guarded, because the cross product is zero for a degenerate or
+        // exactly edge-on quad** - and `normalize` of a zero vector is NaN,
+        // which poisons the whole G-buffer row for that pixel: an octahedral
+        // normal, a roughness and a metallic that the lighting pass then reads
+        // back as a black or white speck flickering with the camera. Braced
+        // because the declaration lives inside a `switch`.
+        {
+            vec3 derived = cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition));
+            axis = length(derived) > 1e-8 ? normalize(derived) : vec3(0.0, 1.0, 0.0);
+        }
         break;
     }
 

@@ -131,6 +131,10 @@ glm::vec2 applyCurve(glm::vec2 stick) {
 
 void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& settings, float deltaSeconds) {
     pad.connected = window.isGamepadConnected();
+    // Read before anything overwrites it: the trigger edges below are the only
+    // ones derived here rather than reported by the window, so they need the
+    // previous frame's answer to "were we actually reading the pad?".
+    const bool wasLive = pad.live;
 
     const engine::GamepadAxes axes = window.gamepadAxes();
     const float deadzone = std::clamp(settings.controllerDeadzone, 0.0f, 0.9f);
@@ -155,6 +159,20 @@ void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& s
     // Screen space grows downward, which is the opposite of the stick.
     pad.pointerDelta = glm::vec2{pointerStick.x * pointerScale, -pointerStick.y * pointerScale};
 
+    // **The one derivation off `lookStick` that is scaled by neither the
+    // sensitivity nor the invert flag its sibling two lines up gets.** Measured
+    // through this function on 2026-08-19: identical stick, identical frame, and
+    // `controller_look_sensitivity` at 1 or at 4 both yield 0.15 notches, while
+    // `controller_invert_y` flips the aim and leaves the scroll direction alone.
+    //
+    // Left alone rather than "fixed", and the earlier report of it named the
+    // wrong pair - it said `pointerDelta`, which comes off the **left** stick
+    // and obeys `controller_cursor_sensitivity`; these two are merely adjacent
+    // lines. The real pair is `lookRadians` and this, both off the right stick.
+    // Which of the two scalings a hotbar cycle should take, or whether it should
+    // take one at all when the reference puts hotbar cycling on the bumpers, is
+    // a judgement about feel and belongs to the playtester. One line either way
+    // once it is called.
     pad.scrollNotches = lookStick.y * kScrollNotchesPerSecond * deltaSeconds;
 
     for (std::size_t i = 0; i < kPadButtonCount; ++i) {
@@ -171,7 +189,13 @@ void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& s
             // A trigger has no press event, so its edge is the one thing here
             // derived from the previous frame rather than reported. Read before
             // `heldNow` is overwritten, just below.
-            pressed = down && !pad.heldNow[i];
+            //
+            // **`wasLive` is the same guard the window puts on every button
+            // edge**, and for the same reason: held state is cleared while
+            // unfocused or unplugged, so without it a trigger held across an
+            // alt-tab fires a press on the way back and the game uses whatever
+            // you were pointing at.
+            pressed = down && !pad.heldNow[i] && wasLive;
         }
 
         pad.heldNow[i] = down;
@@ -208,6 +232,9 @@ void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& s
     if (!pad.connected) {
         pad.sprint = false;
     }
+
+    // Last, so everything above saw the previous frame's value.
+    pad.live = window.isGamepadLive();
 }
 
 InputDevice resolveInputDevice(InputMode mode, InputDevice current, const Gamepad& pad, bool keyboardActive) {
@@ -261,6 +288,39 @@ constexpr std::array<RumbleShape, kRumbleEventCount> kRumbleShapes{{
     /* Explosion    */ {1.00f, 0.90f, 0.70f},
     /* Death        */ {1.00f, 1.00f, 1.10f},
 }};
+
+/// **A missing row here is invisible: it builds clean and rumbles nothing.**
+///
+/// `kRumbleShapes` takes its size from `kRumbleEventCount`, which is
+/// `RumbleEvent::Count` in `Gamepad.hpp`. That derivation is right - it is what
+/// stops two hand-written numbers drifting apart - but it moves the *size* on
+/// its own while the *rows* stay hand-written, so **adding an enumerator to
+/// `RumbleEvent` silently grows this array and default-constructs the new row**.
+/// Every field of `RumbleShape` defaults to `0.0f`, so the new event exists, is
+/// dispatched, passes the `index >= kRumbleEventCount` guard in `rumble()`, and
+/// drives both motors at zero for zero seconds.
+///
+/// **`std::array` will not warn.** A too-long initialiser is a hard error; a
+/// too-short one is filled in for you. That asymmetry is the whole hazard, and
+/// it is the same shape as this project's `default:` rule - a real value
+/// returned for a case nobody wrote.
+///
+/// Every genuine cue fades over a positive time, so `seconds` is an exact
+/// detector for a row nobody wrote rather than a heuristic.
+constexpr bool everyRumbleShapeIsFilled() {
+    for (const RumbleShape& shape : kRumbleShapes) {
+        if (!(shape.seconds > 0.0f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyRumbleShapeIsFilled(),
+              "a RumbleEvent has no shape in kRumbleShapes. If you just added an "
+              "enumerator to RumbleEvent in Gamepad.hpp, add its row to kRumbleShapes "
+              "in the same order - the array sized itself from the enum and left your "
+              "new row zeroed, which is a cue that fires and is felt as nothing");
 
 /// The level below which a motor does not really turn.
 ///

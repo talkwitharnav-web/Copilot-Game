@@ -1,6 +1,10 @@
 #version 450
 
 // These locations must match Vertex::attributeDescriptions() in Vertex.hpp.
+// These five are not declared here so much as transcribed. `Vertex.hpp` owns
+// the layout - its `attributeDescriptions()` is the only table Vulkan reads,
+// and nothing in the build compares it against these lines. Change one end and
+// you must change the other by hand; the compiler will not say a word.
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUv;
@@ -34,53 +38,12 @@ layout(location = 6) out float fragOcclusion;
 
 #include "frame.glsl"
 #include "waves.glsl"
+#include "displace.glsl"
 
 void main() {
-    vec3 position = inPosition;
-
-    // **The water surface actually moves.** Only vertices the mesher marked as
-    // sitting on a fluid's top are touched, so a waterfall's foot, the seabed
-    // and the sides below the waterline all stay put and the column cannot open
-    // a seam. Two vertices at the same world XZ get the same answer whatever
-    // chunk or face they came from, which is what keeps it watertight.
-    bool fluidTop = (inSurface & (1u << 11)) != 0u;
-    if (fluidTop && frame.animation.x >= 0.0 && abs(inLayer - frame.animation.x) < 0.25) {
-        float height = 0.0;
-        vec2 slope = vec2(0.0);
-        waterWave(position.xz, frame.water.x, height, slope);
-        position.y += height * frame.water.y * kWaveDisplacement;
-    }
-
-    // **Grass bends with the wind, it does not wag.** The displacement is
-    // always *along* the wind and never through zero: a blade that oscillated
-    // about its rest position would read as a metronome. The per-position phase
-    // is what stops a whole field moving in unison - and the gust term, which
-    // is shared, is what makes it occasionally do exactly that.
-    //
-    // **The phase must turn slowly across space.** At better than a radian per
-    // block, two corners of the same blade land on opposite parts of the cycle
-    // and move in opposite directions, which shears the plant apart rather than
-    // bending it. A fifth of a radian per block keeps one plant coherent while
-    // still separating it from its neighbours a few blocks away.
-    //
-    // **The phase is a function of the column only.** It used to include the
-    // vertex's height, which put the top of a three-block stalk a third of a
-    // radian out of step with its own base - so the plant twisted along its
-    // length instead of leaning. Everything in one column now shares a phase,
-    // which is what makes a tall plant move as one thing.
-    //
-    // How far the vertex moves is `lean`: its height above its own root, in
-    // blocks, so the base of a stalk holds still and the tip travels furthest.
-    uint swayUnits = (inSurface >> 12) & 15u;
-    if (swayUnits != 0u && frame.wind.z > 0.0) {
-        float lean = min(float(swayUnits) * 0.5, 6.0);
-        float phase = dot(position.xz, vec2(0.21, 0.29));
-        float sway = 0.5 + 0.5 * sin(frame.wind.w * 2.1 + phase);
-        sway += 0.25 * sin(frame.wind.w * 3.7 + phase * 1.9);
-        position.xz += frame.wind.xy * frame.wind.z * sway * lean;
-        // A little lift with the bend, or the tip visibly shortens as it leans.
-        position.y += frame.wind.z * sway * 0.25 * lean;
-    }
+    // Wind sway and the water wave, shared with `shadow.vert` so a plant's
+    // shadow leans with the plant instead of staying at its rest position.
+    vec3 position = displacedPosition(inPosition, inSurface, inLayer);
 
     gl_Position = push.modelViewProjection * vec4(position, 1.0);
     fragColor = inColor;

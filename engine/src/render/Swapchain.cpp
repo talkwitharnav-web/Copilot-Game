@@ -19,6 +19,25 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& av
             return format;
         }
     }
+
+    // **Any sRGB format beats the driver's first offer.** Every shader and the
+    // tone mapper assume the hardware does the sRGB encode on write - the
+    // comment at the top of `TextureArray.cpp` says so outright - so falling
+    // straight through to `front()` can hand back a `UNORM` format and the
+    // whole image comes out washed out or crushed, with nothing anywhere to
+    // explain it. A second pass costs one loop and removes that silence.
+    for (const VkSurfaceFormatKHR& format : available) {
+        switch (format.format) {
+        case VK_FORMAT_B8G8R8A8_SRGB:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+            return format;
+        default:
+            break;
+        }
+    }
+
+    logWarn("No sRGB swapchain format offered; colours will be encoded wrongly");
     return available.front();
 }
 
@@ -48,7 +67,23 @@ VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR& capabilities, VkExtent2D
 } // namespace
 
 Swapchain::Swapchain(const VulkanContext& context, VkExtent2D desiredExtent) : m_context(context) {
-    create(desiredExtent);
+    // See `DepthImage`: a constructor that throws gets no destructor. This was
+    // the one class in the set without the guard, and it is the one where a
+    // leak does more than leak - `create` takes ownership of the
+    // `VkSwapchainKHR` at `vkCreateSwapchainKHR` and can still throw at any of
+    // the image views after it, and an abandoned swapchain stays bound to the
+    // surface, so a later attempt to recover gets `VK_ERROR_NATIVE_WINDOW_IN_
+    // USE_KHR` rather than a clean retry.
+    //
+    // `destroy()` is safe to run against a half-built object: it tolerates the
+    // `VK_NULL_HANDLE` entries `m_imageViews.resize` leaves behind, which is
+    // also why `recreate` can call it unconditionally.
+    try {
+        create(desiredExtent);
+    } catch (...) {
+        destroy();
+        throw;
+    }
 }
 
 Swapchain::~Swapchain() {
@@ -83,6 +118,19 @@ void Swapchain::create(VkExtent2D desiredExtent) {
     m_imageFormat = surfaceFormat.format;
     m_extent = chooseExtent(capabilities, desiredExtent);
 
+    // **A minimised window reports a `currentExtent` of 0x0, and `chooseExtent`
+    // returns it verbatim.** `drawFrame` returns early while minimised, so this
+    // is normally unreachable - but the guard lives in the caller, and
+    // minimising between that check and an `OUT_OF_DATE` acquire runs
+    // `recreateSwapchain` against a zero-sized surface. Named here so a future
+    // regression fails on one clear message rather than a wall of validation
+    // errors - **but it throws, and the session-wide catch in `main` turns that
+    // into an exit rather than a log line**. `Renderer::recreateSwapchain`
+    // returns early on a zero extent precisely so this stays unreachable.
+    if (m_extent.width == 0 || m_extent.height == 0) {
+        throw std::runtime_error("Cannot create a swapchain for a zero-sized window");
+    }
+
     // One more than the driver's minimum so the CPU is not forced to wait on the
     // GPU to hand an image back before it can start the next frame.
     std::uint32_t requestedImageCount = capabilities.minImageCount + 1;
@@ -90,9 +138,16 @@ void Swapchain::create(VkExtent2D desiredExtent) {
         requestedImageCount = capabilities.maxImageCount;
     }
 
-    // TRANSFER_DST is required because this milestone fills the image with
-    // vkCmdClearColorImage rather than drawing into it.
-    constexpr VkImageUsageFlags requiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // **`COLOR_ATTACHMENT` is the only usage the spec guarantees a surface
+    // supports, and it is the only one used.** This asked for `TRANSFER_DST`
+    // as well, left over from the milestone that filled the image with
+    // `vkCmdClearColorImage` - there is no such call anywhere now, and the one
+    // `vkCmdCopyImage` copies the scene into its own copy, never the swapchain.
+    // Demanding it could refuse to start the game on a surface where nothing is
+    // actually wrong, with an error naming the swapchain rather than this
+    // stale constant. The same value is handed to `imageUsage` below, so a
+    // usage the game does not need is no longer requested either.
+    constexpr VkImageUsageFlags requiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if ((capabilities.supportedUsageFlags & requiredUsage) != requiredUsage) {
         throw std::runtime_error("Swapchain does not support the required image usage flags");
     }

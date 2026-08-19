@@ -9,6 +9,16 @@
 // boxed-in the corner is - and they were a single unrecoverable float until
 // M23e. Keeping both is also why unlit caves are not perfectly flat.
 
+/// How far above ordinary diffuse an emissive surface sits. It has to clear 1.0
+/// by a good margin or the tone curve has nothing to turn into a white core
+/// with a coloured fringe, which is what a light actually looks like.
+///
+/// **Lives here because both passes emit light and both already include this
+/// file.** It was declared separately in `deferred.frag` and `triangle.frag`;
+/// they agreed, but changing one would have made fire and lightning glow at a
+/// different strength from glowstone and lanterns, with nothing to catch it.
+const float kEmissionScale = 4.0;
+
 struct Surface {
     vec3 albedo;
     vec3 normal;

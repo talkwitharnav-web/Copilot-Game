@@ -18,6 +18,8 @@ layout(push_constant) uniform Push {
 
 // Everything in here is the same for every draw in the frame.
 #include "frame.glsl"
+#include "shadow.glsl"
+#include "clouds.glsl"
 #include "sky.glsl"
 #include "water.glsl"
 
@@ -34,10 +36,9 @@ const uint kDrawFlagEmissive = 4u;
 const uint kDrawFlagSky = 8u;
 const uint kDrawFlagBlended = 16u;
 
-// How far above ordinary diffuse an emissive surface sits. It has to clear 1.0
-// by a good margin or the tone curve has nothing to turn into a white core with
-// a coloured fringe, which is what a light actually looks like.
-const float kEmissionScale = 4.0;
+// `kEmissionScale` is in lighting.glsl, which this file includes - one
+// definition shared with deferred.frag rather than two that agree until they do
+// not.
 
 // Must match the kNormal* codes in Vertex.hpp.
 const uint kNormalUnaligned = 7u;
@@ -58,7 +59,17 @@ vec3 surfaceNormal() {
     default:
         // Recovered from how world position changes across the triangle. Exact
         // for a flat face, and the only thing available with no axis to name.
-        axis = normalize(cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition)));
+        //
+        // **Guarded, because the cross product is zero for a degenerate or
+        // exactly edge-on quad** - a plant blade or a thin creature limb seen
+        // along its own plane - and `normalize` of a zero vector is NaN, which
+        // poisons every lighting term downstream into a black or white pixel
+        // that flickers with the camera. Braced because the declaration lives
+        // inside a `switch`.
+        {
+            vec3 derived = cross(dFdx(fragWorldPosition), dFdy(fragWorldPosition));
+            axis = length(derived) > 1e-8 ? normalize(derived) : vec3(0.0, 1.0, 0.0);
+        }
         break;
     }
     return dot(axis, frame.eye.xyz - fragWorldPosition) < 0.0 ? -axis : axis;
@@ -75,6 +86,25 @@ layout(set = 0, binding = 3) uniform sampler2DArray skinTexture;
 // The lit world as it stood before anything translucent was drawn into it, with
 // each pixel's distance from the eye in its alpha. Water reflects out of this.
 layout(set = 0, binding = 6) uniform sampler2D sceneCopy;
+// The sun's cascaded shadow map, at binding 7 of the *world* set.
+//
+// **The same image the deferred set carries at its own binding 5**, named twice
+// because the forward pass and the deferred pass are handed different sets and
+// a shader can only read the one it was built against. Everything the forward
+// pass carries - water above all - was lit as though nothing were ever between
+// it and the sun until this arrived.
+//
+// The world set is bound during the shadow pass too, while this very image is
+// the depth attachment. That is legal precisely because `shadow.frag` does not
+// declare this binding: every image-layout rule in the specification is gated
+// on the descriptor being *accessed*. Measured rather than assumed, with the
+// Khronos validation layer on this machine's RTX 4070: the arrangement below
+// raises no message, and a control shader that does sample it raises exactly
+// one - "Cannot use VkImage ... with specific layout SHADER_READ_ONLY_OPTIMAL
+// ... that doesn't match the previous known layout DEPTH_ATTACHMENT_OPTIMAL".
+// **So do not declare this binding in any shader that runs during the shadow
+// pass**, and the ban is a real one rather than a stylistic preference.
+layout(set = 0, binding = 7) uniform sampler2DArrayShadow sunShadowMap;
 
 layout(location = 0) out vec4 outColor;
 
@@ -127,14 +157,22 @@ void main() {
         // blended. What survives still writes depth, so this needs no sorting -
         // unlike the translucent pass.
         //
-        // **The blended pass is exempt, and that exemption is the whole of what
-        // makes glass look like glass.** Its art is a frame at 0.78 alpha
-        // around a panel at 0.43, with a diagonal streak between them, so this
-        // test would keep the frame and the streak and delete the panel. It is
-        // safe to skip precisely here because a blended fragment does not write
-        // depth, which is what the test exists to protect.
+        // **The blended pass takes a far lower threshold, and it is not exempt.**
+        // Its art is a frame at 0.78 alpha around a panel at 0.43, with a
+        // diagonal streak between them, so the 0.5 test would keep the frame and
+        // the streak and delete the panel - which is the whole of what makes
+        // glass look like glass. What it may **not** do is skip the test
+        // entirely, as it did until now on the stated grounds that "a blended
+        // fragment does not write depth". **That is false**: `m_trianglePipeline`
+        // sets `depthWrite = true` alongside `blend = Alpha`, spelled out at its
+        // creation. Today's art has no blended texel
+        // near zero and so survives on that invariant alone; the first pane with
+        // a genuinely empty region - bars, a gap, a tinted frame - would stamp
+        // its distance through the hole and reject everything drawn after it.
+        // 0.02 keeps every deliberately faint texel and throws away only the
+        // ones that draw nothing at all.
         bool blended = (push.flags.x & kDrawFlagBlended) != 0u;
-        if (!blended && texel.a < 0.5) {
+        if (texel.a < (blended ? 0.02 : 0.5)) {
             discard;
         }
 
@@ -189,17 +227,81 @@ void main() {
             surface.metallic = float((materialRow >> 8) & 0xffu) / 255.0;
         }
 
-        rgb = texel.rgb * diffuseLevel(surface, frame.sunDirection.xyz, frame.lighting.xyz, 1.0, 0.0);
+        // **The forward pass reads the sun's shadow map now**, through the
+        // world set's own binding 7 rather than the deferred set's binding 5.
+        // Before it did, every surface only this pass can carry was lit as
+        // though nothing were ever between it and the sun - so a lake lying in
+        // a mountain's shadow still showed a full sun glint, and the specular
+        // term below made that the most visible case in the game.
+        //
+        // `frame.water.w` is the ambient share a shadow takes, the same value
+        // `deferred.frag` passes, so a shadow on water is the same darkness as
+        // the shadow on the bank beside it rather than a second opinion.
+        //
+        // **Only axis-aligned faces are tested, and that is a correctness gate
+        // rather than a saving.** `surfaceNormal()` ends by turning the normal
+        // toward the eye, because a cutout quad is drawn with both windings -
+        // so for a billboard, which has no surface normal of its own, the
+        // normal it returns swings with the camera. `sunShadowFactor` opens by
+        // returning full sun whenever `dot(normal, sunDirection) <= 0`, which
+        // is right for a real face (already dark from the Lambert term, and
+        // testing it only makes acne) and wrong for a billboard: the test's
+        // *sign* would then follow the camera, and a particle standing still in
+        // a shadow would snap between lit and shadowed as the player turned
+        // round. That early-out is sound in `deferred.frag` because every
+        // normal there comes out of the G-buffer and is a real surface normal.
+        // It does not travel to this pass unaided.
+        //
+        // So particles, plant blades and creature limbs stay unshadowed exactly
+        // as they were - a known limitation, and a steady one - while water,
+        // whose top face is `kNormalPosY`, gets the shadow this was for. The
+        // block-breaking crack decal is axis-aligned too, so it now darkens
+        // with the face it is drawn on instead of glowing against it.
+        float sunShadow = 1.0;
+        if (fragNormalCode != kNormalUnaligned) {
+            sunShadow = sunShadowFactor(sunShadowMap, shadePosition, normal, frame.sunDirection.xyz,
+                                        distance(frame.eye.xyz, shadePosition));
+        }
+
+        // **And the cloud's shadow, which the deferred pass has had all along
+        // and this one had not.** Exactly the omission the paragraphs above
+        // describe fixing for the cascade shadow map, left in place for the
+        // second thing that shades the ground: a cloud shadow swept across open
+        // ground, reached the shore and stopped dead, and the lake inside it
+        // kept a full sun glint from the specular term below - the most visible
+        // case in the game, for the second time and for the same reason.
+        //
+        // **Outside the `kNormalUnaligned` guard, unlike the cascade lookup
+        // above, and that is the point rather than an oversight.** That guard
+        // exists because `sunShadowFactor` opens by testing
+        // `dot(normal, sunDirection)`, and a billboard's normal swings with the
+        // camera. `cloudSunShadow` is purely positional - a world point and a
+        // light direction, no normal anywhere in it - so nothing about a
+        // billboard makes it wrong, and glass, particles and the crack decal
+        // now darken under a cloud along with the stone beside them.
+        //
+        // The same three channels the deferred pass reads, in the same order,
+        // so the two cannot disagree about where a cloud is. `cloud.w` is the
+        // quality level and `cloudSunShadow` returns 1.0 on a zero strength, so
+        // this costs nothing when cloud shadows are off.
+        if (frame.cloud.w > 0.5) {
+            sunShadow *= cloudSunShadow(shadePosition, frame.sunDirection.xyz, frame.cloud.x, frame.cloud.y,
+                                        frame.cloud.z);
+        }
+
+        rgb = texel.rgb * diffuseLevel(surface, frame.sunDirection.xyz, frame.lighting.xyz, sunShadow,
+                                       frame.water.w);
 
         // **This is what makes water look wet.** The forward pass carries every
         // surface the deferred one cannot, and water is the whole reason it
         // exists - so without a specular term the one genuinely reflective
         // surface in the game was the only one that never caught the sun.
-        // Gated by sky light so a flooded cave does not glint, and capped so a
-        // near-mirror cannot overload bloom into a white blob.
+        // Gated by sky light so a flooded cave does not glint, by the shadow
+        // factor so a shaded lake does not either, and capped so a near-mirror
+        // cannot overload bloom into a white blob.
         vec3 viewDirection = normalize(frame.eye.xyz - shadePosition);
         vec3 specular = min(specularLobe(surface, frame.sunDirection.xyz, viewDirection), vec3(4.0)) *
-                        fragColor.r * frame.lighting.y * fragOcclusion;
+                        fragColor.r * frame.lighting.y * fragOcclusion * sunShadow;
 
         if (water) {
             // **The sky, in the surface.** A specular highlight alone only ever
@@ -284,8 +386,14 @@ void main() {
                 float texels = frame.waterDetail.w;
                 vec2 lit = (floor(bed.xz * texels) + 0.5) / texels;
                 float caustic = waterCaustics(lit, frame.water.x);
+                // Fades out as the water deepens. Written ascending and
+                // subtracted rather than as `smoothstep(3.0, 0.4, thickness)`:
+                // the GLSL spec says results are undefined when edge0 >= edge1,
+                // and this was the only descending pair in the shader tree.
+                // Identical arithmetic, because S(1-t) == 1-S(t) holds exactly
+                // for the Hermite polynomial smoothstep is defined as.
                 background *= 1.0 + caustic * frame.waterDetail.y * 1.6 * fragColor.r *
-                                        frame.lighting.y * smoothstep(3.0, 0.4, thickness);
+                                        frame.lighting.y * (1.0 - smoothstep(0.4, 3.0, thickness));
             }
 
             // How much of it is returned. Physical, not a look: 2% straight
@@ -369,18 +477,34 @@ void main() {
         rgb = clamp(rgb * vec3(2.9, 0.92, 0.86), 0.0, 1.0);
     }
 
+    // **A blended fragment in this pass still writes depth**, so one that draws
+    // nothing at all stamps its distance and rejects everything drawn after it:
+    // `m_trianglePipeline` sets `depthWrite = true` alongside `blend = Alpha`,
+    // spelled out at its creation. That is the invisible rectangle that used to
+    // surround the moon, and the fix for it was gated on the emissive flag.
+    //
+    // **Ungated now, and this is a hardening rather than a fix for a live bug.**
+    // The cutout above tests `texel.a`; this tests `alpha`, which is
+    // `texel.a * fragColor.a` - so this is the only test in the shader that
+    // catches a fragment faded to nothing by *vertex* alpha rather than by its
+    // texture. No draw relies on that today: every unlit non-emissive mesh
+    // reaching here is the block-selection cage, whose vertices are opaque. It
+    // is ungated because the depth write it guards is a property of the
+    // pipeline, not of the draw, so any future mesh that fades out through
+    // vertex alpha is covered without anyone having to remember this. Nothing
+    // is lost by discarding: at this alpha the blend leaves the colour
+    // attachment exactly as it found it.
+    //
+    // **Do not re-gate this on the emissive flag.** Doing so reopens the moon's
+    // rectangle, which is a real bug and was found by playing.
+    if (alpha < 0.02) {
+        discard;
+    }
+
     // The scene is written to a floating-point image, so this may legitimately
     // go above 1. Anything that does is what bloom picks up and what the tone
     // curve turns into a white core with a coloured fringe.
     if ((push.flags.x & kDrawFlagEmissive) != 0u) {
-        // **A sky body's quad is mostly transparent, and a blended fragment
-        // still writes depth.** So the clear surround stamps a rectangle into
-        // the depth buffer and everything drawn after it - the clouds above all
-        // - is rejected inside that rectangle. That is the invisible border
-        // around the moon, and throwing the empty part away is the whole fix.
-        if (alpha < 0.02) {
-            discard;
-        }
         rgb *= frame.lighting.w;
     }
 
@@ -428,15 +552,21 @@ void main() {
     }
     if (fogDistance > 0.0) {
         float startFraction = frame.eye.w;
-        float distance;
-        bool apply;
-        if (startFraction > 0.0) {
-            distance = length(fragWorldPosition - frame.eye.xyz);
-            apply = worldLit;
-        } else {
-            distance = fragViewDepth;
-            apply = true;
-        }
+        // **Which measure to use is a fact about the geometry, not about where
+        // the eye is.** This used to pick view depth for *everything* whenever
+        // the start fraction was 0 - that is, whenever submerged - so a water
+        // surface or a particle at the edge of the screen came out about 1.6x
+        // less fogged than the terrain immediately behind it, which the
+        // deferred pass fogs radially at all times. `worldLit` is the marker
+        // for a world-space `fragWorldPosition`: everything lit here is drawn
+        // with an identity model matrix, while the two draws that carry their
+        // own transform - the sky dome and the block-selection cage - are not
+        // lit, and for those `fragWorldPosition` is camera-local so only view
+        // depth means anything at all.
+        float distance = worldLit ? length(fragWorldPosition - frame.eye.xyz) : fragViewDepth;
+        // Above water only world geometry is fogged; submerged, everything is,
+        // because the ramp then starts at the eye.
+        bool apply = worldLit || startFraction <= 0.0;
 
         if (apply) {
             float start = fogDistance * startFraction;

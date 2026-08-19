@@ -46,15 +46,53 @@ public:
     std::uint32_t resolution() const { return m_resolution; }
     std::uint32_t cascades() const { return static_cast<std::uint32_t>(m_cascadeViews.size()); }
 
-    /// Highest number of slices anything here will build. The lighting pass
-    /// declares a fixed-size array, so this is shared with `FrameUniforms`.
+    /// Highest number of slices anything here will build.
+    ///
+    /// **Changing this does not change the shaders, and the C++ assert will not
+    /// notice.** `FrameUniforms`'s `sizeof` assert is written in terms of this
+    /// constant, so it re-derives and keeps passing; what does *not* follow is
+    /// the `shadowMatrices` array in `frame.glsl`, which is a literal `[4]`.
+    /// Raise this without editing that and the uniform block is shorter than
+    /// the struct, so every member declared after `shadowMatrices` reads from
+    /// the wrong offset - fog, eye, wind, the lot - with no diagnostic from
+    /// either side.
+    ///
+    /// **The constraint: `frame.glsl`'s `shadowMatrices` extent must equal this
+    /// number, and `shadow.glsl`'s cascade selection must not index past it.**
+    /// Checked 2026-08-19; falsified by `frame.glsl` declaring any other extent,
+    /// which is one grep for `shadowMatrices` - re-run that search rather than
+    /// trusting this paragraph.
     static constexpr std::uint32_t kMaxCascades = 4;
+
+    /// Pins the constant above to the literal the shader was written against.
+    ///
+    /// **It guards one direction only, and the other one is silent.** Change
+    /// this constant and the build stops here. Change `frame.glsl`'s
+    /// `shadowMatrices` extent instead and nothing fires at all: this assert
+    /// still passes, `FrameUniforms`'s `sizeof` assert still passes because it
+    /// is written in terms of this constant, and the uniform block is quietly
+    /// the wrong length. That direction has no instrument except the warning
+    /// written into `frame.glsl` itself, which is why it is written there.
+    ///
+    /// Deriving one side from the other would beat both and is not available -
+    /// GLSL cannot see a C++ constant and the two share no header - so this is
+    /// the strongest guard the boundary allows, on the half it can reach. It
+    /// costs nothing today, because the two already agree.
+    static_assert(kMaxCascades == 4,
+                  "frame.glsl declares mat4 shadowMatrices[4] as a literal and cannot follow this "
+                  "constant; change one and every FrameUniforms member after shadowMatrices reads "
+                  "from the wrong offset with no other diagnostic");
 
     /// Prefers a full 32-bit depth format and falls back to the 16-bit one every
     /// Vulkan device is required to support.
     static VkFormat chooseFormat(VkPhysicalDevice physicalDevice);
 
 private:
+    /// Everything the constructor takes, so a throw part-way through can be
+    /// released by the one function that also serves the destructor.
+    void createResources(std::uint32_t cascades);
+    void destroy() noexcept;
+
     const VulkanContext& m_context;
     VkFormat m_format = VK_FORMAT_UNDEFINED;
     std::uint32_t m_resolution = 0;

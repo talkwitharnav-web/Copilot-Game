@@ -7,6 +7,7 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -57,6 +58,10 @@ enum class Kind {
     /// there are three of them, and it is the only screen where that region's
     /// index means anything.
     Stonecutter,
+    /// **Not a screen.** It bounds the sweep below, which requires every `Kind`
+    /// before it to state its own crafting grid - so a ninth screen fails the
+    /// build instead of silently inheriting a 2x2 nothing draws.
+    Count,
 };
 
 /// Width and height of a screen's crafting grid.
@@ -65,6 +70,8 @@ enum class Kind {
 /// recipe matcher never sees. Nor has a smithing table.
 constexpr int craftSize(Kind kind) {
     switch (kind) {
+    case Kind::Inventory:
+        return 2;
     case Kind::CraftingTable:
         return 3;
     case Kind::Furnace:
@@ -74,14 +81,50 @@ constexpr int craftSize(Kind kind) {
     case Kind::Hopper:
     case Kind::Stonecutter:
         return 0;
-    default:
-        return 2;
+    case Kind::Count:
+        break;
     }
+    // **Not a grid size, and deliberately not a plausible one.** This used to be
+    // `default: return 2`, which is the inventory's own grid - so a ninth `Kind`
+    // would have quietly been given a 2x2 of writable slots that nothing draws
+    // and nothing hit-tests, and it would have worked well enough to ship.
+    // `CLAUDE.md` bug shape #10: a `default:` that returns a real value hides
+    // every missing entry. The sweep below is what turns this into a build
+    // failure, because MSVC's C4062 is off at /W4 and will not report the
+    // missing case on its own.
+    return -1;
 }
 
+/// Whether every `Kind` states its own grid width.
+///
+/// Walks the enum rather than the switch, so the two cannot agree by being the
+/// same list - adding an enumerator without a `case` fails here, which is the
+/// whole point of `Kind::Count` existing.
+constexpr bool everyKindStatesItsGrid() {
+    for (int i = 0; i < static_cast<int>(Kind::Count); ++i) {
+        if (craftSize(static_cast<Kind>(i)) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyKindStatesItsGrid(), "every Kind must state its own crafting grid width");
+/// Negative control: the sweep above is only worth reading if an unstated
+/// `Kind` still fails it.
+static_assert(craftSize(Kind::Count) < 0,
+              "an unstated Kind must answer the sentinel, or the sweep above proves nothing");
+
 constexpr std::size_t craftSlotCount(Kind kind) {
-    const auto size = static_cast<std::size_t>(craftSize(kind));
-    return size * size;
+    // `craftSize` answers -1 for a `Kind` that never stated its grid, and a
+    // negative squared through `std::size_t` wraps to a plausible-looking 1.
+    // Nothing real reaches it - `everyKindStatesItsGrid` proves that - but a
+    // sentinel that turns into a slot count is not a sentinel.
+    const int size = craftSize(kind);
+    if (size <= 0) {
+        return 0u;
+    }
+    return static_cast<std::size_t>(size) * static_cast<std::size_t>(size);
 }
 
 /// How far along a furnace is, 0 to 1 each. Ignored by the other screens.
@@ -91,6 +134,52 @@ struct FurnaceProgress {
 };
 
 /// Slots the layout owns beyond the inventory grid itself.
+///
+/// **`Armour` is live as of 2026-08-19 and the three below it are not.**
+/// `slotAt` returns `Armour` for the four cells down the left of the inventory
+/// panel, `Main.cpp` resolves it to `Inventory::armourAt`, and `build` draws
+/// what is worn there - which is what finally made `armourDefence`,
+/// `armourToughness` and `survival::armourDamageTaken` reachable at all. Before
+/// that the whole armour chain was correct, asserted and unusable, because
+/// nothing in the game could put a helmet on.
+///
+/// `Offhand`, `FurnaceInput` and `FurnaceFuel` are still produced by nothing.
+/// The two furnace ones are dead by design and say so below - the furnace
+/// reuses `Craft`. The offhand is a placeholder for a screen that does not
+/// exist yet. They are kept rather than deleted because the exhaustive `switch`
+/// in `build` names them, so removing one is a compile error rather than a
+/// silently dropped tooltip.
+///
+/// Negative claim about those three, checked 2026-08-19 11:29 and dated because
+/// negative claims rot fastest: what makes it false for `Offhand` is a
+/// second-hand slot existing at all, at which point the cell is already in the
+/// panel art at centre (85, 70) - measured, not guessed - and wiring it is the
+/// same four edits `Armour` needed.
+///
+/// **Re-measure it like this, because the obvious search gives a false clean.**
+/// Grepping `SlotHit{Region::` finds no `Offhand` and never will - not even
+/// after somebody wires one through a local, a ternary or an assignment,
+/// because that pattern tests the *accessor* rather than the data. Use a
+/// bare-name search over comment-stripped source, then reconcile every hit
+/// against a form. In `InventoryScreen.cpp`:
+///
+///   | symbol         | hits | what they are                     |
+///   |----------------|------|-----------------------------------|
+///   | `Armour`       |    3 | 1 construction + 2 `case` labels  |
+///   | `Offhand`      |    2 | 0 constructions + 2 `case` labels |
+///   | `FurnaceInput` |    2 | 0 constructions + 2 `case` labels |
+///   | `FurnaceFuel`  |    2 | 0 constructions + 2 `case` labels |
+///
+/// **`Armour` is the control, and it is the right control because it is the
+/// same kind of symbol, in the same file, under the same search** - a produced
+/// enumerator reads exactly one higher than an unproduced one, and that one is
+/// the construction. Comparing against some neighbouring symbol instead would
+/// be vacuous however true its number, which is the way a control most often
+/// fails without looking like it failed.
+///
+/// **The proof is that no row has a residue.** Every hit is accounted for as a
+/// construction or a label. If `Offhand` ever reads 3 while still showing two
+/// labels, something now produces it and this paragraph is false.
 enum class Region {
     Grid,
     Armour,
@@ -98,7 +187,8 @@ enum class Region {
     Craft,
     CraftResult,
     /// Furnace only. `Craft` index 0 doubles as its input and 1 as its fuel, so
-    /// the shared click handling needs no furnace-specific branch.
+    /// the shared click handling needs no furnace-specific branch - which is
+    /// why neither of these is ever produced.
     FurnaceInput,
     FurnaceFuel,
     /// A chest's own twenty-seven, indexed 0 to 26 across then down.
@@ -151,6 +241,90 @@ struct CatalogueState {
     /// selecting the Search tab does not silently stop `E` closing the screen.
     bool searchFocused = false;
 
+    /// Where the next character goes: a **byte offset into `query`**, from 0
+    /// (before the first character) to `query.size()` (after the last).
+    ///
+    /// **Bytes, not characters - and here the two are the same thing by
+    /// construction, not by luck.** `hud::fontAdvance` is a 128-entry table and
+    /// `appendText` draws one cell per byte, so a byte the font cannot name is
+    /// already undrawable; the field only ever receives what the window's typed
+    /// text hands it. A byte index is therefore the *same* index the renderer
+    /// measures with, which is the whole point - the caret's position and the
+    /// text's width must be counted in one unit or the bar lands between the
+    /// wrong pair of glyphs.
+    ///
+    /// If the field ever accepts anything above 127, `moveCaret` is the single
+    /// place that has to learn about continuation bytes, and this comment is
+    /// the thing that will be wrong first.
+    std::size_t caret = 0;
+
+    /// **The one owner of the caret's range**, and every edit below ends here.
+    ///
+    /// A caret that outlives its string is an out-of-bounds read on the very
+    /// next keystroke, and `query` is a public member that code with no idea a
+    /// caret exists can shorten. Idempotent on purpose, so calling it twice
+    /// costs nothing and calling it once too often is never wrong.
+    ///
+    /// The renderer does **not** rely on this - it clamps again locally, at the
+    /// point of use, because `build` takes this struct by const reference and
+    /// cannot repair it. That is deliberate belt and braces: a missed call here
+    /// can then only look momentarily odd for one frame, never crash.
+    void clampCaret() { caret = std::min(caret, query.size()); }
+
+    /// Replaces the whole field, caret and all.
+    ///
+    /// **This is the reconciliation point for everything that is not a
+    /// keystroke** - closing the screen, switching tab, a reset. A rule that
+    /// exists in only one of the two places that need it is this project's most
+    /// expensive bug shape, so clearing the query has a named way to do it
+    /// rather than a `query.clear()` that leaves the caret behind.
+    void setQuery(std::string next) {
+        query = std::move(next);
+        caret = query.size();
+    }
+
+    /// A typed character, inserted **at the caret** rather than appended.
+    void insertAtCaret(char c) {
+        clampCaret();
+        query.insert(caret, 1, c);
+        ++caret;
+    }
+
+    /// Backspace: removes what is *before* the caret, and moves it back.
+    void backspaceAtCaret() {
+        clampCaret();
+        if (caret > 0) {
+            query.erase(caret - 1, 1);
+            --caret;
+        }
+    }
+
+    /// Delete: removes what is *under* the caret, and leaves it where it is.
+    /// The two are different keys and they are not each other's mirror - this
+    /// one does nothing at the end of the string, where Backspace does nothing
+    /// at the start.
+    void deleteAtCaret() {
+        clampCaret();
+        if (caret < query.size()) {
+            query.erase(caret, 1);
+        }
+    }
+
+    /// Left and Right, as a signed step.
+    ///
+    /// **Clamped at both ends rather than wrapping.** A caret that jumps from
+    /// the end of the field to the start reads as a dropped keystroke, and the
+    /// player presses the key again.
+    void moveCaret(int delta) {
+        clampCaret();
+        const int moved = static_cast<int>(caret) + delta;
+        caret = static_cast<std::size_t>(std::clamp(moved, 0, static_cast<int>(query.size())));
+    }
+
+    /// Home and End.
+    void caretToStart() { caret = 0; }
+    void caretToEnd() { caret = query.size(); }
+
     /// The recipe book: everything the player has been able to make at least
     /// once. It only ever grows, which is what the reference's own book does -
     /// a recipe you have seen stays visible after you spend the ingredients.
@@ -164,6 +338,21 @@ struct CatalogueState {
     /// made nothing yet wants an empty one.
     bool restrictToKnown = false;
 };
+
+/// How many armour cells the open screen shows.
+///
+/// **Only the inventory**, and that is the art rather than a policy: the panel
+/// sprite every other screen uses is the inventory's with everything above the
+/// storage rows painted out - `tools/make-hud-sheet.ps1`, "the top section is
+/// cleared wholesale - armour column, character box, offhand". A crafting table
+/// that answered four here would hit-test four cells that are not drawn.
+///
+/// **This and `armourSlotCentre` must agree**, the same pairing rule
+/// `isContainer` and `chestSlotCount` carry: a screen that offers cells nothing
+/// draws, or draws cells no click can reach, is the half-landed shape.
+constexpr std::size_t armourSlotCount(Kind kind) {
+    return kind == Kind::Inventory ? kArmourSlots : 0;
+}
 
 /// Whether this screen shows the catalogue card beside the inventory.
 ///
@@ -237,12 +426,6 @@ constexpr std::size_t chestSlotCount(Kind kind) {
     return kind == Kind::Chest ? kChestSlots : 0;
 }
 
-/// How many previewed results a screen shows. Only the stonecutter shows more
-/// than one, and it is the only place `Region::CraftResult`'s index matters.
-constexpr std::size_t resultSlotCount(Kind kind) {
-    return kind == Kind::Stonecutter ? static_cast<std::size_t>(kStonecutterOptions) : 1u;
-}
-
 /// Every screen that shows a container, so the caller can ask one question
 /// rather than list three kinds. **`isContainer` and `chestSlotCount` must
 /// agree**: a kind that offers slots and is not named here would draw them and
@@ -250,6 +433,27 @@ constexpr std::size_t resultSlotCount(Kind kind) {
 constexpr bool isContainer(Kind kind) {
     return chestSlotCount(kind) > 0;
 }
+
+/// How many previewed results a screen shows.
+///
+/// **Zero for anything that is not a crafting surface**, which `slotAt` has
+/// always agreed with - it returns before it ever tests a result rectangle on a
+/// chest, a hopper or a double chest. This said 1 for all three, so the two
+/// halves of the same question gave different answers, and any caller that
+/// trusted this one would build a result slot no click could ever reach. The
+/// stonecutter is the only screen that shows more than one.
+constexpr std::size_t resultSlotCount(Kind kind) {
+    if (kind == Kind::Stonecutter) {
+        return static_cast<std::size_t>(kStonecutterOptions);
+    }
+    return isContainer(kind) ? 0u : 1u;
+}
+
+static_assert(resultSlotCount(Kind::Chest) == 0 && resultSlotCount(Kind::DoubleChest) == 0 &&
+                  resultSlotCount(Kind::Hopper) == 0 && resultSlotCount(Kind::Inventory) == 1 &&
+                  resultSlotCount(Kind::Stonecutter) == kStonecutterOptions,
+              "a container has nothing to make - the single edit that breaks this is giving a new "
+              "container kind storage slots without asking whether it also has a result");
 
 /// `heldStack` is what the cursor is carrying, drawn at (cursorX, cursorY).
 ///
@@ -266,9 +470,11 @@ constexpr bool isContainer(Kind kind) {
 /// because they are the one part of the screen that has to stop at an edge.
 ///
 /// What the cursor carries, and the label under it, go into `top`, which is
-/// drawn after `clipped`. A blended fragment still writes depth, so a stack
-/// held over the catalogue was stamping a hole through the icons behind it
-/// wherever its own artwork was transparent.
+/// drawn after `clipped`. The UI pass has no depth attachment (`Renderer.cpp`,
+/// `recordUiPass`), so what actually decides the order is the renderer's
+/// far-first stable sort with append order breaking ties - a stack held over
+/// the catalogue was appended *before* the icons behind it and came out under
+/// them wherever its own artwork was transparent.
 /// `craftResults` points at `resultSlotCount(kind)` previewed results. Every
 /// screen but the stonecutter has exactly one.
 engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* craftSlots,

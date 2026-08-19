@@ -5,6 +5,16 @@
 // which had already drifted to different lengths - legal, because a shorter
 // declaration is still a prefix of the same buffer, and exactly the shape of
 // bug this project keeps paying for. One owner now.
+//
+// **`shadowMatrices`' extent of 4 is part of that match and is the silent half
+// of it.** It must equal `ShadowMap::kMaxCascades`. Editing the constant is
+// caught - a `static_assert` sits beside it and stops the build - but editing
+// the `[4]` below is caught by nothing whatsoever: both C++ asserts still pass,
+// because the sizeof one is written in terms of that same constant. Shorten it
+// and every member declared after it here - fog, eye, wind, all of them - reads
+// from a different offset than the struct writes, with no diagnostic from any
+// tool in this project. This comment is the only instrument on that direction,
+// which is the whole reason it is here. Checked 2026-08-19 11:26.
 
 layout(set = 0, binding = 4) uniform Frame {
     vec4 sunDirection;

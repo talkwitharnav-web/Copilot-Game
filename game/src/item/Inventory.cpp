@@ -4,55 +4,13 @@
 
 namespace game {
 
-int Inventory::add(ItemId item, int count, int damage) {
-    if (item == ItemId::None || count <= 0) {
-        return 0;
-    }
-
-    // Matching stacks first. Opening a fresh slot while a partial one exists is
-    // how an inventory ends up holding the same thing four times over.
-    for (ItemStack& stack : m_slots) {
-        if (count <= 0) {
-            break;
-        }
-        if (!stack.empty() && stack.item == item && stack.damage == damage) {
-            const int moved = std::min(count, stack.space());
-            stack.count += moved;
-            count -= moved;
-        }
-    }
-
-    for (ItemStack& stack : m_slots) {
-        if (count <= 0) {
-            break;
-        }
-        if (stack.empty()) {
-            stack.item = item;
-            stack.count = std::min(count, maxStackFor(item));
-            stack.damage = damage;
-            count -= stack.count;
-        }
-    }
-
-    return count;
-}
-
-bool Inventory::hasRoomFor(ItemId item, int count) const {
-    if (item == ItemId::None || count <= 0) {
-        return true;
-    }
-
-    int room = 0;
-    for (const ItemStack& stack : m_slots) {
-        room += stack.empty() ? maxStackFor(item) : (stack.item == item ? stack.space() : 0);
-        if (room >= count) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void Inventory::consumeOne(std::size_t index) {
+    // **Checked, not trusted.** Every caller passes a slot index that came from
+    // a hit test on the screen, and `std::array::operator[]` on a bad one is not
+    // a crash but a quiet write past thirty-six stacks.
+    if (index >= m_slots.size()) {
+        return;
+    }
     ItemStack& stack = m_slots[index];
     if (stack.empty()) {
         return;
@@ -62,23 +20,23 @@ void Inventory::consumeOne(std::size_t index) {
     }
 }
 
-int Inventory::count(ItemId item) const {
+int Inventory::count(ItemId item, int damage) const {
     int held = 0;
     for (const ItemStack& stack : m_slots) {
-        if (!stack.empty() && stack.item == item) {
+        if (!stack.empty() && stack.item == item && matchesDamage(stack, damage)) {
             held += stack.count;
         }
     }
     return held;
 }
 
-int Inventory::consume(ItemId item, int wanted) {
+int Inventory::consume(ItemId item, int wanted, int damage) {
     int taken = 0;
     for (ItemStack& stack : m_slots) {
         if (taken >= wanted) {
             break;
         }
-        if (stack.empty() || stack.item != item) {
+        if (stack.empty() || stack.item != item || !matchesDamage(stack, damage)) {
             continue;
         }
         const int from = std::min(stack.count, wanted - taken);

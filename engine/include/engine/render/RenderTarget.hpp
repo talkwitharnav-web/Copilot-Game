@@ -43,6 +43,11 @@ public:
     static std::uint32_t mipCountFor(VkExtent2D extent, std::uint32_t limit);
 
 private:
+    /// Everything the constructor takes, so a throw part-way through can be
+    /// released by the one function that also serves the destructor.
+    void createResources(VkImageUsageFlags usage, std::uint32_t mipLevels);
+    void destroy() noexcept;
+
     const VulkanContext& m_context;
     VkExtent2D m_extent{};
     VkFormat m_format = VK_FORMAT_UNDEFINED;

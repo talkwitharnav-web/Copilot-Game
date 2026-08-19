@@ -141,9 +141,21 @@ bool isWaterLayer(float meshedLayer) {
 /// returned completely different parts of the sky and the whole surface read as
 /// coloured static rather than as water.
 ///
-/// **The geometry is not displaced, only the normal.** A water surface that
-/// moved vertically would part company with the block edge it is meshed
-/// against and open a seam at every shoreline.
+/// **The geometry *is* displaced, and this normal is deliberately steeper than
+/// it.** An earlier note here said the surface was not moved at all, which was
+/// false and argued for deleting working code: `displacedPosition` in
+/// `displace.glsl` raises a fluid-top vertex by `height * frame.water.y *
+/// kWaveDisplacement`, and the seam this warned about is prevented instead by
+/// only ever moving vertices the mesher marked as a fluid top, so a shoreline's
+/// side faces and the seabed stay put.
+///
+/// The slope below is the wave's *undamped* derivative, while the geometry is
+/// raised by `kWaveDisplacement` (0.45) of the wave's height. So the shading
+/// normal tilts 1/0.45 = 2.22 times as far as the surface actually does -
+/// measured at 2.654 degrees of shading tilt against 1.195 of geometric tilt.
+/// That is on purpose: the displacement is kept small so a swell cannot open a
+/// visible step against the block edge it is meshed against, while the lighting
+/// still needs enough tilt to read as moving water rather than as a flat sheet.
 vec3 waterNormal(vec2 world, float seconds, float strength) {
     float height = 0.0;
     vec2 slope = vec2(0.0);
@@ -152,7 +164,19 @@ vec3 waterNormal(vec2 world, float seconds, float strength) {
     // is the single most obvious thing missing from one. The wave's own
     // gradient is handed over as how choppy it is here, so a ring on a swell is
     // swamped by it and one on flat water is not.
-    slope += rainRipples(world, seconds, frame.weather.x, length(slope));
+    //
+    // **Rain, not "whatever is falling".** `weather.x` is the intensity of the
+    // precipitation and `weather.y` says which kind it is, and this read the
+    // first without the second - so every lake, river and pond grew expanding
+    // impact rings at rain's full rate throughout a snowstorm. The two shaders
+    // that also consume the pair both split on it: `deferred.frag` gates the
+    // wet-surface darkening with this exact expression and `precipitation.frag`
+    // picks its sprite off `weather.y > 0.5`, so the bank beside the water was
+    // correctly not wet while the water was correctly not water. Written in
+    // `deferred.frag`'s form rather than as a hard step, so the two stay
+    // together through any value between the two states rather than only at
+    // the ends.
+    slope += rainRipples(world, seconds, frame.weather.x * (1.0 - frame.weather.y), length(slope));
     return normalize(vec3(-slope.x * strength, 1.0, -slope.y * strength));
 }
 

@@ -3,12 +3,20 @@
 #include <engine/core/Log.hpp>
 
 #include <string>
+#include <string_view>
 
 namespace game {
 namespace {
 
-/// The file stem each event's recordings are staged under, matching
-/// `tools/make-reference-sounds.ps1` exactly. **One order, two places.**
+/// The file stem each event's recordings are staged under.
+///
+/// **`kStems[i]` is the stem for `SoundEvent(i)`, and that is the only order
+/// that matters.** The old comment here claimed "one order, two places" and
+/// named `tools/make-reference-sounds.ps1` as the second - which is false in
+/// both directions: `Sounds::load` addresses every file by *stem name*, so the
+/// script may write its table in any order it likes and nothing here would
+/// notice. What it must not do is spell a stem differently, and `sweep()` is
+/// what catches that. Do not "repair" the script's order to match this.
 constexpr std::array<const char*, static_cast<std::size_t>(SoundEvent::Count)> kStems{
     "dig_stone",   "dig_wood",    "dig_grass",   "dig_gravel",  "dig_sand",
     "dig_cloth",   "dig_snow",    "dig_glass",   "dig_coral",   "dig_wet",
@@ -36,6 +44,23 @@ constexpr std::array<const char*, static_cast<std::size_t>(SoundEvent::Count)> k
     "bell",
 };
 
+/// Whether the stem sitting at an event's index is the one it should be.
+///
+/// **Not a restatement of the table**: it compares the enum against the array,
+/// which are two different things written in two different places. The single
+/// edit that makes it fail is inserting a `SoundEvent` enumerator without
+/// inserting its stem at the same position - the failure this cannot otherwise
+/// see, because everything after the insertion still loads perfectly and simply
+/// plays the wrong recording. Anchored at both ends and once in the middle, so
+/// an insertion anywhere is caught.
+constexpr bool stemMatches(SoundEvent event, std::string_view stem) {
+    return std::string_view(kStems[static_cast<std::size_t>(event)]) == stem;
+}
+
+static_assert(stemMatches(SoundEvent::DigStone, "dig_stone"), "the stem table has shifted at the top");
+static_assert(stemMatches(SoundEvent::ItemBreak, "item_break"), "the stem table has shifted in the middle");
+static_assert(stemMatches(SoundEvent::Bell, "bell"), "the stem table has shifted at the bottom");
+
 /// And the voice families, in `CreatureVoice` order.
 constexpr std::array<const char*, static_cast<std::size_t>(CreatureVoice::Count)> kVoiceStems{
     "sheep",   "cow",       "pig",      "chicken", "horse",     "llama",     "cat",
@@ -60,9 +85,201 @@ std::uint32_t nextRandom(std::uint32_t& state) {
     return state;
 }
 
+/// The pitch wobble every one-shot gets, and **one owner of it**, because the
+/// positional and the global paths both need it and only one of them had it: a
+/// levelling-up, a burp and a chest lid all played at exactly the same pitch
+/// every time, which is the mechanical repetition the wobble exists to stop.
+/// A little under a semitone either way - the reference's own range.
+float jitterPitch(float pitch, std::uint32_t& state) {
+    return pitch * (0.92f + static_cast<float>(nextRandom(state) % 1000) * 0.00016f);
+}
+
 /// How long between tracks. The reference leaves long gaps deliberately - music
 /// that never stops stops being music.
 constexpr float kMusicGapSeconds = 210.0f;
+
+/// Whether anything in `game/` actually names an event.
+///
+/// **A hand-kept table, and it has to be**: no tool can see from here that a
+/// bank loaded twenty-one recordings which no call site will ever ask for. That
+/// is exactly how thirteen banks - a snapping tool, a drowning gasp, lava being
+/// quenched - were decoded at every startup for twenty milestones while the
+/// game played none of them, and every one of them looked perfectly healthy to
+/// `has()`. Twelve of the thirteen were wired on 2026-08-18 and this table is
+/// now true again, which is the only state in which it is worth anything: a
+/// row that lies about a wired event is worse than no table at all, because
+/// the next person will believe it and stop reading.
+///
+/// **It paid for itself on the way in.** Wiring `ItemBreak` turned up a fourth
+/// hand-rolled tool-wear path - the bow, reading `kBowDurability` and zeroing
+/// its own slot - which `Mining.hpp` already had in the tool table and which
+/// `wearTool` should always have owned. The rule was correct in three places
+/// and had not travelled to the fourth, and what found it was a *sound* being
+/// missing: the silence was the symptom of a missing call to the owner.
+///
+/// **There is no `default:`, but do not trust that on its own.** MSVC's C4062 -
+/// the warning for an unhandled enumerator - is **off by default even at
+/// `/W4`**, and this build does not enable it (`/w44062` would; measured, not
+/// assumed). So a new `SoundEvent` falls out of the switch below and lands on
+/// `Unclassified`, which `sweep` names in the log at every startup. That is the
+/// net: a compile-time one is not available here without a build change.
+enum class EventUse : std::uint8_t {
+    /// A call site names it. `sweep` complains if the recordings are missing.
+    Played,
+    /// Deliberately silent, with a reason. `sweep` says nothing either way.
+    SilentOnPurpose,
+    /// Staged, decoded, and nothing plays it yet. `sweep` says so every start.
+    /// **Empty today, and that is the goal state** - it is where a newly staged
+    /// bank sits while its call site is still being written, not a parking bay.
+    NotYetWired,
+    /// Nobody said. Only reachable by adding a `SoundEvent` and not adding a
+    /// row below, which is precisely the edit this table exists to catch.
+    Unclassified,
+};
+
+constexpr EventUse eventUse(SoundEvent event) {
+    switch (event) {
+    // Every dig and step bank is reachable through `digSoundFor` and
+    // `stepSoundFor`, which is the only path the game uses to name one.
+    case SoundEvent::DigStone:
+    case SoundEvent::DigWood:
+    case SoundEvent::DigGrass:
+    case SoundEvent::DigGravel:
+    case SoundEvent::DigSand:
+    case SoundEvent::DigCloth:
+    case SoundEvent::DigSnow:
+    case SoundEvent::DigGlass:
+    case SoundEvent::DigCoral:
+    case SoundEvent::DigWet:
+    case SoundEvent::StepStone:
+    case SoundEvent::StepWood:
+    case SoundEvent::StepGrass:
+    case SoundEvent::StepGravel:
+    case SoundEvent::StepSand:
+    case SoundEvent::StepCloth:
+    case SoundEvent::StepSnow:
+    case SoundEvent::StepLadder:
+    case SoundEvent::StepCoral:
+    case SoundEvent::StepWet:
+    case SoundEvent::Hurt:
+    case SoundEvent::FallBig:
+    case SoundEvent::FallSmall:
+    case SoundEvent::Bow:
+    case SoundEvent::HitLand:
+    case SoundEvent::Explode:
+    case SoundEvent::Fuse:
+    case SoundEvent::Eat:
+    case SoundEvent::Burp:
+    case SoundEvent::Pop:
+    case SoundEvent::Orb:
+    case SoundEvent::WoodClick:
+    case SoundEvent::Splash:
+    case SoundEvent::ChestOpen:
+    case SoundEvent::ChestClose:
+    case SoundEvent::DoorOpen:
+    case SoundEvent::DoorClose:
+    case SoundEvent::BucketFill:
+    case SoundEvent::BucketEmpty:
+    case SoundEvent::BucketFillLava:
+    case SoundEvent::BucketEmptyLava:
+    case SoundEvent::Ignite:
+    case SoundEvent::Cave:
+    case SoundEvent::Music:
+    case SoundEvent::Rain:
+    case SoundEvent::Thunder:
+    case SoundEvent::Bell:
+
+    // Wired 2026-08-18, and five of them differ from what was specified for
+    // them - written down here because this table is only worth reading while
+    // it is true.
+    //
+    // **One owner each, which is the half that matters.** `ItemBreak` goes
+    // through `wearTool`, which covers all four wear paths rather than the two
+    // that were obvious - the fourth being the bow, which was zeroing its own
+    // slot and snapping in silence until this sweep found it. `Swim` is an
+    // `else if (player.inWater)` branch of the footstep chain rather than a
+    // test in front of it, so `lastStepAt` keeps its single owner, OR'd with
+    // the treading rising edge so bobbing in place still strokes; the old
+    // treading-only trigger was a double-fire and is gone. `Drink` also sounds
+    // at the *start* of a meal, because the opening bite was playing `Eat` for
+    // potions.
+    case SoundEvent::BowHit:
+    case SoundEvent::Click:
+    case SoundEvent::ItemBreak:
+    case SoundEvent::Fizz:
+    case SoundEvent::SplashBig:
+    case SoundEvent::Swim:
+    case SoundEvent::Drink:
+
+    // Through `tickAmbient`, so the call site owns the condition and this file
+    // owns the cadence. **`Water` is not part of the fire-and-lava block scan**
+    // and must not be folded into it: its row is `global`, which reads it as
+    // the muffling of *being* underwater rather than a river heard from the
+    // bank, so it is gated on `player.underwater` alone. `Fire`, `Lava` and
+    // `LavaPop` share one 5x5x5 scan on a quarter-second timer, nearest cell
+    // wins.
+    case SoundEvent::Breath:
+    case SoundEvent::Fire:
+    case SoundEvent::Lava:
+    case SoundEvent::LavaPop:
+    case SoundEvent::Water:
+        return EventUse::Played;
+
+    // **No experience system exists**, so there is no moment for this to mark.
+    // `BlockDrops.hpp` and `Recipe.hpp` both say so where they would otherwise
+    // award it, and it is still the one event in the enum with no call site.
+    // The recording stays staged for the day one lands.
+    case SoundEvent::LevelUp:
+        return EventUse::SilentOnPurpose;
+
+    case SoundEvent::Count:
+        break;
+    }
+    // Reached only by a `SoundEvent` with no row above. Deliberately *not*
+    // `SilentOnPurpose` - that would file a forgotten event under "we meant it".
+    return EventUse::Unclassified;
+}
+
+/// One continuing condition: what it plays, how often, and how loudly.
+struct AmbientRow {
+    SoundEvent event = SoundEvent::Count;
+    /// Roughly the recording's own length, so a held condition sounds
+    /// continuous without stacking on itself.
+    float seconds = 1.0f;
+    float volume = 1.0f;
+    /// Happens *to* you rather than near you, so it carries no position.
+    bool global = false;
+};
+
+constexpr std::array<AmbientRow, static_cast<std::size_t>(AmbientCue::Count)> kAmbientCues{{
+    /* Fire    */ {SoundEvent::Fire, 1.6f, 0.50f, false},
+    /* Lava    */ {SoundEvent::Lava, 2.4f, 0.50f, false},
+    /* LavaPop */ {SoundEvent::LavaPop, 2.8f, 0.60f, false},
+    /* Water   */ {SoundEvent::Water, 1.9f, 0.40f, true},
+    /* Breath  */ {SoundEvent::Breath, 1.00f, 0.70f, true},
+}};
+
+/// Whether every row could actually be heard as an ambience.
+///
+/// The single edit that makes it fail is giving a row an interval of zero,
+/// which retriggers it every frame - forty copies of the same recording a
+/// second, which is a roar rather than a fire. A volume outside the range or a
+/// row that names no event fails it too.
+constexpr bool ambientRowsAreSane() {
+    for (const AmbientRow& row : kAmbientCues) {
+        if (row.event == SoundEvent::Count) {
+            return false;
+        }
+        if (row.seconds <= 0.0f || row.volume <= 0.0f || row.volume > 1.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(ambientRowsAreSane(),
+              "every ambient cue needs a real event, an interval above zero and a volume within "
+              "0 to 1");
 
 } // namespace
 
@@ -172,115 +389,6 @@ CreatureVoice voiceFamilyFor(CreatureKind kind) {
     }
 }
 
-SoundMaterial soundMaterialFor(BlockId block) {
-    // Asked as families rather than as a list of ids, so eleven hundred blocks
-    // are covered by a dozen tests and a new one inherits the right sound the
-    // day it is added.
-    if (block == BlockId::Air || isFluid(block)) {
-        return SoundMaterial::None;
-    }
-    if (isLeafBlock(block)) {
-        return SoundMaterial::Grass;
-    }
-    if (isLogBlock(block) || block == BlockId::Planks || block == BlockId::Bookshelf ||
-        block == BlockId::CraftingTable) {
-        return SoundMaterial::Wood;
-    }
-    if (block == BlockId::Glass || isPane(block) || block == BlockId::Glowstone) {
-        return SoundMaterial::Glass;
-    }
-    if (block == BlockId::Sand || block == BlockId::Sandstone) {
-        return SoundMaterial::Sand;
-    }
-    if (block == BlockId::Gravel || block == BlockId::Clay) {
-        return SoundMaterial::Gravel;
-    }
-    if (block == BlockId::Snow) {
-        return SoundMaterial::Snow;
-    }
-    // Anything that lives in water squelches rather than crunches, which is the
-    // reference's `wet_grass` and is what a seabed should sound like.
-    if (block == BlockId::Kelp || block == BlockId::Seagrass || block == BlockId::LilyPad) {
-        return SoundMaterial::Wet;
-    }
-    if (block == BlockId::Grass || block == BlockId::Dirt || isCrossBlock(block)) {
-        return SoundMaterial::Grass;
-    }
-    if (isCarpet(block)) {
-        return SoundMaterial::Cloth;
-    }
-
-    // A cut shape sounds like whatever it was cut from, which falls out of
-    // `shapedParent` rather than needing six hundred rows of its own.
-    const BlockId parent = shapedParent(block);
-    if (parent != block) {
-        return soundMaterialFor(parent);
-    }
-
-    // Wood is the only family broad enough to be worth a second test; every
-    // remaining block is some kind of rock, which is also the safest thing for
-    // an unknown to be.
-    return isFlammable(block) ? SoundMaterial::Wood : SoundMaterial::Stone;
-}
-
-SoundEvent digSoundFor(SoundMaterial material) {
-    switch (material) {
-    case SoundMaterial::Stone:
-        return SoundEvent::DigStone;
-    case SoundMaterial::Wood:
-        return SoundEvent::DigWood;
-    case SoundMaterial::Grass:
-        return SoundEvent::DigGrass;
-    case SoundMaterial::Gravel:
-        return SoundEvent::DigGravel;
-    case SoundMaterial::Sand:
-        return SoundEvent::DigSand;
-    case SoundMaterial::Cloth:
-        return SoundEvent::DigCloth;
-    case SoundMaterial::Snow:
-        return SoundEvent::DigSnow;
-    case SoundMaterial::Glass:
-        return SoundEvent::DigGlass;
-    case SoundMaterial::Coral:
-        return SoundEvent::DigCoral;
-    case SoundMaterial::Wet:
-        return SoundEvent::DigWet;
-    case SoundMaterial::None:
-        break;
-    }
-    return SoundEvent::Count;
-}
-
-SoundEvent stepSoundFor(SoundMaterial material) {
-    switch (material) {
-    case SoundMaterial::Stone:
-        return SoundEvent::StepStone;
-    case SoundMaterial::Wood:
-        return SoundEvent::StepWood;
-    case SoundMaterial::Grass:
-        return SoundEvent::StepGrass;
-    case SoundMaterial::Gravel:
-        return SoundEvent::StepGravel;
-    case SoundMaterial::Sand:
-        return SoundEvent::StepSand;
-    case SoundMaterial::Cloth:
-        return SoundEvent::StepCloth;
-    case SoundMaterial::Snow:
-        return SoundEvent::StepSnow;
-    // Glass has no footstep of its own in the reference either; it walks like
-    // stone.
-    case SoundMaterial::Glass:
-        return SoundEvent::StepStone;
-    case SoundMaterial::Coral:
-        return SoundEvent::StepCoral;
-    case SoundMaterial::Wet:
-        return SoundEvent::StepWet;
-    case SoundMaterial::None:
-        break;
-    }
-    return SoundEvent::Count;
-}
-
 void Sounds::load(engine::AudioEngine& audio, const std::filesystem::path& directory) {
     if (!std::filesystem::exists(directory)) {
         engine::logInfo("No sound bank at " + directory.string() + "; running silently.");
@@ -352,7 +460,7 @@ void Sounds::play(engine::AudioEngine& audio, SoundEvent event, const glm::vec3&
     how.volume = volume;
     // A little variation on every one, which is most of what stops a repeated
     // sound reading as a loop. The reference does the same.
-    how.pitch = pitch * (0.92f + static_cast<float>(nextRandom(m_random) % 1000) * 0.00016f);
+    how.pitch = jitterPitch(pitch, m_random);
     audio.play(handle, how);
 }
 
@@ -364,7 +472,10 @@ void Sounds::playGlobal(engine::AudioEngine& audio, SoundEvent event, float volu
     engine::SoundPlay how;
     how.global = true;
     how.volume = volume;
-    how.pitch = pitch;
+    // The same wobble a positional sound gets, from the same function. Held
+    // apart, the two drifted and everything that happens *to you* rather than
+    // near you came out at one fixed pitch.
+    how.pitch = jitterPitch(pitch, m_random);
     audio.play(handle, how);
 }
 
@@ -402,6 +513,113 @@ void Sounds::tickMusic(engine::AudioEngine& audio, float deltaSeconds) {
     }
     m_musicTimer = 0.0f;
     audio.playMusic(pick(SoundEvent::Music));
+}
+
+void Sounds::tickAmbient(engine::AudioEngine& audio, AmbientCue cue, bool sounding,
+                         const glm::vec3& at, float deltaSeconds) {
+    const auto index = static_cast<std::size_t>(cue);
+    if (index >= kAmbientCues.size()) {
+        return;
+    }
+    const AmbientRow& row = kAmbientCues[index];
+
+    if (!sounding) {
+        // **Forgotten rather than paused.** Walking back to a fire should be
+        // heard at once; a half-spent timer would leave up to an interval of
+        // silence standing right beside it.
+        m_ambientTimers[index] = 0.0f;
+        return;
+    }
+
+    m_ambientTimers[index] -= deltaSeconds;
+    if (m_ambientTimers[index] > 0.0f) {
+        return;
+    }
+    // A little either way on the interval, for the same reason every one-shot
+    // gets a pitch wobble: an exact cadence reads as a machine, not a fire.
+    m_ambientTimers[index] =
+        row.seconds * (0.85f + static_cast<float>(nextRandom(m_random) % 1000) * 0.0003f);
+
+    if (row.global) {
+        playGlobal(audio, row.event, row.volume);
+    } else {
+        play(audio, row.event, at, row.volume);
+    }
+}
+
+std::vector<std::string> Sounds::sweep() const {
+    std::vector<std::string> findings;
+
+    if (loaded() == 0) {
+        // Everything below would restate this fact a hundred and sixty times.
+        findings.push_back("Sound sweep: no recordings loaded at all - the game will run silently.");
+        return findings;
+    }
+
+    const auto append = [](std::string& list, const std::string& name) {
+        if (!list.empty()) {
+            list += ", ";
+        }
+        list += name;
+    };
+
+    std::string unstaged;
+    std::string orphaned;
+    std::string unclassified;
+    std::size_t orphanedRecordings = 0;
+    for (std::size_t event = 0; event < kStems.size(); ++event) {
+        const bool staged = has(static_cast<SoundEvent>(event));
+        switch (eventUse(static_cast<SoundEvent>(event))) {
+        case EventUse::Played:
+            if (!staged) {
+                append(unstaged, kStems[event]);
+            }
+            break;
+        case EventUse::NotYetWired:
+            if (staged) {
+                append(orphaned, kStems[event]);
+                orphanedRecordings += m_banks[event].size();
+            }
+            break;
+        case EventUse::Unclassified:
+            append(unclassified, kStems[event]);
+            break;
+        case EventUse::SilentOnPurpose:
+            break;
+        }
+    }
+
+    std::string mute;
+    for (std::size_t family = 0; family < kVoiceStems.size(); ++family) {
+        for (std::size_t state = 0; state < kVoiceStates.size(); ++state) {
+            if (!hasVoice(static_cast<CreatureVoice>(family), static_cast<VoiceState>(state))) {
+                append(mute, std::string(kVoiceStems[family]) + " " + kVoiceStates[state]);
+            }
+        }
+    }
+
+    // One line per kind of fault rather than one per event: a missing bank
+    // usually means a missing *run* of them, and sixty warnings hide the one
+    // line that says which.
+    if (!unstaged.empty()) {
+        findings.push_back("Sound sweep: the game plays these and nothing was staged for them: " +
+                           unstaged);
+    }
+    if (!orphaned.empty()) {
+        findings.push_back("Sound sweep: " + std::to_string(orphanedRecordings) +
+                           " recordings decoded that nothing in the game ever plays: " + orphaned);
+    }
+    if (!mute.empty()) {
+        findings.push_back("Sound sweep: creature voices with no recordings: " + mute);
+    }
+    // Last because it is a fault in the *table*, not in the bank: someone added
+    // an event and never said whether the game plays it, so every line above is
+    // answering the wrong question for it.
+    if (!unclassified.empty()) {
+        findings.push_back("Sound sweep: no row in eventUse for: " + unclassified);
+    }
+
+    return findings;
 }
 
 } // namespace game

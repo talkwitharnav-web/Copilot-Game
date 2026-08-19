@@ -37,10 +37,9 @@ layout(push_constant) uniform Post {
 
 layout(location = 0) out vec4 outColor;
 
-// How far above ordinary diffuse an emissive surface sits. It has to clear 1.0
-// by a good margin or the tone curve has nothing to turn into a white core with
-// a coloured fringe, which is what a light actually looks like.
-const float kEmissionScale = 4.0;
+// `kEmissionScale` is in lighting.glsl, which this file includes - one
+// definition shared with triangle.frag rather than two that agree until they do
+// not.
 
 // A point light riding on the player. Off by default and deliberately so: its
 // direction *is* the view direction, so the half-vector is the view vector and

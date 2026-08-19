@@ -175,8 +175,24 @@ void main() {
             float lightAmount = cloudLightMarch(point, wind, coverage);
 
             // Beer's law, with the powder term that darkens the edges facing
-            // you. Not physical - it fakes multiple scattering, and it is what
-            // makes a cloud read as fluffy rather than as plastic.
+            // you. Not physical - it fakes multiple scattering.
+            //
+            // **The powder term is inert today, and the claim that it is what
+            // makes a cloud read as fluffy was false.** `cloudDensity` ends in
+            // `normalised > (1.0 - coverage) ? 1.0 : 0.0`, so it returns
+            // exactly 1.0 or exactly 0.0 and nothing between - and the branch
+            // this sits in has already rejected 0.0. `density` is therefore
+            // always exactly 1.0 here, `powder` is always 1 - exp(-6) =
+            // 0.99752, and the whole term is a uniform 0.25% darkening with no
+            // edge behaviour in it at all. Tuning the 6.0 does nothing
+            // visible, which is the reason to say so here rather than to leave
+            // a reader measuring it.
+            //
+            // Kept rather than deleted, because it is correct code waiting on
+            // its input: the moment `cloudDensity` grows a height profile or
+            // any erosion - which `clouds.glsl` says it deliberately has not -
+            // density becomes continuous and this starts doing the job it
+            // describes, with no edit needed here.
             float extinction = density * stepLength * 0.9;
             float absorbed = 1.0 - exp(-extinction);
             float powder = 1.0 - exp(-density * 6.0);

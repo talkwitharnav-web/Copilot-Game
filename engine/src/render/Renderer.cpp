@@ -21,8 +21,43 @@
 namespace engine {
 namespace {
 
-// 60 degrees or wider makes anything close to the camera visibly warp at the
-// frame edges, the same way an ultrawide phone lens does. 45 reads as natural.
+// **Four is written down in two more places that no compiler can see.**
+// `frame.glsl` declares `mat4 shadowMatrices[4]` as a literal, and
+// `Renderer::m_shadowTexelWorld` is a `glm::vec4` indexed by cascade, so it
+// holds exactly four floats. The `static_assert` in `FrameUniforms.hpp` is
+// parameterised on `kMaxCascades` and would happily follow it to 5 while the
+// GLSL block stayed at 4 and the texel widths ran off the end of the vector -
+// a shadow map sampled with a matrix belonging to a different cascade, which
+// reads as shadows sliding off their casters rather than as any kind of error.
+//
+// **The single edit that makes this fail is raising
+// `ShadowMap::kMaxCascades` to 5**, which is exactly the edit that must not
+// happen on its own.
+static_assert(ShadowMap::kMaxCascades == 4u,
+              "frame.glsl's shadowMatrices[4] and m_shadowTexelWorld's glm::vec4 both hard-code 4");
+
+// A range the caller supplied, made safe against the buffer that actually got
+// uploaded. The mesher and the upload are two separate steps and a slot is
+// reused by a different chunk, so a tail that outruns the buffer is a live
+// possibility rather than a theoretical one - and `vkCmdDrawIndexed` reading
+// past the end is undefined behaviour that reads on screen as panes flickering
+// somewhere unrelated to the chunk that caused it. Anything that does not fit
+// is dropped whole, because half a pane is worse than none.
+MeshIndexRange clampToMesh(const MeshIndexRange& range, std::uint32_t indexCount) {
+    if (range.count == 0 || range.first >= indexCount || range.count > indexCount - range.first) {
+        return MeshIndexRange{};
+    }
+    return range;
+}
+
+// Ten centimetres. Every step of depth precision is spent between here and
+// `m_farPlane`, and an ordinary (non-reversed) depth buffer spends most of it
+// close to the eye, so pulling this nearer costs precision everywhere else in
+// the world. Ten centimetres is small enough that the camera can stand against
+// a wall without the wall disappearing, and no smaller.
+//
+// **This is not the field of view.** That is `m_verticalFovDegrees`, it
+// defaults to 70, and `Renderer::setVerticalFov` is where its range is argued.
 constexpr float kNearPlane = 0.1f;
 
 /// What each shadow quality level costs and buys. Level 0 is off.
@@ -45,6 +80,30 @@ constexpr std::array<ShadowQualityLevel, 4> kShadowQualityLevels{{
     {1536, 3, 128.0f},
     {2048, 4, 192.0f},
 }};
+
+/// **No quality level may ask for more cascades than the shadow map holds.**
+///
+/// The `4` in the last row above and the `4` in `ShadowMap::kMaxCascades` are
+/// two unrelated literals, and only one direction of disagreement is caught.
+/// Raising `kMaxCascades` alone fails the `static_assert` near the top of this
+/// file. **Raising this table alone fails nothing** - that assert still sees
+/// `kMaxCascades == 4`, because this edit does not touch it - and the damage is
+/// at run time, writing a fifth matrix into a four-element array and a fifth
+/// texel scale into a `glm::vec4`.
+///
+/// Both sides are read here, so the pair cannot drift apart silently again.
+constexpr bool shadowQualityFitsCascadeBudget() {
+    for (const ShadowQualityLevel& level : kShadowQualityLevels) {
+        if (level.cascades > ShadowMap::kMaxCascades) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(shadowQualityFitsCascadeBudget(),
+              "a shadow quality level asks for more cascades than ShadowMap::kMaxCascades holds; "
+              "raise kMaxCascades, frame.glsl's shadowMatrices[] and m_shadowTexelWorld together");
 
 /// Pulled this far back behind each cascade, so something standing between the
 /// sun and the slice still casts into it even though it is far outside the
@@ -208,6 +267,33 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
                               .depthFormat = m_depthImage->format(),
                               .descriptorSetLayout = m_descriptorSetLayout,
                               .pushConstantBytes = sizeof(MeshPushConstants),
+                              // **These four are spelled out although they are
+                              // the `PipelineDesc` defaults**, because an audit
+                              // and two reviews have each had to go and look
+                              // them up to find out what this pipeline does,
+                              // and one of them then proposed enabling culling
+                              // that was already on. They are load-bearing, not
+                              // incidental, so they should not follow a change
+                              // to the defaults either:
+                              //
+                              // Culling back faces is what presents one shell
+                              // face per water volume from any angle - the
+                              // mesher never marks a translucent quad
+                              // double-sided, so each carries exactly one
+                              // outward winding.
+                              .cullMode = VK_CULL_MODE_BACK_BIT,
+                              .depthTest = true,
+                              // **Writes depth while blending**, which is the
+                              // trap that has cost this project most. Kept on
+                              // purpose: the rain draw below rejects drops
+                              // behind a lake surface, which only works if the
+                              // water stamped its distance. The costs are paid
+                              // elsewhere instead - `triangle.frag` cutouts
+                              // near-zero alpha so a hole cannot stamp depth,
+                              // and the translucent loop is sorted farthest
+                              // first so one water chunk cannot reject another.
+                              .depthWrite = true,
+                              .blend = BlendMode::Alpha,
                           });
 
     m_gbufferPipeline = std::make_unique<GraphicsPipeline>(
@@ -358,6 +444,17 @@ void Renderer::createPostSamplers() {
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vkCheck(vkCreateSampler(m_context.device(), &samplerInfo, nullptr, &m_edgeSampler), "vkCreateSampler");
 
+    // **Nearest, and only the depth buffer uses it.** The G-buffer bindings are
+    // linear and harmless because `deferred.frag` samples them at `fragUv`
+    // alone, which lands on exact texel centres; the contact-shadow taps do
+    // not, so on depth the filtering is really running. Blending two depths
+    // across a silhouette produces a value that unprojects to a point on
+    // neither surface, and it is also a format feature Vulkan does not require
+    // a depth format to have - see the member's own note.
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    vkCheck(vkCreateSampler(m_context.device(), &samplerInfo, nullptr, &m_pointSampler), "vkCreateSampler");
+
     // One sampled image for the two bloom passes, two for the tone mapper.
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
@@ -387,6 +484,36 @@ void Renderer::createPostSamplers() {
     poolSizes[0].descriptorCount = kMaxBloomMips * 2 + 2 + kFramesInFlight * 5;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[1].descriptorCount = kFramesInFlight;
+
+    // **A tripwire on the descriptor limits, in the same spirit as the
+    // `maxImageArrayLayers` one in `TextureArray::createResources` - but on the
+    // number that is actually bounded.**
+    //
+    // Two limits exist and neither of them bounds a pool.
+    // `maxPerStageDescriptorSampledImages` (guaranteed floor 16) and
+    // `maxDescriptorSetSampledImages` (floor 96) both limit what a single
+    // *descriptor set layout* may declare; a `VkDescriptorPoolSize::
+    // descriptorCount` is a budget handed out across many sets and the spec
+    // places neither limit on it. This asserted `poolSizes[0].descriptorCount`
+    // against 96 and named the per-stage limit in its own comment without ever
+    // checking it, so it sat at 28 against a ceiling three and a half times
+    // higher, measuring the wrong quantity, and would have stayed green through
+    // exactly the change it claimed to catch. A second assert compared
+    // `kPostSets` against the same 96, which has no meaning for `maxSets` at
+    // all.
+    //
+    // What is genuinely at risk is the widest single set, and that is the world
+    // set rather than anything in this function: `kTextureBindingCount` sheets
+    // plus the scene copy plus the sun's shadow map, all declared to the
+    // fragment stage at once. Six today against a floor of sixteen, and a
+    // seventh sampler is one line in `createDescriptorResources`. Every post
+    // set is far smaller - one image for a bloom mip, two for the tone map,
+    // five for the deferred pass.
+    constexpr std::uint32_t kWorldSetSampledImages = kTextureBindingCount + 2;
+    static_assert(kWorldSetSampledImages <= 16,
+                  "The world descriptor set declares more sampled images than Vulkan's guaranteed "
+                  "maxPerStageDescriptorSampledImages of 16. Adding a sampler to the world set grew this - "
+                  "either drop one or check the limit against the device at runtime.");
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -640,10 +767,25 @@ void Renderer::createRenderTargets() {
 void Renderer::writePostDescriptorSets() {
     const std::uint32_t mips = m_bloom->mipLevels();
 
+    // **One owner for both counts.** Every `write` below pushes exactly one
+    // entry to each vector, so the two stay index-for-index aligned; the fix-up
+    // loop at the bottom depends on that and indexes `images` by a `writes`
+    // index. The per-frame figure is 2 world-set bindings (scene copy, sun
+    // shadow) plus 5 deferred ones (albedo, light, material, depth, shadow).
+    // Deriving the reserve from the same constant the guard checks is what
+    // stops the two drifting - they already had, silently: this reserve read
+    // `kFramesInFlight * 5` against 6 actual writes before `kSunShadowBinding`
+    // existed, and an under-reserve is invisible because `push_back` simply
+    // reallocates.
+    constexpr std::size_t kPerFrameImageWrites = 7;
+    constexpr std::size_t kImageWriteCount =
+        kMaxBloomMips * 2 + 2 + static_cast<std::size_t>(kFramesInFlight) * kPerFrameImageWrites;
+    constexpr std::size_t kBufferWriteCount = kFramesInFlight;
+
     std::vector<VkDescriptorImageInfo> images;
-    images.reserve(kMaxBloomMips * 2 + 2 + kFramesInFlight * 5);
+    images.reserve(kImageWriteCount);
     std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(kMaxBloomMips * 2 + 2 + kFramesInFlight * 6);
+    writes.reserve(kImageWriteCount + kBufferWriteCount);
 
     const auto write = [&](VkDescriptorSet set, std::uint32_t binding, VkImageView view, VkSampler sampler,
                            VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
@@ -677,11 +819,17 @@ void Renderer::writePostDescriptorSets() {
     write(m_toneMapSet, 0, m_sceneColor->view(0), m_edgeSampler);
     write(m_toneMapSet, 1, m_bloom->view(0), m_edgeSampler);
 
-    // The world set carries it too, because the forward pass is the one that
-    // reads it and that pass uses the world set. Written here rather than with
-    // the sheets, since a resize replaces the image.
+    // The world set carries the scene copy too, because the forward pass is the
+    // one that reads it and that pass uses the world set. Written here rather
+    // than with the sheets, since a resize replaces the image.
+    //
+    // The shadow map is written here for the matching reason: `setShadowQuality`
+    // destroys the old `ShadowMap` and calls this, so both sets that name it are
+    // rewritten in one place. **This and the deferred write below are its only
+    // two writers** - `createShadowResources` writes no descriptors at all.
     for (std::uint32_t frame = 0; frame < kFramesInFlight; ++frame) {
         write(m_descriptorSets[frame], kSceneCopyBinding, m_sceneCopy->view(0), m_edgeSampler);
+        write(m_descriptorSets[frame], kSunShadowBinding, m_shadowMap->arrayView(), m_shadowMap->sampler());
     }
 
     for (std::uint32_t frame = 0; frame < kFramesInFlight; ++frame) {
@@ -690,13 +838,38 @@ void Renderer::writePostDescriptorSets() {
         write(m_deferredSets[frame], 2, m_gbufferMaterial->view(0), m_edgeSampler);
         // Depth is sampled while it sits in the layout a read-only depth
         // attachment uses, not the ordinary one - the descriptor has to name the
-        // same layout the barrier put it in.
-        write(m_deferredSets[frame], 3, m_depthImage->view(), m_edgeSampler,
+        // same layout the barrier put it in. **Point-sampled, unlike the three
+        // above**: this is the one binding read at sub-texel offsets.
+        write(m_deferredSets[frame], 3, m_depthImage->view(), m_pointSampler,
               VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL);
-        // Written here as well as by `createShadowResources`, because a resize
-        // rewrites the whole set and a binding left unwritten is a fault the
-        // first time the window is dragged.
+        // **The only writer of deferred binding 5.** `createShadowResources`
+        // builds the `ShadowMap` and the shadow pipeline and writes no
+        // descriptors at all, so `setShadowQuality` depends on this call
+        // following it: it destroys the old image view, and without this write
+        // the set would still name it. Deleting this line as redundant leaves a
+        // destroyed view bound the moment shadow quality changes. The world
+        // set's `kSunShadowBinding` above names the same image for the forward
+        // pass and is written for the same reason.
         write(m_deferredSets[frame], 5, m_shadowMap->arrayView(), m_shadowMap->sampler());
+    }
+
+    // A tripwire, not a gate - the same shape as the push-constant one in
+    // `createPipelines`. The loop below indexes `images` with a `writes` index,
+    // which is only sound while the two are the same length, and that holds for
+    // exactly one reason: `write` is the only thing that has pushed so far and
+    // it pushes one entry to each. **The buffer writes below deliberately grow
+    // `writes` past `images`**, which is why the fix-up has to run here rather
+    // than at the end - move it after them and `&images[i]` walks off the end,
+    // handing Vulkan a dangling pointer with nothing on screen to say so.
+    // Checking the constant as well as the equality catches the other half: a
+    // `write` added or removed without the count above being updated.
+    if (writes.size() != images.size() || images.size() != kImageWriteCount) {
+        throw std::runtime_error(
+            "Post-process descriptor writes are out of step: " + std::to_string(writes.size()) +
+            " writes against " + std::to_string(images.size()) + " image infos, expected " +
+            std::to_string(kImageWriteCount) +
+            " of each. Every image write must go through the `write` lambda, and any buffer write "
+            "must come after the pImageInfo fix-up loop.");
     }
 
     // pImageInfo is filled only now: `images` reallocates as it grows, so any
@@ -796,6 +969,9 @@ Renderer::~Renderer() {
     m_screenMesh = GpuMesh{};
     m_clippedScreenMesh = GpuMesh{};
     m_topScreenMesh = GpuMesh{};
+    m_precipitationMesh = GpuMesh{};
+    m_boltMesh = GpuMesh{};
+    m_particleMesh = GpuMesh{};
     for (GpuMesh& sky : m_skyMeshes) {
         sky = GpuMesh{};
     }
@@ -823,6 +999,9 @@ Renderer::~Renderer() {
     }
     if (m_edgeSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_edgeSampler, nullptr);
+    }
+    if (m_pointSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_context.device(), m_pointSampler, nullptr);
     }
     if (m_postPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_context.device(), m_postPool, nullptr);
@@ -918,11 +1097,15 @@ void Renderer::setMaterialTable(const std::vector<std::uint32_t>& rows) {
 }
 
 void Renderer::createDescriptorResources() {
-    // Bindings 0..3 are the sampled sheets; the last is this frame's uniform
-    // block. All five come off one named count, because writing the number out
-    // separately in the layout, the image array and the writes is how two of
-    // the three get updated and the missed one becomes a validation error.
-    std::array<VkDescriptorSetLayoutBinding, kSceneCopyBinding + 1> bindings{};
+    // Bindings 0..3 are the sampled sheets (`kTextureBindingCount`), then this
+    // frame's uniform block (`kFrameUniformBinding`), the material table
+    // (`kMaterialBinding`), the scene copy (`kSceneCopyBinding`) and the sun's
+    // shadow map (`kSunShadowBinding`) - eight in all, and the uniform block is
+    // not the last of them. Every one is a named constant rather than a
+    // literal, because writing the number out separately in the layout, the
+    // pool and the writes is how two of the three get updated and the missed
+    // one becomes a validation error.
+    std::array<VkDescriptorSetLayoutBinding, kSunShadowBinding + 1> bindings{};
     for (std::uint32_t index = 0; index < kTextureBindingCount; ++index) {
         bindings[index].binding = index;
         bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -944,6 +1127,10 @@ void Renderer::createDescriptorResources() {
     bindings[kSceneCopyBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[kSceneCopyBinding].descriptorCount = 1;
     bindings[kSceneCopyBinding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[kSunShadowBinding].binding = kSunShadowBinding;
+    bindings[kSunShadowBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[kSunShadowBinding].descriptorCount = 1;
+    bindings[kSunShadowBinding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -954,7 +1141,11 @@ void Renderer::createDescriptorResources() {
 
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = (kTextureBindingCount + 1) * kFramesInFlight;
+    // The four sheets, plus the scene copy, plus the shadow map. **Counted off
+    // the bindings above rather than written as a number**: a pool one
+    // descriptor short does not warn, it fails `vkAllocateDescriptorSets` at
+    // startup with `OUT_OF_POOL_MEMORY` and the game never opens a window.
+    poolSizes[0].descriptorCount = (kTextureBindingCount + 2) * kFramesInFlight;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[1].descriptorCount = kFramesInFlight;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1043,13 +1234,34 @@ void Renderer::retire(GpuMesh& slot) {
     slot.indexCount = 0;
 }
 
-void Renderer::freeRetiredMeshes() {    if (m_retired.empty()) {
+void Renderer::freeRetiredMeshes() {
+    if (m_retired.empty()) {
         return;
     }
 
-    // A mesh retired on frame N may still be referenced by frames N and N-1.
-    // Once that many frames have been started since, nothing can touch it.
-    constexpr std::uint64_t framesToHold = kFramesInFlight + 1;
+    // **Counted against the upload batch, not against the draws.** Reasoning
+    // from the draws alone - "a mesh retired on frame N may still be referenced
+    // by frames N and N-1" - is true and is one frame short, because the copy
+    // that fills a buffer is submitted later than the draws that read it.
+    //
+    // `retire` only ever runs between frames, so it stamps a buffer with the
+    // frame that has already finished, call it N. A `vkCmdCopyBuffer` recorded
+    // into the still-open upload batch at that moment is not submitted until
+    // `m_uploads->flush()` inside `drawFrame` **N+1**. The fence that proves
+    // N+1 is done is not waited on until frame N+3, and that wait happens
+    // *after* this call, which `drawFrame` makes before it waits. So freeing at
+    // N+3 destroyed a buffer while a transfer was still writing into it -
+    // VUID-vkDestroyBuffer-buffer-00922 - and `freeBufferMemory` then returns
+    // the slice to the pool, so the next `Buffer` can be carved out of memory a
+    // live copy is filling. Reachable whenever one slot is uploaded twice
+    // between two frames, or uploaded and then removed: a chunk remeshed twice
+    // in an iteration, or loaded and unloaded in one.
+    //
+    // One extra frame of holding is the whole fix. A fence signal covers every
+    // command earlier in submission order on the same queue, so frame N+1's
+    // fence settles its upload flush as well as its draws, and there is nothing
+    // further to synchronise.
+    constexpr std::uint64_t framesToHold = kFramesInFlight + 2;
 
     const auto expired = [&](const RetiredMesh& retired) {
         return m_frameIndex - retired.retiredOnFrame >= framesToHold;
@@ -1109,7 +1321,7 @@ void Renderer::uploadInto(GpuMesh& slot, const std::vector<Vertex>& vertices,
     }
 }
 
-MeshHandle Renderer::addMesh(const MeshData& mesh, bool translucent) {
+MeshHandle Renderer::addMesh(const MeshData& mesh, bool translucent, const MeshIndexRange& shapedTail) {
     MeshHandle handle = kInvalidMesh;
 
     if (!m_freeSlots.empty()) {
@@ -1123,15 +1335,20 @@ MeshHandle Renderer::addMesh(const MeshData& mesh, bool translucent) {
     uploadInto(m_meshes[handle], mesh);
     m_meshes[handle].inUse = true;
     m_meshes[handle].translucent = translucent;
+    m_meshes[handle].shapedTail = clampToMesh(shapedTail, m_meshes[handle].indexCount);
     return handle;
 }
 
-void Renderer::updateMesh(MeshHandle handle, const MeshData& mesh) {
+void Renderer::updateMesh(MeshHandle handle, const MeshData& mesh, const MeshIndexRange& shapedTail) {
     if (handle >= m_meshes.size() || !m_meshes[handle].inUse) {
         return;
     }
     uploadInto(m_meshes[handle], mesh);
     m_meshes[handle].inUse = true;
+    // Re-clamped rather than carried over: a slot is reused by a different
+    // chunk, and a stale tail would draw a range off the end of a shorter
+    // buffer - which reads as panes flickering somewhere unrelated.
+    m_meshes[handle].shapedTail = clampToMesh(shapedTail, m_meshes[handle].indexCount);
 }
 
 void Renderer::removeMesh(MeshHandle handle) {
@@ -1354,9 +1571,27 @@ void Renderer::destroySyncObjects() {
 }
 
 void Renderer::recreateSwapchain() {
+    // **The zero-extent check has to be here, not only in the caller.**
+    // `drawFrame` samples `isMinimized()` once on the way in, but this line
+    // asks the OS live - so minimising in the gap between those two, or
+    // minimising part-way through a resize drag, reaches `Swapchain::create`
+    // with a 0x0 extent and throws "Cannot create a swapchain for a zero-sized
+    // window". `Main.cpp` wraps the whole session in a single try/catch, so
+    // that throw *ends the game* rather than logging anything, which is not
+    // what the comment beside the throw promises.
+    //
+    // Returning costs one frame and nothing else: the swapchain is untouched
+    // and still valid, `drawFrame` early-returns for as long as the window is
+    // away, and the first frame after it is restored fails to acquire, comes
+    // back through here with a real extent, and rebuilds properly.
+    const Extent2D framebuffer = m_window.framebufferExtent();
+    if (framebuffer.width == 0 || framebuffer.height == 0) {
+        return;
+    }
+
     vkDeviceWaitIdle(m_context.device());
 
-    m_swapchain.recreate(toVkExtent(m_window.framebufferExtent()));
+    m_swapchain.recreate(toVkExtent(framebuffer));
 
     // The depth attachment must match the colour attachment's size exactly.
     m_depthImage = std::make_unique<DepthImage>(m_context, renderExtent());
@@ -1471,7 +1706,13 @@ void Renderer::recordShadowPass(VkCommandBuffer commandBuffer) const {
     if (m_liveShadowCascades == 0) {
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        // `FRAGMENT_SHADER` as the source, matching the live branch below and
+        // for the same reason: the last frame's lighting pass sampled this
+        // image, and a transition must be ordered after those reads. A source
+        // of `TOP_OF_PIPE` is an *empty* scope - it waits for nothing at all -
+        // so it promises ordering it does not deliver. This branch runs every
+        // sunset, which is exactly when it is least convenient to find out.
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
         return;
     }
@@ -1578,8 +1819,20 @@ void Renderer::recordGeometryPass(VkCommandBuffer commandBuffer, const glm::mat4
     toDepthAttachment.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     toDepthAttachment.subresourceRange.levelCount = 1;
     toDepthAttachment.subresourceRange.layerCount = 1;
+    // **This barrier has to name the stage that last wrote depth, and that is
+    // not the fragment shader.** There is one depth image against two frames in
+    // flight, so the previous frame is the other writer, and its last depth
+    // write is the forward pass's - at `LATE_FRAGMENT_TESTS`, which is logically
+    // *later* than `FRAGMENT_SHADER` and so falls outside a source scope naming
+    // only that. Nothing observable breaks today, because `UNDEFINED` plus a
+    // clear means the old contents are not read and ordering survives through
+    // the chain the scene-copy barrier makes - but the write-after-write is not
+    // made available, sync validation flags it, and ordinary validation never
+    // will.
+    toDepthAttachment.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     toDepthAttachment.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    vkCmdPipelineBarrier(commandBuffer,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, nullptr, 0, nullptr, 1,
                          &toDepthAttachment);
 
@@ -1702,10 +1955,14 @@ void Renderer::recordDeferredPass(VkCommandBuffer commandBuffer, const ClearColo
     // The world is lit into a floating-point image rather than straight onto the
     // screen, so brightness may exceed 1.0 on the way through.
     //
-    // **The clear is what fills every pixel the lighting pass discards** - the
-    // sky, and anything past the fog. It is the same value the distance fog
-    // fades to, and both go through the tone curve together, which is what keeps
-    // the edge of the world invisible.
+    // **The clear is overwritten in full, and is kept for the load op alone.**
+    // It used to be described as what fills every pixel the lighting pass
+    // discards - `deferred.frag` discards nothing: where depth is 1.0 it writes
+    // the sky's own radiance with `kSkyDistance` in the alpha, which is what the
+    // water and rain passes read back as "nothing is behind this". Clearing
+    // rather than loading is still right, because a load would pull the whole
+    // attachment back through memory for pixels that are all about to be
+    // written.
     colorAttachment.imageView = m_sceneColor->view(0);
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -1845,13 +2102,18 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->layout(), 0, 1,
                             &m_descriptorSets[m_currentFrame], 0, nullptr);
 
-    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit, bool fogged = true,
-                              std::uint32_t extraFlags = 0) {
-        if (mesh.indexCount == 0) {
+    // Draws exactly `range`, with no sentinel meaning "all of it" - an empty
+    // range draws nothing. A chunk whose translucent geometry is *only* panes
+    // has a shape tail starting at 0 and therefore an empty body, and under a
+    // "0 means everything" convention that chunk would draw its whole buffer
+    // and then its panes again, blending every pane over itself.
+    const auto drawRange = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit, bool fogged,
+                               std::uint32_t extraFlags, const MeshIndexRange& range) {
+        if (range.count == 0) {
             return;
         }
         ++m_frameDrawCalls;
-        m_frameTriangles += mesh.indexCount / 3;
+        m_frameTriangles += range.count / 3;
 
         MeshPushConstants push{};
         push.modelViewProjection = transform;
@@ -1864,7 +2126,12 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
         const VkDeviceSize vertexOffsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer->handle(), 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, range.count, 1, range.first, 0, 0);
+    };
+
+    const auto drawMesh = [&](const GpuMesh& mesh, const glm::mat4& transform, bool lit, bool fogged = true,
+                              std::uint32_t extraFlags = 0) {
+        drawRange(mesh, transform, lit, fogged, extraFlags, MeshIndexRange{0u, mesh.indexCount});
     };
 
     const std::array<glm::vec4, 6> planes = frustumPlanes(viewProjection);
@@ -1894,17 +2161,83 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
     }
 
     // Blended geometry after it, so what shows through has already been drawn.
-    for (const GpuMesh& mesh : m_meshes) {
+    //
+    // **Farthest first.** `m_meshes` is in slot order, which is streaming
+    // order, so a nearer lake chunk could be drawn first, stamp its depth (this
+    // pipeline writes depth, and rain rejection depends on that) and reject the
+    // farther chunk outright - the seam then moved about as slots recycled.
+    // Back-face culling is *already* on for this draw: `m_trianglePipeline`
+    // sets `cullMode = VK_CULL_MODE_BACK_BIT` explicitly at its creation, and
+    // cull mode is not dynamic state. Culling
+    // settles which face of one volume is drawn; only ordering settles which of
+    // two volumes is drawn first, and that is this loop's job because the
+    // renderer is the only thing here that has a camera.
+    //
+    // Sorted on the box centre rather than `beyondFog`'s nearest point: the
+    // nearest point is zero for every chunk the eye is inside, so it ties
+    // exactly where the order matters most. Chunks are equal cubes on a grid,
+    // for which centre distance is a valid back-to-front order. The slot index
+    // rides in the pair as a tiebreak, so two chunks at equal distance keep the
+    // same order every frame - without it they could swap and the seam would
+    // flicker instead of disappearing.
+    m_translucentOrder.clear();
+    const auto slotCount = static_cast<std::uint32_t>(m_meshes.size());
+    for (std::uint32_t slot = 0; slot < slotCount; ++slot) {
+        const GpuMesh& mesh = m_meshes[slot];
         if (!mesh.translucent || mesh.indexCount == 0) {
             continue;
         }
         if (!boxInFrustum(planes, mesh.boundsMin, mesh.boundsMax) || beyondFog(mesh)) {
             continue;
         }
+        const glm::vec3 offset = (mesh.boundsMin + mesh.boundsMax) * 0.5f - m_eyePosition;
+        float distanceSquared = glm::dot(offset, offset);
+        // **A NaN here is not a speck on screen, it is heap corruption.**
+        // `a > b` on a pair is a strict weak ordering only while every float
+        // compares normally; one NaN makes every comparison against it false,
+        // `std::sort` loses its sentinel and walks off the end of the range.
+        // Nothing reachable produces one today - the bounds come from the
+        // mesher and the eye from the camera - but this is the same hazard
+        // already guarded in `surfaceNormal()`, and the cost of being wrong is
+        // far higher here. Coerced rather than dropped, so a corrupt chunk
+        // still draws (nearest, hence last) instead of silently vanishing.
+        if (!std::isfinite(distanceSquared)) {
+            distanceSquared = 0.0f;
+        }
+        m_translucentOrder.emplace_back(distanceSquared, slot);
+    }
+    std::sort(m_translucentOrder.begin(), m_translucentOrder.end(),
+              [](const std::pair<float, std::uint32_t>& a, const std::pair<float, std::uint32_t>& b) {
+                  return a > b;
+              });
+
+    for (const std::pair<float, std::uint32_t>& entry : m_translucentOrder) {
+        const GpuMesh& mesh = m_meshes[entry.second];
         // Flagged, so the fragment stage keeps the texture's own alpha instead
         // of running the cutout test on it. Only this loop carries it: the
         // particle draw below is blended too but its art is a cutout.
-        drawMesh(mesh, viewProjection, true, true, kDrawFlagBlended);
+        //
+        // **Two draws, not seven.** The mesher can hand over its whole
+        // seven-way split, but only the shape-pass tail is acted on, and the
+        // reason is measured rather than assumed. The six face directions were
+        // offered so the renderer could order them back-facing first - but
+        // back-face culling is already on for this pipeline, so the three
+        // back-facing directions produce no fragments at all and reordering
+        // them changes nothing on screen. Splitting them out to *skip*
+        // issuing those three would save the GPU some vertex work and cost
+        // two extra draw calls per chunk, and at 1.55 ms GPU against an
+        // 8.33 ms frame - 18.6% utilisation, CPU-bound - that is the wrong
+        // trade in the wrong direction. So the six stay as one contiguous
+        // draw, which is what they already are: the ranges tile the buffer in
+        // order, so indices 0 .. shapedTail.first are exactly the six.
+        const std::uint32_t bodyCount = mesh.shapedTail.empty() ? mesh.indexCount : mesh.shapedTail.first;
+        drawRange(mesh, viewProjection, true, true, kDrawFlagBlended, MeshIndexRange{0u, bodyCount});
+        // The shape pass last: it belongs to no direction, and a stained pane
+        // is far more often in front of water than inside it. Skipped
+        // entirely when empty, which is every chunk without one.
+        if (!mesh.shapedTail.empty()) {
+            drawRange(mesh, viewProjection, true, true, kDrawFlagBlended, mesh.shapedTail);
+        }
     }
 
     if (overlayTransform.has_value()) {
@@ -2233,10 +2566,59 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
 
     // Before any early return, so a minimized or resizing window still releases
     // retired buffers instead of accumulating them.
+    //
+    // **That is only safe because every drawn frame waits on the fence of the
+    // slot it is about to reuse**, and a minimized iteration draws nothing: left
+    // to itself it submits nothing and waits for nothing, while still moving the
+    // counter `freeRetiredMeshes` measures against. Three of those iterations
+    // take microseconds, so a buffer bound by the last real submission could be
+    // destroyed while the GPU was still reading it - and `m_currentFrame` does
+    // not advance either, so that slot's fence is never re-checked. The two
+    // waits below are what put real evidence back under that counter.
+    //
+    // Waiting the device out **once, on the way in**, is what covers the
+    // drawing half: it returns with nothing in flight, and no later frame is
+    // submitted while the window is away, so every free below happens against
+    // an idle GPU. Returning before the counter moved would have been simpler
+    // and is exactly what the comment above says not to do - a session left
+    // minimized keeps streaming chunks, and every buffer they retire would be
+    // held until it was restored. One stall, at the moment the window stops
+    // being drawn, costs nothing anyone can see.
+    //
+    // **Uploads are the other half, and they do not stop when drawing does.**
+    // Nothing in the game loop asks whether the window is minimized, so chunks
+    // keep streaming and `uploadInto` keeps recording copies into the upload
+    // context - and keeps retiring the buffers it replaces - at loop speed,
+    // while `m_uploads->flush()` sits on the drawing path below and is never
+    // reached. The interleaving that used to break: iteration k allocates a
+    // buffer and records a copy into it; the chunk changes again, so iteration
+    // k+1 retires it; three iterations later, microseconds after that,
+    // `freeRetiredMeshes` destroys it while the still-open upload command
+    // buffer names it, which invalidates that command buffer and hands the
+    // memory straight back to the pool for the next mesh to be allocated out
+    // of. The wait above cannot cover any of it, because all of it was recorded
+    // after the wait - and a batch that outgrows the staging arena submits
+    // itself from inside `stage`, which is worse rather than better: that copy
+    // is genuinely in flight while the counter runs past it.
+    //
+    // Draining submits what is recorded and waits for it, so every free below
+    // happens with nothing recorded and nothing in flight - on the first
+    // minimized iteration and on the hundredth. Doing it before the device wait
+    // is also what makes that wait mean what it says, since idle only accounts
+    // for work somebody submitted.
+    const bool minimized = m_window.isMinimized();
+    if (minimized) {
+        m_uploads->waitForCompletion();
+        if (!m_wasMinimized) {
+            vkDeviceWaitIdle(m_context.device());
+        }
+    }
+    m_wasMinimized = minimized;
+
     ++m_frameIndex;
     freeRetiredMeshes();
 
-    if (m_window.isMinimized()) {
+    if (minimized) {
         return;
     }
 
@@ -2309,6 +2691,13 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     const VkResult acquireResult = vkAcquireNextImageKHR(device, m_swapchain.handle(), UINT64_MAX,
                                                          m_imageAvailable[m_currentFrame], VK_NULL_HANDLE, &imageIndex);
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+        // The minimized path's rule, in the other place that needs it: this
+        // returns without reaching the flush below, so copies recorded since
+        // the last frame would stay unsubmitted while the counter moves on. A
+        // window being dragged can fail to acquire several iterations running,
+        // which is all it takes for `freeRetiredMeshes` to destroy a buffer one
+        // of those copies still names.
+        m_uploads->waitForCompletion();
         recreateSwapchain();
         return;
     }
@@ -2337,6 +2726,10 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     constexpr VkDeviceSize kMegabyte = 1024u * 1024u;
     m_stats.pooledMegabytesUsed = static_cast<std::uint32_t>(pooledBytesInUse() / kMegabyte);
     m_stats.pooledMegabytesHeld = static_cast<std::uint32_t>(pooledBytesReserved() / kMegabyte);
+    // `UploadContext` already counts its submissions and nothing ever read the
+    // number, so the one measurement that would say whether staging is
+    // batching or thrashing could not be taken. Surfacing it costs a load.
+    m_stats.uploadSubmissions = static_cast<std::uint32_t>(m_uploads->submissionCount());
     if (m_timestampsSupported) {
         m_timestampsPending[m_currentFrame] = true;
     }

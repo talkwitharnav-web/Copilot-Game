@@ -6,12 +6,15 @@
 #include "world/Explosion.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
+#include "world/Survival.hpp"
+#include "world/Tick.hpp"
 #include "world/Village.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <string_view>
 
 namespace game {
 namespace {
@@ -19,8 +22,74 @@ namespace {
 constexpr float kTwoPi = 6.2831853f;
 constexpr float kPi = 3.14159265f;
 
-constexpr float kGravity = 26.0f;
-constexpr float kTerminalVelocity = 60.0f;
+/// The two rates a standing biped's idle sway runs at, in radians a second -
+/// the reference's own 0.09 and 0.067 radians a *tick*, converted. Deliberately
+/// incommensurate, so the motion never visibly repeats.
+constexpr float kIdleSwayRollRate = 1.8f;
+constexpr float kIdleSwayPitchRate = 1.34f;
+/// A full period of the slowest thing `age` drives, in seconds.
+///
+/// **`add` scatters every creature's `age` across this**, which is the whole
+/// reason the field is per creature rather than a world clock. Nothing seeded
+/// it: every creature started at zero, so a herd placed in one call swayed in
+/// exact phase - and a reloaded world, where the entire population is placed in
+/// one call, swayed in phase from end to end. The squid's `jetPhase` had the
+/// right idea and is now seeded beside it.
+constexpr float kAgePhaseSpan = kTwoPi / kIdleSwayPitchRate;
+static_assert(kIdleSwayPitchRate < kIdleSwayRollRate,
+              "the span has to cover the slower rate, or the scatter is not a whole cycle");
+
+/// **The player's pair, read rather than restated.** Bedrock puts players and
+/// mobs on one row of its constant table - `RESEARCH.md` §1.3, gravity
+/// `0.08 b/t²` and terminal `3.92 b/t`, which convert to 32 m/s² and 78.4 m/s
+/// at 20 Hz - so a creature falling at its own 26 was a published constant with
+/// two owners and a 19% divergence, and the animals visibly fell more slowly
+/// than the player did.
+///
+/// **The proof it was an error rather than a feel choice is `species.fallDrag`
+/// below.** That line re-solves the *reference's* own per-tick 0.6 against
+/// whatever gravity is in scope, and only the reference's gravity reproduces
+/// the reference's own answer: 32 x 0.05 x 0.6 / 0.4 = 2.4 m/s, where 26 gave
+/// 1.95 and the comment then attributed 1.95 to the reference.
+///
+/// What had to travel with it: every arc solved against gravity. A jump is
+/// `sqrt(2 g h)` off `species.jumpHeight`, so its apex is unchanged and only
+/// the airtime shortens to the reference's. A hop's `hopLaunch` is a *speed*,
+/// so each of the three distinct launch speeds in the table was re-derived by
+/// `v' = v sqrt(32/26)` to hold its arc height exactly where it was - which is
+/// how a slime's 7.21 came out at 8.00, exactly one block under the new pair.
+constexpr float kGravity = player_constants::kGravity;
+constexpr float kTerminalVelocity = player_constants::kTerminalVelocity;
+
+/// A single frame may not advance a creature further than this. **The same 0.05
+/// the player and the item drops clamp to** (`ItemEntity.cpp` names all three);
+/// they resolve against the same world with the same one-block-deep assumption,
+/// so a frame too long for one is too long for all of them.
+///
+/// Owned by `update`, which clamps once before anything reads it, so the
+/// per-tick timers in `think` and the per-tick timers in `step` cannot advance
+/// at different rates during a hitch - they used to, `think` taking the raw
+/// delta and `step` the clamped one.
+///
+/// **Seconds, and deliberately *not* derived from `tick::kSeconds` even though
+/// it reads the same today.** This is a collision guard - how far a body may
+/// travel before the sweep stops being able to see a floor - and the tick rate
+/// is a simulation rate; they are equal by coincidence and would have to be
+/// re-decided separately, not silently rescaled together. The assert below
+/// exists so that decision has to be made out loud rather than by nobody.
+constexpr float kMaxDeltaSeconds = 0.05f;
+static_assert(kMaxDeltaSeconds == tick::kSeconds && kMaxDeltaSeconds == 0.05f,
+              "the frame clamp happens to equal one tick; if the tick rate moves, decide "
+              "what the sweep clamp should be rather than letting it follow");
+
+/// Longest slice of a vertical move that may be tested in one go.
+///
+/// Consecutive test boxes have to overlap or a floor thinner than the gap
+/// between two of them falls straight between them, so this may never exceed
+/// the shortest body in the roster. The `static_assert` that proves it lives
+/// under `kSpecies`, which is the only place the table is in scope.
+constexpr float kMaxSweepStep = 0.15f;
+
 constexpr float kTurnRate = 4.0f;
 /// Drops deeper than this are treated as a wall. Without it, wandering animals
 /// walk off every cliff in the world and the population drains downhill.
@@ -30,6 +99,18 @@ constexpr float kMaxDropHeight = 3.0f;
 /// Nothing is fixed at it any more — it is the *reference* point that the
 /// runtime radius scales from, so the tuning that was done at 90 m still means
 /// what it meant.
+///
+/// **This is ours, and it stands in for a despawn model Bedrock states in three
+/// numbers rather than one.** Checked against minecraft.wiki's *Mob spawning*
+/// on 2026-08-19: Bedrock despawns a mob outright past **128 blocks** on
+/// simulation distance 6 and above, past **44** on simulation distance 4 (and
+/// fish past 40), and rolls a **1-in-800 chance per tick** for anything past
+/// **32 blocks** that has not been hurt for thirty seconds. We have no
+/// simulation distance and no per-creature damage clock, so `manage` retires on
+/// one radius instead - which sits inside Bedrock's band and is scaled by the
+/// render distance in `setActiveRadius`. **Do not "correct" this to 128**: the
+/// number it would have to match depends on a setting this engine does not
+/// have, and 90 is the figure every population constant below was tuned at.
 constexpr float kBaseRadius = 90.0f;
 
 /// The shell a creature may appear in, as fractions of the active radius. The
@@ -48,8 +129,87 @@ constexpr float kSpawnInterval = 2.5f;
 /// How far up a body buried in terrain will climb to free itself, and in what
 /// steps. Upward only: it is the direction that works for something covered
 /// over, and a sideways nudge would just as often find another block.
-constexpr float kUnstickReach = 2.0f;
-constexpr float kUnstickStep = 0.25f;
+///
+/// **The numbers now live in `collision::`**, beside `overlapsSolid`, which is
+/// the only question they ask. They were written out here *and* in `Player.cpp`
+/// with identical values and structurally identical loops - a published constant
+/// with two owners, which is one of the two shapes this file has paid for most.
+///
+/// **This reach is a convenience, not the answer to being buried.** Anything
+/// deeper than it simply stays inside the terrain, and before the suffocation
+/// clock below existed that meant *stuck alive, permanently* - every move it
+/// tried overlapped something and nothing ever subtracted health. Widening the
+/// reach would only have moved the threshold. Suffocation is the reference's own
+/// answer and it has no threshold.
+///
+/// **On the step size, since three agents have now looked at this pair and the
+/// next reader should not have to re-derive it.** The candidates are
+/// `y + k * step`, phased on the *body's own* `y` rather than on the world, so a
+/// uniform grid of spacing `s` is guaranteed to find a valid landing only when
+/// `s <= slack`, where `slack` is the pocket's height less the body's. Measured
+/// across all 58 rows against each species' own minimal pocket: **37 are safe at
+/// today's 0.25; six more - chicken, wolf, squid, glow squid and the two llamas,
+/// slack 0.13 to 0.20 - would become safe at 0.125; and fifteen stay
+/// phase-dependent whatever the step**, because the villager family's slack is
+/// 0.05 and a skeleton's is 0.01. Dropping to 0.125 is a real but partial fix,
+/// and its sample set is a strict superset of today's - verified here rather
+/// than taken on report, so it can rescue more bodies and never fewer.
+///
+/// **The unstick pass no longer depends on any of that**, because a grid was
+/// the wrong instrument. It now tries the **block floors** above the body first
+/// - `position` is the feet, so a body at rest stands on a block boundary and
+/// `floor(y) + 1, + 2, ...` are exactly the valid resting heights, in two or
+/// three exact samples with no slack condition at all. The fine grid still runs
+/// behind them for slabs, stairs and carpets, whose standing heights are not on
+/// a boundary; but nothing lethal now hangs on its phase. **The recommendation
+/// to drop the shared constant to 0.125 therefore still stands for
+/// `Player.cpp`**, whose loop is still a bare grid, and no longer matters much
+/// here.
+///
+/// The reach is a different question and it *is* load-bearing: a fully entombed
+/// body has to clear its own volume, so a lift shorter than the body's height
+/// can never free it. `Player.cpp` asserts exactly that with
+/// `kUnstickReach >= kHeight`. We cannot mirror the assert - our height is a
+/// runtime field and five rows exceed 2.0 m - so `step` honours the same rule
+/// at runtime by taking the larger of the shared reach and the body's height.
+
+/// Suffocation: **one health point every half second, unreduced by armour**
+/// (`RESEARCH.md` §3.1's damage table, the `Suffocation` row - **not** the
+/// `Lava` row two lines above it, which reads 4 HP per 0.5 s and is what a
+/// line-numbered citation here used to land on). Taken from
+/// `survival::kSuffocationDamage` and `survival::kSuffocationInterval` rather
+/// than written again here, because the player already pays exactly this and a
+/// second copy of a published constant is the bug this file has paid for more
+/// than any other. `Survival.hpp` already asserts the interval against the
+/// shared hazard cadence.
+///
+/// **Read the row, not the line number.** The pointer was four rows off for a
+/// day, and the shape of that mistake is worse than it sounds: the prose was
+/// right, the constant was right, and the only wrong thing was where it said to
+/// look - so an agent checking the constant against §3.1 would have read
+/// "4 HP per 0.5 s", concluded the code understated suffocation fourfold, and
+/// quadrupled a figure the player shares.
+///
+/// **What is ours is the trigger, and it is narrower than the player's.** The
+/// player suffocates when the block at its *eye* is opaque and solid. A
+/// creature suffocates only when it is inside terrain **and the unstick pass
+/// above could not free it** - because ours teleports a shallowly-buried body
+/// out instantly, so charging on the overlap alone would bill it for a burial
+/// the same frame already ended. What is left is the case that had no answer at
+/// all: no free space anywhere within the body's own height above it.
+///
+/// **The trigger is only as honest as the search that feeds it**, and when this
+/// clock was first written it was not honest enough - the pass sampled a fixed
+/// grid that could step straight over a legitimate pocket, and five rows were
+/// taller than the lift could reach. Both were written down as known gaps,
+/// which was fine while failing merely meant "stuck", and stopped being fine
+/// the moment failing meant "dead". Both are closed at the pass itself; see the
+/// note there. Charging a body for a pocket the sampling missed would have been
+/// a search bug wearing a death message.
+///
+/// This also gives sand falling on a mob, a piston pushing one into a wall and
+/// a player bricking one up somewhere to end, all of which were survivable
+/// forever.
 
 /// A struck creature is shoved back and flashes for this long. How long it
 /// stays roused afterwards is `CreatureSpecies::angerSeconds`, which used to be
@@ -78,7 +238,18 @@ float deathTipAngle(const Creature& creature) {
     const float t = std::clamp(creature.deathTimer / kDeathTipSeconds, 0.0f, 1.0f);
     return kDeathTipAngle * t * t * (3.0f - 2.0f * t);
 }
-/// The shove a player's blow carries.
+/// The shove a player's blow carries, in metres per second - **the player-hits-
+/// creature direction only**, applied in `damageCreature`'s caller below.
+///
+/// There is a second, deliberately separate pair further down this file,
+/// `kKnockbackSpeed` / `kKnockbackLift` at 4.5 and 3.0, which is the
+/// creature-hits-you direction. **They are not a duplicated constant and must
+/// not be unified** (2026-08-19): they are two ends of the same exchange and
+/// the reference tunes them apart too - a mob's blow is scaled per species by
+/// `knockbackScale`, a player's blow is scaled by the Knockback enchantment,
+/// and neither scale exists on the other side. What would make this note false
+/// is one pair losing its own scaling factor, at which point they really would
+/// be saying the same thing twice.
 constexpr float kStrikeKnockback = 5.0f;
 constexpr float kStrikeLift = 4.0f;
 
@@ -86,9 +257,37 @@ constexpr float kStrikeLift = 4.0f;
 /// pads its pick box too, and here it also covers the fact that `halfWidth` is
 /// deliberately narrower than the model it is drawn with.
 constexpr float kAimPadding = 0.15f;
-/// How hard a blast throws what it catches. The reference works in blocks per
-/// tick and we work in blocks per second, so it is twenty times over.
-constexpr float kBlastThrow = 20.0f;
+/// How hard a blast throws what it catches, in blocks per second at full
+/// impact.
+///
+/// **This was 20 and that was the wrong end of a conversion.** The reference's
+/// knockback is one block per *tick*, which is twenty a second, so 20 is what
+/// the arithmetic gives - and the arithmetic is not the whole rule. The
+/// reference decays velocity by 9% every tick and **this engine does not
+/// anywhere**: every write to `creature.velocity` in this file was enumerated on
+/// 2026-08-19 and not one of them damps it, while the movement step carries the
+/// horizontal component straight back into the next tick's wish. So a creature
+/// thrown off the ground keeps all twenty blocks per second until it lands,
+/// which reads as a rocket rather than a blast.
+///
+/// **7 is the sustained-speed equivalent of that impulse**, and it is not a new
+/// number: `Main.cpp`'s `kBlastKnockback` is 7.0f, has been since the same
+/// question was worked through for the player, and states the whole argument
+/// above in its own comment. That argument is about *our physics*, not about
+/// what is being thrown, so it always applied here word for word - and this
+/// file only converted the units and stopped.
+///
+/// **`CLAUDE.md` bug shape #14 exactly**: a rule that exists, is correct, and is
+/// commented, in only one of the two places that need it. The symptom was one
+/// blast throwing a cow 2.9 times as far as it threw the player, from the
+/// identical impact - visible in play, invisible in review, and reported by
+/// nothing.
+///
+/// **These are two copies of one number and should be one.** The consolidation
+/// is filed rather than done here because `Main.cpp` is not this agent's file
+/// and a shared constant has to land on both sides in one edit. Until then, a
+/// change to either is a change to both.
+constexpr float kBlastThrow = 7.0f;
 
 /// A lightning bolt's reach, and what it does. The reference's 6x12x6 box read
 /// as half-extents, and its five points of damage.
@@ -258,21 +457,110 @@ constexpr float kFinHalfThickness = 0.012f;
 /// differently again - `melee_attack` multiplies body size by 2 and
 /// `delayed_attack` by 1.5 - but every modern mob in the reference uses the box
 /// form, so that is the one to copy.
+///
+/// `kAttackInterval` is **seconds**, and it is that component's other field:
+/// `melee_box_attack.cooldown_time`, whose published default is 1 second (the
+/// Bedrock creator docs, *Entity Documentation - minecraft:behavior.melee_box_-*
+/// *attack*). Seconds is the reference's own unit here, unusually - most of
+/// what this file copies is published in ticks - so **do not "convert" it**;
+/// multiplying by `tick::kPerSecond` would give a mob one blow every twenty
+/// seconds and every review step would pass.
+///
+/// **This is the mob's cooldown and it has no player counterpart.** Java gives
+/// the player a charge-up meter that scales damage with how long since the last
+/// swing; Bedrock has none, and Bedrock is the reference, so nothing on the
+/// player's side should ever be derived from this number.
 constexpr float kMeleeHorizontalReach = 0.8f;
 constexpr float kAttackInterval = 1.0f;
 /// How long one swing of the arm takes, against that one-second gap between
-/// blows. Six ticks, the reference's own swing duration - so a mob strikes,
-/// recovers, and stands there for most of a second before doing it again.
-constexpr float kAttackSwingSeconds = 0.3f;
+/// blows. Six ticks - so a mob strikes, recovers, and stands there for most of
+/// a second before doing it again. **Seconds, written as six ticks so the six
+/// stays legible.**
+///
+/// **Six is Java's, and it is the one number on this page that is.** Checked
+/// 2026-08-19: Bedrock does not publish a swing duration anywhere. Its arm
+/// swing is driven by the engine-supplied Molang `variable.attack_time`, which
+/// is a normalised 0-to-1 progress value - `resource_pack/animations/`
+/// `humanoid.animation.json` in `Mojang/bedrock-samples` declares no
+/// `animation_length` on the attack animation, and the controllers beside it
+/// only ever test its sign. Six ticks is `LivingEntity`'s swing in Java, used
+/// here because nothing better exists and because this drives an *animation*
+/// rather than a hit. **What would make this note false: an `animation_length`
+/// appearing on that animation, or a `{{only|bedrock}}` duration on
+/// minecraft.wiki's *Melee attack* page.**
+constexpr float kAttackSwingSeconds = 6.0f * tick::kSeconds;
+static_assert(kAttackSwingSeconds < kAttackInterval && kAttackSwingSeconds == 0.3f,
+              "the swing has to finish inside the one-second cooldown, and six ticks is "
+              "0.3 s only at a twenty-tick second");
 
-/// Burning in daylight: one point a second, which is the reference's own fire
-/// damage rate, above a sky light of twelve. A zombie therefore takes twenty
-/// seconds to die of the sun and can still reach shade in that time - the
-/// reference's behaviour, and the whole reason it reads as burning rather than
-/// as vanishing.
-constexpr float kBurnInterval = 1.0f;
-constexpr int kBurnDamage = 1;
+/// Burning in daylight starts **at** a sky light of twelve, not above it - the
+/// test at the call site is `>=`, and this sentence said "above" until
+/// 2026-08-19, which is a one-level disagreement between prose and code in the
+/// direction that gets code "corrected". **The threshold is all that is written
+/// down here** - the rate is `survival::kBurnDamage` and
+/// `survival::kBurnInterval`, one point a second, which the player already
+/// spends on being alight after leaving a flame. A zombie therefore takes
+/// twenty seconds to die of the sun and can still reach shade in that time -
+/// the reference's behaviour, and the whole reason it reads as burning rather
+/// than as vanishing.
+///
+/// **Twelve is the best-sourced number and the source is not edition-tagged.**
+/// minecraft.wiki's *Sun* page: "sunlight can be considered as the presence of
+/// both an internal sky light level of at least 12 and a sky light level of
+/// 15" - so the reference's real rule is a *pair* of tests, and ours keeps only
+/// the first because we have one sky-light value rather than two. Re-checked
+/// 2026-08-19 against the Bedrock behaviour packs and no Bedrock-only statement
+/// of it exists, so **do not "restore" this to a Bedrock citation** it never
+/// had; what would make that claim false is a `{{only|bedrock}}` tag appearing
+/// on the *Sun* or *Zombie* page's burning section.
+///
+/// **This file used to carry its own `kBurnDamage` and `kBurnInterval` beside
+/// this line, and they were the *unqualified* names**, so the sun branch below
+/// silently read the local pair while the lava and fire branches beside it read
+/// `survival::` - no ambiguity, no warning, and a comment at the call site
+/// asserting outright that both rates come from `Survival.hpp`. They only
+/// agreed because both pairs happened to read 1 and 1.0; retuning the player's
+/// afterburn would have moved one and not the other. The sky light stays
+/// because it has no second owner: nothing in `Survival.hpp` publishes it, the
+/// player does not burn in daylight, and it is a *trigger* rather than a rate.
 constexpr int kBurnSkyLight = 12;
+
+/// Who walks through fire and lava unharmed.
+///
+/// "Most of the Nether mobs (blazes, ghasts, magma cubes, striders, wither
+/// skeletons, zoglins, and zombified piglins), agents, NPCs, vexes, ender
+/// dragons, shulkers, wardens, withers, and players or mobs affected by the
+/// Fire Resistance effect are not damaged when touching lava" (minecraft.wiki,
+/// *Lava*). Three of that roster exist here: the magma cube in all three sizes,
+/// the blackbone - our name for the reference's wither skeleton - and the
+/// zombie princepin, its zombified piglin.
+///
+/// **The princepin and the princepin brute are not on it**, and neither is the
+/// plain skeleton. That list names its own exceptions, and inverting them would
+/// make the brute that guards a bastion immune to the one thing the terrain
+/// around it is made of - so the roster is quoted rather than inferred from
+/// "lives in the Nether".
+///
+/// This is a `switch` and not a table column because the column belongs in
+/// `CreatureSpecies`, which lives in `Creature.hpp` and has an owner other than
+/// this session. **The single edit that makes the assertion below fail is
+/// adding a species**, which is exactly when this roster needs re-reading -
+/// a `default:` alone would have quietly answered "not immune" for it.
+[[nodiscard]] constexpr bool fireImmune(CreatureKind kind) {
+    switch (kind) {
+    case CreatureKind::Blackbone:
+    case CreatureKind::ZombiePrincepin:
+    case CreatureKind::MagmaCubeSmall:
+    case CreatureKind::MagmaCubeMedium:
+    case CreatureKind::MagmaCubeLarge:
+        return true;
+    default:
+        return false;
+    }
+}
+static_assert(static_cast<int>(CreatureKind::Count) == 58,
+              "a species was added or removed - check it against the fire-immune roster in "
+              "fireImmune() above, then bump this number");
 
 /// What a hopper does when it arrives on you. **Ours, not the reference's** -
 /// Bedrock makes a slime `pushable` and lets entity collision separate the two,
@@ -300,7 +588,10 @@ constexpr float kMeleeHalfFov = 0.7853982f;
 /// performance, and it buys two things beyond the cost - a target that cannot
 /// flicker on and off frame by frame at the exact edge of the sense range, and
 /// a line-of-sight ray paid for twice a second instead of at the frame rate.
-constexpr float kTargetScanSeconds = 0.5f;
+///
+/// **Seconds, from the published ten ticks.** Written as the conversion rather
+/// than as 0.5 so the ten is still legible against the reference.
+constexpr float kTargetScanSeconds = 10.0f * tick::kSeconds;
 
 /// Bedrock's `look_at_player`: notices you within 8 m, rolls **0.02 per tick**
 /// and holds the glance for two to four seconds.
@@ -308,8 +599,15 @@ constexpr float kTargetScanSeconds = 0.5f;
 /// The probability is converted to a per-second rate, because our tick is a
 /// frame and the reference's is a fixed twentieth of a second - used verbatim,
 /// a chicken at 120 fps would roll six times as often as one at 20.
+///
+/// **The conversion is `* tick::kPerSecond`, not `/ 0.05f`.** It was the
+/// literal for a long time, which made this the only per-tick-odds conversion
+/// in the file that did not go through `Tick.hpp` - `kGrazeChancePerSecond`
+/// and `kGrazeBabyChancePerSecond` below do the identical sum correctly. Same
+/// value today (0.4 either way), so nothing moved; what changed is that the
+/// tick rate now has one owner here as well as everywhere else.
 constexpr float kLookDistance = 8.0f;
-constexpr float kLookChancePerSecond = 0.02f / 0.05f;
+constexpr float kLookChancePerSecond = 0.02f * tick::kPerSecond;
 constexpr float kLookSecondsMin = 2.0f;
 constexpr float kLookSecondsMax = 4.0f;
 /// A head snaps round quicker than a body turns, and stops well short of
@@ -343,13 +641,36 @@ constexpr float kFleeSprint = 7.0f;
 /// its countdown, but never past it, so there is always a moment to react.
 constexpr float kFallFuseTicksPerBlock = 1.5f;
 constexpr float kFallFuseHeadroomTicks = 5.0f;
-constexpr float kTicksPerSecond = 20.0f;
+/// From `Tick.hpp`, the one owner. Only the name is local: everything around it
+/// is published per tick and reads as a multiplier, not as a duration.
+constexpr float kTicksPerSecond = tick::kPerSecond;
 
-/// Grazing. `time_until_eat` is the reference's, and so are the odds - a per
-/// tick chance of 0.001 for an adult and 0.02 for a lamb, converted to the per
-/// second rates a delta-time loop needs. A sheep therefore crops the grass
-/// about once a minute and a lamb rather often, which is exactly the reference
-/// and is why a flock leaves a trail of dirt behind it.
+/// The two spellings of the tick have to agree **at the site that divides by
+/// one of them** - the creeper's fuse headroom is a quarter of a second either
+/// way round, and the second clause is the general rule the first is an
+/// instance of.
+///
+/// > Fails if: `kTicksPerSecond` is re-literalised here rather than derived, or
+/// > either half of `Tick.hpp` moves without the other.
+static_assert(kFallFuseHeadroomTicks / kTicksPerSecond == kFallFuseHeadroomTicks * tick::kSeconds &&
+                  kTicksPerSecond * tick::kSeconds == 1.0f,
+              "the fuse headroom is five ticks whichever way the tick rate is spelled");
+
+/// Grazing. **`time_until_eat` is 1.8 and its published unit is *seconds*, not
+/// ticks** - `Mojang/bedrock-samples` `behavior_pack/entities/sheep.json` reads
+/// `"time_until_eat": 1.8`, and Microsoft's schema for
+/// `minecraft:behavior.eat_block` says "the amount of time (**in seconds**) it
+/// takes for the block to be eaten". So this one is *not* converted, and
+/// multiplying it by the tick rate would give a sheep a thirty-six-second
+/// mouthful. Java's `EatBlockGoal` uses 40 ticks (2 s) instead, so the two
+/// editions genuinely differ here and Bedrock is the shorter.
+///
+/// The odds beside it *are* per tick and are converted: 0.001 for an adult and
+/// 0.02 for a lamb, the same file's
+/// `"success_chance": "query.is_baby ? 0.02 : 0.001"`, which happens to match
+/// Java exactly. A sheep therefore crops the grass about once a minute and a
+/// lamb rather often, which is exactly the reference and is why a flock leaves
+/// a trail of dirt behind it.
 constexpr float kGrazeSeconds = 1.8f;
 constexpr float kGrazeChancePerSecond = 0.001f * kTicksPerSecond;
 constexpr float kGrazeBabyChancePerSecond = 0.02f * kTicksPerSecond;
@@ -420,10 +741,27 @@ constexpr float kDeflateRate = 1.0f;
 constexpr float kChargedPowerScale = 2.0f;
 /// How many Brambles arrive already charged. **A second source, not the only
 /// one**: a lightning strike charges one, which is where the reference gets
-/// them from and what M27 built. This keeps a few in the world between storms.
+/// them from and what M27 built (`Main.cpp` drives `applyLightning` off the
+/// storm). This keeps a few in the world between storms.
+///
+/// **Ours, and the reference publishes no counterpart** - checked 2026-08-19.
+/// minecraft.wiki/w/Creeper states only that "a charged creeper is created when
+/// lightning strikes within four blocks of a normal creeper", and
+/// `behavior_pack/spawn_rules/creeper.json` in `Mojang/bedrock-samples` carries
+/// no powered roll at all. So it is a probability per *spawn*, not per tick or
+/// per second, and **nobody should go looking for a source for the 0.05**;
+/// what would make this note false is a `powered` entry appearing in that
+/// spawn-rules file.
 constexpr float kChargedChance = 0.05f;
-/// The shove a blow carries. Enough to break your footing, not enough to throw
-/// you somewhere you cannot recognise.
+/// The shove a *creature's* blow carries, in metres per second. Enough to break
+/// your footing, not enough to throw you somewhere you cannot recognise.
+///
+/// **The mirror of `kStrikeKnockback` / `kStrikeLift` (5.0 / 4.0) near the top
+/// of this file, and deliberately a different number.** That pair is the
+/// player-hits-creature direction; this one is multiplied per species by
+/// `knockbackScale` and `knockbackLiftScale`, which is how an iron golem
+/// launches you and a silverfish does not. See the longer note over
+/// `kStrikeKnockback` before merging them.
 constexpr float kKnockbackSpeed = 4.5f;
 constexpr float kKnockbackLift = 3.0f;
 
@@ -452,16 +790,29 @@ constexpr float kWaypointReached = 0.55f;
 /// route into somewhere the legs cannot manage is walked at forever.
 constexpr float kProgressWindow = 1.0f;
 constexpr float kProgressDistance = 0.25f;
-/// Searches allowed across the whole population in one frame. A ceiling on the
+/// Searches allowed across the whole population **in one second**, and the unit
+/// is the fix: it was `kPathsPerFrame = 2`, so AI responsiveness was a function
+/// of frame rate. At 240 fps that bought 480 searches a second and at 30 fps
+/// only 60, against a full population wanting about 88 - so on a weaker machine
+/// some animals never pathed at all while others chased normally. Everything
+/// else in this file is per tick or per second; this was the odd one out
+/// (failure shape #3, a number measured in a different unit).
+///
+/// Two per tick at the reference's 20 Hz, which is exactly what the old
+/// constant delivered on a frame that happened to be a tick. A ceiling on the
 /// spike rather than a rate: the repath cadence already holds the population to
 /// about two searches a second each, so this only ever binds when several
 /// animals are boxed in at once - which is exactly the case worth bounding.
-constexpr int kPathsPerFrame = 2;
+constexpr float kPathsPerSecond = 40.0f;
+/// Most a hitch may bank, so a two-second stall does not buy eighty searches on
+/// the frame it ends. Two ticks' worth.
+constexpr float kMaxPathBurst = 4.0f;
 /// How far an ambling creature picks a spot. The reference's `random_stroll`
 /// reaches ten blocks.
 constexpr float kWanderRange = 10.0f;
 
-/// Swimming. A fish carries a heading and a dive angle rather than a goal/// point: the reference's `random_swim` aims 16 blocks out and up to 4 up or
+/// Swimming. A fish carries a heading and a dive angle rather than a goal
+/// point: the reference's `random_swim` aims 16 blocks out and up to 4 up or
 /// down, which is an angle of about 14 degrees, so rolling the angle directly
 /// reproduces it without storing a destination. The turn rate is slower than a
 /// walker's because a fish banks rather than pivots.
@@ -493,10 +844,96 @@ constexpr float kFlyDecisionSpan = 3.0f;
 constexpr int kFlyFloorBlocks = 2;
 constexpr int kFlyCeilingBlocks = 6;
 
-/// How far a bee looks for a flower, in blocks. It runs on the wander timer
-/// rather than per frame, which is what keeps a box this size affordable.
+/// How far a bee looks for a flower, in **blocks**, and both halves are the
+/// reference's: `Mojang/bedrock-samples` `behavior_pack/entities/bee.json`
+/// gives its `minecraft:behavior.move_to_block` a `"search_range": 6` and a
+/// `"search_height": 4`. **The height read 3 until 2026-08-19** - a
+/// hand-rounded number sitting beside a sourced one, which is the shape that
+/// survives review because the pair looks deliberate. It runs on the wander
+/// timer rather than per frame, which is what keeps a box this size affordable.
 constexpr int kFlowerSearchXZ = 6;
-constexpr int kFlowerSearchY = 3;
+constexpr int kFlowerSearchY = 4;
+
+/// The rest of the pollination cycle, every number off
+/// `Mojang/bedrock-samples` `behavior_pack/entities/bee.json` unless it says
+/// otherwise. **Read the unit note on `kPollinateSeconds` before changing any
+/// of them.**
+///
+/// How far a bee looks for its hive, in **blocks**: `find_hive`'s
+/// `minecraft:behavior.move_to_block` carries `"search_range": 16` and
+/// `"search_height": 10`, four times the flower box's volume and the reason
+/// this one is gated behind `hiveCell.y < 0` and a timer rather than run on the
+/// wander cadence like the flower scan.
+constexpr int kHiveSearchXZ = 16;
+constexpr int kHiveSearchY = 10;
+
+/// How long a bee stays on a flower before it has nectar.
+///
+/// **`look_for_food`'s `"stay_duration": 20.0`, read as SECONDS, and the unit
+/// is genuinely disputed - which is why both readings are written down.**
+/// Microsoft's own component reference for `minecraft:behavior.move_to_block`
+/// (learn.microsoft.com, read 2026-08-19) says "Number of **ticks** needed to
+/// complete a stay at the block", which would make this 1.0 s. Three things
+/// argue for seconds and are why that is what is used here: the field is typed
+/// "Decimal number" and every tick count in the same file is an integer;
+/// Java's `PollinateGoal` holds a bee on its flower for a minimum of 400 ticks,
+/// which is exactly 20 s, so 20.0 s is the value the two editions agree on; and
+/// play accounts of Bedrock describe tens of seconds of circling, not one.
+///
+/// **The two readings differ by twenty times**, so this is the constant to
+/// re-derive first if hives ever fill absurdly fast. What would settle it: a
+/// stopwatch on a Bedrock bee, or an engine-side source for the unit. This is
+/// `CLAUDE.md` bug shape #3 caught before it was written rather than after.
+///
+/// **The cross-entity check was run on 2026-08-19 and came back empty, which is
+/// itself the answer to "why is this still open".** The technique that settled
+/// `honey_level` was counting the property's users - it has two, `beehive` and
+/// `bee_nest`, and they agree. `stay_duration` has **exactly one user in the
+/// whole vanilla behaviour pack, and it is `bee.json` itself**. So there is no
+/// second entity whose value could disambiguate the unit, and the only
+/// documentary statement of it is the Microsoft page above - which carries
+/// `ai-usage: ai-assisted` metadata, so the one source is also the weak one. A
+/// search for a second source returns that same page, which is agreement with
+/// itself rather than corroboration.
+///
+/// **Left at 20 s deliberately, because the two errors are not symmetric.** Too
+/// slow is a hive that takes longer than it should to fill, which is a pacing
+/// complaint. Too fast is honeycomb going from scarce to trivial and a wax farm
+/// that needs no farm - it would quietly undo the scarcity the whole chain is
+/// built on. When a factual question cannot be closed, the conservative arm is
+/// the one that fails visibly rather than the one that fails silently.
+///
+/// **This is a feel decision with a factual dispute under it, so it belongs to
+/// the playtester**, and flipping it is one edit: 20.0f -> 1.0f, nothing else
+/// in the cycle reads the unit.
+constexpr float kPollinateSeconds = 20.0f;
+
+/// How close counts as arrived, in blocks, measured in three dimensions because
+/// a bee approaches from above as often as from the side. The flower's is
+/// `look_for_food`'s `"goal_radius": 1.0`; the hive's is `go_home`'s
+/// `"goal_radius": 1.2` rather than `find_hive`'s 0.633, because `go_home` is
+/// the higher-priority path home in the reference and 0.633 is a hard target
+/// for something that steers by heading rather than by waypoint.
+constexpr float kFlowerArrival = 1.0f;
+constexpr float kHiveArrival = 1.2f;
+
+/// How often a homeless bee re-runs the hive scan, in seconds.
+///
+/// **The reference's own retry cadence for the adjacent case, not a guess.**
+/// `bee.json` gives `find_hive` a `"tick_interval": 1` - once per tick - which
+/// over a 33x21x33 box is not affordable here; its `hive_full` group waits
+/// `"time": [5, 20]` with `randomInterval` before trying for a hive again, and
+/// that is the number used. A bee that has a home never runs this at all, so
+/// the cost is paid only where there is nothing to find.
+constexpr float kHiveSearchMin = 5.0f;
+constexpr float kHiveSearchSpan = 15.0f;
+
+/// The chance, per delivery, that the hive gains **two** levels instead of one.
+/// "When the bee exits, the hive increments its honey level by 1 and has a 1%
+/// chance to increment it by 2" - minecraft.wiki/w/Beehive/Usage, and Java's
+/// `nextInt(100) == 0 ? 2 : 1` says the same thing, so it is two *instead of*
+/// one rather than three.
+constexpr float kDoubleHoneyChance = 0.01f;
 
 /// A stranded fish flops rather than lying still: a small hop and a new heading
 /// on a fixed cadence. It cannot right itself, which is the point of it.
@@ -602,6 +1039,212 @@ float hashUnit(std::uint32_t hash) {
     return static_cast<float>(hash & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
 
+/// Records who landed a blow, for the drop table to read a second later.
+///
+/// **One function for both blow sites**, because "zero names the player" is
+/// exactly the kind of rule that gets written correctly in one place and
+/// forgotten in the other. Overwrites rather than accumulates: the reference
+/// decides a mob's drops by the *killing* blow, so whoever hit last wins.
+void recordBlow(Creature& target, std::uint32_t fromId) {
+    if (target.death.latched) {
+        return;
+    }
+    target.death.cause = fromId == 0 ? DeathCause::Player : DeathCause::Creature;
+    target.death.killerId = fromId;
+}
+
+/// The same, for the four ways the world itself kills something. Clears
+/// `killerId` as well, or a creature the player wounded and the sea finished
+/// would still be paying out a player kill's rare drops.
+void recordHazard(Creature& target, DeathCause cause) {
+    if (target.death.latched) {
+        return;
+    }
+    target.death.cause = cause;
+    target.death.killerId = 0;
+}
+
+/// **One function for every blow that lands on a creature**, and it is a new
+/// rule here rather than a tidied-up old one. Read the next paragraph before
+/// judging a time-to-kill regression.
+///
+/// **Creatures never had a damage window.** At HEAD `applyHits` (creature on
+/// creature) and `strike` (the player's swing and every arrow) each subtracted
+/// health straight out of the struct, unconditionally, and `Creature.hpp`
+/// carried neither `invulnerableSeconds` nor `lastDamage` - both fields arrive
+/// in this change. Only the player had the rule, in `damagePlayer`, since M21.
+/// So this is **not** a de-duplication: `Survival.hpp` is the shared home the
+/// player's copy moved into, and creatures are a **new** caller of it.
+///
+/// **The behavioural consequence is real and it is not a refactor.** Within
+/// `survival::kInvulnerableSeconds` of a hit landing, a second blow no larger
+/// than the first now does nothing at all, and only the *difference* lands when
+/// it is larger (`RESEARCH.md` §2.4). Concretely: fast weapons lose roughly
+/// half their effect against mobs, a wolf pack or two skeletons converging on
+/// one target have most of their hits vanish, and because `chargeFall` routes
+/// through here too, a mob that has just landed is briefly hard to hit. That is
+/// the reference's behaviour - Bedrock mobs carry the same ten-tick hurt
+/// resistance with the same "only the difference lands" rule - and it is the
+/// point of the change rather than a side effect of it. It also fixes what the
+/// unconditional sites did: a wolf pack all landing in one tick deleted a sheep
+/// between two frames, and a fall ending on the same tick as a sword swing
+/// charged for both.
+///
+/// **The three hazard ticks are deliberately outside it** - burning, drowning
+/// and drying out each carry their own cadence in `think`, one point every half
+/// second or every second, and running those through a half-second window would
+/// silently halve rates that were taken from the reference. They are the same
+/// split the reference makes, where suffocation and fire have their own clocks
+/// rather than sharing the melee one. Suffocation joins them, for the same
+/// reason and on the same terms. **Lightning and explosions do not** - they are
+/// ordinary blows in the reference and go through here, which is what stops a
+/// creeper detonating on the frame of a sword swing from charging twice.
+///
+/// Returns whether health actually moved, so a caller can hang the things that
+/// should only happen on a real hit - the hurt cry, the knockback, the anger,
+/// the alerting of neighbours - off the answer rather than off having tried.
+bool damageCreature(Creature& target, int amount) {
+    if (amount <= 0 || target.health <= 0) {
+        return false;
+    }
+
+    // **The window rule lives in `Survival.hpp`**, which is where the player's
+    // copy moved to so that this file could call it rather than write a second
+    // one. There was no creature copy to merge - see above - so what this line
+    // does is *adopt* a published rule, not reconcile two of them.
+    //
+    // No `bypass` here: a creature has no void death and nothing else that must
+    // outrun the window. The returned amount needs no scaling either, which is
+    // why the shared function hands back the raw figure and leaves scaling to
+    // the caller - `effects::damageTakenScale` reads a `Player`'s effects and a
+    // creature has no effects at all.
+    const int landed =
+        survival::chargeDamageWindow(target.invulnerableSeconds, target.lastDamage, amount);
+    if (landed <= 0) {
+        return false;
+    }
+
+    target.health = std::max(0, target.health - landed);
+    target.hurtTimer = kHurtSeconds;
+    return true;
+}
+
+/// The world killing something, on its own clock and **outside** the damage
+/// window `damageCreature` enforces.
+///
+/// Burning, drowning and drying out each carry their own cadence - one point
+/// every half second or every second - and routing those through a half-second
+/// window would silently halve rates taken from the reference. That split is
+/// deliberate and is the reference's own; what was not deliberate is that the
+/// three sites then had to agree about everything else by inspection, **and one
+/// of them did not**. Burning tested `health > 0`; drowning and drying out did
+/// not, and both live in `step`, which is the one function that *does* run on a
+/// corpse. So a cow the player killed at the water's edge kept drowning after
+/// it died, and `recordHazard` overwrites `cause` and clears `killerId` - so
+/// the kill became the sea's, and the player's rare drops were gone by the time
+/// the body paid out a second later. A dolphin left on a beach did the same
+/// thing through `dryTimer`.
+///
+/// One function, so the guard cannot travel to two of the three again.
+void hazardDamage(Creature& target, int amount, DeathCause cause) {
+    if (target.health <= 0) {
+        return;
+    }
+    // Clamped, exactly as `damageCreature` clamps. Not cosmetic: drowning takes
+    // two points at a time against a health that can be 1, so this was the last
+    // path in the file that could leave the field negative - and it is written
+    // to the save. Every reader tests `health <= 0` so nothing behaves
+    // differently today, which is precisely why the two would have drifted
+    // apart unnoticed.
+    target.health = std::max(0, target.health - amount);
+    target.hurtTimer = kHurtSeconds;
+    recordHazard(target, cause);
+}
+
+/// Rousing one creature: the anger clock and who it blames, set together.
+///
+/// **One owner, because the pair had four writers** - `strike`, where the blow
+/// itself provokes; `applyHits`, the same thing for creature on creature;
+/// `alertNeighbours`, where the call carries to the herd; and `provokeNear`,
+/// where something in the world angers a group without touching it. Each set
+/// both fields by hand, and `provokedTimer` without `threatId` is a creature
+/// angry at whoever it was angry at last - which, since zero names the player,
+/// defaults to blaming them for someone else's arrow.
+///
+/// **How long it lasts is the species' own number**, never a flat constant: a
+/// bear you shot is angry for five hundred seconds and a bee for twenty-five.
+void rouse(Creature& target, std::uint32_t threatId) {
+    target.provokedTimer = speciesInfo(target.kind).angerSeconds;
+    target.threatId = threatId;
+}
+
+
+/// partner, and the two swing cooldowns.
+///
+/// **Split out because it has two callers, and the second one is why it
+/// exists.** These sat at the top of `think`, and `update` skips `think`
+/// entirely for a corpse - so all four froze at whatever the killing blow left
+/// and never counted down again. `Player.cpp`'s `tickPassiveTimers` is the same
+/// extraction made at the same time, and there it was load-bearing: its early
+/// return skipped `deathSeconds` and soft-locked the respawn screen.
+///
+/// **Here it is hygiene, and saying so is the point.** Nothing visible depends
+/// on it today: the corpse tint is `hurtTimer > 0 || health <= 0` on purpose,
+/// `damageCreature` refuses a corpse so the window cannot matter, and the
+/// `wish` chain gives a corpse its own branch before either swing timer is
+/// read. What it buys is that a clock measuring elapsed time elapses, so the
+/// next thing to read one of these off a body - a revive, a longer death
+/// animation, a corpse that can be hit again - finds a number rather than a
+/// fossil.
+///
+/// **The AI clocks deliberately stay in `think`.** `provokedTimer`, `scanTimer`
+/// and `decisionTimer` are inputs to decisions, and a corpse makes none - where
+/// these four are outputs of things that already happened, and an event in the
+/// past does not stop expiring because the thing it happened to has died.
+void tickPassiveTimers(Creature& creature, float deltaSeconds) {
+    creature.hurtTimer = std::max(0.0f, creature.hurtTimer - deltaSeconds);
+    // **The other half of the shared window rule.** The pair is cleared
+    // together or `lastDamage` outlives the window it belongs to and suppresses
+    // the next real hit - and that clearing is no longer a rule this function
+    // has to remember on its own, which is the whole point of the move.
+    survival::tickDamageWindow(creature.invulnerableSeconds, creature.lastDamage, deltaSeconds);
+    creature.attackTimer = std::max(0.0f, creature.attackTimer - deltaSeconds);
+    creature.swingTimer = std::max(0.0f, creature.swingTimer - deltaSeconds);
+}
+
+/// Fall damage, on the **same two constants the player pays** - `RESEARCH.md`
+/// §1.10, `floor((distance - 3) * 1)`, measured in change in Y rather than in
+/// speed. Called once per resolved landing by `step`.
+///
+/// **Creatures took none at all until now.** `fallDistance` was a complete,
+/// correct accumulator with exactly one consumer - the exploder fuse - and
+/// nothing anywhere subtracted health, so a skeleton pushed off a cliff walked
+/// away and no document recorded an exemption. Bedrock applies fall damage to
+/// every mob that is not explicitly excepted, which is why this is the general
+/// rule here and the exceptions are named on the rows.
+///
+/// The exceptions are the reference's own two lists, both in §1.10: six of our
+/// species are on its "fully immune" line, and the goat and the frog take ten
+/// and five points less. **Subtracted from the damage, not from the distance**,
+/// because that is what "takes 10 HP less, always" says - a goat still takes
+/// nothing at all under 13 blocks, and above that it pays ten less than a sheep
+/// beside it.
+///
+/// Fliers and swimmers never reach here with anything accumulated, because both
+/// clear `fallDistance` where they take over `velocity.y`.
+void chargeFall(Creature& creature, const CreatureSpecies& species) {
+    if (species.ignoresFallDamage) {
+        return;
+    }
+    const int damage =
+        static_cast<int>(std::floor((creature.fallDistance - survival::kSafeFallDistance) *
+                                    survival::kFallDamagePerBlock)) -
+        species.fallDamageReduction;
+    if (damage > 0 && damageCreature(creature, damage)) {
+        recordHazard(creature, DeathCause::Falling);
+    }
+}
+
 /// How far a struck animal's own kind hears it. **Ours, not the reference's** -
 /// Bedrock gives farm animals no alerting whatsoever, and a herd that scatters
 /// together is worth more than fidelity here.
@@ -609,10 +1252,23 @@ constexpr float kHerdAlertRange = 16.0f;
 
 /// One row per species. Adding an animal is adding a row.
 ///
-/// Heights for the nine most recent species are Bedrock's hitboxes rather than
-/// the model's silhouette: a head or a pair of ears is allowed to rise above
-/// the box it collides with. The first four keep the boxes they were playtested
-/// with. Half-widths are ours throughout and are deliberately narrower than the
+/// Heights are Bedrock's collision box throughout, rather than the model's
+/// silhouette: a head or a pair of ears is allowed to rise above the box it
+/// collides with. **The first four rows - sheep, cow, pig, bramble - are the
+/// documented exception and keep the boxes they were playtested with**, which
+/// is why they are the only four that agree with neither edition; mushroom cow
+/// tracks our cow at 1.5 for the same reason, because two animals that look
+/// identical must not stand different heights. Everything else was measured
+/// against `behavior_pack/entities/*.json` on 2026-08-19 and 30 of 51 already
+/// agreed exactly. **Fifteen were corrected that day**: the twelve humanoid
+/// and undead rows carried Java's 1.95 and 1.99 where Bedrock publishes a
+/// single 1.9 for all of them - drowned was already right, which is what gave
+/// the cluster away - the frog was 0.50 against 0.55, and the pufferfish and
+/// tropical fish had both lost their scale factor. To falsify any of this,
+/// re-run the dump against that source; a row that disagrees is either a
+/// new upstream value or a missing scale factor.
+///
+/// Half-widths are ours throughout and are deliberately narrower than the
 /// reference's - a horse is 0.9 across here against Bedrock's 1.4 - because a
 /// wide box catches on doorways and tree trunks far more than it reads as bulk.
 ///
@@ -633,12 +1289,67 @@ constexpr float kHerdAlertRange = 16.0f;
 /// `L(1 - cos angle)`, so a short-legged animal at full amplitude prances. The
 /// several species that sit on the cap are the short-legged and the fast, which
 /// is exactly the set the reference would give one flat amplitude anyway.
+/// **Health is in health points, never hearts, everywhere in this table.** Two
+/// points to a heart, so a row copied off a wiki infobox's heart *picture*
+/// rather than its `{{hp|n}}` number comes out at half - and half of a correct
+/// number is the one wrong value that never looks wrong. Four rows were found
+/// that way on 2026-08-19 by dumping the whole column and reading it against
+/// `RESEARCH.md` §6.1 and the wiki infoboxes, which is the only instrument that
+/// finds this: every one of them built, validated and played fine.
+///
+/// **Source order for anything in this table, settled 2026-08-19.** Use
+/// `Mojang/bedrock-samples`, `behavior_pack/entities/<mob>.json`, first. That
+/// repository is Mojang's own shipped Bedrock behaviour pack - a *primary*
+/// source stating `minecraft:health`, `minecraft:attack`,
+/// `minecraft:collision_box` and `minecraft:movement` in the engine's own
+/// units - and where it covers a field it beats minecraft.wiki outright. The
+/// wiki is secondary, documents Java freely, and marks the edition split
+/// unevenly; it misled this project three separate times in one night, twice
+/// into nearly "correcting" values that were already right.
+///
+/// Two things to know when reading those files. **A value can live in a
+/// `component_group` rather than in `components`**, and the group is usually a
+/// state this project does not have - `wolf_tame` publishes a different attack
+/// and a different health from the wild wolf, and taking the group's number
+/// for the base is how this table ended up with a wild wolf biting like a
+/// tamed one. **And `minecraft:health.value` is sometimes a `{range_min,
+/// range_max}` object**, which the four living equines all use; this table
+/// stores one health per species, so any figure inside the published range is
+/// a legitimate pick and only a figure outside it is a defect.
+///
+/// **And third, the one that nearly cost two correct rows: `collision_box` is
+/// stored pre-divided by `minecraft:scale`, so the real box is the product of
+/// the two.** Mojang annotate it themselves in `rabbit.json` - `"width":
+/// 0.81666666, // 0.49/0.6` beside `"scale": 0.6` - and reading the raw box
+/// alone says a rabbit is 1.0 tall when it is 0.6, exactly what this table
+/// already had. The same trap sits under blackbone, whose raw 2.01 times its
+/// 1.2 scale is the 2.412 that the 2.4 here was taken from; "correcting" it to
+/// 2.01 would have shortened it by four-tenths of a metre. Four rows of the
+/// fifty-one carry a scale other than 1 - rabbit, blackbone, pufferfish and
+/// tropical fish - and a scale is only in force when it sits in the same block
+/// as the box. **Search for it with a first-match regex and you will get the
+/// wrong one**: `zombie.json` answers 0.5, which belongs to its
+/// `minecraft:zombie_baby` group, and believing that would halve every
+/// humanoid in this table; rabbit answers 0.4, its baby, where the adult is
+/// 0.6. Read the top-level `components` block, or the group the box is in.
+/// This is `CLAUDE.md` bug shape #3, a number in a different unit,
+/// and nothing about the file's appearance warns you.
+///
+/// Four rows were corrected against that source on 2026-08-19 - bogged attack
+/// 2 to 3, wolf attack 4 to 3, zombie horse health 15 to 25, trader llama
+/// health 12 to 15 - after fifty-three entity files were downloaded and their
+/// health, attack, hitbox and movement dumped in one pass. Reading finds what
+/// looks wrong; a wrong row looks exactly like a right one, and there are
+/// fifty-seven of them.
 constexpr CreatureSpecies kSpecies[] = {
-    {.name = "Sheep", .halfWidth = 0.32f, .height = 1.40f, .gaitRate = 6.0f, .gaitSwing = 0.36f,
-     .modelScale = 1.00f, .health = 6, .walkSpeed = 1.6f, .runSpeed = 3.4f, .senseRange = 8.0f,
+    // Eight, not six: `{{hp|8}}` on minecraft.wiki/w/Sheep, no edition split,
+    // and `RESEARCH.md` §6.1's master table says the same. Six was two points
+    // light, which is one whole hit off a wooden sword.
+    {.name = "Sheep", .halfWidth = 0.32f, .height = 1.30f, .gaitRate = 6.0f, .gaitSwing = 0.36f,
+     .modelScale = 1.00f, .health = 8, .walkSpeed = 1.6f, .runSpeed = 3.4f, .senseRange = 8.0f,
      .maxBlockLight = 15, .weight = 1.0f, .babyChance = 0.05f, .groupSize = 4, .grazes = true,
      .avoidsWater = true, .alertRange = kHerdAlertRange},
-    {.name = "Cow", .halfWidth = 0.45f, .height = 1.50f, .gaitRate = 5.5f, .gaitSwing = 0.36f,
+    {.name = "Cow", .halfWidth = 0.45f, .height = 1.30f, .gaitRate = 5.5f, .gaitSwing = 0.36f,
      .modelScale = 1.00f, .health = 10, .walkSpeed = 1.3f, .runSpeed = 2.8f, .senseRange = 8.0f,
      .maxBlockLight = 15, .weight = 0.9f, .babyChance = 0.05f, .groupSize = 4,
      .avoidsWater = true, .alertRange = kHerdAlertRange},
@@ -676,17 +1387,31 @@ constexpr CreatureSpecies kSpecies[] = {
     {.name = "Chicken", .halfWidth = 0.20f, .height = 0.80f, .gaitRate = 14.0f, .gaitSwing = 0.49f,
      .modelScale = 1.00f, .health = 4, .walkSpeed = 1.5f, .runSpeed = 3.0f, .senseRange = 6.0f,
      .maxBlockLight = 15, .weight = 1.1f, .babyChance = 0.05f, .groupSize = 4, .fallDrag = 0.6f,
-     .alertRange = kHerdAlertRange},
+     .ignoresFallDamage = true, .alertRange = kHerdAlertRange},
+    // **Ten health and three damage, both from the reference.** Six and one
+    // were ours and nothing recorded where they came from: minecraft.wiki/w/Cat
+    // publishes `Wild: {{hp|10}} / Tamed: {{hp|20}}` for Bedrock specifically
+    // (Java has a flat 10), `RESEARCH.md` §6.1 records the same pair, and the
+    // same infobox gives `damage = {{hp|3}} against rabbits and baby turtles
+    // only`. We have no taming, so the wild figure is the one that applies.
+    // Damage matters more than the health does: a rabbit is 3 health, so one
+    // pounce now settles it the way the reference has it, instead of three.
     {.name = "Cat", .halfWidth = 0.24f, .height = 0.70f, .gaitRate = 10.0f, .gaitSwing = 0.32f,
-     .modelScale = 1.00f, .health = 6, .walkSpeed = 1.8f, .runSpeed = 3.8f, .senseRange = 9.0f,
-     .attackDamage = 1, .maxBlockLight = 15, .weight = 0.8f, .babyChance = 0.25f, .groupSize = 2,
-     .hunts = tagMask(CreatureTag::Critter), .retaliates = false, .avoidsWater = true,
-     .alertRange = kHerdAlertRange},
+     .modelScale = 1.00f, .health = 10, .walkSpeed = 1.8f, .runSpeed = 3.8f, .senseRange = 9.0f,
+     .attackDamage = 3, .maxBlockLight = 15, .weight = 0.8f, .babyChance = 0.25f, .groupSize = 2,
+     .hunts = tagMask(CreatureTag::Critter), .retaliates = false, .ignoresFallDamage = true,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // Long-legged enough to walk up a full block without jumping, which is the
     // reference's own list: the horse family, the llama and the camel all have
     // a step height of 1 or more and so never hop a ledge.
+    //
+    // **Thirty-two health, not sixteen** - `{{hp|32|mob=1}}` on
+    // minecraft.wiki/w/Camel, and `RESEARCH.md` §6.1 bolds the same number
+    // precisely because it is the surprising one. The height beside it (2.375)
+    // is off the same infobox and was already right, which is what made the
+    // halved health invisible: the row looked sourced.
     {.name = "Camel", .halfWidth = 0.48f, .height = 2.375f, .gaitRate = 3.5f, .gaitSwing = 0.35f,
-     .modelScale = 1.00f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 2.8f, .senseRange = 10.0f,
+     .modelScale = 1.00f, .health = 32, .walkSpeed = 1.3f, .runSpeed = 2.8f, .senseRange = 10.0f,
      .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.05f, .groupSize = 1, .stepHeight = 1.5f,
      .jumpHeight = 0.0f, .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
     {.name = "Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f, .gaitSwing = 0.49f,
@@ -697,8 +1422,20 @@ constexpr CreatureSpecies kSpecies[] = {
      .modelScale = 0.92f, .health = 16, .walkSpeed = 1.8f, .runSpeed = 4.0f, .senseRange = 10.0f,
      .maxBlockLight = 15, .weight = 0.55f, .babyChance = 0.20f, .groupSize = 3, .stepHeight = 1.0f,
      .jumpHeight = 0.0f, .avoidsWater = true, .alertRange = kHerdAlertRange},
+    // **The one row in the table whose health the reference randomises.**
+    // `minecraft.wiki/w/Llama` publishes `{{hp|15}} to {{hp|30}}`, no edition
+    // split - a llama rolls its own maximum on spawn, which is why a wild herd
+    // has weak and tough members. This row holds one int, so it takes the
+    // published **floor**: 15 health points. It was 12, which is not a figure
+    // the reference contains anywhere and is below the weakest llama that can
+    // exist (2026-08-19, found by a probe that dumped all 58 rows). What would
+    // make this note false: `health` becoming a range the way `attackDamage`
+    // already has `attackDamageMax`, at which point this should be 15..30.
+    //
+    // It has no `attackDamage` and that is correct rather than missing - a
+    // llama does not bite, it spits, for {{hp|1}} on Easy and Normal.
     {.name = "Llama", .halfWidth = 0.43f, .height = 1.87f, .gaitRate = 5.5f, .gaitSwing = 0.31f,
-     .modelScale = 1.00f, .health = 12, .walkSpeed = 1.6f, .runSpeed = 3.5f, .senseRange = 10.0f,
+     .modelScale = 1.00f, .health = 15, .walkSpeed = 1.6f, .runSpeed = 3.5f, .senseRange = 10.0f,
      .maxBlockLight = 15, .weight = 0.65f, .babyChance = 0.10f, .groupSize = 4, .stepHeight = 1.0f,
      .jumpHeight = 0.0f, .alertRange = kHerdAlertRange},
     {.name = "Donkey", .halfWidth = 0.42f, .height = 1.60f, .gaitRate = 5.5f, .gaitSwing = 0.44f,
@@ -708,12 +1445,23 @@ constexpr CreatureSpecies kSpecies[] = {
     {.name = "Goat", .halfWidth = 0.38f, .height = 1.30f, .gaitRate = 8.0f, .gaitSwing = 0.36f,
      .modelScale = 1.00f, .health = 10, .walkSpeed = 1.7f, .runSpeed = 3.8f, .senseRange = 9.0f,
      .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.05f, .groupSize = 3,
+     .fallDamageReduction = 10,
      .avoidsWater = true, .alertRange = kHerdAlertRange},
     // The gait numbers are zero on purpose for a hopper: its legs are driven by
     // the jump, so there is no cycle to tune. Sat upright the rabbit is tall
     // and narrow, which is what the much smaller scale is paying for.
-    {.name = "Rabbit", .halfWidth = 0.18f, .height = 0.60f, .hops = true, .hopLaunch = 4.2f,
-     .hopGather = 0.18f, .modelScale = 0.48f, .health = 4, .walkSpeed = 2.0f, .runSpeed = 4.2f,
+    //
+    // `hopLaunch` is a **speed**, so it is the one number in this table that
+    // gravity is measured against: the arc it reaches is `v^2 / 2g`. It was
+    // re-derived when `kGravity` was unified with the player's, by
+    // `v' = v sqrt(32/26)`, which holds the arc at the 0.34 m `RESEARCH.md`
+    // §1.4 records for an ordinary rabbit hop and shortens only the airtime.
+    //
+    // **Three health, not four** - `{{hp|3}}` on minecraft.wiki/w/Rabbit and
+    // `RESEARCH.md` §6.1, no edition split. Four made it the same to kill as a
+    // chicken, which it is not: a rabbit is the frailest thing in the roster.
+    {.name = "Rabbit", .halfWidth = 0.18f, .height = 0.60f, .hops = true, .hopLaunch = 4.66f,
+     .hopGather = 0.18f, .modelScale = 0.48f, .health = 3, .walkSpeed = 2.0f, .runSpeed = 4.2f,
      .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.9f, .babyChance = 0.05f, .groupSize = 3,
      .avoids = CreatureTag::Canine | CreatureTag::Ursine, .avoidRange = 8.0f,
      .avoidPlayerRange = 4.0f, .avoidsWater = true, .alertRange = kHerdAlertRange,
@@ -722,9 +1470,24 @@ constexpr CreatureSpecies kSpecies[] = {
     // until struck. See `CreatureSpecies::attackDamage`. Twenty-five seconds of
     // grudge is the reference's `wolf_angry`, and it is four times what every
     // animal on the roster used to carry.
+    //
+    // **The bite was 4 and is 3** (2026-08-19). `wolf.json` in
+    // `Mojang/bedrock-samples` - the shipped Bedrock behaviour pack, which
+    // beats the wiki wherever it covers something - carries **two** attack
+    // components: `"damage": 3` in `components`, which is every wild wolf, and
+    // `"damage": 4` inside the `minecraft:wolf_tame` group, which is a wolf
+    // that belongs to somebody. The 4 was the tamed number sitting in a table
+    // that has no taming in it, so a wild pack bit a third harder than the
+    // reference - and a pack is `groupSize = 4`. The same file puts tamed
+    // health at 40 in `minecraft:wolf_increased_max_health` against the wild 8
+    // this row already has, so the wild/tame split is real and this row is
+    // unambiguously the wild side of it.
+    //
+    // What would make this note false: taming arriving, at which point a tamed
+    // wolf wants 4 and 40, and this row still wants 3 and 8.
     {.name = "Wolf", .halfWidth = 0.30f, .height = 0.80f, .gaitRate = 9.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 8, .walkSpeed = 1.8f, .runSpeed = 4.2f, .senseRange = 12.0f,
-     .attackDamage = 4, .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.10f, .groupSize = 4,
+     .attackDamage = 3, .maxBlockLight = 15, .weight = 0.7f, .babyChance = 0.10f, .groupSize = 4,
      .hunts = CreatureTag::Grazer | CreatureTag::Critter | CreatureTag::Vulpine |
               CreatureTag::Skeletal,
      .angerSeconds = 25.0f, .alertRange = 20.0f},
@@ -735,9 +1498,10 @@ constexpr CreatureSpecies kSpecies[] = {
     // The one genuinely amphibious animal here: it breathes underwater, walks
     // the bottom rather than bobbing, and `sinks = false` holds it at whatever
     // depth it is at instead of settling.
-    {.name = "Frog", .halfWidth = 0.25f, .height = 0.50f, .hops = true, .hopLaunch = 6.5f,
+    {.name = "Frog", .halfWidth = 0.25f, .height = 0.55f, .hops = true, .hopLaunch = 7.21f,
      .hopGather = 0.55f, .modelScale = 1.00f, .health = 10, .walkSpeed = 1.0f, .runSpeed = 2.2f,
      .senseRange = 7.0f, .maxBlockLight = 15, .weight = 0.8f, .groupSize = 4, .stepHeight = 1.0f,
+     .fallDamageReduction = 5,
      .floats = false, .sinks = false, .amphibious = true, .breathesWater = true,
      .alertRange = kHerdAlertRange, .panicSpeedScale = 1.2f},
     {.name = "Fox", .halfWidth = 0.25f, .height = 0.70f, .gaitRate = 11.0f, .gaitSwing = 0.66f,
@@ -750,9 +1514,37 @@ constexpr CreatureSpecies kSpecies[] = {
     // horse's - the reference draws them from one rig too.
     {.name = "Ocelot", .halfWidth = 0.24f, .height = 0.70f, .gaitRate = 10.0f, .gaitSwing = 0.32f,
      .modelScale = 1.00f, .health = 10, .walkSpeed = 1.8f, .runSpeed = 3.9f, .senseRange = 9.0f,
-     .attackDamage = 1, .maxBlockLight = 15, .weight = 0.6f, .babyChance = 0.25f, .groupSize = 2,
-     .hunts = tagMask(CreatureTag::Fowl), .retaliates = false, .avoidsWater = true,
-     .alertRange = kHerdAlertRange},
+     // **Three, off `RESEARCH.md` 7.1's land-quadruped table, the `Ocelot`
+     // row** - which also carries the 10 health beside it. This cited a line
+     // number until 2026-08-19, and the line it named was a paragraph about the
+     // creeper's stats, nowhere near a cat; 7.1 is a table, and a table's rows
+     // move while its heading does not. **The claim that went with it - "not
+     // the cat's one" - was wrong too**, and in the more expensive direction:
+     // the reference gives a cat 3 as well (`damage = {{hp|3}}`,
+     // minecraft.wiki/w/Cat), so the cat's row has been corrected to match
+     // rather than this one being treated as special. A chicken has 4 health,
+     // so either of them settles one in two pounces.
+     //
+     // **The primary source has no attack component for either animal at all**
+     // (2026-08-19). `Mojang/bedrock-samples` is the shipped Bedrock behaviour
+     // pack and beats the wiki where it covers something: `ocelot.json` and
+     // `cat.json` each contain **zero** `"minecraft:attack"` entries and zero
+     // melee-attack behaviours. That is a real zero and not a bad search - the
+     // identical scan over `bogged.json`, `wolf.json`, `fox.json` and
+     // `panda.json` returns 1, 2, 1 and 2, so the check can still find
+     // something when there is something to find. Health is confirmed
+     // exactly - wild 10 in both files, tamed 20, which is the 10 this row and
+     // the Cat row carry.
+     //
+     // The 3 is therefore **ours**, off `RESEARCH.md` 7.1, and it is being
+     // left: both animals are `hunts`-only with `retaliates = false` and no
+     // `hostile`, so this number never reaches the player and decides one
+     // thing only - how many pounces a rabbit or a chicken survives. Changing
+     // it to 0 would stop cats hunting at all, since the melee attempt returns
+     // early on `attackDamage <= 0`.
+     .attackDamage = 3, .maxBlockLight = 15, .weight = 0.6f, .babyChance = 0.25f, .groupSize = 2,
+     .hunts = tagMask(CreatureTag::Fowl), .retaliates = false, .ignoresFallDamage = true,
+     .avoidsWater = true, .alertRange = kHerdAlertRange},
     // The heaviest thing in the world and the second neutral: it ignores you
     // until struck, and then hits for six. Slow, so backing off actually works -
     // except that it now holds a grudge for the reference's five hundred
@@ -765,9 +1557,16 @@ constexpr CreatureSpecies kSpecies[] = {
      .senseRange = 12.0f, .attackDamage = 6, .maxBlockLight = 15, .weight = 0.4f,
      .babyChance = 0.10f, .groupSize = 2, .hunts = tagMask(CreatureTag::Vulpine),
      .leashRange = 48.0f, .angerSeconds = 500.0f, .alertRange = 41.0f},
+    // Neutral like the bear above and tuned like it - the reference gives a
+    // provoked panda the same long grudge and the same wide alert - but it was
+    // copied without the one field that lets any of it run: `hurtByTargetStart`
+    // returns false outright on `attackDamage <= 0`, so a panda could not
+    // retaliate and both numbers beside it were dead. Two is `RESEARCH.md`
+    // 7.1's own figure; the aggressive variant's six is not modelled, because
+    // there is no personality field here to hang it on.
     {.name = "Panda", .halfWidth = 0.45f, .height = 1.25f, .gaitRate = 4.5f, .gaitSwing = 0.54f,
      .modelScale = 1.10f, .health = 20, .walkSpeed = 0.8f, .runSpeed = 1.8f, .senseRange = 8.0f,
-     .maxBlockLight = 15, .weight = 0.35f, .babyChance = 0.05f, .groupSize = 2,
+     .attackDamage = 2, .maxBlockLight = 15, .weight = 0.35f, .babyChance = 0.05f, .groupSize = 2,
      .avoidsWater = true, .angerSeconds = 500.0f, .alertRange = 41.0f},
     // The three slimes are one animal at three sizes, and the size is the whole
     // design: health is the size squared, damage is the size, and killing one
@@ -777,16 +1576,16 @@ constexpr CreatureSpecies kSpecies[] = {
     // They hop rather than walk, and the launch is identical for all three
     // because the reference jumps one block high whatever the size - only the
     // distance covered scales, which falls out of the speed.
-    {.name = "Small Slime", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 7.21f,
+    {.name = "Small Slime", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.90f, .modelScale = 1.04f, .health = 1, .walkSpeed = 0.5f, .runSpeed = 1.1f,
      .hostile = true, .senseRange = 16.0f, .nocturnal = true, .maxBlockLight = 15, .weight = 0.6f,
      .burnsInDay = false, .avoidsWater = true},
-    {.name = "Slime", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 7.21f,
+    {.name = "Slime", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.85f, .modelScale = 2.08f, .health = 4, .walkSpeed = 0.8f, .runSpeed = 1.8f,
      .hostile = true, .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true,
      .maxBlockLight = 15, .weight = 0.5f, .burnsInDay = false,
      .splitInto = CreatureKind::SlimeSmall, .splitMin = 2, .splitMax = 4, .avoidsWater = true},
-    {.name = "Large Slime", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 7.21f,
+    {.name = "Large Slime", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.80f, .modelScale = 4.16f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 2.8f,
      .hostile = true, .senseRange = 16.0f, .attackDamage = 4, .nocturnal = true,
      .maxBlockLight = 15, .weight = 0.3f, .burnsInDay = false,
@@ -828,7 +1627,7 @@ constexpr CreatureSpecies kSpecies[] = {
     // The undead do not swim. `is_amphibious` with no float goal means they
     // walk the seabed, and `breathes_water` is why that costs them nothing -
     // so a lake is a road to a zombie rather than a wall.
-    {.name = "Zombie", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+    {.name = "Zombie", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f, .hostile = true,
      .senseRange = 35.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 1.0f,
      .floats = false, .amphibious = true, .breathesWater = true,
@@ -842,7 +1641,7 @@ constexpr CreatureSpecies kSpecies[] = {
     // missing: a skeleton is an archer. The reference only drops one to melee
     // when it has no bow, and until we have arrows a punching animation would
     // tell the player it is something it is not.
-    {.name = "Skeleton", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
+    {.name = "Skeleton", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 20, .walkSpeed = 1.2f, .runSpeed = 2.8f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
@@ -853,7 +1652,17 @@ constexpr CreatureSpecies kSpecies[] = {
     // run speed and gets no bonus on top, which leaves it the least athletic
     // fleer on the roster against a rabbit's 1.5 - the reference's timid
     // villager surviving the change of unit intact.
-    {.name = "Villager", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f, .gaitSwing = 0.62f,
+    //
+    // **The shuffle, and it is half a biped's stride on purpose.** `ANIMATION.md`
+    // §1 gives villager legs a 40 degree amplitude against the biped's 80 - the
+    // reference animates a villager's walk as a short shuffle, not a march. Our
+    // whole roster is already halved to 0.70 rad, so it is the *ratio* that
+    // ports, not the number: 0.70 / 2 = 0.35. It was 0.62, which is a biped's
+    // stride with a rounding error, and a villager strode about its village
+    // like a zombie. The same three rows share the rig and the number: this
+    // one, `Witch` and `Wandering Trader`. `Zombie Villager` deliberately does
+    // **not** - it is a zombie wearing a villager's skin and marches like one.
+    {.name = "Villager", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 4.5f, .gaitSwing = 0.35f,
      .modelScale = 0.92f, .health = 20, .walkSpeed = 0.9f, .runSpeed = 1.6f, .senseRange = 8.0f,
      .maxBlockLight = 15, .weight = 0.5f, .avoids = tagMask(CreatureTag::Undead),
      .avoidRange = 8.0f, .avoidsWater = true, .alertRange = kHerdAlertRange,
@@ -864,9 +1673,20 @@ constexpr CreatureSpecies kSpecies[] = {
     // something is still hunting you at noon. It forgets in three seconds where
     // a zombie takes seventeen, which is the reference's own divergence and
     // easy to miss.
-    {.name = "Husk", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+    //
+    // **The blow is the zombie's, and it used to be a point harder** (2026-08-19,
+    // probe over all 58 rows). `minecraft.wiki/w/Husk` gives Easy 2.5, Normal 3,
+    // Hard 4.5 with **no edition split**, and opens by saying a husk "functions
+    // similarly to zombies, except that they do not burn in sunlight" - the same
+    // one difference the paragraph above claims. The row said 4 while `Zombie`
+    // two rows down said 3, so the comment and the row disagreed about how many
+    // differences there are, and 4 is the reference's *Hard* figure in a table
+    // that is Normal everywhere else. Health points, Normal difficulty. What
+    // would make this note false: this project growing a difficulty setting, at
+    // which point every hostile row needs three numbers, not one.
+    {.name = "Husk", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f, .hostile = true,
-     .senseRange = 35.0f, .attackDamage = 4, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
+     .senseRange = 35.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.9f,
      .burnsInDay = false, .floats = false, .amphibious = true, .breathesWater = true,
      .leashRange = 25.0f, .swingsArms = true},
     // The smallest thing in the world: seven tapering segments, no legs, and a
@@ -892,7 +1712,43 @@ constexpr CreatureSpecies kSpecies[] = {
     //
     // **The one skeleton that does swing**: it carries a stone sword in the
     // reference rather than a bow, so melee is its real attack.
-    {.name = "Blackbone", .halfWidth = 0.30f, .height = 2.40f, .gaitRate = 5.5f, .gaitSwing = 0.70f,
+    //
+    // **The 6 is ours and is deliberately left alone** (2026-08-19). Because the
+    // paragraph above cites the reference for the sword, the next reader will
+    // look the damage up, so here it is in full: `minecraft.wiki/w/Wither_
+    // Skeleton` gives **unarmed** Easy 3 / Normal 4 / Hard 6, and **armed with
+    // the stone sword** Java 5/8/12 against **Bedrock 5.5/9/13.5** - one of the
+    // handful of places the two editions genuinely differ, so Bedrock's Normal
+    // 9 is the faithful figure. Ours sits between unarmed-Hard and armed-Normal.
+    // That is a *feel* number on the rarest hostile in the game and the user is
+    // the playtester, so it is not being moved from a desk; it is written down
+    // so nobody "corrects" it to 9 or to 4 believing either is obviously right.
+    // The reference also applies Wither for ten seconds on hit, which this
+    // project does not - filed, not silently absorbed into the 6.
+    //
+    // **Primary source, added 2026-08-19, and it moves the goalposts without
+    // moving the number.** Every figure in the paragraph above came from the
+    // wiki, which is a secondary source that documents Java freely and marks
+    // the split unevenly. `Mojang/bedrock-samples`
+    // `behavior_pack/entities/wither_skeleton.json` - the shipped Bedrock
+    // behaviour pack - publishes `"minecraft:attack": {"damage": 4,
+    // "effect_name": "wither", "effect_duration": 10}`. So Bedrock's stated
+    // component is **4**, not the 9 written above; 9 is what the wiki reports
+    // *after* the stone sword is counted, and **our engine gives held items no
+    // damage at all** - the blow is `species.attackDamage` and nothing else,
+    // and `heldMainHand` is drawn, never added. The wither-on-hit clause is
+    // confirmed by the same file.
+    //
+    // The 6 still stands and is still the user's call, but the question is now
+    // "6 or 4", not "6 or 9". Note the trap this defuses: a reader who opens
+    // that JSON, sees 4, sees `heldMainHand = StoneSword` and assumes the sword
+    // makes up the difference would set this to 4 and quietly cut the mob's
+    // threat by a third, because in *this* engine the sword contributes
+    // nothing. Every other armed mob in this table - Princepin 5, Princepin
+    // Brute 7, Zombie Princepin 5 - already carries its JSON figure exactly,
+    // so this row is the only one that does not, which is the argument for 4
+    // and is written here rather than acted on.
+    {.name = "Blackbone", .halfWidth = 0.30f, .height = 2.01f, .gaitRate = 5.5f, .gaitSwing = 0.70f,
      .modelScale = 1.20f, .health = 20, .walkSpeed = 1.1f, .runSpeed = 2.6f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 6, .nocturnal = true, .maxBlockLight = 6,
      .weight = 0.35f, .burnsInDay = false, .avoids = tagMask(CreatureTag::Canine),
@@ -905,15 +1761,25 @@ constexpr CreatureSpecies kSpecies[] = {
     // weaker. The reference also tells them apart by the arrows they fire -
     // `aux_val` 19 slowness and 26 poison - which needs a tipped-arrow launch
     // kind we do not have; both fire plain ones.
-    {.name = "Stray", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
+    //
+    // **The bogged's melee was 2 and is 3** (2026-08-19). The pair is *not*
+    // told apart by damage in the reference: `stray.json` and `bogged.json`
+    // both put `"minecraft:attack": {"damage": 3}` in their
+    // `minecraft:melee_attack` group, and the bogged's weakness is spelt
+    // entirely in its **health**, 16 against the stray's 20 - which this table
+    // already had right. The 2 was the plain `skeleton.json` figure, which is
+    // genuinely 2, sitting in the wrong row: the stray beside it was read and
+    // the bogged was assumed. Source is `Mojang/bedrock-samples`
+    // `behavior_pack/entities/`, the shipped behaviour pack, not the wiki.
+    {.name = "Stray", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 6.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 20, .walkSpeed = 1.2f, .runSpeed = 2.8f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.5f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
      .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
      .chaseSpeedScale = 1.25f, .shootsArrows = true, .heldMainHand = ItemId::Bow},
-    {.name = "Bogged", .halfWidth = 0.28f, .height = 1.99f, .gaitRate = 6.5f, .gaitSwing = 0.70f,
+    {.name = "Bogged", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 6.5f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 16, .walkSpeed = 1.3f, .runSpeed = 3.0f, .hostile = true,
-     .senseRange = 16.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.6f,
+     .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true, .maxBlockLight = 6, .weight = 0.6f,
      .avoids = tagMask(CreatureTag::Canine), .avoidRange = 6.0f,
      .floats = false, .amphibious = true, .breathesWater = true, .avoidsWater = true,
      .chaseSpeedScale = 1.25f, .shootsArrows = true, .rangedInterval = 3.5f,
@@ -921,7 +1787,7 @@ constexpr CreatureSpecies kSpecies[] = {
     // The villager's rig - its nets are identical row for row - but posed with
     // the arms held out rather than folded, which is the reference's own
     // distinction between a villager and one that has turned.
-    {.name = "Zombie Villager", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+    {.name = "Zombie Villager", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f,
      .gaitSwing = 0.70f, .modelScale = 0.92f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f,
      .hostile = true, .senseRange = 35.0f, .attackDamage = 3, .nocturnal = true,
      .maxBlockLight = 6, .weight = 0.4f, .floats = false, .amphibious = true,
@@ -939,15 +1805,15 @@ constexpr CreatureSpecies kSpecies[] = {
     // `heldMainHand` stays empty on purpose: the reference's witch has nothing
     // in its hands until it reaches for a bottle, and the bottle is put there
     // by the behaviour through `heldOverride`.
-    {.name = "Witch", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f, .gaitSwing = 0.62f,
+    {.name = "Witch", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 4.5f, .gaitSwing = 0.35f,
      .modelScale = 0.92f, .health = 26, .walkSpeed = 0.9f, .runSpeed = 1.8f, .hostile = true,
      .senseRange = 10.0f, .attackDamage = 2, .nocturnal = true, .maxBlockLight = 6, .weight = 0.3f,
      .burnsInDay = false, .leashRange = 64.0f, .throwsPotions = true},
     // Passive, rare and found anywhere: the one thing on the roster that is
     // meant to read as a traveller rather than a resident. Trading is a
     // milestone of its own, so for now it only wanders.
-    {.name = "Wandering Trader", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 4.5f,
-     .gaitSwing = 0.62f, .modelScale = 0.92f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 1.8f,
+    {.name = "Wandering Trader", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 4.5f,
+     .gaitSwing = 0.35f, .modelScale = 0.92f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 1.8f,
      .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.2f,
      .avoids = tagMask(CreatureTag::Undead), .avoidRange = 8.0f, .avoidsWater = true,
      .alertRange = kHerdAlertRange, .panicSpeedScale = 1.0f},
@@ -965,7 +1831,7 @@ constexpr CreatureSpecies kSpecies[] = {
     // all - wood, stone, iron, diamond, emberite. A stone blade is the nearest
     // thing that exists rather than a choice, and it is one word to change on
     // the day a golden sword does.
-    {.name = "Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
+    {.name = "Princepin", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f, .gaitSwing = 0.70f,
      .modelScale = 1.00f, .health = 16, .walkSpeed = 1.1f, .runSpeed = 2.4f, .hostile = true,
      .senseRange = 16.0f, .attackDamage = 5, .maxBlockLight = 15, .weight = 0.3f,
      .burnsInDay = false, .floats = false, .avoidsWater = true, .leashRange = 64.0f,
@@ -1019,14 +1885,19 @@ constexpr CreatureSpecies kSpecies[] = {
     // three seconds after it leaves. The stages are three separate *models* -
     // the spines are real geometry, not a scale - which is why this is a flag
     // rather than a size. The reference's own `scale` of 1.2 is folded into
-    // `modelScale`.
+    // `modelScale` for the drawing, and **also into the height**: 0.8 stored
+    // times 1.2 is the 0.96 below, because this file stores boxes pre-divided
+    // by scale (see the third note above `kSpecies`). 0.60 sat here until
+    // 2026-08-19 and matched neither the stored 0.8 nor the effective 0.96.
     //
-    // **Its collision box does not grow with it.** The reference swaps the box
-    // per stage, and one species owns one shape here; a per-stage box is a
-    // change to the shape table rather than to this row. Nothing collides with
-    // a fish but terrain, so the cost is that a puffed one is easier to swim
-    // past than it should be.
-    {.name = "Pufferfish", .halfWidth = 0.28f, .height = 0.60f, .gaitRate = 0.0f,
+    // **Its collision box does not grow with it.** One species owns one shape
+    // here, so a per-stage box would be a change to the shape table rather
+    // than to this row. Worth knowing before assuming the reference does
+    // otherwise: none of its seven component groups carries a `collision_box`
+    // at all, so if it swaps one it is doing it in code and not in data.
+    // Nothing collides with a fish but terrain, so the cost is that a puffed
+    // one is easier to swim past than it should be.
+    {.name = "Pufferfish", .halfWidth = 0.28f, .height = 0.80f, .gaitRate = 0.0f,
      .modelScale = 1.20f, .health = 3, .walkSpeed = 2.2f, .runSpeed = 4.4f, .senseRange = 6.0f,
      .maxBlockLight = 15, .weight = 0.5f, .groupSize = 5, .stepHeight = 0.0f, .jumpHeight = 0.0f,
      .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
@@ -1098,8 +1969,15 @@ constexpr CreatureSpecies kSpecies[] = {
     // twenty-two named fish by tinting a base and an overlay at runtime; ours
     // draws the overlay as a second cutout shell instead, because runtime
     // tinting is exactly what produced the washed-out grass at M19a.
+    // Its height is 0.4 stored times a `scale` of 1.3, and the 0.40 that sat
+    // here until 2026-08-19 was the stored figure read without the scale -
+    // this table's one confirmed instance of that trap. `modelScale` stays 1
+    // deliberately: our model is sized from its texture net rather than from
+    // the reference's box, so folding 1.3 in there is a visual change to be
+    // judged on screen, not a correction. None of its sixty component groups
+    // carries a box or a scale, so the pair above is the whole story.
     {.name = "Tropical Fish", .halfWidth = 0.20f, .height = 0.40f, .gaitRate = 0.0f,
-     .modelScale = 1.00f, .health = 3, .walkSpeed = 1.8f, .runSpeed = 3.6f, .senseRange = 6.0f,
+     .modelScale = 1.30f, .health = 3, .walkSpeed = 1.8f, .runSpeed = 3.6f, .senseRange = 6.0f,
      .maxBlockLight = 15, .weight = 0.7f, .groupSize = 5, .stepHeight = 0.0f, .jumpHeight = 0.0f,
      .floats = false, .sinks = false, .breathesWater = true, .swims = true, .breathesAir = false,
      .spawnsInWater = true, .maxSpawnY = kSeaLevel, .maxLoaded = 8, .walksOnLand = false,
@@ -1112,27 +1990,54 @@ constexpr CreatureSpecies kSpecies[] = {
     // The cow's rig and the cow's stats. The reference confines it to one
     // biome we do not have, so it spawns wherever a cow does and is simply
     // scarce - a named divergence rather than an oversight.
-    {.name = "Mushroom Cow", .halfWidth = 0.45f, .height = 1.50f, .gaitRate = 5.5f,
+    {.name = "Mushroom Cow", .halfWidth = 0.45f, .height = 1.30f, .gaitRate = 5.5f,
      .gaitSwing = 0.36f, .modelScale = 1.00f, .health = 10, .walkSpeed = 1.3f, .runSpeed = 2.8f,
      .senseRange = 8.0f, .maxBlockLight = 15, .weight = 0.18f, .babyChance = 0.05f,
      .groupSize = 2, .avoidsWater = true, .alertRange = kHerdAlertRange},
     // Both undead horses are `geometry.horse` unchanged. They are **passive**,
     // as the reference has them, and neither burns off - so a pale horse
     // standing in a field at noon is correct rather than a bug.
+    //
+    // **They do not share a health, and they did** (2026-08-19). The two rows
+    // are otherwise identical and the zombie one had been given the skeleton
+    // one's 15. `Mojang/bedrock-samples` is unambiguous and the two files
+    // disagree with each other on purpose: `skeleton_horse.json` says
+    // `"minecraft:health": {"value": 15, "max": 15}` and `zombie_horse.json`
+    // says `{"value": 25, "max": 25}`. Neither is a range, unlike the four
+    // living equines, so there is no judgement to make here - 25 is simply the
+    // number. Player consequence: a zombie horse died in three hits of a stone
+    // sword instead of five.
     {.name = "Skeleton Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f,
      .gaitSwing = 0.49f, .modelScale = 1.00f, .health = 15, .walkSpeed = 2.0f, .runSpeed = 4.5f,
      .senseRange = 10.0f, .nocturnal = true, .maxBlockLight = 7, .weight = 0.15f,
      .burnsInDay = false, .stepHeight = 1.0f, .jumpHeight = 0.0f, .floats = false,
      .amphibious = true, .breathesWater = true},
     {.name = "Zombie Horse", .halfWidth = 0.45f, .height = 1.60f, .gaitRate = 5.0f,
-     .gaitSwing = 0.49f, .modelScale = 1.00f, .health = 15, .walkSpeed = 1.8f, .runSpeed = 4.0f,
+     .gaitSwing = 0.49f, .modelScale = 1.00f, .health = 25, .walkSpeed = 1.8f, .runSpeed = 4.0f,
      .senseRange = 10.0f, .nocturnal = true, .maxBlockLight = 7, .weight = 0.15f,
      .burnsInDay = false, .stepHeight = 1.0f, .jumpHeight = 0.0f, .floats = false,
      .amphibious = true, .breathesWater = true},
     // The llama's rig with its pack drawn over it. Travels in smaller groups
     // than a wild llama, which is the whole idea of a trader's string.
+    //
+    // **Fifteen, and this is the second half of a fix that only landed on the
+    // first half** (2026-08-19). The wild Llama row carried 12 until earlier
+    // today, when it went to 15 because the published health is a 15..30 range
+    // and 12 is not in it. `trader_llama.json` in `Mojang/bedrock-samples`
+    // carries the **identical** `"minecraft:health": {"value": {"range_min":
+    // 15, "range_max": 30}}`, and this row kept the 12 - so the pair was left
+    // disagreeing, which is exactly the shape the wild llama had just been
+    // fixed out of. Same 12, same source, one of the two edited: `CLAUDE.md`
+    // bug shape #5.
+    //
+    // On the range: this table stores one health per species and the four
+    // living equines all share that same 15..30 roll, so any figure inside it
+    // is a legitimate pick and 15 (the floor, matching the Llama and Donkey
+    // rows) is the one this file uses. Horse and Mule sit at 16, also inside
+    // it, also fine. **Twelve was the only one outside it**, which is what made
+    // it a defect rather than a preference.
     {.name = "Trader Llama", .halfWidth = 0.43f, .height = 1.87f, .gaitRate = 5.5f,
-     .gaitSwing = 0.31f, .modelScale = 1.00f, .health = 12, .walkSpeed = 1.6f, .runSpeed = 3.5f,
+     .gaitSwing = 0.31f, .modelScale = 1.00f, .health = 15, .walkSpeed = 1.6f, .runSpeed = 3.5f,
      .senseRange = 10.0f, .maxBlockLight = 15, .weight = 0.2f, .babyChance = 0.10f,
      .groupSize = 2, .stepHeight = 1.0f, .jumpHeight = 0.0f, .alertRange = kHerdAlertRange},
     // The Princepin's rig at both ends of its family. The brute is the
@@ -1143,13 +2048,13 @@ constexpr CreatureSpecies kSpecies[] = {
     // The brute carries an **axe** where the other two carry swords, which is
     // the reference's own distinction and the only thing that tells the three
     // apart at a glance once they are all wearing the same skin family.
-    {.name = "Princepin Brute", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+    {.name = "Princepin Brute", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f,
      .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 50, .walkSpeed = 1.2f, .runSpeed = 2.6f,
      .hostile = true, .senseRange = 16.0f, .attackDamage = 7, .maxBlockLight = 15,
      .weight = 0.12f, .burnsInDay = false, .floats = false, .avoidsWater = true,
      .leashRange = 64.0f, .angerSeconds = 600.0f, .alertRange = 16.0f, .swingsArms = true,
      .heldMainHand = ItemId::StoneAxe},
-    {.name = "Zombie Princepin", .halfWidth = 0.28f, .height = 1.95f, .gaitRate = 5.0f,
+    {.name = "Zombie Princepin", .halfWidth = 0.28f, .height = 1.90f, .gaitRate = 5.0f,
      .gaitSwing = 0.70f, .modelScale = 1.00f, .health = 20, .walkSpeed = 1.0f, .runSpeed = 2.2f,
      .senseRange = 16.0f, .attackDamage = 5, .nocturnal = true, .maxBlockLight = 7,
      .weight = 0.35f, .burnsInDay = false, .floats = false, .amphibious = true,
@@ -1165,20 +2070,36 @@ constexpr CreatureSpecies kSpecies[] = {
     // already there and none of it needed touching. The launch is shared for
     // the same reason theirs is: the reference jumps one block whatever the
     // size, and only the ground covered scales.
-    {.name = "Small Magma Cube", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 7.21f,
+    //
+    // **`nocturnal` and the light gate are ours, and the row says so.** These
+    // three had neither - no `nocturnal`, `maxBlockLight = 15` - while the
+    // comment above them claimed "being underground and dark is what actually
+    // gates them", which was wrong twice over: `nocturnal == false` means *day
+    // only* in the spawner, not "any time", and a ceiling of 15 is a light gate
+    // that can never fire. A Large Magma Cube hitting for 6 hopped across a lit
+    // mountainside at noon and none appeared at night, the exact reverse of
+    // what was written. Nothing here is a reference number, because the
+    // reference's magma cube lives in the Nether and spawns at any light level;
+    // relocating it to Overworld stone and badlands is ours, so its spawn rule
+    // has to be ours too, and 6 is the band every other Overworld hostile on
+    // this table already uses.
+    {.name = "Small Magma Cube", .halfWidth = 0.26f, .height = 0.52f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.75f, .modelScale = 1.04f, .health = 1, .walkSpeed = 0.8f, .runSpeed = 1.6f,
-     .hostile = true, .senseRange = 16.0f, .attackDamage = 3, .maxBlockLight = 15,
-     .weight = 0.35f, .burnsInDay = false, .avoidsWater = true},
-    {.name = "Magma Cube", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 7.21f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 3, .nocturnal = true,
+     .maxBlockLight = 6, .weight = 0.35f, .burnsInDay = false, .ignoresFallDamage = true,
+     .avoidsWater = true},
+    {.name = "Magma Cube", .halfWidth = 0.52f, .height = 1.04f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.70f, .modelScale = 2.08f, .health = 4, .walkSpeed = 1.1f, .runSpeed = 2.2f,
-     .hostile = true, .senseRange = 16.0f, .attackDamage = 4, .maxBlockLight = 15,
-     .weight = 0.3f, .burnsInDay = false, .splitInto = CreatureKind::MagmaCubeSmall,
-     .splitMin = 2, .splitMax = 4, .avoidsWater = true},
-    {.name = "Large Magma Cube", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 7.21f,
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 4, .nocturnal = true,
+     .maxBlockLight = 6, .weight = 0.3f, .burnsInDay = false,
+     .splitInto = CreatureKind::MagmaCubeSmall,
+     .splitMin = 2, .splitMax = 4, .ignoresFallDamage = true, .avoidsWater = true},
+    {.name = "Large Magma Cube", .halfWidth = 0.75f, .height = 2.08f, .hops = true, .hopLaunch = 8.0f,
      .hopGather = 0.65f, .modelScale = 4.16f, .health = 16, .walkSpeed = 1.5f, .runSpeed = 3.0f,
-     .hostile = true, .senseRange = 16.0f, .attackDamage = 6, .maxBlockLight = 15,
-     .weight = 0.2f, .burnsInDay = false, .splitInto = CreatureKind::MagmaCubeMedium,
-     .splitMin = 2, .splitMax = 4, .avoidsWater = true},
+     .hostile = true, .senseRange = 16.0f, .attackDamage = 6, .nocturnal = true,
+     .maxBlockLight = 6, .weight = 0.2f, .burnsInDay = false,
+     .splitInto = CreatureKind::MagmaCubeMedium,
+     .splitMin = 2, .splitMax = 4, .ignoresFallDamage = true, .avoidsWater = true},
     // The first flier, and `flies` is the whole archetype - the exact mirror of
     // `swims`: no gravity, a heading in three dimensions, and no pathfinder,
     // because there are no floors to plan a route across.
@@ -1194,7 +2115,9 @@ constexpr CreatureSpecies kSpecies[] = {
     // over it forever.
     {.name = "Bee", .halfWidth = 0.275f, .height = 0.50f, .gaitRate = 0.0f, .modelScale = 1.00f,
      .health = 10, .walkSpeed = 2.4f, .runSpeed = 4.0f, .senseRange = 12.0f, .attackDamage = 2,
-     .maxBlockLight = 15, .weight = 0.6f, .groupSize = 3, .stepHeight = 0.0f, .jumpHeight = 0.0f,
+     .maxBlockLight = 15, .weight = 0.6f, .groupSize = 3, .pollinates = true, .stepHeight = 0.0f,
+     .jumpHeight = 0.0f,
+     .ignoresFallDamage = true,
      .floats = false, .sinks = false, .flies = true, .maxLoaded = 12, .angerSeconds = 25.0f,
      .alertRange = 20.0f},
 
@@ -1213,13 +2136,254 @@ constexpr CreatureSpecies kSpecies[] = {
      .gaitSwing = 0.66f, .modelScale = 1.00f, .health = 100, .walkSpeed = 1.0f, .runSpeed = 1.9f,
      .senseRange = 24.0f, .attackDamage = 7, .maxBlockLight = 15, .weight = 0.0f,
      .burnsInDay = false, .hunts = tagMask(CreatureTag::Monster), .stepHeight = 1.0f,
-     .jumpHeight = 0.0f, .floats = false, .amphibious = true, .breathesWater = true,
+     .jumpHeight = 0.0f, .ignoresFallDamage = true,
+     .floats = false, .amphibious = true, .breathesWater = true,
      .avoidsWater = true, .angerSeconds = 600.0f, .swingsArms = true, .attackDamageMax = 21,
      .knockbackScale = 3.15f, .knockbackLiftScale = 3.71f},
 };
 
 static_assert(std::size(kSpecies) == static_cast<std::size_t>(CreatureKind::Count),
               "every CreatureKind needs a row");
+
+/// **The order is declared load-bearing at the top of the table and only its
+/// *length* was ever checked.** `speciesInfo` is a bare index, so swapping two
+/// adjacent rows compiles clean at `/W4`, passes the soak, and hands each
+/// species the other's health, damage, speed, spawn weight, population cap and
+/// despawn rules for good. The rows most at risk are the ones that look alike
+/// and sit next to each other by design: Cat and Ocelot differ in four numbers,
+/// Stray and Bogged are adjacent, and the three slimes and the three magma
+/// cubes are near-identical triples where a swap is invisible from any angle
+/// except the health bar.
+///
+/// Names rather than numbers, because a name is unique across the table and a
+/// health value is not - and one anchor per look-alike run rather than all
+/// fifty-eight, because the point is to catch a *neighbouring* swap and a run
+/// of one has nothing to swap with. `archersShareOneRig` already pins
+/// Skeleton/Stray/Bogged from the other end.
+///
+/// The single edit that makes it fail: exchanging any two rows inside one of
+/// the named runs - the two slime lines, say, or Cat and Ocelot.
+constexpr bool speciesNamed(CreatureKind kind, std::string_view name) {
+    return name == kSpecies[static_cast<std::size_t>(kind)].name;
+}
+constexpr bool speciesRowsAnchored() {
+    return speciesNamed(CreatureKind::Sheep, "Sheep") &&
+           speciesNamed(CreatureKind::Cat, "Cat") &&
+           speciesNamed(CreatureKind::Ocelot, "Ocelot") &&
+           speciesNamed(CreatureKind::Horse, "Horse") &&
+           speciesNamed(CreatureKind::Mule, "Mule") &&
+           speciesNamed(CreatureKind::Donkey, "Donkey") &&
+           speciesNamed(CreatureKind::SlimeSmall, "Small Slime") &&
+           speciesNamed(CreatureKind::SlimeMedium, "Slime") &&
+           speciesNamed(CreatureKind::SlimeLarge, "Large Slime") &&
+           speciesNamed(CreatureKind::Spider, "Spider") &&
+           speciesNamed(CreatureKind::CaveSpider, "Cave Spider") &&
+           speciesNamed(CreatureKind::Skeleton, "Skeleton") &&
+           speciesNamed(CreatureKind::Stray, "Stray") &&
+           speciesNamed(CreatureKind::Bogged, "Bogged") &&
+           speciesNamed(CreatureKind::Cod, "Cod") &&
+           speciesNamed(CreatureKind::Salmon, "Salmon") &&
+           speciesNamed(CreatureKind::Turtle, "Turtle") &&
+           speciesNamed(CreatureKind::MagmaCubeSmall, "Small Magma Cube") &&
+           speciesNamed(CreatureKind::MagmaCubeMedium, "Magma Cube") &&
+           speciesNamed(CreatureKind::MagmaCubeLarge, "Large Magma Cube") &&
+           speciesNamed(CreatureKind::IronGolem, "Iron Golem");
+}
+static_assert(speciesRowsAnchored(),
+              "kSpecies rows must stay in CreatureKind order - a swap is silent and permanent");
+
+/// And the one relationship in the table that points at another row, which a
+/// swap of the slime lines would invert rather than merely scramble: a slime
+/// must split into something smaller than itself, or killing a large one
+/// produces two larger ones and the population never stops growing.
+///
+/// The single edit that makes it fail: pointing `SlimeLarge.splitInto` at
+/// `SlimeLarge`, or swapping the small and large rows.
+static_assert(kSpecies[static_cast<std::size_t>(CreatureKind::SlimeLarge)].splitInto ==
+                      CreatureKind::SlimeMedium &&
+                  kSpecies[static_cast<std::size_t>(CreatureKind::SlimeMedium)].splitInto ==
+                      CreatureKind::SlimeSmall &&
+                  kSpecies[static_cast<std::size_t>(CreatureKind::SlimeSmall)].splitInto ==
+                      CreatureKind::Count,
+              "a slime must split into a smaller slime, and the smallest into nothing");
+
+/// The fall-damage immunity list, pinned by count and by its one trap.
+///
+/// `RESEARCH.md` §1.10 names exactly eight of our fifty-eight rows as fully
+/// immune - the three magma cubes, the bee, the cat, the chicken, the iron
+/// golem and the ocelot - and the trap is that **the slime is not on it** while
+/// the magma cube is. The two families are otherwise line-for-line copies of
+/// each other in this table, so a later editor tidying the pair into agreement
+/// would be undoing a real reference difference rather than a typo.
+///
+/// The single edit that makes it fail: giving any slime row
+/// `ignoresFallDamage`, dropping it from a magma cube, or adding a ninth row to
+/// the list without a §1.10 line to hang it on.
+constexpr int fallImmuneRows() {
+    int count = 0;
+    for (const CreatureSpecies& species : kSpecies) {
+        if (species.ignoresFallDamage) {
+            ++count;
+        }
+    }
+    return count;
+}
+static_assert(fallImmuneRows() == 8, "RESEARCH.md 1.10 lists exactly eight of our rows as immune");
+static_assert(kSpecies[static_cast<std::size_t>(CreatureKind::MagmaCubeLarge)].ignoresFallDamage &&
+                  !kSpecies[static_cast<std::size_t>(CreatureKind::SlimeLarge)].ignoresFallDamage,
+              "a magma cube is immune to falling and a slime is not - that difference is real");
+
+/// The shortest body the roster can put in the world, in metres.
+///
+/// **Babies count, and every row is measured as though it could have one.**
+/// `babyChance` is not asked: a row gaining one later is exactly the edit that
+/// would otherwise reopen the hole below without touching anything the compiler
+/// can see.
+constexpr float shortestBody() {
+    float shortest = kSpecies[0].height;
+    for (const CreatureSpecies& row : kSpecies) {
+        shortest = row.height < shortest ? row.height : shortest;
+    }
+    return shortest * kBabyScale;
+}
+
+/// And the narrowest, which is the horizontal sweep's version of the same
+/// question. Written as a separate function rather than one returning both,
+/// because the pair "derive one of these and not the other" is its own recorded
+/// failure shape and two names is the cheapest way to make the omission visible.
+constexpr float narrowestBody() {
+    float narrowest = kSpecies[0].halfWidth;
+    for (const CreatureSpecies& row : kSpecies) {
+        narrowest = row.halfWidth < narrowest ? row.halfWidth : narrowest;
+    }
+    return narrowest * 2.0f * kBabyScale;
+}
+
+/// **The three that keep `step`'s sweep honest**, and they live here rather
+/// than beside `kMaxSweepStep` because this is the first point at which the
+/// table is in scope.
+///
+/// Consecutive test boxes in a swept move must overlap or a body passes clean
+/// between two of them, which is how creatures fell through the floor for
+/// twenty milestones. **Strict, matching `Player.cpp`'s
+/// `kMaxStepDistance < kWidth`** - the same non-tunnelling condition written
+/// against the same kind of quantity, and equality is a touch rather than an
+/// overlap.
+///
+/// **The single edit that makes the first fail:** adding a species shorter than
+/// 0.273 m - a 0.25 m mob, say - or lowering `kBabyScale`. Today's margin is
+/// 0.15 against 0.165.
+static_assert(kMaxSweepStep < shortestBody(),
+              "sweep slices must overlap, or the shortest body falls between two of them");
+
+/// The horizontal half, and it is the one that had no sweep at all until the
+/// knockback numbers were held up against the frame clamp: `kKnockbackSpeed`
+/// times the iron golem's 3.15 `knockbackScale` is 14.175 m/s, which is 0.709 m
+/// inside one clamped frame against a narrowest body of 0.198 m.
+///
+/// **The single edit that makes it fail:** adding a species narrower than 0.136
+/// half-width, or lowering `kBabyScale`.
+static_assert(kMaxSweepStep < narrowestBody(),
+              "sweep slices must overlap sideways too, or a shove goes through a wall");
+
+/// And the budget, so the slice count stays sane. **The single edit that makes
+/// it fail:** raising `kTerminalVelocity`, or loosening the frame clamp, far
+/// enough that a clamped fall needs more slices than the sweep was written for.
+static_assert(kMaxDeltaSeconds * kTerminalVelocity / kMaxSweepStep <= 32.0f,
+              "a clamped fall would need more sweep slices than intended");
+
+/// How many rows stand taller than the unstick pass's shared reach.
+///
+/// **`Player.cpp` asserts `kUnstickReach >= kHeight` and we cannot mirror it**,
+/// which is worth stating rather than quietly omitting. The heights *are*
+/// available at compile time - `kSpecies` is `constexpr` and `shortestBody`
+/// above already walks it - so the obstacle is not reach into the table. The
+/// obstacle is that **the assert would be false**: the shared reach is 2.0 m and
+/// five rows exceed it, the iron golem at 2.9 m by nearly half again.
+///
+/// **So the rule is honoured at runtime instead of dropped.** Their assert is
+/// not really about a constant, it is the statement *a body must be able to
+/// clear its own volume* - and a fully entombed body lifted by less than its own
+/// height never can. `step` therefore lifts by the larger of the shared reach
+/// and the body's own height, which satisfies the same rule for all 58 rows and
+/// for any future one. This count is what remains: the rows for which that
+/// widening is what saves them, and which would silently go back to being
+/// unrescuable - now fatally, since suffocation charges what the pass cannot
+/// free - if the widening were ever tidied away as redundant.
+///
+/// **The single edit that makes this fail:** adding a sixth species over 2.0 m
+/// tall, or changing `collision::kUnstickReach` in either direction - each of
+/// which should be a deliberate act rather than something noticed later in a
+/// ravine.
+constexpr int bodiesTallerThanUnstickReach() {
+    int count = 0;
+    for (const CreatureSpecies& row : kSpecies) {
+        if (row.height > collision::kUnstickReach) {
+            ++count;
+        }
+    }
+    return count;
+}
+static_assert(bodiesTallerThanUnstickReach() == 5,
+              "iron golem, blackbone, camel and the two large cubes out-reach the shared lift");
+
+/// **Blackbone clears `kUnstickReach` by 0.01 m and that is not a typo**
+/// (2026-08-19). Its height moved 2.40 -> 2.01 to match
+/// `wither_skeleton.json`'s `collision_box`, so the margin over the 2.0 m lift
+/// went from 0.40 to 0.01 and the count above stayed 5 only just. Checked
+/// rather than assumed: `2.01f` is 2.00999999 as a single, strictly greater
+/// than `2.0f`, so the comparison is not riding on a tie.
+///
+/// **The fragility is in the safe direction.** Rounding the row to a tidy 2.0
+/// drops the count to 4 and **fails the assert loudly** rather than quietly
+/// removing a body from the lift's care - which is the whole reason the count
+/// is asserted instead of commented. Do not "simplify" 2.01; it is the
+/// reference number, and the 0.01 is load-bearing.
+
+/// Whether a spawn attempt for this species is placed **in the water column**
+/// rather than on the ground above it.
+///
+/// **One owner for a rule that was written three times and keyed on the wrong
+/// field.** `canSpawnAt` branched on `swims`, and so did both spawners' choice
+/// of Y - so `spawnsInWater`, which reads exactly like the field that decides
+/// this, was dead on all nine swimmers and the turtle was unspawnable. Its row
+/// and `spawnsIn` both say it hatches on beach sand like the reference's; the
+/// code asked for three blocks of open water on a beach column, `waterColumnY`
+/// returned -1, and every attempt was discarded on both paths. The one shape
+/// the slime row already records as paid for: the rule lived in a comment and
+/// the comment said the opposite of the code.
+///
+/// `swims` is now only "how deep" - a body that moves in three dimensions is
+/// dropped anywhere in the column, the Drowned walks the seabed at `surface+1`
+/// - and `spawnsInWater` alone decides wet or dry.
+constexpr bool spawnsInOpenWater(const CreatureSpecies& species) {
+    return species.swims && species.spawnsInWater;
+}
+
+/// **A swimmer that cannot walk must say where it spawns.** Without this the
+/// turtle's fix is one field away from silently becoming a fish's bug: a new
+/// row with `swims` and no `spawnsInWater` now takes the *land* branch, so it
+/// would be placed on dry ground and suffocate there.
+///
+/// The two species this deliberately allows through are the turtle and the
+/// axolotl, both of which set `walksOnLand`; the turtle picks land and the
+/// axolotl picks water, and that is a real choice rather than an omission.
+///
+/// The single edit that makes it fail: adding a fish - `swims`,
+/// `walksOnLand = false` - and forgetting `spawnsInWater = true`.
+constexpr bool swimmersSpawnWet() {
+    for (const CreatureSpecies& row : kSpecies) {
+        if (row.swims && !row.walksOnLand && !row.spawnsInWater) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(swimmersSpawnWet(),
+              "a species that swims and cannot walk must spawn in water, not on a beach");
+static_assert(!spawnsInOpenWater(kSpecies[static_cast<std::size_t>(CreatureKind::Turtle)]) &&
+                  kSpecies[static_cast<std::size_t>(CreatureKind::Turtle)].swims,
+              "the turtle swims and still hatches ashore, which is the whole point of the split");
 
 Aabb bodyBox(const CreatureSpecies& species, const glm::vec3& feet, float scale) {
     const float half = species.halfWidth * scale;
@@ -1233,6 +2397,21 @@ Aabb bodyBox(const CreatureSpecies& species, const glm::vec3& feet, float scale)
 bool bodyOverlapsSolid(const World& world, const CreatureSpecies& species, const glm::vec3& feet,
                        float scale = 1.0f) {
     return overlapsSolid(world, bodyBox(species, feet, scale));
+}
+
+/// Whether the terrain under a body has actually arrived.
+///
+/// **One owner for a rule that had one caller and needed two.** Ground a
+/// creature cannot see is ground it would fall through - an absent chunk reads
+/// as air, so moving a body over one drops it out of the world and it reappears
+/// buried when the chunk returns. `step` refused to simulate over an unloaded
+/// column and said so in a paragraph; `separate`, a hundred lines below, wrote
+/// `position` with no such test, and `bodyOverlapsSolid` over an unloaded
+/// column answers "clear" - so a shove could nudge a body into terrain that had
+/// not landed yet. Both ask this now.
+bool onLoadedColumn(const World& world, const glm::vec3& feet) {
+    return world.columnResident(static_cast<int>(std::floor(feet.x)),
+                                static_cast<int>(std::floor(feet.z)));
 }
 
 /// Ground within a step's reach below, so a heading that walks into open air is
@@ -1498,6 +2677,18 @@ struct BehaviourContext {
     /// target, but **only while acquiring** - see `nearestTargetContinue`.
     bool playerSneaking;
 
+    /// Whether it is night where the whole world is concerned - the same flag
+    /// the spawner and the daylight burners already run on, passed in rather
+    /// than re-derived, because a second answer to "is it dark" is a second
+    /// place for it to be wrong.
+    ///
+    /// One reader today: a bee stops looking for flowers after dark. Bedrock
+    /// spells that as `bee.json`'s `shelter_detection` environment sensor,
+    /// which sends a bee home when `is_daytime` is false **or** the weather is
+    /// precipitation; only the first half is expressible here, because nothing
+    /// hands this file the weather.
+    bool night;
+
     /// What hour of the day it is, and therefore what a villager should be
     /// doing. **The phase sits above the behaviour table rather than inside
     /// it**: in the reference it is a `minecraft:scheduler` component that
@@ -1542,6 +2733,21 @@ struct BehaviourContext {
     float yawFromThreat;
     float threatDistance;
 
+    /// The thing that last hurt it, **resolved on exactly the leash `foe` is
+    /// held on** and null otherwise.
+    ///
+    /// This is the one owner of "can I still fight what hit me". `threatId`
+    /// alone answers "who", and answering "and is it still reachable" a second
+    /// time somewhere else is how an iron golem spent ten minutes as a statue:
+    /// `foe` was dropped past the leash, `threatId` was not, and the producer
+    /// re-asserted the unreachable target every tick for the full 600 s.
+    ///
+    /// **Null does not mean forgiven.** `provokedTimer` and `threatId` both
+    /// survive an excursion out of range, so a golem that loses a zombie round
+    /// a corner is still angry and re-engages the moment it comes back inside -
+    /// what stops is the *targeting*, not the anger.
+    const Creature* threat;
+
     /// Where a blow on the player is reported. Behaviours never touch the
     /// player themselves.
     CreatureAttack& attack;
@@ -1554,6 +2760,10 @@ struct BehaviourContext {
     /// And a block a grazing animal has eaten, because only the main thread may
     /// write to the world.
     std::vector<glm::ivec3>& grazed;
+    /// And a hive a bee has just delivered nectar to, for exactly the same
+    /// reason. See `Creatures::takePollinated` for what the drain must do and
+    /// why a repeated cell is meaningful rather than a duplicate.
+    std::vector<glm::ivec3>& pollinated;
     std::uint32_t& random;
 
     /// The one route planner, and what is left of this frame's search budget.
@@ -1695,25 +2905,39 @@ bool hurtByTargetStart(const BehaviourContext& ctx) {
     if (ctx.self.provokedTimer <= 0.0f || ctx.species.attackDamage <= 0) {
         return false;
     }
+    if (ctx.self.threatId != 0) {
+        // **Only while it is still there to be fought.** `ctx.threat` is the
+        // single owner of that question and applies the same leash `foe` does,
+        // so this row cannot assert a quarry that `think` has already given up
+        // on - which is precisely how the freeze happened.
+        return ctx.threat != nullptr;
+    }
     // **A golem you built yourself never turns on you, and there is no timer on
     // that.** Bedrock gives a player-made golem its own `hurt_by_target` row
     // with the player filtered out — it carries no `minecraft:angry` component
     // at all, so this is structural rather than an anger duration set to zero.
     // `threatId == 0` means the player did it.
-    if (ctx.self.playerBuilt && ctx.self.threatId == 0) {
+    if (ctx.self.playerBuilt) {
         return false;
     }
     // A predator that is passive toward people still fights whatever bit it.
     // `retaliates` is the reference simply not giving a cat a `hurt_by_target`
     // goal - it kills rabbits and it runs from you, so "can it bite" and "will
     // it bite *you*" had to stop being one question.
-    return ctx.species.retaliates || ctx.self.threatId != 0;
+    return ctx.species.retaliates;
 }
 
 void hurtByTargetTick(const BehaviourContext& ctx) {
-    if (ctx.self.threatId != 0) {
+    // **The bootstrap that used to force this row to write blind is gone.**
+    // `ctx.foe` is resolved from the *previous* tick's `targetId`, so it is
+    // always null on the first tick after a blow, and a producer keyed on it
+    // would never set the slot that makes it resolve. `ctx.threat` is resolved
+    // from `threatId` in the same pass, so it is non-null immediately - the
+    // attacker is standing right there, it just swung - and the row can be
+    // honest about reachability without refusing to start a fight.
+    if (ctx.threat != nullptr) {
         ctx.self.target = CreatureTarget::Creature;
-        ctx.self.targetId = ctx.self.threatId;
+        ctx.self.targetId = ctx.threat->id;
         return;
     }
     ctx.self.target = CreatureTarget::Player;
@@ -1872,8 +3096,22 @@ bool meleeAttackStart(const BehaviourContext& ctx) {
     // same controllers - and **the witch is the reason this is now two tests**:
     // it set neither flag, so it fell straight through to melee and dealt two
     // damage by walking into you, with no animation and nothing thrown.
-    return ctx.self.target != CreatureTarget::None && !ctx.species.shootsArrows &&
-           !ctx.species.throwsPotions;
+    if (ctx.self.target == CreatureTarget::None || ctx.species.shootsArrows ||
+        ctx.species.throwsPotions) {
+        return false;
+    }
+    // **A row that cannot act must not claim a controller**, because
+    // `runBehaviours` claims *before* it ticks. The target slot names a
+    // creature that `think` could not resolve - dead, despawned, or past the
+    // leash - so `meleeAttackTick` would take `ControlMove | ControlLook`,
+    // return on its first line and leave the animal standing still for as long
+    // as the producer keeps re-asserting the target. `HurtByTarget` re-asserts
+    // it every tick for `species.angerSeconds`, which is **six hundred seconds**
+    // for an iron golem: one shot from out of reach froze it mid-village while
+    // zombies walked past. Refusing here hands the controllers to `Wander` and
+    // `Panic`, and the moment the quarry is resolvable again this row takes
+    // them straight back.
+    return !(ctx.self.target == CreatureTarget::Creature && ctx.foe == nullptr);
 }
 
 void meleeAttackTick(const BehaviourContext& ctx) {
@@ -1887,8 +3125,11 @@ void meleeAttackTick(const BehaviourContext& ctx) {
     // point of the target slot is that a consumer never asks who filled it.
     const bool onCreature = self.target == CreatureTarget::Creature && ctx.foe != nullptr;
     if (self.target == CreatureTarget::Creature && ctx.foe == nullptr) {
-        // The target died or walked out of range between the producer writing
-        // it and this row reading it. Nothing to close on.
+        // Belt only: `meleeAttackStart` refuses this case outright now, so the
+        // row never claims the two controllers it would then sit on. Kept
+        // because the two would otherwise have to agree by inspection, and this
+        // is the branch that would read `ctx.foe` through a null if they ever
+        // stopped.
         return;
     }
     const CreatureSpecies& foeSpecies =
@@ -2029,6 +3270,24 @@ void meleeAttackTick(const BehaviourContext& ctx) {
     // where it does not. **Defaulting the top of the range to zero is what
     // leaves every existing row provably untouched** rather than requiring
     // fifty-seven of them to restate a number they already carry.
+    //
+    // **`heldMainHand` contributes nothing here and that is deliberate**
+    // (2026-08-19). Four species carry a weapon - Blackbone and Princepin a
+    // stone sword, Princepin Brute an axe, Zombie Princepin a sword - and the
+    // field is read only by the model builder, so the item is drawn in the fist
+    // and never enters this sum. `attackDamage` is therefore the **whole** blow
+    // a species lands, not a base that equipment is added to.
+    //
+    // This matters when checking a row against `Mojang/bedrock-samples`,
+    // because the reference works the other way round: there,
+    // `minecraft:attack.damage` is a base and a held weapon really does raise
+    // it, which is why the wiki's published figure for an armed mob is larger
+    // than the number in its JSON. Reading our 6 beside `wither_skeleton.json`'s
+    // 4 and concluding the 2 must be the sword would be wrong twice over - the
+    // sword is worth nothing here, and setting the row to 4 would just make the
+    // mob weaker. What would make this note false: a weapon-damage term
+    // arriving in this function, at which point every armed row wants revisiting
+    // together.
     int damage = ctx.species.attackDamage;
     if (ctx.species.attackDamageMax > damage) {
         damage += static_cast<int>(nextRandom(ctx.random) *
@@ -2072,6 +3331,10 @@ struct ModelPoint {
 /// `CLAUDE.md`'s box of bug shapes.
 constexpr float kBipedArmRestUp = 1.125f;
 constexpr float kBipedShoulderGap = 0.25f;
+/// The pig-family torso, in texels across the side axis. **Named because the
+/// `static_assert` beside the arms measures against it** - the arm hangs flush
+/// on the torso's side, so the two cannot be edited apart.
+constexpr float kPigTorsoWidth = 8.0f;
 constexpr float kBipedArmLength = 12.0f;
 constexpr float kBipedArmGrow = 0.005f;
 
@@ -2115,10 +3378,33 @@ constexpr float kVillagerFold = -0.75f;
 constexpr float kVillagerArmPivotUp = 1.384f;
 constexpr float kVillagerArmLength = 8.0f;
 
-ModelPoint villagerHandPoint() {
+/// A point on that folded assembly, carried rigidly round its own pivot.
+///
+/// **One owner for the rotation.** `villagerRig` hangs three boxes on it and
+/// the witch's bottle leaves from it, and the two used to turn the arm in two
+/// separate places - which is how the thrown potion ended up leaving from the
+/// *unturned* hand, about 0.38 blocks from where the mesh was drawing it.
+///
+/// A positive `turn` carries a point below the pivot **forward and up**, which
+/// is the opposite sense to `uprightBox`'s `pitch`, whose positive direction
+/// leans a limb's far end backwards. Any caller turning the assembly therefore
+/// pairs `turn` with `-turn` of pitch, and that pairing is the whole of what
+/// keeps the sleeve from coming apart.
+ModelPoint foldedArmPoint(const ModelPoint& rest, float turn) {
+    const float dy = rest.up - kVillagerArmPivotUp;
+    return {rest.alongForward * std::cos(turn) - dy * std::sin(turn),
+            kVillagerArmPivotUp + rest.alongForward * std::sin(turn) + dy * std::cos(turn),
+            rest.alongSide};
+}
+
+/// `armRaise` is the wind-up the rig is drawing, so this is the hands where
+/// they *are* rather than where they rest. At zero it reduces exactly to the
+/// resting fold, which is what leaves a villager and a trader untouched.
+ModelPoint villagerHandPoint(float armRaise = 0.0f) {
     const float reach = kVillagerArmLength * kTexel;
-    return {-std::sin(kVillagerFold) * reach,
-            kVillagerArmPivotUp - std::cos(kVillagerFold) * reach, 0.0f};
+    const ModelPoint rest{-std::sin(kVillagerFold) * reach,
+                          kVillagerArmPivotUp - std::cos(kVillagerFold) * reach, 0.0f};
+    return foldedArmPoint(rest, armRaise);
 }
 
 /// A model point in world space, for the two things outside `buildMesh` that
@@ -2263,12 +3549,25 @@ constexpr float kWitchReach = 0.6f;
 /// motionless villager.
 constexpr float kWitchArmRaise = 0.85f;
 
+/// How far her arms are up **right now**, which both the rig and the throw need
+/// and neither may work out for itself. `aim` is the eased 0-to-1 the archer's
+/// bow rides on, so the two wind-ups run off one clock.
+float witchArmRaise(const Creature& self) { return self.aim * kWitchArmRaise; }
+
 /// The row in `kPotions` carrying an effect at a given strength.
 ///
 /// **Scanned rather than written down.** The forty-one brews are a table in
 /// `Item.hpp` and their indices are an implementation detail of it; a literal
 /// 23 here would be a second copy of that ordering, and inserting one brew
 /// would silently turn every witch into a thrower of something else.
+///
+/// **-1 on a miss, not 0.** It returned 0, which is a plausible answer and
+/// therefore the worst kind: `kPotions[0]` is a *water bottle*, so deleting or
+/// re-amplifying the Slowness row would have handed the witch a splash bottle
+/// of water - she winds up, throws, and nothing whatsoever happens - with every
+/// assert below still green, because `isSplashPotion` is true of row 0 exactly
+/// as it is of row 23. `potionAt(-1, 1)` lands one below `SplashPotionFirst`,
+/// which `isSplashPotion` rejects, so the miss now fails the build instead.
 constexpr int potionRow(effects::Effect effect, int amplifier) {
     for (std::size_t i = 0; i < kPotions.size(); ++i) {
         if (kPotions[i].effect == effect && kPotions[i].amplifier == amplifier &&
@@ -2276,7 +3575,7 @@ constexpr int potionRow(effects::Effect effect, int amplifier) {
             return static_cast<int>(i);
         }
     }
-    return 0;
+    return -1;
 }
 
 /// The splash form of a brew, which is the only form a witch ever holds.
@@ -2284,15 +3583,26 @@ constexpr ItemId witchBrew(effects::Effect effect) {
     return potionAt(potionRow(effect, 0), 1);
 }
 
+/// **The single edit that makes these fail:** deleting
+/// `{effects::Effect::Slowness, 0, 90.0f}` from `kPotions`, or changing its
+/// amplifier. Both asserts used to survive that - the first because a water
+/// bottle is a splash potion too, the second because it only checked two of the
+/// four brews and Slowness was one of the two it left out, which is the one she
+/// actually throws at range.
 static_assert(isSplashPotion(witchBrew(effects::Effect::Slowness)) &&
                   isSplashPotion(witchBrew(effects::Effect::Poison)) &&
                   isSplashPotion(witchBrew(effects::Effect::Weakness)) &&
                   isSplashPotion(witchBrew(effects::Effect::InstantDamage)),
               "a witch must be holding a splash potion, not a bottle it would drink");
-static_assert(potionKind(witchBrew(effects::Effect::InstantDamage)).effect ==
-                      effects::Effect::InstantDamage &&
-                  potionKind(witchBrew(effects::Effect::Poison)).effect == effects::Effect::Poison,
-              "the scan must find the brew it was asked for");
+static_assert(potionKind(witchBrew(effects::Effect::Slowness)).effect ==
+                      effects::Effect::Slowness &&
+                  potionKind(witchBrew(effects::Effect::Poison)).effect ==
+                      effects::Effect::Poison &&
+                  potionKind(witchBrew(effects::Effect::Weakness)).effect ==
+                      effects::Effect::Weakness &&
+                  potionKind(witchBrew(effects::Effect::InstantDamage)).effect ==
+                      effects::Effect::InstantDamage,
+              "the scan must find the brew it was asked for - all four of them");
 
 /// Which bottle to reach for.
 ///
@@ -2320,42 +3630,60 @@ static_assert(potionKind(witchBrew(effects::Effect::InstantDamage)).effect ==
 /// The result is faithful for a healthy player, which is nearly always: at
 /// range a witch slows you so it can keep the range, and in close it poisons
 /// you.
-ItemId witchBrewFor(const BehaviourContext& ctx) {
-    if (ctx.distance >= kWitchSlownessRange) {
+///
+/// **The distance is passed in rather than read off the context**, because the
+/// context's is the distance to the *player* and a witch can be angered by
+/// something that is not one - an iron golem does it in any village she walks
+/// into. The caller has already resolved who is being thrown at, and this is
+/// the last place in the ranged path that could have disagreed with it.
+ItemId witchBrewFor(float targetDistance) {
+    if (targetDistance >= kWitchSlownessRange) {
         return witchBrew(effects::Effect::Slowness);
     }
     return witchBrew(effects::Effect::Poison);
 }
 
 bool rangedAttackStart(const BehaviourContext& ctx) {
-    return (ctx.species.shootsArrows || ctx.species.throwsPotions) &&
-           ctx.self.target != CreatureTarget::None;
+    if (!(ctx.species.shootsArrows || ctx.species.throwsPotions) ||
+        ctx.self.target == CreatureTarget::None) {
+        return false;
+    }
+    // **The same rule `meleeAttackStart` keeps, and it was missing here.** A
+    // row that cannot act must not claim a controller: this one takes
+    // `ControlMove | ControlLook`, so a skeleton holding an unresolvable
+    // creature target would stand drawing a bow at nothing for the whole of
+    // `angerSeconds`. The `HurtByTarget` freeze reached this row too - it was
+    // only ever reported against melee because a skeleton is excluded there.
+    return !(ctx.self.target == CreatureTarget::Creature && ctx.foe == nullptr);
 }
 
 /// Lets the shot go. Split out of the tick because the tick decides *whether*
 /// and this decides *where*, and a committed release has to be able to run it
 /// from a branch that has already stopped thinking about anything else.
-void loose(const BehaviourContext& ctx, bool thrower) {
+///
+/// `aimAt` is a world point rather than a bearing, because the lead below is
+/// applied to the *flat distance* and needs the real geometry to do it. The
+/// caller resolves it, so this function never asks who is being shot at - the
+/// same contract `meleeAttackTick` keeps.
+void loose(const BehaviourContext& ctx, bool thrower, const glm::vec3& aimAt) {
     Creature& self = ctx.self;
 
     // Where the shot leaves, and it is **the hand holding the weapon** rather
     // than the middle of the chest it used to be. Both points come from the
     // same two functions the mesh hangs the item on, so the arrow can only ever
     // leave the bow and the bottle can only ever leave the fingers.
+    //
+    // The witch's hand is turned by her wind-up, and this used to ask for the
+    // resting one: the mesh drew the bottle on a raised arm and the throw left
+    // from where her hands hang, 0.38 blocks apart at full raise.
     const glm::vec3 from =
-        thrower ? modelPointToWorld(self, ctx.species, villagerHandPoint())
+        thrower ? modelPointToWorld(self, ctx.species, villagerHandPoint(witchArmRaise(self)))
                 : modelPointToWorld(self, ctx.species,
                                     bipedHandPoint(kArcherLimbWidth,
                                                    kArcherArmPitch + self.headPitch,
                                                    kArcherBowArmRoll, true));
 
-    // A bottle is aimed **below** the eye and an arrow above the waist: the one
-    // is meant to burst at your feet and the other to hit your chest.
-    const float aimHeight = thrower ? player_constants::kEyeHeight - kWitchAimDrop
-                                    : player_constants::kEyeHeight * 0.66f;
-    const glm::vec3 to = ctx.self.position + ctx.toPlayer + glm::vec3{0.0f, aimHeight, 0.0f};
-
-    glm::vec3 aim = to - from;
+    glm::vec3 aim = aimAt - from;
     const float flat = std::sqrt(aim.x * aim.x + aim.z * aim.z);
     // Aim above the target by a fifth of the ground distance. The reference's
     // own lead, and without it an archer's arrows all land at your feet -
@@ -2378,20 +3706,58 @@ void loose(const BehaviourContext& ctx, bool thrower) {
     aim += glm::vec3{wobble(), wobble(), wobble()};
 
     if (thrower) {
+        // **Named rather than left to default.** `fromId` is who the hit is
+        // blamed on, and a bottle or an arrow that arrives anonymous is blamed
+        // on the player - which is how a skeleton's stray shot used to make an
+        // enemy of you out of whatever it clipped.
         ctx.launches.push_back({from, aim * kWitchThrowPower,
-                                Creatures::LaunchKind::SplashPotion, self.heldOverride});
+                                Creatures::LaunchKind::SplashPotion, self.heldOverride, self.id});
         // Out of its hands the instant it leaves them.
         self.heldOverride = ItemId::None;
         return;
     }
-    ctx.launches.push_back({from, aim * kArcherPower});
+    ctx.launches.push_back(
+        {from, aim * kArcherPower, Creatures::LaunchKind::Arrow, ItemId::None, self.id});
 }
 
 void rangedAttackTick(const BehaviourContext& ctx) {
     Creature& self = ctx.self;
-    self.targetHeadYaw = ctx.yawToPlayer;
-    self.targetHeadPitch = ctx.pitchToPlayer;
-    self.targetYaw = ctx.yawToPlayer;
+
+    // **Everything below is measured against whatever is being shot at**, and
+    // until now none of it was: every bearing, the closing distance, the
+    // backing-off heading and the shot itself all read `ctx.*Player`
+    // unconditionally, so a skeleton that a zombie had angered raised its bow,
+    // walked toward *you* and put the arrow in *you*. Resolved into one set of
+    // locals exactly as `meleeAttackTick` does, because the whole point of the
+    // target slot is that a consumer never asks who filled it.
+    const bool onCreature = self.target == CreatureTarget::Creature && ctx.foe != nullptr;
+    const glm::vec3 toTarget = onCreature ? ctx.toFoe : ctx.toPlayer;
+    const float distance = onCreature ? ctx.foeDistance : ctx.distance;
+    const float yawToTarget = onCreature ? ctx.yawToFoe : ctx.yawToPlayer;
+
+    // A bottle is aimed **below** the eye and an arrow above the waist: the one
+    // is meant to burst at your feet and the other to hit your chest. Against a
+    // creature the same two fractions are taken of *its* height, so a shot at a
+    // chicken is not aimed at the air above it.
+    const bool thrower = ctx.species.throwsPotions;
+    const float targetEye =
+        onCreature ? speciesInfo(ctx.foe->kind).height * ctx.foe->scale * 0.85f
+                   : player_constants::kEyeHeight;
+    const float aimHeight = thrower ? std::max(targetEye - kWitchAimDrop, 0.0f)
+                                    : targetEye * 0.66f;
+    const glm::vec3 aimAt = self.position + toTarget + glm::vec3{0.0f, aimHeight, 0.0f};
+
+    // Negated because a positive head pitch is nose-down, so something standing
+    // above wants a negative one. The player's copy of this lives in `think`;
+    // this is the same expression against the resolved target.
+    const float pitchToTarget =
+        onCreature ? -std::atan2(toTarget.y + targetEye - ctx.species.height * 0.85f,
+                                 std::max(distance, 0.001f))
+                   : ctx.pitchToPlayer;
+
+    self.targetHeadYaw = yawToTarget;
+    self.targetHeadPitch = pitchToTarget;
+    self.targetYaw = yawToTarget;
     self.speedScale = ctx.species.chaseSpeedScale;
 
     // One behaviour, two weapons. They engage at different distances and throw
@@ -2399,7 +3765,6 @@ void rangedAttackTick(const BehaviourContext& ctx) {
     // backing off, reloading, leading the shot, the spread - is identical, so
     // it is written once. A second row in the table would have been a second
     // copy of all of it.
-    const bool thrower = ctx.species.throwsPotions;
     const float range = thrower ? kWitchRange : kArcherRange;
     const float preferred = thrower ? kWitchPreferred : kArcherPreferred;
     const float tooClose = thrower ? kWitchTooClose : kArcherTooClose;
@@ -2439,18 +3804,18 @@ void rangedAttackTick(const BehaviourContext& ctx) {
         }
         self.releaseTimer = 0.0f;
         self.drawTimer = 0.0f;
-        loose(ctx, thrower);
+        loose(ctx, thrower, aimAt);
         return;
     }
 
-    if (ctx.distance > preferred) {
+    if (distance > preferred) {
         self.running = true;
-        walkTo(ctx, ctx.self.position + ctx.toPlayer);
-    } else if (ctx.distance < tooClose) {
+        walkTo(ctx, self.position + toTarget);
+    } else if (distance < tooClose) {
         // Backing away is a bearing rather than a place, like panic: there is
         // nowhere in particular it wants to be, only somewhere further off.
         self.running = true;
-        walkToward(ctx, ctx.yawToPlayer + 3.14159265f);
+        walkToward(ctx, yawToTarget + kPi);
     } else {
         self.walking = false;
         self.route.clear();
@@ -2475,9 +3840,24 @@ void rangedAttackTick(const BehaviourContext& ctx) {
     // hand follows the body - the head turns on its own and must not count.
     // And the fourth is that it is not **backing away**: it may shoot standing
     // still or while closing, never while retreating.
-    const float offAim = std::abs(std::remainder(ctx.yawToPlayer - self.yaw, kTwoPi));
-    const bool retreating = ctx.distance < tooClose;
-    if (ctx.distance > range || !ctx.seesPlayer || offAim > kArcherFov || retreating) {
+    const float offAim = std::abs(std::remainder(yawToTarget - self.yaw, kTwoPi));
+    const bool retreating = distance < tooClose;
+    if (distance > range || offAim > kArcherFov || retreating) {
+        return;
+    }
+    // **The sight test is the one thing that is not free, so it is asked last
+    // and only here** - once per `rangedInterval` at the moment of committing,
+    // rather than every tick. `ctx.seesPlayer` is a cached answer `think`
+    // maintains for the player alone; a creature target has no such cache, and
+    // a remembered quarry is not re-filtered for sight, so this is the only
+    // place the question can be asked about one at all.
+    if (onCreature) {
+        const glm::vec3 eye =
+            self.position + glm::vec3{0.0f, ctx.species.height * self.scale * 0.85f, 0.0f};
+        if (!hasLineOfSight(ctx.world, eye, aimAt)) {
+            return;
+        }
+    } else if (!ctx.seesPlayer) {
         return;
     }
 
@@ -2488,7 +3868,7 @@ void rangedAttackTick(const BehaviourContext& ctx) {
     // It has to be this side of the commit rather than during the release,
     // because the release branch above does nothing but count down and throw.
     if (thrower) {
-        self.heldOverride = witchBrewFor(ctx);
+        self.heldOverride = witchBrewFor(distance);
     }
     self.releaseTimer = release;
 }
@@ -2596,10 +3976,26 @@ void swimWanderTick(const BehaviourContext& ctx) {
     }
 }
 
+/// The middle of a cell, on all three axes.
+///
+/// **Deliberately not `cellCentre`**, which the villager section defines and
+/// which leaves `y` on the block's bottom face because a villager stands *on*
+/// its bed. A bee flies *to* the middle of a flower, so the two are different
+/// questions and share no answer.
+glm::vec3 blockCentre(const glm::ivec3& cell) {
+    return {static_cast<float>(cell.x) + 0.5f, static_cast<float>(cell.y) + 0.5f,
+            static_cast<float>(cell.z) + 0.5f};
+}
+
+/// Nothing, on the `y < 0` convention `hiveCell`, `flowerCell` and the three
+/// village cells all share. Spelled once so that clearing one is a named thing
+/// rather than a literal repeated at five sites.
+constexpr glm::ivec3 kNoCell{0, -1, 0};
+
 /// The nearest flower to a point, inside a small box, and a bee's whole reason
 /// for leaving the hive. Returns false when there is none, which is the common
 /// case and costs the same scan either way.
-bool nearestFlower(const World& world, const glm::vec3& from, glm::vec3& found) {
+bool nearestFlower(const World& world, const glm::vec3& from, glm::ivec3& found) {
     const int cx = static_cast<int>(std::floor(from.x));
     const int cy = static_cast<int>(std::floor(from.y));
     const int cz = static_cast<int>(std::floor(from.z));
@@ -2608,17 +4004,48 @@ bool nearestFlower(const World& world, const glm::vec3& from, glm::vec3& found) 
     for (int dy = -kFlowerSearchY; dy <= kFlowerSearchY; ++dy) {
         for (int dz = -kFlowerSearchXZ; dz <= kFlowerSearchXZ; ++dz) {
             for (int dx = -kFlowerSearchXZ; dx <= kFlowerSearchXZ; ++dx) {
-                if (!isFlower(world.blockAt(cx + dx, cy + dy, cz + dz))) {
+                const glm::ivec3 cell{cx + dx, cy + dy, cz + dz};
+                if (!isFlower(world.blockAt(cell.x, cell.y, cell.z))) {
                     continue;
                 }
-                const glm::vec3 at{static_cast<float>(cx + dx) + 0.5f,
-                                   static_cast<float>(cy + dy) + 0.5f,
-                                   static_cast<float>(cz + dz) + 0.5f};
-                const glm::vec3 away = at - from;
+                const glm::vec3 away = blockCentre(cell) - from;
                 const float distance = glm::dot(away, away);
                 if (!any || distance < best) {
                     best = distance;
-                    found = at;
+                    found = cell;
+                    any = true;
+                }
+            }
+        }
+    }
+    return any;
+}
+
+/// The nearest hive or nest, and the other half of a bee's day.
+///
+/// **Its own function rather than a predicate parameter on `nearestFlower`**,
+/// because the two differ in more than what they are looking for: this box is
+/// `find_hive`'s 16 by 10 against the flower's 6 by 4, fifteen times the
+/// volume, which is the whole reason one runs on the wander cadence and this
+/// one only runs when a bee has no home at all.
+bool nearestHive(const World& world, const glm::vec3& from, glm::ivec3& found) {
+    const int cx = static_cast<int>(std::floor(from.x));
+    const int cy = static_cast<int>(std::floor(from.y));
+    const int cz = static_cast<int>(std::floor(from.z));
+    float best = 0.0f;
+    bool any = false;
+    for (int dy = -kHiveSearchY; dy <= kHiveSearchY; ++dy) {
+        for (int dz = -kHiveSearchXZ; dz <= kHiveSearchXZ; ++dz) {
+            for (int dx = -kHiveSearchXZ; dx <= kHiveSearchXZ; ++dx) {
+                const glm::ivec3 cell{cx + dx, cy + dy, cz + dz};
+                if (!isBeehive(world.blockAt(cell.x, cell.y, cell.z))) {
+                    continue;
+                }
+                const glm::vec3 away = blockCentre(cell) - from;
+                const float distance = glm::dot(away, away);
+                if (!any || distance < best) {
+                    best = distance;
+                    found = cell;
                     any = true;
                 }
             }
@@ -2649,9 +4076,9 @@ void flyWanderTick(const BehaviourContext& ctx) {
         self.targetYaw = nextRandom(ctx.random) * kTwoPi;
         self.targetPitch = (nextRandom(ctx.random) * 2.0f - 1.0f) * kFlyPitchMax;
 
-        glm::vec3 flower{0.0f};
+        glm::ivec3 flower{0, -1, 0};
         if (nearestFlower(ctx.world, self.position, flower)) {
-            self.targetYaw = yawTo(self, flower);
+            self.targetYaw = yawTo(self, blockCentre(flower));
             self.targetPitch = 0.0f;
         }
     }
@@ -2674,8 +4101,20 @@ void flyWanderTick(const BehaviourContext& ctx) {
     const int hx = static_cast<int>(std::floor(self.position.x));
     const int hz = static_cast<int>(std::floor(self.position.z));
     const int feet = static_cast<int>(std::floor(self.position.y));
+    // **Clearance is a collision question, and both probes were asking
+    // `isSolid`.** `isSolid` reports a cell *occupied*, and it says yes for
+    // `BlockShape::Flat` - a rail, a redstone line, a tripwire - none of which
+    // has any collision box at all, so a bird would not climb over a powered
+    // rail and read a track on the ground as its floor a block early. One
+    // lambda for both, because a floor rule and a ceiling rule that disagree is
+    // this project's most expensive bug shape. A lantern still counts: its box
+    // is small but real, so the half of the finding about hanging blocks was
+    // already right.
+    const auto blocked = [&ctx](int x, int y, int z) {
+        return worldCollisionBoxes(ctx.world, x, y, z).count != 0;
+    };
     int clearance = 0;
-    while (clearance < kFlyCeilingBlocks && !ctx.world.isSolid(hx, feet - 1 - clearance, hz)) {
+    while (clearance < kFlyCeilingBlocks && !blocked(hx, feet - 1 - clearance, hz)) {
         ++clearance;
     }
     if (clearance < kFlyFloorBlocks) {
@@ -2686,7 +4125,7 @@ void flyWanderTick(const BehaviourContext& ctx) {
 
     // And anything directly overhead, which the horizontal fan cannot see.
     const float top = self.position.y + ctx.species.height * self.scale;
-    if (ctx.world.isSolid(hx, static_cast<int>(std::floor(top + kFlyProbe)), hz)) {
+    if (blocked(hx, static_cast<int>(std::floor(top + kFlyProbe)), hz)) {
         self.targetPitch = std::max(self.targetPitch, 0.0f);
     }
 }
@@ -3055,6 +4494,178 @@ void mingleTick(const BehaviourContext& ctx) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The bee's day
+// ---------------------------------------------------------------------------
+
+/// Where home is and which flower is being worked, kept up to date.
+///
+/// **A producer claiming no controller, exactly like `ClaimPoi`**, and for the
+/// identical reason: remembering a cell is not a way of moving, so it must not
+/// be able to crowd out - or be crowded out by - anything that is. It is also
+/// what keeps a bee that cannot find a hive from freezing: the search runs
+/// here, the flying stays with `FlyWander`.
+///
+/// **This is where every scan a bee does is paid for, and both are gated.** The
+/// hive box is fifteen times the flower box's volume, so it only runs while
+/// there is no home at all, on the reference's own retry cadence; the flower
+/// box only runs while there is a home to carry nectar to and daylight to work
+/// in. A bee that has settled into a nest costs one `blockAt` a tick.
+bool beeScanStart(const BehaviourContext& ctx) {
+    return ctx.species.pollinates;
+}
+
+void beeScanTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+
+    // Home first, and **forgetting comes before finding**. A hive that has been
+    // mined, burnt or blown up stops being one, and a bee steering at a cell
+    // that no longer holds a hive would neither arrive nor give up. One lookup,
+    // so it is checked every tick rather than on the search cadence.
+    if (self.hiveCell.y >= 0 &&
+        !isBeehive(ctx.world.blockAt(self.hiveCell.x, self.hiveCell.y, self.hiveCell.z))) {
+        self.hiveCell = kNoCell;
+    }
+    if (self.hiveCell.y < 0) {
+        self.hiveSearchTimer -= ctx.deltaSeconds;
+        if (self.hiveSearchTimer <= 0.0f) {
+            self.hiveSearchTimer = kHiveSearchMin + nextRandom(ctx.random) * kHiveSearchSpan;
+            glm::ivec3 hive{kNoCell};
+            if (nearestHive(ctx.world, self.position, hive)) {
+                self.hiveCell = hive;
+            }
+        }
+    }
+
+    // Then the flower, on the same two rules in the same order.
+    if (self.flowerCell.y >= 0 &&
+        !isFlower(ctx.world.blockAt(self.flowerCell.x, self.flowerCell.y, self.flowerCell.z))) {
+        self.flowerCell = kNoCell;
+        // Losing the flower loses the visit with it, so a bee that arrives at
+        // the next one starts its stay from the top rather than finishing a
+        // countdown it began somewhere else.
+        self.pollinateTimer = 0.0f;
+    }
+    // Three ways to have no use for a flower: already carrying nectar, nowhere
+    // to put it, or after dark. The last is `bee.json`'s `shelter_detection`,
+    // which sends a bee home when `is_daytime` is false - its other half tests
+    // for precipitation, and nothing hands this file the weather.
+    if (self.hasNectar || self.hiveCell.y < 0 || ctx.night || self.flowerCell.y >= 0) {
+        return;
+    }
+    self.flowerSearchTimer -= ctx.deltaSeconds;
+    if (self.flowerSearchTimer > 0.0f) {
+        return;
+    }
+    // The wander cadence, because this is the scan `FlyWander` already runs at
+    // that rate and one box should not be affordable at two different prices.
+    self.flowerSearchTimer = kFlyDecisionMin + nextRandom(ctx.random) * kFlyDecisionSpan;
+    glm::ivec3 flower{kNoCell};
+    if (nearestFlower(ctx.world, self.position, flower)) {
+        self.flowerCell = flower;
+    }
+}
+
+/// The round trip: out to a flower, twenty seconds on it, home with the nectar.
+/// **The only thing in the game that puts honey in a hive**, and therefore the
+/// only source of honeycomb, the honeycomb block, candles and every waxed
+/// copper stage.
+///
+/// One row where Bedrock has four goals - `look_for_food`, `go_home`,
+/// `find_hive` and the `has_nectar` component group. They are a state machine
+/// with one bit of state between them, and writing it as one behaviour is the
+/// same choice `Work` makes against the villager's several: our table arbitrates
+/// by controller, so four rows that can never run together would buy nothing and
+/// would give the bit four owners.
+///
+/// **Claims both controllers**, like `EatBlock`: a bee settled on a flower is
+/// neither wandering nor looking anywhere else.
+///
+/// Two of the reference's numbers are deliberately not ported.
+/// `look_for_food`'s `"start_chance": 0.5` is a coin flip per `tick_interval`,
+/// and `tick_interval` is 1 - so it starts within a tick or two either way, and
+/// rolling it here would only add jitter to a decision that is already made.
+/// `find_hive`'s `"goal_radius": 0.633` is likewise replaced by `go_home`'s
+/// 1.2, which is the reference's own arrival distance for the higher-priority
+/// path home and is reachable by something that steers on a heading.
+bool pollinateStart(const BehaviourContext& ctx) {
+    const Creature& self = ctx.self;
+    if (!ctx.species.pollinates || self.hiveCell.y < 0) {
+        return false;
+    }
+    // Carrying nectar, the only thing that matters is getting home - and that
+    // runs after dark, because a bee heading for shelter is what the reference
+    // does at nightfall rather than what it stops doing.
+    if (self.hasNectar) {
+        return true;
+    }
+    return !ctx.night && self.flowerCell.y >= 0;
+}
+
+void pollinateTick(const BehaviourContext& ctx) {
+    Creature& self = ctx.self;
+
+    if (self.hasNectar) {
+        const glm::vec3 home = blockCentre(self.hiveCell);
+        if (glm::distance(self.position, home) > kHiveArrival) {
+            if (!walkTo(ctx, home)) {
+                self.walking = false;
+                self.route.clear();
+            }
+            return;
+        }
+
+        // Home. **Reported rather than done**: only the main thread may write to
+        // the world, so the cell is queued and `Main.cpp` raises the level.
+        //
+        // Bedrock increments as the bee *exits* again, after converting the
+        // nectar inside; we have no inside, so it lands on arrival. That is a
+        // difference of one hive-conversion delay and nothing else - the number
+        // of levels a delivery is worth is identical.
+        //
+        // **Twice for the 1% is the whole of the double-honey rule**, and it is
+        // rolled here because this is where the random stream is. The drain
+        // adds one level per entry, so two entries are two levels; see
+        // `Creatures::takePollinated` for why that list must never be
+        // de-duplicated.
+        ctx.pollinated.push_back(self.hiveCell);
+        if (nextRandom(ctx.random) < kDoubleHoneyChance) {
+            ctx.pollinated.push_back(self.hiveCell);
+        }
+        self.hasNectar = false;
+        self.walking = false;
+        self.route.clear();
+        return;
+    }
+
+    // No nectar, so this is the outward half. `beeScanTick` owns which flower.
+    const glm::vec3 flower = blockCentre(self.flowerCell);
+    if (glm::distance(self.position, flower) > kFlowerArrival) {
+        if (!walkTo(ctx, flower)) {
+            self.walking = false;
+            self.route.clear();
+        }
+        // Arriving is what starts the stay, so a bee crossing a meadow does not
+        // bank the flight time.
+        self.pollinateTimer = kPollinateSeconds;
+        return;
+    }
+
+    // Settled. Said outright because `walking` is sticky - the same trap the
+    // grazing sheep, the swelling Bramble and the arriving zombie all paid for.
+    self.walking = false;
+    self.route.clear();
+    self.targetHeadYaw = yawTo(self, flower);
+
+    self.pollinateTimer -= ctx.deltaSeconds;
+    if (self.pollinateTimer > 0.0f) {
+        return;
+    }
+    self.pollinateTimer = 0.0f;
+    self.hasNectar = true;
+    self.flowerCell = kNoCell;
+}
+
 /// The table. One list shared by every species: the differences between animals
 /// are already in `kSpecies`, and the predicates read them, so a per-species
 /// list would be a second place for a species to disagree with itself.
@@ -3078,6 +4689,10 @@ constexpr Behaviour kBehaviours[] = {
     // Also a producer claiming nothing. Taking a job *is* gaining a trade, so
     // this is where every profession in the world comes from.
     {"ClaimPoi", 2, 0, claimPoiStart, claimPoiTick},
+    // The same shape for the same reason: remembering where home and the
+    // flower are is not a way of moving, and a bee that cannot find a hive must
+    // still be able to fly while it looks.
+    {"BeeScan", 2, 0, beeScanStart, beeScanTick},
     // **Above `Avoid` on purpose, and it ties with it.** The reference gives
     // `sleep` priority 3 and `avoid_mob_type` priority 4, so a villager in bed
     // does not flee the zombie at the window. Within a tie the array order
@@ -3097,6 +4712,11 @@ constexpr Behaviour kBehaviours[] = {
     // three mutually exclusive: a swimmer never ambles, a flier never swims and
     // a walker never cruises.
     {"SwimWander", 5, ControlMove, swimWanderStart, swimWanderTick},
+    // **Must stay above `FlyWander`.** Both want the movement controller and
+    // both are priority 5, so the array order alone decides - and below it a
+    // bee would cruise instead of working, which is the whole honey chain gone
+    // with the priorities still reading as sorted and nothing warning.
+    {"Pollinate", 5, ControlMove | ControlLook, pollinateStart, pollinateTick},
     {"FlyWander", 5, ControlMove, flyWanderStart, flyWanderTick},
     // **Priority 5, not the reference's 7.** Bedrock puts `work` and `mingle`
     // at 7 and `random_stroll` at 11; ours strolls at 6, so the two schedule
@@ -3119,6 +4739,75 @@ constexpr bool behavioursSorted() {
     return true;
 }
 static_assert(behavioursSorted(), "kBehaviours must be ordered by priority, lowest number first");
+
+/// Where a row sits in the table, by name. `std::size(kBehaviours)` when there
+/// is no such row, which is itself the failure a rename should produce.
+constexpr std::size_t behaviourIndex(std::string_view name) {
+    for (std::size_t i = 0; i < std::size(kBehaviours); ++i) {
+        if (name == kBehaviours[i].name) {
+            return i;
+        }
+    }
+    return std::size(kBehaviours);
+}
+
+/// **The half `behavioursSorted` cannot see.** That one proves priorities are
+/// non-decreasing, and the single edit that makes it fail is swapping `Wander`
+/// (6) and `LookAtPlayer` (7) - but not one of the four invariants this table
+/// actually leans on is a priority. All four are *ties*, where the array order
+/// alone decides, and every one of them was written down in a comment and
+/// nowhere else. Swap any pair below and the priorities are still sorted, the
+/// old assert still passes, and the behaviour is silently wrong.
+///
+/// The single edit that makes each line fail, in order:
+///   1. Move `NearestPreyTarget` below `NearestAttackableTarget` - both claim
+///      nothing so both run, and the later writer wins, so a wolf eating a
+///      sheep would stop turning on the player who walked up to it.
+///   2. Move `Swell` above `NearestAttackableTarget` - `Swell` reads the target
+///      slot that row writes, so a creeper would swell against last tick's
+///      answer and hesitate a frame every time it acquired you.
+///   3. Move `Sleep` below `Avoid` - both want the same two controllers, and
+///      the reference gives `sleep` priority 3 against `avoid_mob_type` 4, so a
+///      villager in bed would leap up at the zombie outside the window.
+///   4. Move `RangedAttack` below `MeleeAttack` - both want the same two
+///      controllers, so an archer would close to bite instead of keeping its
+///      distance.
+///   5. Give `Wander` priority 5 to match `Work` and `Mingle` and leave it
+///      where it is - `behavioursSorted` is still satisfied, and a villager
+///      strolls straight through its own working day.
+///   6. Move `Pollinate` below `FlyWander` - both claim the movement
+///      controller at priority 5, so a bee would cruise instead of working, no
+///      honey would ever reach a hive, and honeycomb would go back to being
+///      unobtainable with every priority in the table still sorted.
+constexpr bool behaviourTiesOrdered() {
+    return behaviourIndex("NearestPreyTarget") < behaviourIndex("NearestAttackableTarget") &&
+           behaviourIndex("NearestAttackableTarget") < behaviourIndex("Swell") &&
+           behaviourIndex("Sleep") < behaviourIndex("Avoid") &&
+           behaviourIndex("RangedAttack") < behaviourIndex("MeleeAttack") &&
+           behaviourIndex("Work") < behaviourIndex("Wander") &&
+           behaviourIndex("Mingle") < behaviourIndex("Wander") &&
+           behaviourIndex("Pollinate") < behaviourIndex("FlyWander");
+}
+static_assert(behaviourTiesOrdered(),
+              "kBehaviours ties are load-bearing: within one priority the array order decides");
+/// A misspelt or renamed row would make every comparison above compare two
+/// copies of `std::size(kBehaviours)`, which is false, so the assert would fire
+/// - except for the one pair where *both* names went missing together. Pinning
+/// the count is what closes that: a row that cannot be found is not a row.
+static_assert(behaviourIndex("NearestPreyTarget") < std::size(kBehaviours) &&
+                  behaviourIndex("NearestAttackableTarget") < std::size(kBehaviours) &&
+                  behaviourIndex("Swell") < std::size(kBehaviours) &&
+                  behaviourIndex("Sleep") < std::size(kBehaviours) &&
+                  behaviourIndex("Avoid") < std::size(kBehaviours) &&
+                  behaviourIndex("RangedAttack") < std::size(kBehaviours) &&
+                  behaviourIndex("MeleeAttack") < std::size(kBehaviours) &&
+                  behaviourIndex("Work") < std::size(kBehaviours) &&
+                  behaviourIndex("Mingle") < std::size(kBehaviours) &&
+                  behaviourIndex("Pollinate") < std::size(kBehaviours) &&
+                  behaviourIndex("FlyWander") < std::size(kBehaviours) &&
+                  behaviourIndex("BeeScan") < std::size(kBehaviours) &&
+                  behaviourIndex("Wander") < std::size(kBehaviours),
+              "a tie-order assert that names a row which no longer exists proves nothing");
 
 /// Chooses which behaviours run this tick and runs them.
 ///
@@ -3152,6 +4841,28 @@ void runBehaviours(const BehaviourContext& ctx) {
     }
 
     ctx.self.runningBehaviours = running;
+}
+
+/// Draws one species from a weighted shortlist, or `Count` when the roll finds
+/// nothing - which it genuinely can, because subtracting a shortlist's weights
+/// back off a `total` that was summed in the same order still leaves floating
+/// point residue.
+///
+/// **One function rather than two loops**, because the two disagreed and only
+/// one of them was right: the chunk spawner started at `Count` and returned
+/// nothing when it missed, and the continuous one started at `Sheep` and kept
+/// it - so a missed roll put a sheep in an ocean cell picked for a cod, or at
+/// night where only a hostile had qualified, with `canSpawnAt` never asked
+/// about it. Naming the failure is what makes the caller handle it.
+CreatureKind drawSpecies(const float (&weights)[static_cast<std::size_t>(CreatureKind::Count)],
+                         float roll) {
+    for (std::size_t i = 0; i < static_cast<std::size_t>(CreatureKind::Count); ++i) {
+        roll -= weights[i];
+        if (weights[i] > 0.0f && roll <= 0.0f) {
+            return static_cast<CreatureKind>(i);
+        }
+    }
+    return CreatureKind::Count;
 }
 
 } // namespace
@@ -3250,6 +4961,10 @@ std::vector<glm::ivec3> Creatures::takeGrazed() {
     return std::exchange(m_grazed, {});
 }
 
+std::vector<glm::ivec3> Creatures::takePollinated() {
+    return std::exchange(m_pollinated, {});
+}
+
 std::vector<CreatureVoiceEvent> Creatures::takeVoices() {
     return std::exchange(m_voices, {});
 }
@@ -3345,7 +5060,11 @@ bool spawnsIn(CreatureKind kind, BiomeId biome) {
     case CreatureKind::Skeleton:
         return land;
     case CreatureKind::Villager:
-        // Villages do not exist yet, so it simply lives on open grassland.
+        // **Villages exist now**, and `populateChunks` places their people from
+        // the village plan rather than from this table - so this rule is the
+        // *stray* villager on open grassland, not the village's own population.
+        // It used to say villages did not exist yet, which is the first thing
+        // anyone porting the declarative spawn-rule table would have read.
         return land && any(BiomeTag::Grassland);
     case CreatureKind::Husk:
         // The reference's desert zombie, and the only hostile that is still
@@ -3416,21 +5135,48 @@ bool spawnsIn(CreatureKind kind, BiomeId biome) {
     case CreatureKind::MagmaCubeSmall:
     case CreatureKind::MagmaCubeMedium:
     case CreatureKind::MagmaCubeLarge:
-        // Nether again, so the same barren stand-in - and being underground and
-        // dark is what actually gates them.
+        // Nether again, so the same barren stand-in. **The gate is darkness at
+        // night**, which is now what the row says as well - it read "underground
+        // and dark" while carrying neither, and the spawner only ever places at
+        // `surface + 1`, so underground is unreachable by construction and no
+        // comment here can make it otherwise.
         return land && any(BiomeTag::Stony | BiomeTag::Badlands | BiomeTag::Peak);
     case CreatureKind::Bee:
-        // Where the flowers are. The reference hangs its spawn off bee nests
-        // generating in trees, which is a worldgen feature we do not have, so
-        // the biomes that actually grow flowers stand in for it.
+        // Where the flowers are, and **deliberately not off the nests**.
+        //
+        // The reference hangs its spawn off bee nests: a nest generates with
+        // 2-3 bees already inside it, and there is no ambient bee spawn at all.
+        // Nests now generate here too (`Structures.cpp`, 2026-08-19, which is
+        // what makes this comment worth re-reading rather than trusting - it
+        // said "a worldgen feature we do not have" until that landed), but a
+        // nest in this game holds no occupants, because there is no inside. So
+        // the only way to copy the reference exactly would be for the spawner
+        // to hunt for nest blocks, which is a scan over the world at spawn time
+        // for a creature that has a perfectly good biome rule.
+        //
+        // The biome rule reaches the same place from the other side, and
+        // `Biome.cpp` is what makes that true rather than luck: Meadow carries
+        // `Grassland`, the highest `flowerShare` in the table at 0.55, and a
+        // 100% nest chance on every tree it grows - so the one biome where a
+        // nest is certain is also a biome where a bee is common and a flower is
+        // never far. `Creature.cpp`'s own hive search (16 blocks out, 10 up)
+        // does the pairing that the reference does at generation time.
+        //
+        // **What would make this wrong:** a nest gaining occupants of its own,
+        // or `Meadow` losing `Grassland`. Neither is true on 2026-08-19.
         return land && any(BiomeTag::Grassland | BiomeTag::Forest | BiomeTag::Swamp);
+    case CreatureKind::IronGolem:
+        // **Not a natural spawn, and now it says so.** A golem is placed by
+        // `populateChunks` from the village plan, next to whichever residents
+        // are guarding - so falling through to `false` here is right, but it
+        // was silent, and silent is indistinguishable from forgotten.
     case CreatureKind::Count:
         break;
     }
     return false;
 }
 
-Creatures::Creatures(std::uint32_t seed) : m_random(seed | 1u) {}
+Creatures::Creatures(std::uint32_t seed) : m_seed(seed), m_random(seed | 1u) {}
 
 float Creatures::random01() {
     return nextRandom(m_random);
@@ -3487,7 +5233,7 @@ bool Creatures::canSpawnAt(const World& world, const CreatureSpecies& species, i
     if (species.maxSpawnY > 0 && y > species.maxSpawnY) {
         return false;
     }
-    if (species.swims) {
+    if (spawnsInOpenWater(species)) {
         // Nothing under it and nothing above it matters - only that there is
         // enough water to be inside of. Asking for the cell above as well is
         // what stops a fish appearing in the single wet block of a shoreline.
@@ -3503,22 +5249,88 @@ bool Creatures::canSpawnAt(const World& world, const CreatureSpecies& species, i
     if (!world.isSolid(x, y - 1, z)) {
         return false;
     }
-    const BlockId ground = world.blockAt(x, y - 1, z);
-    return ground == BlockId::Grass || ground == BlockId::Sand || ground == BlockId::Snow ||
-           ground == BlockId::Stone || ground == BlockId::Gravel;
+    // **Asked of the block table rather than listed here.** This was a
+    // hand-kept whitelist of five ids - Grass, Sand, Snow, Stone, Gravel - and
+    // it was a second copy of knowledge `Biome.cpp` already owns. Two biome top
+    // blocks are not on it: the Badlands is Terracotta over Clay patches, so
+    // **100% of its surface could never spawn anything at all**, day or night,
+    // and Frozen Peaks is PackedIce saved only by its 10% snow patches. Camel,
+    // Husk, Princepin and all three magma cubes name the Badlands as home; each
+    // also carries `Sandy`, `Stony` or `Peak`, which is why no species vanished
+    // from the game and this stayed invisible for the life of the biome.
+    //
+    // `isOpaque` is "a full cube that hides what is behind it", which is the
+    // reference's own spawn-surface test - it lets a mob stand on any natural
+    // ground and on player-built stone the way Bedrock does, and still refuses
+    // leaves, glass, cross-shaped plants, slabs, stairs and fences. The next
+    // biome given a new top block is spawnable the day it is added rather than
+    // silently dead.
+    return isOpaque(world.blockAt(x, y - 1, z));
 }
+
+/// **The proof the line above actually covers the terrain**, because "it
+/// compiles" says nothing about which blocks a biome puts on top. Every `.top`
+/// and `.patch` block in `Biome.cpp` is listed, and the negative half pins the
+/// things that must stay unspawnable - without it, widening `isOpaque` to mean
+/// merely "solid" would pass the first assert and quietly let mobs spawn on
+/// leaves and fence posts.
+///
+/// The single edit that makes it fail: giving a biome a top block that is not a
+/// full opaque cube - a moss carpet, say - or marking Terracotta a cutout.
+static_assert(isOpaque(BlockId::Grass) && isOpaque(BlockId::Sand) && isOpaque(BlockId::Snow) &&
+                  isOpaque(BlockId::Stone) && isOpaque(BlockId::Gravel) &&
+                  isOpaque(BlockId::Terracotta) && isOpaque(BlockId::PackedIce) &&
+                  isOpaque(BlockId::Clay),
+              "every biome's top and patch block must be ground something can spawn on");
+static_assert(!isOpaque(BlockId::Leaves) && !isOpaque(BlockId::Glass) &&
+                  !isOpaque(BlockId::TallGrass),
+              "and foliage and glass must not be");
 
 void Creatures::think(const World& world, Creature& creature, const glm::vec3& playerFeet,
                       float deltaSeconds, bool night, bool playerSneaking, float timeOfDay,
                       CreatureAttack& attack, std::vector<CreatureExplosion>& blasts) {
     const CreatureSpecies& species = speciesInfo(creature.kind);
 
-    creature.hurtTimer = std::max(0.0f, creature.hurtTimer - deltaSeconds);
-    creature.attackTimer = std::max(0.0f, creature.attackTimer - deltaSeconds);
-    creature.swingTimer = std::max(0.0f, creature.swingTimer - deltaSeconds);
+    tickPassiveTimers(creature, deltaSeconds);
     creature.provokedTimer = std::max(0.0f, creature.provokedTimer - deltaSeconds);
     creature.scanTimer = std::max(0.0f, creature.scanTimer - deltaSeconds);
     creature.decisionTimer -= deltaSeconds;
+
+    // **Standing in fire or lava, which until this landed did nothing at all to
+    // a creature.** `BlockId::Fire` and `isLava` appeared nowhere in this file:
+    // the only heat in the game was the sun on the undead, so a burning forest
+    // killed no animals, "set it on fire" was not a strategy, and the
+    // cooked-drop rule the loot table has carried for milestones - raw beef to
+    // steak - was unreachable, because nothing could ever set `death.burning`.
+    //
+    // "An entity standing inside a fire block takes 1 HP per tick, capped by
+    // the damage-immunity window to once every half second"; lava is the same
+    // clock at four (minecraft.wiki, *Fire* and *Lava*). Both rates are already
+    // published in `Survival.hpp` and spent by the player, so they are read
+    // from there rather than written down a second time here.
+    //
+    // Sampled over the cells the body occupies, the same scan the player's
+    // contact hazards use, so a corner clipping a flame counts and standing
+    // beside one does not. **Skipped outright for a fire-immune species** -
+    // that is what makes it cheap for a magma cube sitting in a lava lake,
+    // which is the one creature that spends its whole life inside this test.
+    const bool immuneToHeat = fireImmune(creature.kind);
+    bool inFire = false;
+    bool inLava = false;
+    if (!immuneToHeat && creature.health > 0) {
+        const Aabb body = bodyBox(species, creature.position, creature.scale);
+        inLava = fluid::sampleFluid(world, body, fluid::FluidKind::Lava).inFluid;
+        for (int x = static_cast<int>(std::floor(body.min.x));
+             x <= static_cast<int>(std::floor(body.max.x)) && !inFire; ++x) {
+            for (int y = static_cast<int>(std::floor(body.min.y));
+                 y <= static_cast<int>(std::floor(body.max.y)) && !inFire; ++y) {
+                for (int z = static_cast<int>(std::floor(body.min.z));
+                     z <= static_cast<int>(std::floor(body.max.z)) && !inFire; ++z) {
+                    inFire = world.blockAt(x, y, z) == BlockId::Fire;
+                }
+            }
+        }
+    }
 
     // **Caught in the sun, and it burns to death rather than being deleted.**
     // `manage` used to retire one outright the moment the sky reached twelve,
@@ -3531,20 +5343,68 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     //
     // Water and shade both stop it, which is the reference's rule and the only
     // reason a drowned is not extinct by breakfast.
-    if (!night && species.nocturnal && species.burnsInDay && !creature.inWater &&
-        creature.health > 0 &&
-        world.skyLightAt(static_cast<int>(std::floor(creature.position.x)),
-                         static_cast<int>(std::floor(creature.position.y)),
-                         static_cast<int>(std::floor(creature.position.z))) >= kBurnSkyLight) {
+    //
+    // **Water is sampled here rather than read off `creature.inWater`, which is
+    // a frame stale.** That flag is written by `step`, and `step` runs after
+    // `think` in `update`, so a zombie stepping out of water took a tick of
+    // burn it had not earned and one stepping in was spared a tick it had. The
+    // sample is placed last in the condition on purpose: only a nocturnal
+    // burner already standing in daylight ever pays for it.
+    //
+    // **Three sources, one clock, and the fastest of them owns it** - lava
+    // beats fire beats the sun, each charging its own published rate. Running
+    // three accumulators side by side would interleave them into a stream
+    // faster than any one is meant to be, which is the mistake
+    // `survival::kHazardInterval` exists to stop the player's hazards making.
+    //
+    // **All three rates are `survival::`-qualified, and that is load-bearing
+    // rather than tidy.** The sun branch alone used the bare names while a
+    // file-local `kBurnDamage` / `kBurnInterval` pair sat at the top of this
+    // TU, so unqualified lookup took the copy - no ambiguity, no warning, and
+    // the two branches either side of it honouring the rule the copy broke.
+    // Leaving the qualifier off any of them makes the same hole the moment
+    // someone writes a constant of that name here again.
+    int heatDamage = 0;
+    float heatInterval = 0.0f;
+    if (inLava) {
+        heatDamage = survival::kLavaDamage;
+        heatInterval = survival::kLavaInterval;
+    } else if (inFire) {
+        heatDamage = survival::kFireDamage;
+        heatInterval = survival::kFireInterval;
+    } else if (!night && species.nocturnal && species.burnsInDay && creature.health > 0 &&
+               world.skyLightAt(static_cast<int>(std::floor(creature.position.x)),
+                                static_cast<int>(std::floor(creature.position.y)),
+                                static_cast<int>(std::floor(creature.position.z))) >=
+                   kBurnSkyLight &&
+               !fluid::sampleFluid(world, bodyBox(species, creature.position, creature.scale))
+                    .inFluid) {
+        heatDamage = survival::kBurnDamage;
+        heatInterval = survival::kBurnInterval;
+    }
+
+    if (heatDamage > 0) {
         creature.burnTimer += deltaSeconds;
-        while (creature.burnTimer >= kBurnInterval) {
-            creature.burnTimer -= kBurnInterval;
-            creature.health -= kBurnDamage;
-            creature.hurtTimer = kHurtSeconds;
+        while (creature.burnTimer >= heatInterval) {
+            creature.burnTimer -= heatInterval;
+            hazardDamage(creature, heatDamage, DeathCause::Burning);
         }
     } else {
-        // Stepping into shade puts it out rather than pausing it, so a zombie
-        // that reaches a doorway with one point left keeps that point.
+        // Stepping into shade or out of the flames puts it out rather than
+        // pausing it, so a zombie that reaches a doorway with one point left
+        // keeps that point.
+        //
+        // **The reference's eight- and fifteen-second afterburn is not modelled
+        // here**, and it is the one part of *Fire* this cannot reach: a mob's
+        // `Fire` tag jumps to 160 ticks the moment it is exposed and keeps
+        // burning after it leaves. That needs a countdown on the record -
+        // `Player` carries exactly one, `burningSeconds`, beside the same
+        // `burnTimer` this uses - and `Creature` has no such field. Adding one
+        // is a `Creature.hpp` edit and a saved-record change, both owned
+        // elsewhere; `survival::kFireBurnSeconds` and `kLavaBurnSeconds` are
+        // already published and waiting for it. Until then a creature stops
+        // burning the instant it is clear, which undercharges the escape and
+        // never overcharges it.
         creature.burnTimer = 0.0f;
     }
 
@@ -3581,9 +5441,18 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     //
     // How often the ray is cast is the interesting part. An exploder needs an
     // answer every tick, because its fuse reverses the instant the line breaks.
-    // Everything else only needs one on the tick it scans, and the answer holds
-    // until the next scan - which is exactly Bedrock's own sampling, and takes
-    // the cost from one ray per creature per frame to two per second.
+    // A creature that has never seen you pays one ray per scan - twice a
+    // second - and the answer holds until the next scan, which is Bedrock's own
+    // sampling.
+    //
+    // **A creature that *is* chasing you pays one every frame, and that is the
+    // case that costs.** `forgetTimer` is refilled to `species.forgetSeconds`
+    // on every tick the player is seen - seventeen for a zombie - so `recheck`
+    // is true for the whole of a chase and for seventeen seconds after it. The
+    // comment here used to promise two rays a second flatly, which was true
+    // only of the creatures that never look at you. It is deliberate rather
+    // than an oversight: a chase is exactly when the answer has to be current,
+    // and it is bounded by how many things can be chasing at once.
     creature.sightTimer = std::max(0.0f, creature.sightTimer - deltaSeconds);
     const float sightRange = std::max(species.senseRange, species.leashRange);
     const bool caresAboutSight =
@@ -3649,10 +5518,14 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     // What it is fighting, resolved once so that every consumer sees the same
     // answer. A remembered quarry outranks a fresh scan, which is what stops a
     // wolf abandoning a wounded sheep for a nearer healthy one on every tick.
+    //
+    // **One leash, used twice**, for the foe below and for the threat further
+    // down. Two copies of "how far can I still care about this" is exactly what
+    // let the two disagree and freeze a golem for ten minutes.
+    const float leash = species.leashRange > 0.0f ? species.leashRange : species.senseRange;
     const Creature* foe = nullptr;
     if (creature.targetId != 0) {
         const Creature* held = creatureById(creature.targetId);
-        const float leash = species.leashRange > 0.0f ? species.leashRange : species.senseRange;
         if (held != nullptr && held->health > 0 &&
             glm::distance(held->position, creature.position) <= leash) {
             foe = held;
@@ -3670,13 +5543,47 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                 (creatureTags(other.kind) & species.hunts) == 0) {
                 continue;
             }
+            // **Three dimensions, matching the retention test above.**
+            // Acquisition measured flat and retention measured in 3-D meant a
+            // foe picked up a slope away was already out of leash on the very
+            // next tick, so a fox on a hillside twitched between chasing and
+            // idling on alternate scans.
             const glm::vec3 offset = other.position - creature.position;
-            const float flat = offset.x * offset.x + offset.z * offset.z;
-            if (flat >= nearest) {
+            const float span = glm::dot(offset, offset);
+            if (span >= nearest) {
                 continue;
             }
-            nearest = flat;
+            nearest = span;
             foe = &other;
+        }
+
+        // **`mustSee` travelled to one of the two targeting rows and not the
+        // other.** `nearestTargetStart`, which picks the player, gates on it
+        // correctly; this scan cast no ray at all, so an iron golem set off
+        // through a village wall after a zombie it had never seen and a wolf
+        // tracked a sheep through a hill. The flag defaults to true, so this is
+        // the whole roster of hunters: cat, wolf, fox, ocelot and the golem.
+        //
+        // **One ray, after the scan, not one per candidate.** A ray through the
+        // world is the expensive thing in this function; asking it of every
+        // grazer in range would have cost the population's worth of them per
+        // scan to reject all but one. Losing the nearest to a wall means going
+        // without a quarry until the next scan rather than falling through to
+        // the second nearest, which is the reference's behaviour too - its
+        // `nearest_attackable_target` picks first and filters after.
+        if (foe != nullptr && species.mustSee) {
+            // Both eyes scaled, or a cub sights from an adult's height - the
+            // "derivation applied to one of a pair and not the other" shape,
+            // and the reason the two lines are written to mirror each other.
+            const glm::vec3 eye =
+                creature.position +
+                glm::vec3{0.0f, species.height * creature.scale * 0.85f, 0.0f};
+            const CreatureSpecies& foeSpecies = speciesInfo(foe->kind);
+            const glm::vec3 foeEye =
+                foe->position + glm::vec3{0.0f, foeSpecies.height * foe->scale * 0.85f, 0.0f};
+            if (!hasLineOfSight(world, eye, foeEye)) {
+                foe = nullptr;
+            }
         }
     }
 
@@ -3694,16 +5601,27 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
     // happens to be standing nearby.
     float yawFromThreat = yawToPlayer + kPi;
     float threatDistance = distance;
+    const Creature* threat = nullptr;
     if (creature.threatId != 0) {
-        const Creature* threat = creatureById(creature.threatId);
-        if (threat != nullptr && threat->health > 0) {
-            const glm::vec3 offset = threat->position - creature.position;
-            threatDistance = std::sqrt(offset.x * offset.x + offset.z * offset.z);
-            yawFromThreat = std::atan2(-offset.x, -offset.z);
-        } else {
+        const Creature* held = creatureById(creature.threatId);
+        if (held == nullptr || held->health <= 0) {
             // Whatever it was is gone, so there is nothing left to run from.
             creature.threatId = 0;
             creature.provokedTimer = 0.0f;
+        } else {
+            const glm::vec3 offset = held->position - creature.position;
+            threatDistance = std::sqrt(offset.x * offset.x + offset.z * offset.z);
+            yawFromThreat = std::atan2(-offset.x, -offset.z);
+            // **Alive but out of reach is a third answer, and it used to be
+            // missing.** Gone cleared both fields, near kept both, and there
+            // was no case in between - so an attacker that simply backed off
+            // stayed the target for the whole of `angerSeconds`, up to 600 s.
+            // The anger deliberately survives: `provokedTimer` and `threatId`
+            // are untouched here, so it re-engages the instant the thing comes
+            // back inside the leash. What stops is the targeting.
+            if (glm::distance(held->position, creature.position) <= leash) {
+                threat = held;
+            }
         }
     }
 
@@ -3731,6 +5649,7 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                                    huntsHere,
                                    seesPlayer,
                                    playerSneaking,
+                                   night,
                                    // The scheduler's 0-10 s stagger, added to
                                    // the clock rather than to a countdown, so a
                                    // village changes shift raggedly instead of
@@ -3749,10 +5668,12 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
                                    yawToFoe,
                                    yawFromThreat,
                                    threatDistance,
+                                   threat,
                                    attack,
                                    m_hits,
                                    m_launches,
                                    m_grazed,
+                                   m_pollinated,
                                    m_random,
                                    m_pathfinder,
                                    m_pathBudget};
@@ -3802,6 +5723,21 @@ void Creatures::think(const World& world, Creature& creature, const glm::vec3& p
         const float power =
             species.explodePower * (creature.charged ? kChargedPowerScale : 1.0f);
         blasts.push_back(CreatureExplosion{creature.position, power});
+        // **This is the eighth site that lowers `health`, and it records like
+        // the other seven.** It did not, and that was a real drop bug rather
+        // than tidiness: `applyExplosion` skips anything already at zero, so
+        // nothing else was ever going to write this death down, and the context
+        // kept whatever had last hurt this Bramble *at any point in its life*.
+        // A skeleton that grazed it half a minute ago left `cause` reading
+        // `Creature` with that skeleton's id, so walking up to the player and
+        // detonating paid out a music disc - the creeper-shot-by-skeleton drop,
+        // through a door nobody had thought to shut.
+        //
+        // `Explosion` rather than a `SelfDestruct` of its own, deliberately: it
+        // *is* a blast, and one enumerator is one thing for a future "did this
+        // die in an explosion?" test to ask about. A second one is a rule that
+        // has to travel, and rules that have to travel are the ones that do not.
+        recordHazard(creature, DeathCause::Explosion);
         // Retired by the next `manage`, the same way anything killed is.
         creature.health = 0;
         creature.fuseTimer = 0.0f;
@@ -3841,14 +5777,19 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     // Clamped exactly as the player's is. The resolver snaps out of at most one
     // block, so a frame long enough to fall further than that lands the body on
     // the wrong side of the floor - and a chunk-loading hitch is long enough.
-    deltaSeconds = std::min(deltaSeconds, 0.05f);
+    //
+    // **Belt, not the owner.** `update` clamps once before anything reads the
+    // frame, so this is already true for every caller it has today; it stays
+    // because `step` is a `private` member with three call sites and the clamp
+    // is a precondition of the sweep below rather than of the caller.
+    deltaSeconds = std::min(deltaSeconds, kMaxDeltaSeconds);
 
     // Ground it cannot see is ground it would fall through: an absent chunk
     // reads as air, so simulating over one drops the creature out of the world
     // and it reappears buried when the chunk returns. Standing still until the
-    // terrain is back is the only safe answer.
-    if (!world.columnResident(static_cast<int>(std::floor(creature.position.x)),
-                              static_cast<int>(std::floor(creature.position.z)))) {
+    // terrain is back is the only safe answer. `separate` asks the same
+    // question through the same helper.
+    if (!onLoadedColumn(world, creature.position)) {
         creature.velocity = glm::vec3{0.0f};
         return;
     }
@@ -3859,18 +5800,111 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
     // was standing in all can - and once inside, every move it tries overlaps
     // something, so it is stuck for good. The reference has its own push-out
     // procedure for exactly this (`RESEARCH.md` §1.6).
+    //
+    // **The search had to get better the moment this could kill.** The clock
+    // below charges a body this pass fails to free, so every way the pass can
+    // fail *spuriously* became a way to die of a search bug rather than of
+    // being buried. Two were already written down as known gaps, and both are
+    // closed here rather than excused:
+    //
+    // 1. **A fixed 0.25 grid phased on the body's own `y` steps over legitimate
+    //    free space.** It only guarantees a hit when the step is no larger than
+    //    the pocket's slack, and 21 of the 58 rows have under 0.25 m of it in a
+    //    one-block pocket - a skeleton has 0.01. **Block floors have no phase
+    //    condition at all**: `position` is the feet, so a body at rest stands
+    //    with its feet on a block boundary, and `floor(y) + 1, + 2, ...` are
+    //    precisely the valid resting heights. Two or three samples, exact.
+    // 2. **Five rows are taller than the shared 2.0 m reach**, so a fully
+    //    entombed iron golem could never clear its own volume however fine the
+    //    sampling got. `Player.cpp` asserts `kUnstickReach >= kHeight` and that
+    //    assert *is* the rule; it could not be mirrored here only because our
+    //    height is a runtime field. So the rule is honoured at runtime instead
+    //    of dropped - the reach covers the body's own height when that is the
+    //    larger. It cannot misplace anything: every candidate is still rejected
+    //    unless it is clear.
+    //
+    // What is left when both loops fail is a body with no free space anywhere
+    // within its own height above it, which is a defensible meaning for
+    // "buried" and the one the clock below is allowed to charge for.
+    bool buried = false;
     if (bodyOverlapsSolid(world, species, creature.position, creature.scale)) {
-        for (float lift = kUnstickStep; lift <= kUnstickReach; lift += kUnstickStep) {
+        buried = true;
+        const float startY = creature.position.y;
+        const float reach = std::max(collision::kUnstickReach, species.height * creature.scale);
+
+        const auto tryLift = [&](float lift) {
+            if (lift <= 0.0f || lift > reach) {
+                return false;
+            }
             glm::vec3 freed = creature.position;
-            freed.y += lift;
-            if (!bodyOverlapsSolid(world, species, freed, creature.scale)) {
-                creature.position = freed;
+            freed.y = startY + lift;
+            if (bodyOverlapsSolid(world, species, freed, creature.scale)) {
+                return false;
+            }
+            creature.position = freed;
+            buried = false;
+            return true;
+        };
+
+        for (float surface = std::floor(startY) + 1.0f; surface <= startY + reach;
+             surface += 1.0f) {
+            if (tryLift(surface - startY)) {
                 break;
+            }
+        }
+        // The fine grid still runs behind them, because a slab, a stair or a
+        // carpet gives a valid standing height that is not on a block boundary
+        // and the block floors alone would miss it.
+        if (buried) {
+            for (float lift = collision::kUnstickStep; lift <= reach;
+                 lift += collision::kUnstickStep) {
+                if (tryLift(lift)) {
+                    break;
+                }
             }
         }
         // Whatever it was doing, it was not doing it from in there.
         creature.velocity = glm::vec3{0.0f};
         creature.onGround = false;
+    }
+
+    // **Still inside it**, with nothing clear within its own height overhead,
+    // and until this clock existed that was a creature stuck alive for ever -
+    // `step` has no other way to end it, because every move it attempts
+    // overlaps and none of the three hazards it does run asks about solid
+    // terrain.
+    //
+    // Worth the cost right now in particular: `kChunkFormatVersion` keeps
+    // moving - it was 5 -> 6 when this was written and is **8 as of 2026-08-19
+    // 11:09**, read out of `WorldStore.cpp:436` rather than remembered - so
+    // every modified chunk in every existing save is being discarded
+    // and regenerated while creature records load unconditionally from their own
+    // file. A creature materialising inside fresh terrain is the normal case
+    // this round, not the edge case. **That is also exactly why the search above
+    // had to be made exact before this was allowed to be lethal** - a villager
+    // dies to this in ten seconds and an iron golem in twenty, with no attacker
+    // to blame it on, so charging one for a pocket the sampling merely missed
+    // would have been the worst kind of silent regression.
+    //
+    // **Deliberately not an early return.** Everything below - the water sample,
+    // the breath counter, the fall accumulator - goes on running exactly as it
+    // did before this clock was added, so the only change here is that health
+    // now moves. Returning would have read more tidily and would have quietly
+    // frozen four other timers on a buried body, which is the "what else does
+    // this early return skip" shape that has already cost this project a
+    // soft-locked respawn screen. The moves below all overlap and fail on their
+    // own, exactly as they did before, and need no help from here.
+    if (buried) {
+        creature.suffocateTimer += deltaSeconds;
+        if (creature.suffocateTimer >= survival::kSuffocationInterval) {
+            creature.suffocateTimer -= survival::kSuffocationInterval;
+            hazardDamage(creature, survival::kSuffocationDamage, DeathCause::Suffocation);
+        }
+    } else {
+        // Free, so the clock starts again from nothing rather than resuming - a
+        // body clipped by a closing door for a frame should never accumulate
+        // toward a hit. `burnTimer` is reset by shade for the same reason.
+        creature.suffocateTimer = 0.0f;
     }
 
     // **Floating is a behaviour, not buoyancy.** Bedrock gives almost every
@@ -3885,7 +5919,7 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
                                                  static_cast<int>(std::floor(eye.z))));
     const fluid::FluidContact water =
         fluid::sampleFluid(world, bodyBox(species, creature.position, creature.scale));
-    creature.inWater = water.inWater;
+    creature.inWater = water.inFluid;
 
     if (creature.inWater) {
         // Water **replaces** gravity rather than being applied after it. Doing
@@ -3926,8 +5960,7 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
             creature.drownTimer += deltaSeconds;
             while (creature.drownTimer >= fluid::kDrownInterval) {
                 creature.drownTimer -= fluid::kDrownInterval;
-                creature.health -= fluid::kDrownDamage;
-                creature.hurtTimer = kHurtSeconds;
+                hazardDamage(creature, fluid::kDrownDamage, DeathCause::Drowning);
             }
         }
     } else {
@@ -3947,20 +5980,26 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
             creature.dryTimer += deltaSeconds;
             if (creature.dryTimer >= species.dryOutSeconds) {
                 creature.dryTimer -= 1.0f;
-                creature.health -= 1;
-                creature.hurtTimer = kHurtSeconds;
+                hazardDamage(creature, 1, DeathCause::DryingOut);
             }
         }
     }
 
     // A chicken flaps and drifts down instead of dropping. The reference scales
-    // a descent by 0.6 every tick, which settles at 1.95 m/s against the 60
+    // a descent by 0.6 every tick, which settles at 2.4 m/s against the 78.4
     // everything else reaches - and it is why one never needs fall damage
     // exempting, because it simply never lands hard.
     //
+    // **That 2.4 is the reference's own number, and reaching it is what proved
+    // `kGravity` had drifted.** This line re-solves the reference's per-tick
+    // constant against whatever gravity is in scope, so with the old creature
+    // gravity of 26 it produced 1.95 and the comment here reported 1.95 as
+    // though the reference had said it.
+    //
     // The factor is re-solved for our timestep rather than used verbatim.
     // `v = (v - g dt) k` settles at `g dt k / (1 - k)`, so applying 0.6 per
-    // *frame* would land somewhere else entirely - 2.55 m/s at 120 fps. Working
+    // *frame* would land somewhere else entirely - it is linear in `dt`, so at
+    // 120 fps it would settle at a sixth of the speed, 0.4 m/s. Working
     // backwards from the speed the reference's own constant produces keeps the
     // descent identical at any frame rate, and comes out at exactly 0.6 when a
     // frame happens to be a tick.
@@ -4039,11 +6078,10 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
             float drive = creature.walking ? speed : 0.0f;
 
             if (species.jets) {
-                // Seeded on the first tick rather than at construction, so a
-                // group of them is out of phase with itself.
-                if (creature.age <= 0.0f) {
-                    creature.jetPhase = random01() * kTwoPi;
-                }
+                // **Seeded in `add` with every other phase**, not on the first
+                // tick here. This asked for `age <= 0.0f`, which quietly stopped
+                // being true the day `age` itself was scattered - a guard a fix
+                // three thousand lines away could switch off without touching it.
                 creature.jetPhase += kJetRate * deltaSeconds;
                 if (creature.jetPhase > kTwoPi) {
                     creature.jetPhase -= kTwoPi;
@@ -4166,12 +6204,32 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
 
     // One axis at a time, vertical first, exactly as the player resolves - so a
     // corner cannot push it diagonally through a wall.
-    creature.position.y += creature.velocity.y * deltaSeconds;
+    //
+    // **Swept, not destination-only.** `ItemEntity.cpp` carries the identical
+    // loop under the identical heading, and a creature needed it at least as
+    // badly. The shortest body on the roster is a 0.30 m silverfish, 0.165 m as
+    // a baby, and a clamped frame at terminal velocity moves 3.92 m - so a test
+    // of only where the move *ended* found clear air under every floor the body
+    // had jumped clean over, and the animal fell out of the world after an
+    // ordinary 13 m cliff. The move is walked in slices no longer than
+    // `kMaxSweepStep`, and the first one to hit stops it; the two
+    // `static_assert`s under `kSpecies` are what keep the slice short enough
+    // for consecutive test boxes to overlap.
+    const float verticalStep = creature.velocity.y * deltaSeconds;
+    const int verticalSlices =
+        std::max(1, static_cast<int>(std::ceil(std::abs(verticalStep) / kMaxSweepStep)));
+    const float verticalSlice = verticalStep / static_cast<float>(verticalSlices);
     creature.onGround = false;
-    if (creature.velocity.y < 0.0f) {
-        creature.fallDistance -= creature.velocity.y * deltaSeconds;
-    }
-    if (bodyOverlapsSolid(world, species, creature.position, creature.scale)) {
+    for (int i = 0; i < verticalSlices; ++i) {
+        // Where *this slice* began, and the ceiling a landing may not be above.
+        // Handing the whole frame's start to `highestSurfaceBelow` would let a
+        // later slice settle on a surface the body had already fallen past,
+        // which is a teleport upward.
+        const float from = creature.position.y;
+        creature.position.y += verticalSlice;
+        if (!bodyOverlapsSolid(world, species, creature.position, creature.scale)) {
+            continue;
+        }
         if (creature.velocity.y < 0.0f) {
             // A slab's top is halfway up its cell, so the resting height comes
             // from the shape table rather than from the cell boundary. Checked
@@ -4179,33 +6237,49 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
             // body already was, and a lower position can meet something the
             // higher one cleared.
             const float surface = highestSurfaceBelow(
-                world, bodyBox(species, creature.position, creature.scale), before.y);
-            const float landed = std::isfinite(surface) ? surface + kCollisionSkin : before.y;
+                world, bodyBox(species, creature.position, creature.scale), from);
+            const float landed = std::isfinite(surface) ? surface + kCollisionSkin : from;
             glm::vec3 settled = creature.position;
             settled.y = landed;
             creature.position.y =
-                bodyOverlapsSolid(world, species, settled, creature.scale) ? before.y : landed;
+                bodyOverlapsSolid(world, species, settled, creature.scale) ? from : landed;
             creature.onGround = true;
-
-            // A hard landing lights most of an exploder's fuse. The reference
-            // buys 1.5 ticks per block and stops five short of the end, so a
-            // creeper dropped on your head goes off almost at once - but never
-            // instantly, and only if it is swelling anyway.
-            if (species.explodePower > 0.0f && creature.fallDistance > 0.5f) {
-                const float ceiling =
-                    std::max(0.0f, species.fuseSeconds - kFallFuseHeadroomTicks / kTicksPerSecond);
-                const float bought =
-                    creature.fallDistance * kFallFuseTicksPerBlock / kTicksPerSecond;
-                creature.fuseTimer = std::min(std::max(creature.fuseTimer, bought), ceiling);
-            }
-            creature.fallDistance = 0.0f;
         } else {
-            creature.position.y = before.y;
+            creature.position.y = from;
         }
         creature.velocity.y = 0.0f;
+        break;
     }
 
-    const auto tryMove = [&](float dx, float dz) {
+    // **How far it fell, measured as ground actually lost rather than as speed
+    // multiplied by time.** Taken after the sweep has resolved, so a slice that
+    // landed contributes only the part of its travel that happened - the old
+    // accumulator added the whole intended step first and let the landing throw
+    // it away, which credited a fall with up to a frame of travel it never made.
+    if (creature.position.y < before.y) {
+        creature.fallDistance += before.y - creature.position.y;
+    }
+
+    // The two consumers of that one number, so it is read in one place and
+    // cleared in one place. It used to be charged inside the landing branch,
+    // where a landing resolved anywhere else - a swim, a flier's hover - left
+    // it to grow without bound.
+    if (creature.onGround) {
+        // A hard landing lights most of an exploder's fuse. The reference buys
+        // 1.5 ticks per block and stops five short of the end, so a creeper
+        // dropped on your head goes off almost at once - but never instantly,
+        // and only if it is swelling anyway.
+        if (species.explodePower > 0.0f && creature.fallDistance > 0.5f) {
+            const float ceiling =
+                std::max(0.0f, species.fuseSeconds - kFallFuseHeadroomTicks / kTicksPerSecond);
+            const float bought = creature.fallDistance * kFallFuseTicksPerBlock / kTicksPerSecond;
+            creature.fuseTimer = std::min(std::max(creature.fuseTimer, bought), ceiling);
+        }
+        chargeFall(creature, species);
+        creature.fallDistance = 0.0f;
+    }
+
+    const auto trySlice = [&](float dx, float dz) {
         const glm::vec3 previous = creature.position;
         creature.position.x += dx;
         creature.position.z += dz;
@@ -4221,6 +6295,16 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
         }
         glm::vec3 raised = previous;
         raised.y += species.stepHeight;
+        // **The rise alone is tested first**, exactly as `Player.cpp` does
+        // before its own step-up. Combining the rise and the horizontal move
+        // into one destination test accepts a place reachable only by cutting
+        // the corner - the body passes through the ceiling over its head on the
+        // way up and arrives somewhere it could never have walked to. Same rule
+        // as the sweep above and for the same reason: a single test of where a
+        // move *ended* says nothing about what it went through.
+        if (bodyOverlapsSolid(world, species, raised, creature.scale)) {
+            return false;
+        }
         raised.x += dx;
         raised.z += dz;
         if (bodyOverlapsSolid(world, species, raised, creature.scale)) {
@@ -4246,6 +6330,57 @@ void Creatures::step(const World& world, Creature& creature, float deltaSeconds)
         creature.position = raised;
         creature.stepSmooth =
             std::min(creature.stepSmooth + (raised.y - previous.y), kMaxStepSmooth);
+        return true;
+    };
+
+    // **Swept, exactly as the vertical is forty lines above, and it was not.**
+    // The same rule, the same function, twelve lines apart, correct in one of
+    // the two places that needed it - which is the shape this file is the
+    // project's worst offender for. The vertical was swept because gravity
+    // reaches 78.4 m/s; the horizontal was left destination-only on the
+    // reasoning that a creature walks at 4 m/s, and that reasoning forgot
+    // knockback. An iron golem's punch is `kKnockbackSpeed` x its 3.15
+    // `knockbackScale`, 14.175 m/s, which is 0.709 m inside one clamped frame -
+    // against a 0.40 m-wide chicken and a 0.198 m baby silverfish. A single
+    // test of where the shove *ended* found open air on the far side of the
+    // village wall, and the bird went through it.
+    //
+    // Partial progress is kept rather than thrown away, which is also a fix:
+    // stopping the whole move on a blocked slice left a body up to a slice
+    // short of the wall it was walking into, and the gap showed.
+    const auto tryMove = [&](float dx, float dz) {
+        // One axis at a time by construction, so the sum is the length.
+        const float travel = std::abs(dx) + std::abs(dz);
+        const int slices = std::max(1, static_cast<int>(std::ceil(travel / kMaxSweepStep)));
+        const float sliceX = dx / static_cast<float>(slices);
+        const float sliceZ = dz / static_cast<float>(slices);
+        for (int i = 0; i < slices; ++i) {
+            // Each slice re-reads the world from wherever the last one left the
+            // body, and a step-up taken by one is a step-up the next measures
+            // from. Nothing is decided once and re-applied - that is the defect
+            // the player's bounce latch exists to fix, and the reason the
+            // vertical hands every slice its own `from`.
+            if (!trySlice(sliceX, sliceZ)) {
+                // **The stopped axis loses its speed, exactly as the vertical
+                // one does on landing and as `ItemEntity`'s `sweepAxis` does.**
+                // Position alone was already right - the body is clamped short
+                // of the wall every frame - but `velocity.xz` is not scratch
+                // here: a hop, a flop, a mid-air drift and a knockback all read
+                // `wish` straight back out of it. Left alone, a slime that
+                // clips a fence keeps its whole launch speed pressed into it
+                // for the rest of the arc, and a creature knocked into a wall
+                // spends its entire `hurtTimer` shoving at the stone. Only the
+                // blocked axis is cleared, so sliding along the wall - which is
+                // what calling this once per axis buys - still works.
+                if (dx != 0.0f) {
+                    creature.velocity.x = 0.0f;
+                }
+                if (dz != 0.0f) {
+                    creature.velocity.z = 0.0f;
+                }
+                return false;
+            }
+        }
         return true;
     };
 
@@ -4330,10 +6465,27 @@ CreatureAttack Creatures::update(const World& world, const glm::vec3& playerFeet
                                  bool night, bool playerSneaking, float timeOfDay,
                                  std::vector<CreatureExplosion>& blasts) {
     CreatureAttack attack;
-    // Refilled once a frame, then spent by whichever creatures ask to search.
-    // A cap here rather than a cap per creature is what bounds the cost against
+
+    // **Clamped once, here, for everything downstream.** `step` clamped and
+    // `think` did not, so during a chunk-loading hitch the burn, anger and fuse
+    // timers in `think` advanced at the raw rate while the drown, dry-out and
+    // air timers in `step` advanced at the clamped one - two families of
+    // per-tick clock running at different speeds through the same stutter.
+    // `separate` took the raw delta too, and with `kSeparationPush` that turned
+    // a one-second hitch into a three-metre shove tested only at its
+    // destination, i.e. straight through a wall.
+    deltaSeconds = std::min(deltaSeconds, kMaxDeltaSeconds);
+
+    // Refilled at a rate, then spent by whichever creatures ask to search. A
+    // cap here rather than a cap per creature is what bounds the cost against
     // the whole population instead of against each animal.
-    m_pathBudget = kPathsPerFrame;
+    //
+    // The fractional part is carried, so a rate that does not divide evenly
+    // into a frame is still delivered on average: at 240 fps this hands out a
+    // single search every sixth frame rather than rounding to none.
+    m_pathCredit = std::min(m_pathCredit + kPathsPerSecond * deltaSeconds, kMaxPathBurst);
+    m_pathBudget = static_cast<int>(m_pathCredit);
+    m_pathCredit -= static_cast<float>(m_pathBudget);
     for (Creature& creature : m_creatures) {
         // A corpse stops deciding things but keeps falling, so it settles on
         // whatever it was standing over instead of hanging where it died. The
@@ -4346,8 +6498,46 @@ CreatureAttack Creatures::update(const World& world, const glm::vec3& playerFeet
             if (creature.deathTimer <= 0.0f) {
                 m_voices.push_back({creature.kind, CreatureSound::Death, creature.position,
                                     creature.scale});
+                // **The same one-shot gate latches the death context**, rather
+                // than a second gate beside it that could disagree. Everything
+                // it needs is destroyed within a tick or two: `think` never
+                // runs on a corpse, so `burnTimer` freezes here whatever the
+                // last live tick left - and loot is not paid out until a full
+                // second later, by which time nothing on the creature still
+                // says it died on fire.
+                creature.death.burning =
+                    creature.burnTimer > 0.0f || creature.death.cause == DeathCause::Burning;
+                // **And who did it, latched by the same gate for the same
+                // reason.** `recordHazard` overwrites `cause` and clears
+                // `killerId` outright, and `step` runs on a corpse - so a cow
+                // the player killed at the water's edge went on drowning while
+                // it toppled, and the drop that was paid out a second later was
+                // the sea's kill with no killer and no rare drops. The hazards
+                // now refuse a corpse outright, which is the real fix;
+                // this is the belt, and it is what makes the next hazard
+                // somebody adds harmless rather than a repeat.
+                creature.death.latched = true;
+                // And where it died, in sixteenths of a block, for the same
+                // reason and in the same breath. `position` does **not** hold
+                // still for the second the body lies there: `separate` shoves
+                // corpses exactly as it shoves the living, so an animal killed
+                // inside a herd drifts several sixteenths before it is retired
+                // - and that shove is per-frame explicit Euler, which put the
+                // frame-rate dependence the whole hash exists to remove back
+                // into the commonest kill there is. Latched here, the drop is
+                // decided by the death and nothing after it.
+                creature.death.place =
+                    glm::ivec2{static_cast<int>(std::floor(creature.position.x * 16.0f)),
+                               static_cast<int>(std::floor(creature.position.z * 16.0f))};
             }
             creature.deathTimer += deltaSeconds;
+            // **The clocks that expire keep expiring**, which they did not:
+            // `think` is skipped entirely for a corpse and it owned all four.
+            // Hygiene rather than a visible fix - see `tickPassiveTimers` for
+            // what does and does not depend on it - and the same extraction
+            // `Player.cpp` made for the same shape at the same time, where it
+            // *was* load-bearing.
+            tickPassiveTimers(creature, deltaSeconds);
             creature.walking = false;
             creature.running = false;
             creature.swelling = false;
@@ -4385,11 +6575,16 @@ void Creatures::applyHits() {
         if (target == nullptr || target->health <= 0) {
             continue;
         }
-        target->health -= hit.damage;
-        target->hurtTimer = kHurtSeconds;
+        // **The damage window decides whether this is a hit at all**, and
+        // everything below hangs off the answer. A pack all swinging in the
+        // same tick used to land every blow, which is the one case the window
+        // exists for.
+        if (!damageCreature(*target, hit.damage)) {
+            continue;
+        }
+        recordBlow(*target, hit.fromId);
         m_voices.push_back({target->kind, CreatureSound::Hurt, target->position, target->scale});
-        target->provokedTimer = speciesInfo(target->kind).angerSeconds;
-        target->threatId = hit.fromId;
+        rouse(*target, hit.fromId);
         // Assigned, never accumulated - the oldest bug in this file, and a pack
         // all landing on one animal in the same tick is exactly the case that
         // exposes it. A flier owns every axis of its own velocity, so a shove
@@ -4412,8 +6607,18 @@ void Creatures::applyHits() {
 void Creatures::separate(const World& world, float deltaSeconds) {
     // A soft horizontal shove rather than a hard constraint, which is what the
     // reference does too: entities never resolve against each other properly,
-    // they just push apart. There is deliberately no vertical component, so one
-    // standing on another stays there rather than being squeezed out.
+    // they just push apart. There is deliberately no vertical *push*, so one
+    // standing on another stays there rather than being squeezed out - but
+    // there is a vertical *bound*, which is a different thing and was missing.
+    //
+    // **This loop was the file's worst case of a rule that exists twelve lines
+    // away.** `step` clamps the frame, refuses to move a body over an unloaded
+    // column and skips corpses; `alertNeighbours`, immediately below, bounds
+    // its pair test in Y. `separate` had none of the four, so a zombie in a
+    // cave thirty metres under a pen shoved the cows above it, a corpse drifted
+    // out of the herd while it toppled, and a chunk-loading hitch pushed an
+    // animal several metres through a wall in one destination-only test. The
+    // frame clamp now has one owner in `update`; the other three are here.
     //
     // Quadratic, and that is fine at a cap of fourteen plus whatever a slime
     // splits into. If the cap ever grows past a hundred this wants a grid.
@@ -4422,9 +6627,20 @@ void Creatures::separate(const World& world, float deltaSeconds) {
             Creature& a = m_creatures[i];
             Creature& b = m_creatures[j];
 
-            const float reach = (speciesInfo(a.kind).halfWidth * a.scale +
-                                 speciesInfo(b.kind).halfWidth * b.scale);
+            const CreatureSpecies& speciesA = speciesInfo(a.kind);
+            const CreatureSpecies& speciesB = speciesInfo(b.kind);
+            const float reach = speciesA.halfWidth * a.scale + speciesB.halfWidth * b.scale;
             glm::vec3 offset = b.position - a.position;
+            // **Bodies that do not overlap in Y are not crowding each other.**
+            // `alertNeighbours` twelve lines down has carried this bound all
+            // along; without it the test was flat, so two squid at different
+            // depths and two bees at different altitudes shoved each other at
+            // over a metre a second. Measured against the taller of the two
+            // rather than a constant, so a slime stack and a bee agree.
+            const float span = std::max(speciesA.height * a.scale, speciesB.height * b.scale);
+            if (std::abs(offset.y) >= span) {
+                continue;
+            }
             offset.y = 0.0f;
             const float distance = std::sqrt(offset.x * offset.x + offset.z * offset.z);
             if (distance >= reach) {
@@ -4446,12 +6662,21 @@ void Creatures::separate(const World& world, float deltaSeconds) {
             // inside a block every move a creature tries overlaps something, so
             // it is stuck for good - which is how a herd crowding a wall buried
             // its own members.
+            //
+            // **Tested per body**, so a corpse or a body over an unloaded
+            // column still pushes the living without being pushed itself.
+            // `update` zeroes a corpse's horizontal velocity on the tick it
+            // dies, with a comment saying that carrying it would slide the body
+            // along the ground while it tips over - and then called this two
+            // statements later, which did exactly that.
             const glm::vec3 nextA = a.position - push * strength;
             const glm::vec3 nextB = b.position + push * strength;
-            if (!bodyOverlapsSolid(world, speciesInfo(a.kind), nextA, a.scale)) {
+            if (a.health > 0 && onLoadedColumn(world, nextA) &&
+                !bodyOverlapsSolid(world, speciesA, nextA, a.scale)) {
                 a.position = nextA;
             }
-            if (!bodyOverlapsSolid(world, speciesInfo(b.kind), nextB, b.scale)) {
+            if (b.health > 0 && onLoadedColumn(world, nextB) &&
+                !bodyOverlapsSolid(world, speciesB, nextB, b.scale)) {
                 b.position = nextB;
             }
         }
@@ -4493,13 +6718,22 @@ void Creatures::alertNeighbours(const Creature& struck, std::size_t struckIndex,
             offset.x * offset.x + offset.z * offset.z > species.alertRange * species.alertRange) {
             continue;
         }
-        other.provokedTimer = species.angerSeconds;
-        other.threatId = threatId;
+        // Same kind by the filter above, so the species row `rouse` looks up is
+        // the one already in hand.
+        rouse(other, threatId);
     }
 }
-
 void Creatures::add(Creature creature) {
     creature.id = m_nextId++;
+    // **Every animation phase is scattered here, at the one door in.** Both of
+    // these are read only by the renderer and neither is a duration, so a fresh
+    // roll per session is enough and there is nothing to save; what matters is
+    // that no two individuals share one. `age` was seeded nowhere at all, which
+    // left a reloaded world of bipeds swaying as one; `jetPhase` was seeded on
+    // the squid's first tick, off a test on `age` that scattering `age` would
+    // have silently disabled.
+    creature.age = random01() * kAgePhaseSpan;
+    creature.jetPhase = random01() * kTwoPi;
     m_creatures.push_back(creature);
 }
 
@@ -4537,7 +6771,21 @@ void Creatures::placeVillager(const glm::vec3& feet, float yaw, bool baby, bool 
 }
 
 void Creatures::restore(CreatureKind kind, const glm::vec3& feet, float yaw, int health, float scale,
-                        bool charged, bool playerBuilt, std::uint8_t profession) {
+                        bool charged, bool playerBuilt, std::uint8_t profession,
+                        const glm::ivec3& bedCell, const glm::ivec3& jobCell,
+                        const glm::ivec3& meetCell) {
+    // **A corrupt id is rejected here rather than trusted.** The record's kind
+    // arrives as a plain number off the disk, and one out of range would index
+    // the species table past its end - `speciesInfo` immediately below being the
+    // first of a hundred readers to do it.
+    //
+    // The rule itself lives in `isKnownCreatureKind` beside the enum, so the
+    // record reader can ask it *before* casting to `CreatureKind` and skip or
+    // report the row, rather than casting blind and relying on this to catch
+    // what it made. Same test, one owner, two callers.
+    if (!isKnownCreatureKind(static_cast<std::int32_t>(kind))) {
+        return;
+    }
     Creature creature;
     creature.kind = kind;
     creature.health = health;
@@ -4546,13 +6794,114 @@ void Creatures::restore(CreatureKind kind, const glm::vec3& feet, float yaw, int
     creature.yaw = yaw;
     creature.targetYaw = yaw;
     creature.headYaw = yaw;
-    creature.scale = scale;
+    // **`kind` was treated as a value off the disk and these two were not**, and
+    // the difference is not a matter of degree. `villagerSkinRow` computes
+    // `kVillagerProfessionSkinRow + (profession - 1) * 64`, so a byte of 200
+    // addresses row sixteen thousand of a sheet that has four thousand seven
+    // hundred - and `professionName`'s `default:` answers "Unemployed" and hides
+    // it. `scale` is worse: it multiplies straight into `bodyBox`, so a NaN or a
+    // 1e30 off a truncated save produces a collision box that swallows the
+    // world and shoves every creature in it.
+    //
+    // Clamped rather than rejected, because a save with one odd byte should
+    // cost you a villager's coat and not the animal. `kNitwit` is the last
+    // outfit in the sheet, so it is also the largest legal index.
+    creature.scale = std::isfinite(scale) ? std::clamp(scale, kBabyScale, 1.0f) : 1.0f;
     creature.charged = charged;
     creature.playerBuilt = playerBuilt;
-    creature.profession = profession;
+    creature.profession = std::min(profession, kNitwit);
+    // A villager's whole working life. Without these three a reloaded armourer
+    // could never reach `workStart`, which needs `jobCell.y >= 0`, and could
+    // never re-claim either - the claim gate is closed to anyone who already has
+    // a profession. Worse, the free-station scan reads every restored villager
+    // as claiming nothing, so the next one to wake up takes the same anvil and
+    // the village ends up with two armourers and no bed between them.
+    creature.bedCell = bedCell;
+    creature.jobCell = jobCell;
+    creature.meetCell = meetCell;
     creature.phaseDelay = random01() * kSchedulePhaseStagger;
     pickWanderGoal(creature, m_random);
     add(creature);
+
+    // **What comes back off the disk is what that chunk's one-off pass already
+    // produced.** `m_populated` is session-only, so without this every reload
+    // re-ran `populateChunks` over chunks whose animals had just been restored:
+    // a second herd beside the first, and - because the village block answered
+    // to no cap at all - two of every villager and two iron golems per village
+    // after one load, six of each after five, standing in pairs and contending
+    // for the same beds.
+    //
+    // The three claim cells are marked as well as the body, because a villager
+    // walks and its bed does not. A resident restored at the far end of its
+    // village would otherwise leave its own birth chunk unmarked and be born
+    // again beside its own bed.
+    markPopulated(feet);
+    if (bedCell.y >= 0) {
+        markPopulated(glm::vec3{bedCell});
+    }
+    if (jobCell.y >= 0) {
+        markPopulated(glm::vec3{jobCell});
+    }
+    if (meetCell.y >= 0) {
+        markPopulated(glm::vec3{meetCell});
+    }
+}
+
+namespace {
+
+/// The `m_populated` key, packed and unpacked, as one pair so the inverse
+/// cannot drift from the forward direction. Both go through `std::uint32_t`:
+/// the coordinates are signed, and letting either half sign-extend turns every
+/// negative chunk - half the world - into a key that never matches.
+constexpr std::uint64_t packColumn(int chunkX, int chunkZ) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
+           static_cast<std::uint32_t>(chunkZ);
+}
+
+constexpr glm::ivec2 unpackColumn(std::uint64_t key) {
+    return glm::ivec2{static_cast<int>(static_cast<std::uint32_t>(key >> 32)),
+                      static_cast<int>(static_cast<std::uint32_t>(key))};
+}
+
+/// **The single edit that makes these fail is dropping either `std::uint32_t`
+/// cast**, which is the whole hazard: a save written before the change reloads
+/// with every negative column missing, the one-off animal pass runs again over
+/// all of them, and the herd doubles on every reload west or north of the
+/// origin. Nothing else in the system would report it.
+static_assert(unpackColumn(packColumn(0, 0)) == glm::ivec2{0, 0});
+static_assert(unpackColumn(packColumn(-1, -1)) == glm::ivec2{-1, -1});
+static_assert(unpackColumn(packColumn(-7, 12)) == glm::ivec2{-7, 12});
+static_assert(unpackColumn(packColumn(12, -7)) == glm::ivec2{12, -7});
+static_assert(packColumn(-7, 12) != packColumn(12, -7), "and the two halves are not transposable");
+
+} // namespace
+
+std::uint64_t Creatures::populatedKey(int chunkX, int chunkZ) {
+    return packColumn(chunkX, chunkZ);
+}
+
+void Creatures::markPopulated(const glm::vec3& feet) {
+    m_populated.insert(populatedKey(static_cast<int>(std::floor(feet.x)) >> kChunkShift,
+                                    static_cast<int>(std::floor(feet.z)) >> kChunkShift));
+}
+
+std::vector<glm::ivec2> Creatures::populatedColumns() const {
+    std::vector<glm::ivec2> columns;
+    columns.reserve(m_populated.size());
+    for (const std::uint64_t key : m_populated) {
+        // **The only place the packing is undone**, through the inverse that
+        // sits beside the forward direction and is asserted against it.
+        columns.push_back(unpackColumn(key));
+    }
+    return columns;
+}
+
+void Creatures::restorePopulatedColumn(int chunkX, int chunkZ) {
+    m_populated.insert(populatedKey(chunkX, chunkZ));
+}
+
+void Creatures::restorePopulatedColumn(const glm::ivec2& column) {
+    restorePopulatedColumn(column.x, column.y);
 }
 
 void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) {
@@ -4572,8 +6921,7 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
 
     for (int cz = centreZ - populateRadius; cz <= centreZ + populateRadius; ++cz) {
         for (int cx = centreX - populateRadius; cx <= centreX + populateRadius; ++cx) {
-            const auto key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cx)) << 32) |
-                             static_cast<std::uint32_t>(cz);
+            const auto key = populatedKey(cx, cz);
             if (m_populated.count(key) != 0) {
                 continue;
             }
@@ -4592,7 +6940,18 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
             // a chunk is built on a worker. The layout is a pure function of
             // the seed, so the same column always produces the same villagers
             // however you approach it — the same guarantee the herd below has.
-            {
+            //
+            // **Under the same ceiling the herd honours, which it was not.**
+            // This block sat above the population guard as well as above the
+            // `kChunkSpawnChance` roll, so village population answered to
+            // nothing at all: every reload re-ran it over chunks whose people
+            // had just been restored from disk, and after five loads a village
+            // held six of every resident and six iron golems, contending in
+            // pairs for the same beds. `restore` marking what it brings back is
+            // what closes the duplication; this is what bounds whatever still
+            // slips past it - a resident who wandered out of the chunk it was
+            // born in before the save, which nothing in this file can see.
+            if (m_creatures.size() < generatedCeiling(m_activeRadius)) {
                 const village::Nearby villages = village::plansNear(world.seed(), cx, cz);
                 village::Resident residents[village::kMaxResidents];
                 const int born = village::residentsIn(villages, cx, cz, residents,
@@ -4613,6 +6972,33 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
                           {static_cast<float>(where.x) + 0.5f, static_cast<float>(where.y),
                            static_cast<float>(where.z) + 0.5f},
                           0.0f);
+                }
+
+                // The animals in the paddocks. Every pen in the world was a
+                // fenced empty square until 2026-08-19 — the fences were built
+                // and nothing ever put anything inside them, so a village was
+                // no source of starting livestock at all.
+                //
+                // **This sits here, and not in the generator, for all four of
+                // the reasons the two blocks above it do.** `village::
+                // livestockIn` only *derives* where the animals stand, which
+                // keeps chunk generation a pure function of `(seed,
+                // chunkCoord)`; the spawn is a world mutation and so belongs to
+                // the one owner of this list, on the main thread. Sitting
+                // inside the `m_populated` guard is what stops a pen restocking
+                // itself on every reload — the same defect that once left a
+                // village holding six of every resident after five loads — and
+                // sitting inside `generatedCeiling` is what keeps a herd of
+                // cows from eating the creature budget.
+                village::Livestock penned[village::kMaxLivestock];
+                const int stock =
+                    village::livestockIn(villages, cx, cz, penned, village::kMaxLivestock);
+                for (int i = 0; i < stock; ++i) {
+                    const village::Livestock& animal = penned[i];
+                    place(animal.kind,
+                          {static_cast<float>(animal.x) + 0.5f, static_cast<float>(animal.y),
+                           static_cast<float>(animal.z) + 0.5f},
+                          hashUnit(chunkHash(world.seed(), animal.x, animal.z)) * kTwoPi);
                 }
             }
 
@@ -4647,15 +7033,7 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
             }
 
             seed = chunkHash(seed, cx, cz);
-            float roll = hashUnit(seed) * total;
-            auto chosen = CreatureKind::Count;
-            for (std::size_t i = 0; i < static_cast<std::size_t>(CreatureKind::Count); ++i) {
-                roll -= weights[i];
-                if (weights[i] > 0.0f && roll <= 0.0f) {
-                    chosen = static_cast<CreatureKind>(i);
-                    break;
-                }
-            }
+            const CreatureKind chosen = drawSpecies(weights, hashUnit(seed) * total);
             if (chosen == CreatureKind::Count) {
                 continue;
             }
@@ -4669,9 +7047,17 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
                     return;
                 }
                 seed = chunkHash(seed, n, cz);
-                const int x = originX + static_cast<int>(hashUnit(seed) * 32.0f);
+                // **`kChunkSize`, not a 32 that happens to agree with it.** The
+                // origin two lines up derives from `cx << kChunkShift`, so a
+                // literal here agrees only while the shift is 5. Nothing would
+                // change type if the chunk size moved, so the compiler could not
+                // have caught it - spawns would silently cluster in one corner
+                // of every chunk (failure shape #1).
+                const int x =
+                    originX + static_cast<int>(hashUnit(seed) * static_cast<float>(kChunkSize));
                 seed = chunkHash(seed, n, cx);
-                const int z = originZ + static_cast<int>(hashUnit(seed) * 32.0f);
+                const int z =
+                    originZ + static_cast<int>(hashUnit(seed) * static_cast<float>(kChunkSize));
 
                 const int surface = world.highestSolid(x, z);
                 if (surface < 0) {
@@ -4683,8 +7069,11 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
                     continue;
                 }
                 seed = chunkHash(seed, z, x);
-                const int y =
-                    species.swims ? waterColumnY(world, x, z, hashUnit(seed)) : surface + 1;
+                // `spawnsInOpenWater`, not `swims` - the turtle swims and is
+                // still placed on the sand. One owner, three call sites.
+                const int y = spawnsInOpenWater(species)
+                                  ? waterColumnY(world, x, z, hashUnit(seed))
+                                  : surface + 1;
                 if (y < 0 || !canSpawnAt(world, species, x, y, z)) {
                     continue;
                 }
@@ -4709,100 +7098,762 @@ void Creatures::populateChunks(const World& world, const glm::vec3& playerFeet) 
     }
 }
 
-/// What a species leaves behind when killed.
+namespace {
+
+/// Per-slot conditions the reference states in words rather than in numbers.
 ///
-/// A switch beside the table rather than three more columns on all sixty rows:
-/// plenty of species drop nothing, and the rest would be `None, 0, 0` repeated.
-/// Anything not named here drops nothing.
-///
-/// **Two drops, because most of the roster has two**: an animal leaves its meat
-/// and its hide, a spider its string and its eye. A third has never been needed.
-struct LootRule {
-    ItemId item;
-    int min;
-    int max;
-    ItemId extra = ItemId::None;
-    int extraMin = 0;
-    int extraMax = 0;
+/// A flag rather than an `if` beside the table for the reason the slime paid
+/// for: its rule lived in a comment, the comment said the opposite of the code,
+/// and every audit read the comment and moved on. A flag is checked by the one
+/// emitter and cannot disagree with itself.
+enum class LootFlag : std::uint8_t {
+    None = 0,
+    /// Bedrock's "only when killed by a player". Among the **common** drops the
+    /// spider's eye alone; every rare drop is player-only as well and says so by
+    /// being in the rare pool rather than by carrying this.
+    PlayerKill = 1u << 0,
+    /// Only when the killing blow was a bolt - the turtle's bowl, and nothing
+    /// else in the roster.
+    Lightning = 1u << 1,
+    /// Fires **only if the slot above it did not**. The polar bear alone:
+    /// Bedrock rolls raw cod at three-quarters *or* raw salmon at one quarter,
+    /// and two independent chances would leave some bears carrying both and
+    /// some carrying neither.
+    Otherwise = 1u << 2,
 };
 
-LootRule lootFor(CreatureKind kind) {
-    switch (kind) {
-    case CreatureKind::Pig:
-        return {ItemId::RawPorkchop, 1, 3};
-    case CreatureKind::Cow:
-    case CreatureKind::MushroomCow:
-        return {ItemId::RawBeef, 1, 3, ItemId::Leather, 1, 2};
-    case CreatureKind::Chicken:
-        return {ItemId::RawChicken, 1, 1, ItemId::Feather, 1, 2};
-    case CreatureKind::Sheep:
-        return {ItemId::RawMutton, 1, 2, itemForBlock(BlockId::WhiteWool), 1, 1};
-    case CreatureKind::Rabbit:
-        return {ItemId::RawRabbit, 1, 1, ItemId::RabbitHide, 1, 1};
-    case CreatureKind::Panda:
-        return {itemForBlock(BlockId::Bamboo), 1, 2};
-    case CreatureKind::Horse:
-    case CreatureKind::Donkey:
-    case CreatureKind::Mule:
-    case CreatureKind::Llama:
-    case CreatureKind::TraderLlama:
-        return {ItemId::Leather, 1, 2};
+constexpr std::uint8_t lootFlag(LootFlag flag) {
+    return static_cast<std::uint8_t>(flag);
+}
 
-    // The water half. **The salmon drops salmon** - it shared the cod's row
-    // until the audit noticed, so the one fish with its own meat item in the
-    // catalogue was unobtainable.
-    case CreatureKind::Cod:
-    case CreatureKind::Dolphin:
-        return {ItemId::RawCod, 1, 1};
-    case CreatureKind::Salmon:
-        return {ItemId::RawSalmon, 1, 1};
-    case CreatureKind::TropicalFish:
-        return {ItemId::RawTropicalFish, 1, 1};
-    case CreatureKind::Pufferfish:
-        return {ItemId::RawPufferfish, 1, 1};
-    case CreatureKind::Squid:
-        return {ItemId::InkSac, 1, 3};
-    case CreatureKind::GlowSquid:
-        return {ItemId::GlowInkSac, 1, 3};
-    case CreatureKind::Turtle:
-        return {ItemId::Scute, 1, 1};
+/// Chances are in tenths of a percent, so that the reference's own numbers go
+/// in unrounded. Whole percents cannot hold the standard 2.5% rare drop, and a
+/// denominator of forty - which can - cannot hold the drowned's 11%.
+constexpr int kChanceScale = 1000;
+constexpr std::uint16_t kAlways = static_cast<std::uint16_t>(kChanceScale);
 
-    // The village guard. Three to five ingots always, and nought to two poppies
-    // — the reference's own two pools, and the only mob whose drop is worth
-    // more than it cost to build.
-    case CreatureKind::IronGolem:
-        return {ItemId::IronIngot, 3, 5, itemForBlock(BlockId::Poppy), 0, 2};
+/// One stack a death may leave behind.
+struct LootDrop {
+    ItemId item = ItemId::None;
+    /// What `item` becomes when the body was burning. Bedrock's whole rule is
+    /// the single bit `DeathContext::burning` carries - *"only when on fire"* -
+    /// so lava, a campfire and an undead caught at dawn all cook it alike.
+    /// Java additionally counts a Fire Aspect weapon; there is no enchanting
+    /// here, which makes the simpler rule the complete one. `None` means this
+    /// drop has no cooked form - a tropical fish has none.
+    ///
+    /// **Reachable at last**: `think` charges fire and lava contact, so a cow
+    /// driven into a flame now drops steak. The sun still cooks the undead's
+    /// drops too, which is the reference's rule - one bit, every source alike.
+    ItemId cooked = ItemId::None;
+    /// Uniform and inclusive. **A minimum of zero is the reference's own number
+    /// for most of the roster**, and is the whole reason a kill can pay nothing.
+    std::uint8_t min = 0;
+    std::uint8_t max = 0;
+    /// Out of `kChanceScale`.
+    std::uint16_t chance = kAlways;
+    std::uint8_t flags = 0;
+};
 
-    // The hostiles.
-    case CreatureKind::Spider:
-    case CreatureKind::CaveSpider:
-        return {ItemId::String, 1, 2, ItemId::SpiderEye, 1, 1};
-    case CreatureKind::Zombie:
-    case CreatureKind::Husk:
-    case CreatureKind::Drowned:
-    case CreatureKind::ZombieVillager:
-    case CreatureKind::ZombiePrincepin:
-        return {ItemId::RottenFlesh, 1, 2};
-    case CreatureKind::Skeleton:
-    case CreatureKind::Stray:
-    case CreatureKind::Bogged:
-    case CreatureKind::Blackbone:
-    case CreatureKind::SkeletonHorse:
-        return {ItemId::Bone, 1, 2};
-    case CreatureKind::Bramble:
-        return {ItemId::Gunpowder, 1, 2};
-    // Only the two larger sizes, which is the reference's rule: a small slime
-    // is what a bigger one broke into and leaves nothing more behind.
-    case CreatureKind::SlimeMedium:
-    case CreatureKind::SlimeLarge:
-        return {ItemId::Slimeball, 1, 2};
-    case CreatureKind::MagmaCubeMedium:
-    case CreatureKind::MagmaCubeLarge:
-        return {ItemId::MagmaCream, 1, 1};
-    case CreatureKind::Witch:
-        return {ItemId::Redstone, 1, 2, ItemId::GlassBottle, 1, 1};
-    default:
-        return {ItemId::None, 0, 0};
+/// One entry of the witch's weighted pool.
+struct LootPoolEntry {
+    ItemId item = ItemId::None;
+    /// Relative, against whatever else the row lists. The reference gives the
+    /// stick two shares and the other six one apiece, so a roll picks a stick
+    /// **2 in 8 - a quarter**, and each of the rest an eighth. It is worth
+    /// writing the denominator down: the redstone entry was missing here for a
+    /// while, which made the same stick 2 in 7, and a pool's odds are the one
+    /// thing you cannot read off a single row.
+    std::uint8_t weight = 0;
+    std::uint8_t min = 0;
+    std::uint8_t max = 0;
+};
+
+/// Three, because the turtle - seagrass, scute and a bowl - is the widest row
+/// in the roster today. Widening this is one number; the asserts below prove
+/// nothing overflowed it.
+constexpr std::size_t kLootSlots = 3;
+/// Three, because the zombie's iron ingot, carrot and potato is the largest
+/// shared pool the reference has for anything here.
+constexpr std::size_t kLootRareSlots = 3;
+/// Seven, which is the witch's pool exactly: stick, glass bottle, glowstone
+/// dust, gunpowder, spider eye, sugar **and redstone**. It read six until the
+/// redstone was found sitting outside the pool as a guaranteed drop.
+constexpr std::size_t kLootPoolSlots = 7;
+
+/// Everything one species leaves behind, one row each.
+///
+/// **The twin of `kSpecies`, deliberately.** It used to be a `switch`, which
+/// meant a species could be added to the enum and simply drop nothing, silently
+/// and for ever - which is how five of them came to. Adding an animal is now
+/// adding a row in each of two adjacent arrays, and forgetting the second is a
+/// build failure rather than an animal nobody notices is empty.
+struct LootRow {
+    std::array<LootDrop, kLootSlots> common{};
+
+    /// One shared roll picks **one** of these. The reference's own rule, and
+    /// the reason a zombie's iron ingot, carrot and potato are 0.833% each
+    /// rather than 2.5% each - they share the 2.5%, they do not each get one.
+    ///
+    /// **Always player-only**, which every rare drop in the reference is. That
+    /// is what `DeathCause::Player` exists for: reading `threatId == 0` instead
+    /// would pay an iron ingot for every zombie that burned off at dawn.
+    std::array<ItemId, kLootRareSlots> rare{};
+    std::uint8_t rareCount = 0;
+    /// Out of `kChanceScale`. 25 is the reference's flat 2.5%.
+    std::uint16_t rareChance = 0;
+
+    /// The witch alone. One to three rolls, each picking a single item by
+    /// weight and paying nought to two of it, repeats allowed - which is how
+    /// one witch can leave six sticks and another none at all.
+    std::array<LootPoolEntry, kLootPoolSlots> pool{};
+    std::uint8_t poolRollsMin = 0;
+    std::uint8_t poolRollsMax = 0;
+};
+
+/// Every number below is Bedrock's, from `RESEARCH.md` §5.1 (the drop rules)
+/// and §5.2 (the roster table), with the per-species loot tables themselves
+/// read from Mojang's own published behaviour pack:
+/// <https://learn.microsoft.com/en-us/minecraft/creator/reference/source/vanillabehaviorpack_snippets/loot_tables/entities/>
+/// (one JSON per mob - `witch`, `spider`, `zombie_pigman` and the rest).
+///
+/// **That citation is load-bearing and it used to be a lie**: this comment
+/// named `ml-04-mobdrops.md` §4.2 and §4.4, a file that has never existed in
+/// this repository, so not one of these fifty-eight rows could be checked
+/// against anything without leaving the tree. Cite something a reader can open.
+///
+/// **Where a minimum is zero it is zero in the reference**; this table used to
+/// read `1` in **twenty-nine** places, so every kill paid out and nothing could
+/// ever roll empty. Two of the twenty-nine turned out to be a *chance* rather
+/// than a range - see the spider - which leaves twenty-seven reading `0` today.
+///
+/// Deliberately **not** sized `[Count]`: an explicit size would zero-fill a
+/// forgotten row into a silently empty animal, where an unsized array trips the
+/// assert underneath.
+constexpr LootRow kLoot[] = {
+    // Sheep. Its wool is the one drop the reference exempts from Looting in
+    // both directions, death and shearing alike - which will matter when there
+    // is shearing to exempt.
+    {.common = {{{ItemId::RawMutton, ItemId::CookedMutton, 1, 2},
+                 {itemForBlock(BlockId::WhiteWool), ItemId::None, 1, 1}}}},
+    // Cow.
+    {.common = {{{ItemId::RawBeef, ItemId::CookedBeef, 1, 3},
+                 {ItemId::Leather, ItemId::None, 0, 2}}}},
+    // Pig.
+    {.common = {{{ItemId::RawPorkchop, ItemId::CookedPorkchop, 1, 3}}}},
+    // Bramble. The reference's creeper also drops a music disc when a skeleton
+    // kills it, which is handled beside the table because it needs to know what
+    // killed it and a row cannot ask.
+    {.common = {{{ItemId::Gunpowder, ItemId::None, 0, 2}}}},
+    // Chicken. Exactly one bird, never two - the only meat in the roster with
+    // no range at all.
+    {.common = {{{ItemId::RawChicken, ItemId::CookedChicken, 1, 1},
+                 {ItemId::Feather, ItemId::None, 0, 2}}}},
+    // Cat. Dropped nothing until now.
+    {.common = {{{ItemId::String, ItemId::None, 0, 2}}}},
+    // Camel. Nothing: a saddle is only ever there because a player put it there.
+    {},
+    // Horse.
+    {.common = {{{ItemId::Leather, ItemId::None, 0, 2}}}},
+    // Mule.
+    {.common = {{{ItemId::Leather, ItemId::None, 0, 2}}}},
+    // Llama.
+    {.common = {{{ItemId::Leather, ItemId::None, 0, 2}}}},
+    // Donkey.
+    {.common = {{{ItemId::Leather, ItemId::None, 0, 2}}}},
+    // Goat. Nothing. Its horn is a ramming drop, not a death drop.
+    {},
+    // Rabbit. The foot is the one rare in the roster at ten per cent rather
+    // than the standard two and a half.
+    {.common = {{{ItemId::RawRabbit, ItemId::CookedRabbit, 0, 1},
+                 {ItemId::RabbitHide, ItemId::None, 0, 1}}},
+     .rare = {{ItemId::RabbitFoot}},
+     .rareCount = 1,
+     .rareChance = 100},
+    // Wolf. Nothing - its armour drops only if a player put it on.
+    {},
+    // Frog.
+    {},
+    // Fox. Nothing of its own: Bedrock drops whatever it spawned holding, and
+    // nothing here spawns a fox holding anything.
+    {},
+    // Ocelot.
+    {},
+    // PolarBear. Cod at three-quarters *or* salmon at one quarter, never both -
+    // see `LootFlag::Otherwise`. Dropped nothing until now.
+    {.common = {{{ItemId::RawCod, ItemId::CookedCod, 0, 2, 750},
+                 {ItemId::RawSalmon, ItemId::CookedSalmon, 0, 2, kAlways,
+                  lootFlag(LootFlag::Otherwise)}}}},
+    // Panda. Nought to two is Bedrock's; Java gives exactly one.
+    {.common = {{{itemForBlock(BlockId::Bamboo), ItemId::None, 0, 2}}}},
+    // SlimeSmall. **The small one is the only size that drops slimeballs**, and
+    // this table had it exactly backwards for twenty milestones behind a comment
+    // that stated the rule confidently and stated it inverted. A large slime
+    // still pays more than a small one, because it breaks into several of them.
+    {.common = {{{ItemId::Slimeball, ItemId::None, 0, 2}}}},
+    // SlimeMedium. Nothing - it splits, and the pieces pay.
+    {},
+    // SlimeLarge. Nothing, for the same reason.
+    {},
+    // Spider. The eye is player-only in the reference; a spider that burned to
+    // death or drowned leaves string and nothing else.
+    //
+    // **One eye at 33.3%, not nought-to-one at fifty.** Bedrock writes it as
+    // `set_count {min: -1, max: 1}` and clamps at zero, so the three outcomes
+    // are -1, 0 and 1 and only the last pays - the widely quoted one-in-three.
+    // A uniform 0-1 here reads identically at a glance and pays half again as
+    // many eyes, which is the whole fermented-spider-eye economy off by 50%.
+    {.common = {{{ItemId::String, ItemId::None, 0, 2},
+                 {ItemId::SpiderEye, ItemId::None, 1, 1, 333,
+                  lootFlag(LootFlag::PlayerKill)}}}},
+    // CaveSpider. The reference groups it with the spider on one row.
+    {.common = {{{ItemId::String, ItemId::None, 0, 2},
+                 {ItemId::SpiderEye, ItemId::None, 1, 1, 333,
+                  lootFlag(LootFlag::PlayerKill)}}}},
+    // Zombie. One 2.5% roll picks one of the three, so each is 0.833% - not
+    // three separate 2.5% rolls, which would be three times as generous.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 2}}},
+     .rare = {{ItemId::IronIngot, ItemId::Carrot, ItemId::Potato}},
+     .rareCount = 3,
+     .rareChance = 25},
+    // Skeleton. **Arrows are new**: three species carry them in the reference
+    // and none of them dropped one here, which left arrows with no mob source.
+    {.common = {{{ItemId::Bone, ItemId::None, 0, 2}, {ItemId::Arrow, ItemId::None, 0, 2}}}},
+    // Villager.
+    {},
+    // Husk.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 2}}},
+     .rare = {{ItemId::IronIngot, ItemId::Carrot, ItemId::Potato}},
+     .rareCount = 3,
+     .rareChance = 25},
+    // Silverfish.
+    {},
+    // Blackbone. Outside the Overworld scope, but it is a row today and it was
+    // wrong today. Its skull is not in the catalogue, so that 2.5% is left out.
+    {.common = {{{ItemId::Coal, ItemId::None, 0, 1}, {ItemId::Bone, ItemId::None, 0, 2}}}},
+    // Stray. Its arrow of Slowness needs a named tipped arrow and is left out.
+    {.common = {{{ItemId::Bone, ItemId::None, 0, 2}, {ItemId::Arrow, ItemId::None, 0, 2}}}},
+    // Bogged. Its arrow of Poison is left out for the same reason.
+    {.common = {{{ItemId::Bone, ItemId::None, 0, 2}, {ItemId::Arrow, ItemId::None, 0, 2}}}},
+    // ZombieVillager. The reference gives it the zombie's rare pool entire,
+    // which is why its iron ingot is quoted at the same 0.833%.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 2}}},
+     .rare = {{ItemId::IronIngot, ItemId::Carrot, ItemId::Potato}},
+     .rareCount = 3,
+     .rareChance = 25},
+    // Witch. One to three rolls over a pool of **seven entries carrying eight
+    // shares** - the stick counts twice - each paying nought to two of whatever
+    // it picked, and **there is no guaranteed drop at all**.
+    //
+    // This row read "redstone 4-8 guaranteed, then a six-entry pool", which was
+    // by a wide margin the largest fidelity error in the roster and the only
+    // one that mattered economically. The reference's redstone is the seventh
+    // entry of the same pool - weight 1, nought to two - so the expected yield
+    // is 2 rolls x 1/8 x 1 = **0.25 dust per witch**. Guaranteed 4-8 pays 6.0
+    // every single time: twenty-four times the reference, on the most valuable
+    // common material in the game, which turns a lottery mob into a redstone
+    // farm and every redstone recipe into a witch hunt.
+    //
+    // Her 8.5% potion needs her to be killed mid-drink, and nothing records
+    // that yet.
+    {.pool = {{{ItemId::Stick, 2, 0, 2},
+               {ItemId::GlassBottle, 1, 0, 2},
+               {ItemId::GlowstoneDust, 1, 0, 2},
+               {ItemId::Gunpowder, 1, 0, 2},
+               {ItemId::SpiderEye, 1, 0, 2},
+               {ItemId::Sugar, 1, 0, 2},
+               {ItemId::Redstone, 1, 0, 2}}},
+     .poolRollsMin = 1,
+     .poolRollsMax = 3},
+    // WanderingTrader. Two leads, always, however it died. Dropped nothing
+    // until now.
+    //
+    // **A deliberate divergence, and it is the "however it died" half.** The
+    // reference drops the two leads because they are the ones tying its pair of
+    // trader llamas, so a trader that never had llamas drops nothing - and ours
+    // never has any, because llamas are not on the roster. Dropping them
+    // unconditionally is the closest thing to the reference's *outcome* that
+    // can be written before the llamas exist; the day they do, this becomes a
+    // count of the leashed animals it is still holding.
+    {.common = {{{ItemId::Lead, ItemId::None, 2, 2}}}},
+    // Princepin. No common drops in the reference; its sword is equipment.
+    {},
+    // Drowned. Copper at 11% on a player kill. Its nautilus shell is 100% *if
+    // it spawned holding one*, and nothing here records what a creature spawned
+    // holding, so that is left out rather than guessed at a flat rate.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 2}}},
+     .rare = {{ItemId::CopperIngot}},
+     .rareCount = 1,
+     .rareChance = 110},
+    // Cod. Every fish leaves a bone a quarter of the time in Bedrock; Java
+    // gives bone *meal* at a twentieth, and that is not the reference here.
+    {.common = {{{ItemId::RawCod, ItemId::CookedCod, 1, 1},
+                 {ItemId::Bone, ItemId::None, 1, 1, 250}}}},
+    // Salmon. **Its own meat**, which it did not have until an earlier audit -
+    // it shared the cod's row, so raw salmon was unobtainable.
+    {.common = {{{ItemId::RawSalmon, ItemId::CookedSalmon, 1, 1},
+                 {ItemId::Bone, ItemId::None, 1, 1, 250}}}},
+    // Pufferfish. No cooked form in the reference, so none here.
+    {.common = {{{ItemId::RawPufferfish, ItemId::None, 1, 1},
+                 {ItemId::Bone, ItemId::None, 1, 1, 250}}}},
+    // Squid.
+    {.common = {{{ItemId::InkSac, ItemId::None, 1, 3}}}},
+    // GlowSquid.
+    {.common = {{{ItemId::GlowInkSac, ItemId::None, 1, 3}}}},
+    // Turtle. Seagrass is the reference's actual death drop and is new here.
+    //
+    // **The scute is a deliberate divergence and stays until it has somewhere
+    // else to come from.** In the reference a scute comes off a baby turtle
+    // *growing up* and never off a corpse - but there is no growth clock here,
+    // and the scute is the sole ingredient of a five-scute recipe, so removing
+    // it would make that recipe unreachable rather than merely rare. Delete
+    // this slot on the day baby turtles grow.
+    {.common = {{{itemForBlock(BlockId::Seagrass), ItemId::None, 0, 2},
+                 {ItemId::Scute, ItemId::None, 1, 1},
+                 {ItemId::Bowl, ItemId::None, 1, 1, kAlways,
+                  lootFlag(LootFlag::Lightning)}}}},
+    // Dolphin.
+    {.common = {{{ItemId::RawCod, ItemId::CookedCod, 0, 1}}}},
+    // Axolotl.
+    {},
+    // TropicalFish. No cooked form, same as the pufferfish.
+    {.common = {{{ItemId::RawTropicalFish, ItemId::None, 1, 1},
+                 {ItemId::Bone, ItemId::None, 1, 1, 250}}}},
+    // MushroomCow. The cow's row exactly; its mushrooms come off shears.
+    {.common = {{{ItemId::RawBeef, ItemId::CookedBeef, 1, 3},
+                 {ItemId::Leather, ItemId::None, 0, 2}}}},
+    // SkeletonHorse.
+    {.common = {{{ItemId::Bone, ItemId::None, 0, 2}}}},
+    // ZombieHorse. Dropped nothing until now.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 2}}}},
+    // TraderLlama.
+    {.common = {{{ItemId::Leather, ItemId::None, 0, 2}}}},
+    // PrincepinBrute. Its axe is equipment, not a drop.
+    {},
+    // ZombiePrincepin. Nought to one of each, unlike the ordinary zombie's
+    // nought to two - and the gold ingot is its rare, at the standard 2.5% on a
+    // player kill. It was the one undead in the roster without one, which left
+    // the four others paying a rare and this one paying none.
+    {.common = {{{ItemId::RottenFlesh, ItemId::None, 0, 1},
+                 {ItemId::GoldNugget, ItemId::None, 0, 1}}},
+     .rare = {{ItemId::GoldIngot}},
+     .rareCount = 1,
+     .rareChance = 25},
+    // Voidmite.
+    {},
+    // MagmaCubeSmall. Nothing, which is the slime's rule inverted - and it is
+    // inverted in the reference too, so both are as written.
+    {},
+    // MagmaCubeMedium.
+    {.common = {{{ItemId::MagmaCream, ItemId::None, 0, 1}}}},
+    // MagmaCubeLarge.
+    {.common = {{{ItemId::MagmaCream, ItemId::None, 0, 1}}}},
+    // Bee. Nothing - honey comes off the hive rather than off the bee, and as
+    // of 2026-08-19 it finally gets there: `Pollinate` above flies a bee to a
+    // flower, holds it there for `look_for_food`'s `stay_duration`, and queues
+    // its home hive on `takePollinated` when it returns. That queue is the last
+    // rung of the honeycomb chain and the one that lives outside this file -
+    // `Main.cpp` drains it beside `takeGrazed` and raises the level.
+    //
+    // The cycle, and where each half lives, so that a reader who finds one
+    // half broken knows where the other one is:
+    //
+    //   * **Placement.** `Structures.cpp` hangs an **empty** nest under the
+    //     south edge of an oak canopy at Bedrock's per-biome chances - meadow
+    //     100%, plains 5%, forest and dense forest 0.035%. Level 0 is not an
+    //     oversight and must not be "fixed": a nest that generated full would
+    //     invert the mechanic and make the bee pointless.
+    //   * **Filling.** Here. One level per delivery, two on a 1% roll, capped
+    //     at five by the drain.
+    //   * **Harvest.** `Main.cpp` already shears a full hive for exactly 3
+    //     honeycomb and empties it, and has done all along - that half was
+    //     written long before anything could reach it.
+    //
+    // **Corroborated by Mojang directly, and it widens the ask by one block.**
+    // `metadata/vanilladata_modules/mojang-blocks.json` in
+    // `Mojang/bedrock-samples` publishes `honey_level` with the value list
+    // `[0,1,2,3,4,5]`, which settles the six levels above. Its **users are
+    // `beehive` *and* `bee_nest`, both of them** - so whoever widens the state
+    // has to widen the pair, and a fix that touches only the crafted hive
+    // leaves the naturally-generated nest unable to hold honey. That is this
+    // project's failure shape 14 waiting to happen, and it is the whole reason
+    // the block list is written down here rather than left as "the hive".
+    //
+    // **The count-the-users rule applies to that file and this is a case where
+    // it passes.** A property's published value list there is the *storage
+    // domain* for every block that carries it, not any one block's range, so a
+    // list is only authoritative when exactly one block uses it. `honey_level`
+    // has two users and they are the pair that must agree, so `[0..5]` is right
+    // for both. Contrast `growth [0-7]`, which thirteen blocks share and which
+    // therefore proves nothing about any single crop.
+    {},
+    // IronGolem. Three to five ingots always, and nought to two poppies - the
+    // reference's own two pools, and the only mob whose drop is worth more than
+    // it cost to build.
+    {.common = {{{ItemId::IronIngot, ItemId::None, 3, 5},
+                 {itemForBlock(BlockId::Poppy), ItemId::None, 0, 2}}}},
+};
+
+static_assert(std::size(kLoot) == static_cast<std::size_t>(CreatureKind::Count),
+              "every CreatureKind needs a loot row");
+
+/// Proves every row is well formed, at compile time.
+///
+/// The same shape as `survival::foodTablesAgree`, and for the same reason: both
+/// sides are `constexpr`, so **none of this can rot**. Every clause is a bug
+/// that has already been paid for once - a transposed range, a half-filled
+/// slot, an `Otherwise` with nothing above it to be otherwise *to*, a cooked
+/// form that is not food, and the salmon that shared the cod's row until its
+/// own meat turned out to be unobtainable.
+constexpr bool lootTableIsSane() {
+    for (const LootRow& row : kLoot) {
+        for (std::size_t i = 0; i < row.common.size(); ++i) {
+            const LootDrop& drop = row.common[i];
+            if (drop.item == ItemId::None) {
+                // A range, a cooked form or a condition with no item to attach
+                // it to - a row half-edited and left.
+                if (drop.min != 0 || drop.max != 0 || drop.cooked != ItemId::None ||
+                    drop.flags != 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (drop.min > drop.max || drop.max == 0) {
+                return false;
+            }
+            if (static_cast<int>(drop.max) > maxStackFor(drop.item)) {
+                return false;
+            }
+            if (drop.chance == 0 || drop.chance > kAlways) {
+                return false;
+            }
+            for (std::size_t j = 0; j < i; ++j) {
+                if (row.common[j].item == drop.item) {
+                    return false;
+                }
+            }
+            // `Otherwise` asks "did the slot above me fire?", and the emitter
+            // answers that from a `previousFired` that starts `false` - so an
+            // `Otherwise` in slot 0, or one sitting under an empty slot, fires
+            // **unconditionally** while reading like a conditional. The rule
+            // above forbids a half-filled slot but says nothing about a gap.
+            //
+            // The single edit that trips this: move the polar bear's salmon
+            // slot to index 0, or delete its cod slot.
+            if ((drop.flags & lootFlag(LootFlag::Otherwise)) != 0 &&
+                (i == 0 || row.common[i - 1].item == ItemId::None)) {
+                return false;
+            }
+            if (drop.cooked != ItemId::None) {
+                // **What these two clauses actually guarantee, and no more:**
+                // the raw side is food, and the cooked side is not *worse* than
+                // the raw side. That is a downgrade check, not a pairing check.
+                //
+                // It does not catch a mispairing, and the obvious example
+                // passes: raw beef paired with cooked *chicken* clears both,
+                // because cooked chicken's 6 hunger is happily above raw beef's
+                // 3. The clause that would close it is
+                // `smeltResult(drop.item).item == drop.cooked`, which is the
+                // question actually being asked - but `smeltResult`
+                // (`item/Smelting.hpp`) is not `constexpr`, so it cannot be
+                // called from here. Make it `constexpr` and this becomes a real
+                // check for one line.
+                if (survival::foodValue(drop.item).hunger <= 0) {
+                    return false;
+                }
+                if (survival::foodValue(drop.cooked).hunger <
+                    survival::foodValue(drop.item).hunger) {
+                    return false;
+                }
+            }
+        }
+        if (static_cast<std::size_t>(row.rareCount) > row.rare.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < row.rare.size(); ++i) {
+            const bool filled = i < static_cast<std::size_t>(row.rareCount);
+            if (filled != (row.rare[i] != ItemId::None)) {
+                return false;
+            }
+        }
+        if ((row.rareCount > 0) != (row.rareChance > 0) || row.rareChance > kAlways) {
+            return false;
+        }
+        if (row.poolRollsMin > row.poolRollsMax) {
+            return false;
+        }
+        int weight = 0;
+        for (const LootPoolEntry& entry : row.pool) {
+            if (entry.item == ItemId::None) {
+                if (entry.weight != 0 || entry.min != 0 || entry.max != 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (entry.weight == 0 || entry.min > entry.max || entry.max == 0) {
+                return false;
+            }
+            if (static_cast<int>(entry.max) > maxStackFor(entry.item)) {
+                return false;
+            }
+            weight += entry.weight;
+        }
+        // A pool with nothing in it, or contents nothing ever rolls for.
+        if ((weight > 0) != (row.poolRollsMax > 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(lootTableIsSane(), "a loot row is malformed - see lootTableIsSane for which rule");
+
+/// Which roll of a death this is.
+///
+/// Folded into the hash so the rolls of one death are independent: without it a
+/// cow's beef and its leather would draw the same number and always agree, and
+/// a slot's chance and its count would be the same coin flipped twice.
+enum class LootRoll : int {
+    Count,
+    Chance,
+    Pick,
+};
+
+/// Which independent roll a slot index names, past the common slots.
+constexpr std::size_t kRareSlot = kLootSlots;
+constexpr std::size_t kChainmailSlot = kLootSlots + 1;
+constexpr std::size_t kDiscSlot = kLootSlots + 2;
+constexpr std::size_t kPoolCountSlot = kLootSlots + 3;
+constexpr std::size_t kPoolFirstSlot = kLootSlots + 4;
+
+/// A drop roll, as a pure function of the death rather than a draw from a
+/// running stream.
+///
+/// `random01` advances one shared xorshift that wander goals, ambient voices,
+/// variant rolls and animation phases all draw from, so **every extra frame an
+/// animal lived for shifted what it dropped** - the same kill in the same place
+/// paid differently depending on the frame rate, and a reload re-rolled it.
+/// Block drops sidestep this by being fixed (`dropCountForBlock` takes the
+/// middle of each range), which a creature cannot do: the whole point of a 0-2
+/// range is that some kills pay nothing.
+///
+/// Position is quantised to a sixteenth of a block **on purpose** - hashing the
+/// raw float would make the answer depend on bits a re-simulation is not
+/// obliged to reproduce - and it is read from `death.place`, latched on the
+/// tick health crossed zero, **never from `creature.position`**. That is not a
+/// nicety: `separate` shoves corpses exactly as it shoves the living, so a
+/// body killed inside a herd is pushed for the whole `kDeathSeconds` before it
+/// pays out, and that push is per-frame explicit Euler. Hashing where the body
+/// came to rest would therefore be hashing the frame rate, in precisely the
+/// commonest kill there is.
+///
+/// `deathTimer` and every other clock are deliberately out, because including
+/// one is exactly how the frame-rate dependence gets back in. The honest limit:
+/// `id` restarts at one each session and is not saved, so this is
+/// session-stable rather than save-stable, and the death position carries the
+/// rest.
+std::uint32_t lootHash(std::uint32_t worldSeed, const Creature& creature, std::size_t slot,
+                       LootRoll roll) {
+    const std::uint32_t seed = worldSeed ^ creature.id;
+    const std::uint32_t place = chunkHash(seed, creature.death.place.x, creature.death.place.y);
+    return chunkHash(place, static_cast<int>(slot), static_cast<int>(roll));
+}
+
+} // namespace
+
+void Creatures::emitLoot(const Creature& creature) {
+    // **A baby leaves nothing.** `RESEARCH.md` §5.1: *"Baby animals drop no
+    // common drops at all"*, which is two lines above the very table this row
+    // set was built from - and `emitLoot` never asked. Babies are not a corner
+    // case either: `populateChunks` rolls `species.babyChance` on every animal
+    // it places, which is 5% for most of the roster and 25-30% for rabbits,
+    // ocelots and axolotls, so a herd has been paying adult meat all along.
+    //
+    // Blanket rather than common-only, and that is not a shortcut: the
+    // reference exempts babies from common drops but still lets them drop
+    // *equipment*, and nothing in this roster spawns holding anything - every
+    // species carrying `babyChance` is a passive animal with no rare pool
+    // either. Revisit the day a baby zombie exists.
+    //
+    // `scale < 1.0f` is the same test `graze` already uses for "is this a
+    // baby", rather than a second spelling of the rule beside it.
+    if (creature.scale < 1.0f) {
+        return;
+    }
+
+    const LootRow& row = kLoot[static_cast<std::size_t>(creature.kind)];
+    const DeathContext& death = creature.death;
+
+    // Every roll below is one of these two, and both are pure functions of the
+    // death - see `lootHash`.
+    const auto unit = [&](std::size_t slot, LootRoll roll) {
+        return hashUnit(lootHash(m_seed, creature, slot, roll));
+    };
+    const auto passes = [&](std::size_t slot, int chance) {
+        return static_cast<int>(lootHash(m_seed, creature, slot, LootRoll::Chance) %
+                                static_cast<std::uint32_t>(kChanceScale)) < chance;
+    };
+    const auto rollCount = [&](std::size_t slot, int low, int high) {
+        const int span = high - low + 1;
+        return std::min(low + static_cast<int>(unit(slot, LootRoll::Count) *
+                                               static_cast<float>(span)),
+                        high);
+    };
+    const auto leave = [&](ItemId item, int count) {
+        if (count > 0) {
+            m_loot.push_back({creature.position, item, count});
+        }
+    };
+
+    // Walked in order, because `Otherwise` asks about the slot above it.
+    bool previousFired = false;
+    for (std::size_t slot = 0; slot < kLootSlots; ++slot) {
+        const LootDrop& drop = row.common[slot];
+        bool fires = drop.item != ItemId::None;
+        if (fires && (drop.flags & lootFlag(LootFlag::PlayerKill)) != 0) {
+            fires = death.cause == DeathCause::Player;
+        }
+        if (fires && (drop.flags & lootFlag(LootFlag::Lightning)) != 0) {
+            fires = death.cause == DeathCause::Lightning;
+        }
+        if (fires && (drop.flags & lootFlag(LootFlag::Otherwise)) != 0) {
+            fires = !previousFired;
+        }
+        if (fires && drop.chance < kAlways) {
+            fires = passes(slot, drop.chance);
+        }
+        previousFired = fires;
+        if (!fires) {
+            continue;
+        }
+        // Bedrock's cooked-on-fire rule, and the only reader of the bit latched
+        // when health crossed zero. Every burning source qualifies in the
+        // reference, and now in this game too: the sun on the undead, a fire
+        // block and lava all run through the one `burnTimer` in `think`, so all
+        // three cook what they kill.
+        const ItemId item =
+            death.burning && drop.cooked != ItemId::None ? drop.cooked : drop.item;
+        leave(item, rollCount(slot, drop.min, drop.max));
+    }
+
+    // The rare pool: **one** roll decides whether anything rare fell, and a
+    // second decides which - never one roll each, or a zombie's three rares
+    // would be three times as likely as the reference's one.
+    if (row.rareCount > 0 && death.cause == DeathCause::Player &&
+        passes(kRareSlot, row.rareChance)) {
+        const int pick = std::min(static_cast<int>(unit(kRareSlot, LootRoll::Pick) *
+                                                   static_cast<float>(row.rareCount)),
+                                  static_cast<int>(row.rareCount) - 1);
+        leave(row.rare[static_cast<std::size_t>(pick)], 1);
+    }
+
+    // The witch's pool. Each roll picks one item by weight and pays nought to
+    // two of it, and the rolls are independent of each other - which is why one
+    // witch can leave six sticks and the next one nothing.
+    if (row.poolRollsMax > 0) {
+        int weight = 0;
+        for (const LootPoolEntry& entry : row.pool) {
+            weight += entry.weight;
+        }
+        const int rolls = rollCount(kPoolCountSlot, row.poolRollsMin, row.poolRollsMax);
+        for (int n = 0; n < rolls; ++n) {
+            const std::size_t slot = kPoolFirstSlot + static_cast<std::size_t>(n);
+            int ticket = std::min(
+                static_cast<int>(unit(slot, LootRoll::Pick) * static_cast<float>(weight)),
+                weight - 1);
+            for (const LootPoolEntry& entry : row.pool) {
+                if (entry.item == ItemId::None) {
+                    continue;
+                }
+                ticket -= entry.weight;
+                if (ticket < 0) {
+                    leave(entry.item, rollCount(slot, entry.min, entry.max));
+                    break;
+                }
+            }
+        }
+    }
+
+    // The reference's only source of a music disc: a creeper killed by a
+    // skeleton's arrow leaves one, every time. **The one drop in the roster
+    // that needs a *mob* to have done it** - which is why the death context
+    // carries who as well as whether, and why this cannot be a table row.
+    //
+    // **Which mobs can do it is derived from `shootsArrows`, not listed.** The
+    // reference's rule is about the *arrow*, not about the family: the
+    // `#minecraft:skeletons` tag also holds the wither skeleton - our
+    // `Blackbone` - and it still cannot drop a disc, because it carries a sword
+    // and never fires anything. (Minecraft Wiki, "Music Disc": a wither
+    // skeleton only manages it if a command gives it a bow.) So the set that
+    // qualifies is exactly the set that carries one, which `archersShareOneRig`
+    // already pins, and a fourth archer species joins it for free rather than
+    // being forgotten here - the failure this file pays for more than any
+    // other.
+    //
+    // **The one divergence, stated at the site:** we do not check that the
+    // killing blow was the arrow rather than a bite. Nothing records what a
+    // blow was made with; when something does, this wants that test too.
+    if (creature.kind == CreatureKind::Bramble && death.cause == DeathCause::Creature) {
+        const Creature* killer = creatureById(death.killerId);
+        if (killer != nullptr && speciesInfo(killer->kind).shootsArrows) {
+            const int index = std::min(
+                static_cast<int>(unit(kDiscSlot, LootRoll::Pick) *
+                                 static_cast<float>(kMusicDiscs)),
+                kMusicDiscs - 1);
+            leave(musicDiscAt(index), 1);
+        }
+    }
+
+    // Chainmail has no recipe in the reference either - it is armour worn by
+    // the undead and taken off them. **This is its only source**, so without it
+    // four catalogue entries would be unreachable rather than merely rare.
+    //
+    // **All four pieces drop here, and a name-based sweep cannot see three of
+    // them.** Finding 940 reported the chestplate and the leggings as having no
+    // producer of any kind; that is wrong, and it is wrong in an instructive
+    // way. The only chainmail ids spelled out in this file are `ChainmailHelmet`
+    // - the base the roll offsets from - and `ChainmailBoots`, which appears
+    // solely inside the `static_assert` below. The other two are produced by
+    // arithmetic and appear nowhere as a name, so a grep for
+    // `ChainmailChestplate` returns nothing and reads as an absent feature.
+    // That is `CLAUDE.md` bug shape #15's false-positive class exactly: a value
+    // routed through an index cast is invisible to a call-site sweep. `piece`
+    // runs 0 to 3 over `ChainmailHelmet + piece`, so helmet, chestplate,
+    // leggings and boots are each drawn a quarter of the time this fires.
+    //
+    // Deliberately still outside the table, and still 4%: Bedrock's actual rule
+    // is 25% of a piece the mob *spawned wearing*, and nothing here records
+    // what anything spawned wearing. It belongs in the equipment rule the day
+    // one exists; a row cannot hold it, because a zombie's rare pool is already
+    // spoken for by iron, carrot and potato.
+    //
+    // **This list is deliberately not the archer list above.** It is "the
+    // undead that wear armour", which is a different question with a different
+    // answer - the `Bogged` is an archer and wears none, and the `Husk` wears
+    // armour and shoots nothing. Written out rather than derived because there
+    // is no flag for it yet, and the flag is the equipment rule's to add.
+    //
+    // **This list is deliberately not the archer list above.** It is "the
+    // undead that wear armour", which is a different question with a different
+    // answer - the `Bogged` is an archer and wears none, and the `Husk` wears
+    // armour and shoots nothing. Written out rather than derived because there
+    // is no flag for it yet, and the flag is the equipment rule's to add.
+    if (creature.kind == CreatureKind::Zombie || creature.kind == CreatureKind::Skeleton ||
+        creature.kind == CreatureKind::Husk || creature.kind == CreatureKind::Stray) {
+        if (passes(kChainmailSlot, 40)) {
+            // **The four pieces must be contiguous and in this order**, because
+            // the roll indexes off the helmet. `Item.hpp` lists them helmet,
+            // chestplate, leggings, boots; inserting anything between two of
+            // them would silently start dropping whatever landed in the gap,
+            // and nothing here changes type, so only this can catch it.
+            static_assert(static_cast<int>(ItemId::ChainmailBoots) -
+                                  static_cast<int>(ItemId::ChainmailHelmet) ==
+                              3,
+                          "chainmail pieces must stay contiguous, helmet first");
+            const int piece =
+                std::min(static_cast<int>(unit(kChainmailSlot, LootRoll::Pick) * 4.0f), 3);
+            leave(static_cast<ItemId>(static_cast<int>(ItemId::ChainmailHelmet) + piece), 1);
+        }
     }
 }
 
@@ -4851,34 +7902,7 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
             // burning off is the world forgetting about an animal, and a trail
             // of meat at the edge of the render distance is not that.
             if (killed) {
-                const LootRule loot = lootFor(creature.kind);
-                const auto leave = [&](ItemId item, int low, int high) {
-                    if (item == ItemId::None) {
-                        return;
-                    }
-                    const int span = high - low + 1;
-                    const int count = low + static_cast<int>(random01() * static_cast<float>(span));
-                    m_loot.push_back({creature.position, item, std::min(count, high)});
-                };
-                leave(loot.item, loot.min, loot.max);
-                leave(loot.extra, loot.extraMin, loot.extraMax);
-                // Chainmail has no recipe in the reference either - it is
-                // armour worn by the undead and taken off them. **This is its
-                // only source**, so without it four catalogue entries would be
-                // unreachable rather than merely rare.
-                if (creature.kind == CreatureKind::Zombie ||
-                    creature.kind == CreatureKind::Skeleton ||
-                    creature.kind == CreatureKind::Husk ||
-                    creature.kind == CreatureKind::Stray) {
-                    if (random01() < 0.04f) {
-                        const int piece = static_cast<int>(random01() * 4.0f);
-                        m_loot.push_back({creature.position,
-                                          static_cast<ItemId>(
-                                              static_cast<int>(ItemId::ChainmailHelmet) +
-                                              std::min(piece, 3)),
-                                          1});
-                    }
-                }
+                emitLoot(creature);
             }
             // Only a kill splits it. Retiring at distance or burning off must
             // not, or walking away from a large slime quietly breeds a swarm
@@ -4966,13 +7990,17 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
                 loaded[i] >= static_cast<std::size_t>(species.maxLoaded)) {
                 continue;
             }
-            const int spawnY = species.swims ? swimY : y;
+            const int spawnY = spawnsInOpenWater(species) ? swimY : y;
             if (spawnY < 0) {
                 continue;
             }
             // Fish are the reference's `water_ambient` category, which carries
             // neither a light rule nor a time-of-day one - the sea is dark
-            // enough at depth and they are there at noon regardless.
+            // enough at depth and they are there at noon regardless. **Keyed on
+            // `swims` rather than on where the body is put**, deliberately: the
+            // turtle is placed on sand by the line above and is still an
+            // aquatic, and the reference's turtle spawn rule names a biome and
+            // a surface and no light or time condition either.
             if (!species.swims) {
                 if (species.nocturnal != night) {
                     continue;
@@ -4991,21 +8019,19 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
             continue;
         }
 
-        float roll = random01() * total;
-        auto chosen = CreatureKind::Sheep;
-        for (std::size_t i = 0; i < static_cast<std::size_t>(CreatureKind::Count); ++i) {
-            roll -= weights[i];
-            if (weights[i] > 0.0f && roll <= 0.0f) {
-                chosen = static_cast<CreatureKind>(i);
-                break;
-            }
+        // The same draw the chunk spawner makes, and now literally the same
+        // function: this one fell back to `Sheep` when the roll missed, which
+        // is a spawn nothing on the shortlist ever qualified for.
+        const CreatureKind chosen = drawSpecies(weights, random01() * total);
+        if (chosen == CreatureKind::Count) {
+            continue;
         }
 
         Creature creature;
         creature.kind = chosen;
         creature.health = speciesInfo(chosen).health;
         creature.variant = rollVariant(chosen);
-        const int spawnY = speciesInfo(chosen).swims ? swimY : y;
+        const int spawnY = spawnsInOpenWater(speciesInfo(chosen)) ? swimY : y;
         creature.position = glm::vec3{static_cast<float>(x) + 0.5f, static_cast<float>(spawnY),
                                       static_cast<float>(z) + 0.5f};
         creature.yaw = random01() * kTwoPi;
@@ -5028,7 +8054,8 @@ void Creatures::manage(const World& world, const glm::vec3& playerFeet, float de
     }
 }
 
-std::size_t Creatures::findAimed(const glm::vec3& eye, const glm::vec3& forward, float reach) const {
+std::size_t Creatures::findAimed(const glm::vec3& eye, const glm::vec3& forward, float reach,
+                                 std::uint32_t ignoreId, float* entryDistance) const {
     // Nearest first, so a creature behind another cannot be hit through it.
     float nearest = reach;
     std::size_t found = m_creatures.size();
@@ -5064,6 +8091,11 @@ std::size_t Creatures::findAimed(const glm::vec3& eye, const glm::vec3& forward,
 
     for (std::size_t i = 0; i < m_creatures.size(); ++i) {
         const Creature& creature = m_creatures[i];
+        // Whoever the shot is still inside. Ids start at one, so the usual zero
+        // asks this of nobody and costs one comparison.
+        if (creature.id == ignoreId && ignoreId != 0) {
+            continue;
+        }
         // A body part-way through falling over is scenery. Letting it answer
         // would have it swallow the next swing and shield whatever is behind
         // it for a second after it is already dead.
@@ -5089,6 +8121,12 @@ std::size_t Creatures::findAimed(const glm::vec3& eye, const glm::vec3& forward,
         nearest = entry;
         found = i;
     }
+    // Only meaningful when something was found; `nearest` still holds `reach`
+    // otherwise, and reporting that as a hit distance would be a lie the caller
+    // cannot tell from a graze at maximum range.
+    if (entryDistance != nullptr && found != m_creatures.size()) {
+        *entryDistance = nearest;
+    }
     return found;
 }
 
@@ -5109,15 +8147,41 @@ std::size_t Creatures::findMilkable(const glm::vec3& eye, const glm::vec3& forwa
     return m_creatures[index].health > 0 ? index : kNoCreature;
 }
 
-bool Creatures::strike(const glm::vec3& eye, const glm::vec3& forward, float reach, int damage) {
-    const std::size_t index = findAimed(eye, forward, reach);
+bool Creatures::strike(const glm::vec3& eye, const glm::vec3& forward, float reach, int damage,
+                       std::uint32_t fromId, std::uint32_t ignoreId, float* hitDistance,
+                       std::size_t* hitIndex) {
+    float entry = 0.0f;
+    const std::size_t index = findAimed(eye, forward, reach, ignoreId, &entry);
     if (index == m_creatures.size()) {
         return false;
     }
+    // **Answered before the window, not after.** Every path below this either
+    // returns true or falls through to returning true, so the ray's answer is
+    // settled here and the two out-parameters are filled once, where the one
+    // function that owns the question is standing. Filling them beside the
+    // damage instead would have the absorbed-blow early return hand back a hit
+    // with no distance and no index.
+    if (hitDistance != nullptr) {
+        *hitDistance = entry;
+    }
+    if (hitIndex != nullptr) {
+        *hitIndex = index;
+    }
 
     Creature& target = m_creatures[index];
-    target.health -= damage;
-    target.hurtTimer = kHurtSeconds;
+    // **The same window `applyHits` goes through**, which is what stops a fast
+    // weapon - or a swarm of arrows arriving in one frame - landing every blow.
+    //
+    // The caller is still told `true`, because what it asked was "did the swing
+    // connect with a creature", not "did it hurt one": `Main.cpp` hangs the
+    // swing cooldown and the tool's durability off this answer, and a player
+    // whose blow the window absorbed would otherwise get a free swing at no
+    // wear and no cooldown. Only the damage, the cry, the shove and the anger
+    // are filtered.
+    if (!damageCreature(target, damage)) {
+        return true;
+    }
+    recordBlow(target, fromId);
     m_voices.push_back({target.kind, CreatureSound::Hurt, target.position, target.scale});
     // Assigned, not added. Accumulating means a second blow before the first has
     // worn off launches the creature twice as far, and a third further still.
@@ -5142,15 +8206,20 @@ bool Creatures::strike(const glm::vec3& eye, const glm::vec3& forward, float rea
     // **How long it keeps mattering is the species' own number.** A flat six
     // seconds meant a polar bear you shot forgot about it before you had
     // finished backing away; the reference gives it five hundred.
-    target.provokedTimer = speciesInfo(target.kind).angerSeconds;
-    // Zero names the player, which is why the id counter starts at one.
-    target.threatId = 0;
+    // **Whoever actually struck**, which is not always the player: this is the
+    // path an arrow resolves through as well as the player's own swing, and it
+    // used to write a flat zero. A skeleton shooting past you and clipping your
+    // wolf therefore turned that wolf - and, through `alertNeighbours`, its
+    // whole pack - on the one person in the fight who had not fired. Zero still
+    // names the player, which is why the id counter starts at one, and it is
+    // still what the melee caller passes.
+    rouse(target, fromId);
 
     // A clean kill starts no war. The reference has the same exemption, and it
     // is what stops one-shotting a lone animal turning its whole species on
     // you - the neighbours never saw anything happen.
     if (target.health > 0) {
-        alertNeighbours(target, index, 0);
+        alertNeighbours(target, index, fromId);
     }
     return true;
 }
@@ -5177,11 +8246,115 @@ int Creatures::applyLightning(const glm::vec3& at) {
             continue;
         }
 
-        creature.health -= kLightningDamage;
-        creature.hurtTimer = kHurtSeconds;
+        // **Through the window, not around it.** A bolt is an ordinary blow in
+        // the reference, not a hazard tick with its own cadence, so it belongs
+        // where every other blow goes. Writing `health -=` here also let the
+        // value go negative, which `damageCreature`'s clamp does not.
+        //
+        // `recordHazard` is gated on the blow actually landing, and that guard
+        // is the point: it overwrites `cause` and clears `killerId`, so a bolt
+        // swallowed by the window of the player's own sword hit would have
+        // taken the kill off them and with it their rare drops. That is the
+        // same blame-stealing shape the drowning tick already paid for.
+        if (damageCreature(creature, kLightningDamage)) {
+            recordHazard(creature, DeathCause::Lightning);
+        }
+        // Counted either way: `caught` means the bolt reached it, which the
+        // Bramble branch above already establishes by counting a charge that
+        // deals no damage at all.
         ++caught;
     }
     return caught;
+}
+
+int Creatures::hurtInBox(const glm::vec3& low, const glm::vec3& high, int damage, DeathCause cause) {
+    // **Nothing to do is answered here rather than at every call site.**
+    // `anvilLandingDamage` returns 0 for gravel, for sand and for an anvil that
+    // has not fallen far enough to hurt, so a caller draining a queue of
+    // landings would otherwise need this test itself - and `damageCreature`
+    // with a zero would still spend the immunity window and set the hurt flash,
+    // which is a mob flashing red for a falling sand block.
+    if (damage <= 0) {
+        return 0;
+    }
+
+    int caught = 0;
+    for (Creature& creature : m_creatures) {
+        // Already at zero and waiting for the next `manage` to retire it. The
+        // same guard `applyExplosion` opens with, and the reason is the one
+        // `hazardDamage` was written for: a corpse that keeps being damaged has
+        // its `cause` and `killerId` overwritten, and the kill - with its rare
+        // drops - is taken off whoever earned it.
+        if (creature.health <= 0) {
+            continue;
+        }
+
+        const CreatureSpecies& species = speciesInfo(creature.kind);
+        const Aabb body = bodyBox(species, creature.position, creature.scale);
+        // **Written to match `Main.cpp`'s player test clause for clause**, with
+        // the creature's body where the player's box goes. Strict on both sides,
+        // so boxes that merely touch faces do not count as overlapping - a mob
+        // standing exactly flush beside the cell is missed, exactly as a player
+        // standing there is. The whole value of this entry point is that the
+        // two answers cannot drift apart; writing a different inequality here
+        // would be the drift arriving on day one.
+        if (body.min.x >= high.x || body.max.x <= low.x || body.min.y >= high.y ||
+            body.max.y <= low.y || body.min.z >= high.z || body.max.z <= low.z) {
+            continue;
+        }
+
+        // **Through the window, not around it** - the same choice `applyLightning`
+        // and `applyExplosion` make, and here it is load-bearing rather than
+        // merely consistent. A tower of anvils collapses into one cell across
+        // consecutive frames, and the player's path leans on `damagePlayer`'s
+        // half-second window to make that land as a single hit. A creature going
+        // around the window would take the whole stack, so the same trap would
+        // kill a pig and bruise a player.
+        //
+        // `recordHazard` gated on the blow landing, for the reason it is gated
+        // everywhere else: it overwrites `cause` and clears `killerId`, so an
+        // anvil the window swallows must not take the kill off the player who
+        // was mid-swing.
+        if (damageCreature(creature, damage)) {
+            recordHazard(creature, cause);
+        }
+        // Counted whether or not the damage landed, matching `applyLightning`:
+        // the number answers "did it reach anything?", which is the question a
+        // caller draining landings wants and which the window does not change.
+        ++caught;
+
+        // Deliberately **not** provoked, for the reason `applyExplosion` spells
+        // out: `provokedTimer` can only ever mean "the player did this", so
+        // angering a mob at an anvil that fell on its own would send it after
+        // somebody who did nothing.
+    }
+    return caught;
+}
+
+int Creatures::provokeNear(const glm::vec3& centre, float radius, CreatureKind kind,
+                           std::uint32_t threatId) {
+    // **Nothing here damages, and that is the whole reason it exists.** The only
+    // public way to anger a group was `strike`, which lands a blow to do it - so
+    // "shearing a hive angers its bees" could not be written without also
+    // wounding them. `rouse` sets the anger clock and the blame, and touches
+    // health, knockback and the hurt flash not at all.
+    const float reachSquared = radius * radius;
+    int roused = 0;
+    for (Creature& creature : m_creatures) {
+        if (creature.kind != kind || creature.health <= 0) {
+            continue;
+        }
+        const glm::vec3 offset = creature.position - centre;
+        if (glm::dot(offset, offset) > reachSquared) {
+            continue;
+        }
+        // The species' own anger duration, never a constant passed in: a bee
+        // stays angry twenty-five seconds and a bear five hundred, and a caller
+        // that had to know which would be a second owner of that number.
+        rouse(creature, threatId);
+        ++roused;
+    }
+    return roused;
 }
 
 int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float power) {
@@ -5194,6 +8367,18 @@ int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float
         }
 
         const CreatureSpecies& species = speciesInfo(creature.kind);
+        // **The cheap question first.** `explosionExposure` fires about thirty-six
+        // DDA rays through the world for one body, and every one of them is
+        // wasted on something the blast cannot reach at all: outside twice the
+        // power the impact is zero whatever the exposure says, so the work was
+        // bought and then thrown away by the `impact <= 0` test below. This is
+        // the pre-filter `Explosion.hpp` publishes for exactly that reason, and
+        // calling it keeps the `2 x power` reach in one place instead of
+        // growing a second copy here - which is the shape that has already cost
+        // this project a blast radius that disagreed with its own crater.
+        if (!withinBlast(centre, power, creature.position)) {
+            continue;
+        }
         const Aabb body = bodyBox(species, creature.position, creature.scale);
         // Distance is measured to the feet and shelter across the whole box,
         // which is the reference's split: where you stand decides how much of
@@ -5205,8 +8390,18 @@ int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float
             continue;
         }
 
-        creature.health -= explosionDamage(power, impact);
-        creature.hurtTimer = kHurtSeconds;
+        // **Through the window, as the reference does.** A blast is a blow, not
+        // a hazard on its own clock, and going around the window meant a creeper
+        // detonating on the same frame as a sword swing charged the mob twice -
+        // and a second creeper in a chain charged it a third time. That is
+        // precisely the double-charge `damageCreature` exists to stop. It also
+        // clamps, where `health -=` here could leave the value negative.
+        //
+        // `recordHazard` gated on the blow landing, so a blast the window
+        // swallows cannot take the kill off the player who was mid-swing.
+        if (damageCreature(creature, explosionDamage(power, impact))) {
+            recordHazard(creature, DeathCause::Explosion);
+        }
         // Deliberately **not** provoked. `provokedTimer` only ever means "the
         // player did this", because the target slot has no way to name anything
         // else - so rousing a goat a Bramble blew up would send it after the
@@ -5218,6 +8413,12 @@ int Creatures::applyExplosion(const World& world, const glm::vec3& centre, float
         if (reach > 0.001f) {
             // Aimed at the body's middle rather than its feet, which is what
             // gives a close blast its upward throw without a special case.
+            //
+            // **Thrown even when the window swallowed the damage**, which is
+            // the reference's split too: being caught in a blast moves you
+            // whether or not your health bar does. Hanging the throw off the
+            // damage instead would make a mob that had just been hit stand
+            // impossibly still in an explosion.
             //
             // Assigned, not added - two blasts in one frame each adding their
             // own throw is the accumulator bug that has already emptied the map
@@ -5807,6 +9008,17 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             const float swing =
                 -std::sin(creature.gait) * species.gaitSwing * creature.limbSwingAmount;
 
+            // **Arms swing less than legs, and by a published amount.** The
+            // reference's `animation.humanoid.move` drives `leftarm` with
+            // `tcos0` against `leftleg`'s `tcos0 * -1.4`, and Java's
+            // `HumanoidModel` sets 1.0 radian of arm against 1.4 of leg -
+            // `ANIMATION.md` 2.4 states the ratio in bold. Both arms had been
+            // reading the leg amplitude outright, which is a march.
+            //
+            // Derived from `swing` rather than given a species column of its
+            // own: one number, two limbs, and no way for the pair to drift.
+            constexpr float kArmSwingRatio = 1.0f / 1.4f;
+            const float armSwing = swing * kArmSwingRatio;
             // The one idle motion the reference gives every biped, and it is
             // the difference between a person standing there and a statue: the
             // arms rock outward by up to 5.7 degrees and forward and back by
@@ -5817,8 +9029,8 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
             // The roll carries a constant offset as well as a swing, which is
             // what leaves the arms resting slightly splayed rather than flush
             // against the torso - and incidentally off its face planes.
-            const float swayRoll = std::cos(creature.age * 1.8f) * 0.05f + 0.05f;
-            const float swayPitch = std::sin(creature.age * 1.34f) * 0.05f;
+            const float swayRoll = std::cos(creature.age * kIdleSwayRollRate) * 0.05f + 0.05f;
+            const float swayPitch = std::sin(creature.age * kIdleSwayPitchRate) * 0.05f;
 
             // A blow, straight out of the two shipped animations. Bedrock runs
             // `variable.attack_time` from 0 to 1 across the swing; ours counts
@@ -5878,8 +9090,15 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 endHead();
 
                 const auto leg = [&](float alongForward, float alongSide, float angle) {
-                    constexpr float halfStrip = 0.03125f;
-                    constexpr float halfFoot = 0.09375f;
+                    // **Scaled, like every other half-extent in this file.**
+                    // These two were bare metres, so a chick - `kBabyScale`
+                    // 0.55 - wore full-size legs and full-size feet under a
+                    // half-size body, and a puffed-up chicken's legs did not
+                    // grow with it. The bee's wing and the mooshroom's sprite
+                    // are the precedent: a half-extent is always
+                    // `* modelScale * swellWide`.
+                    const float halfStrip = 0.03125f * modelScale * swellWide;
+                    const float halfFoot = 0.09375f * modelScale * swellWide;
                     // No box to hand to `legBox`, so the same pivot is applied
                     // by hand: the hip is the top of the strip and everything
                     // below it swings on the arc.
@@ -6078,8 +9297,12 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
 
                 const glm::vec3 tailLow = place(-0.91f, 1.28f, 0.0f);
                 const glm::vec3 tailHigh = place(-0.91f, 2.10f, 0.0f);
-                skinQuad(tailLow - side * 0.09375f, tailLow + side * 0.09375f,
-                         tailHigh + side * 0.09375f, tailHigh - side * 0.09375f,
+                // Half-width scaled with the model, like every other extent -
+                // it was a bare metre, so a camel's tail stayed one width
+                // whatever size the animal was drawn at.
+                const float halfTail = 0.09375f * modelScale * swellWide;
+                skinQuad(tailLow - side * halfTail, tailLow + side * halfTail,
+                         tailHigh + side * halfTail, tailHigh - side * halfTail,
                          0.70f, kCamelSkin, 122.0f, 0.0f, 3.0f, 14.0f);
                 continue;
             }
@@ -6450,7 +9673,10 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                            0.0f, 5.0f, kFrogSkin, 0.005f);
 
                 const auto webbedFoot = [&](float alongForward, float alongSide, float rx, float ry) {
-                    constexpr float half = 0.125f;
+                    // Scaled with the model, like every other half-extent. A
+                    // bare metre here meant a tadpole-scale frog stood on
+                    // full-size feet.
+                    const float half = 0.125f * modelScale * swellWide;
                     const glm::vec3 c = place(alongForward, 0.012f, alongSide);
                     skinQuad(c - forward * half - side * half, c + forward * half - side * half,
                              c + forward * half + side * half, c - forward * half + side * half,
@@ -6894,9 +10120,9 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
 
                     legBox(place(0.0f, kBipedArmRestUp, shoulder), limb, 12.0f, limb,
                            40.0f, 16.0f, skin, grow,
-                           blend(-swing + swayPitch, aimPitch + swayPitch),
+                           blend(-armSwing + swayPitch, aimPitch + swayPitch),
                            blend(swayRoll, kArcherStringArmRoll + swayRoll));
-                    mainPitch = blend(swing - swayPitch - humanoidRaise, aimPitch - swayPitch);
+                    mainPitch = blend(armSwing - swayPitch - humanoidRaise, aimPitch - swayPitch);
                     mainRoll = blend(-swayRoll, kArcherBowArmRoll - swayRoll);
                 }
                 mainHand = legBox(place(0.0f, kBipedArmRestUp, -shoulder), limb, 12.0f, limb,
@@ -7085,20 +10311,27 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // zero every expression below reduces to the numbers it
                 // replaced, so a villager and a trader are untouched.
                 constexpr float kFold = kVillagerFold;
-                const float turn = -armRaise;
-                const float cosTurn = std::cos(turn);
-                const float sinTurn = std::sin(turn);
+                // **The wind-up's sign was inverted, and it dropped her hands
+                // instead of lobbing.** `turn` is the assembly's own frame
+                // rotation, whose positive direction carries the hands forward
+                // and up; `pitch` is `uprightBox`'s, whose positive direction
+                // leans a limb's far end backwards. They are the same rotation
+                // in two conventions, so the rigid pair is `+armRaise` against
+                // `kFold - armRaise` - and that pair reaches -1.60 rad at full
+                // wind-up, which is `kWitchArmRaise`'s own documented "just past
+                // straight out" (`kArcherArmPitch` is -1.5708). Written the
+                // other way round it reached +0.10 - arms hanging down - and
+                // put the hands 5 cm behind the pivot and 13 below their rest.
+                const float turn = armRaise;
                 const auto folded = [&](float alongForward, float up, float alongSide) {
-                    const float dy = up - kVillagerArmPivotUp;
-                    return place(alongForward * cosTurn - dy * sinTurn,
-                                 kVillagerArmPivotUp + alongForward * sinTurn + dy * cosTurn,
-                                 alongSide);
+                    const ModelPoint turned = foldedArmPoint({alongForward, up, alongSide}, turn);
+                    return place(turned.alongForward, turned.up, turned.alongSide);
                 };
 
                 uprightBox(folded(0.1477f, 1.221f, 0.375f), 4.0f, 8.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, kFold + armRaise);
+                           44.0f, 22.0f, skin, 0.005f, kFold - armRaise);
                 uprightBox(folded(0.1477f, 1.221f, -0.375f), 4.0f, 8.0f, 4.0f,
-                           44.0f, 22.0f, skin, 0.005f, kFold + armRaise);
+                           44.0f, 22.0f, skin, 0.005f, kFold - armRaise);
                 // Cross-section matched to the sleeves exactly - same 0.005
                 // grow, so both cut ends are 4.16 texels square - and stretched
                 // sideways to reach well into them.
@@ -7111,16 +10344,17 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // separates every one of them while leaving it the same size to
                 // the eye - which sizing it up or down cannot do.
                 uprightBox(folded(0.2332f, 1.1381f, 0.0f), 8.0f, 4.0f, 4.0f,
-                           40.0f, 38.0f, skin, 0.005f, kFold + armRaise, 0.08f);
+                           40.0f, 38.0f, skin, 0.005f, kFold - armRaise, 0.08f);
 
-                // The bottle, held where the hands are. `villagerHandPoint` is
-                // the same function the thrown potion leaves from, turned by
-                // the same rigid swing, so what is in her hands and what
-                // arrives at your feet start from one place.
-                const ModelPoint grip = villagerHandPoint();
-                const float pitch = kFold + armRaise;
+                // The bottle, held where the hands are. `villagerHandPoint` now
+                // applies the swing itself, so the thrown potion and the drawn
+                // one are the *same call with the same argument* rather than two
+                // places agreeing by hand - which they did not: the throw used
+                // the resting hand and the mesh the turned one.
+                const ModelPoint grip = villagerHandPoint(armRaise);
+                const float pitch = kFold - armRaise;
                 const glm::vec3 gripUp = boxHeightAxis(pitch, 0.0f);
-                const LimbEnd hands{folded(grip.alongForward, grip.up, 0.0f), gripUp,
+                const LimbEnd hands{place(grip.alongForward, grip.up, grip.alongSide), gripUp,
                                     forward * std::cos(pitch) - upAxis * std::sin(pitch), side};
                 heldItem(ItemId::None, hands, false);
             };
@@ -7197,7 +10431,7 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // the user's own instruction, so it swings rigidly or not at
                 // all. `aim` is the eased 0 to 1 the archer's bow rides on, so
                 // the two wind-ups are the same clock.
-                villagerRig(kWitchSkin, false, creature.aim * kWitchArmRaise);
+                villagerRig(kWitchSkin, false, witchArmRaise(creature));
                 // Four boxes stacked off the crown, every one measured: brim
                 // 10x2x10 at (0,64), then 7x4x7, 4x4x4 and a 1x2x1 tip. Each
                 // takes its own small grow so the stack overlaps instead of
@@ -7266,19 +10500,54 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                            2.0f, 4.0f, skin, 0.004f);
                 endHead();
 
-                uprightBox(place(0.0f, 1.125f, 0.0f), 8.0f, 12.0f, 4.0f,
+                uprightBox(place(0.0f, 1.125f, 0.0f), kPigTorsoWidth, 12.0f, 4.0f,
                            16.0f, 16.0f, skin, 0.0f);
                 constexpr float kPigHip = 0.133f;
                 legBox(place(0.0f, 0.375f, kPigHip), 4.0f, 12.0f, 4.0f,
                        16.0f, 48.0f, skin, 0.005f, swing);
                 legBox(place(0.0f, 0.375f, -kPigHip), 4.0f, 12.0f, 4.0f,
                        0.0f, 16.0f, skin, 0.005f, -swing);
-                constexpr float kPigShoulder = 0.375f;
-                legBox(place(0.0f, 1.125f, kPigShoulder), 4.0f, 12.0f, 4.0f,
-                       32.0f, 48.0f, skin, 0.005f, -swing + swayPitch - humanoidRaise,
-                       swayRoll);
-                legBox(place(0.0f, 1.125f, -kPigShoulder), 4.0f, 12.0f, 4.0f,
-                       40.0f, 16.0f, skin, 0.005f, swing - swayPitch, -swayRoll);
+                // **Derived from `bipedHandPoint`'s own shoulder rule**, not
+                // written down beside it: that function anchors the weapon, and
+                // a shoulder measured twice is a weapon floating off the arm
+                // holding it. Same for the rest height - `legBox` hangs the
+                // joint off it and `bipedHandPoint` assumes it.
+                constexpr float kPigArmWidth = 4.0f;
+                constexpr float kPigShoulder = kBipedShoulderGap + kPigArmWidth * kTexel * 0.5f;
+                // **The relationship, not the answer.** This used to pin
+                // `kPigShoulder == 0.375f`, which proved only that nobody had
+                // retyped the sum - it would have fired on a perfectly correct
+                // widening of `kBipedShoulderGap` and stayed silent on the one
+                // edit that matters. What actually has to hold is that the
+                // shared shoulder gap *is* this torso's half-width, so the arm
+                // hangs flush against its side rather than floating off it or
+                // sinking into it. The single edit that makes it fail: widening
+                // the torso above to a ten-texel brute without widening the
+                // gap, or moving the gap without the torso.
+                static_assert(kBipedShoulderGap == kPigTorsoWidth * kTexel * 0.5f,
+                              "the biped shoulder gap must be this torso's half-width");
+                // The **off** hand, on the creature's left: (32,48) is the left
+                // arm on the player sheet, which `bipedHandPoint`'s own comment
+                // cites as the check for which side is which.
+                legBox(place(0.0f, kBipedArmRestUp, kPigShoulder), 4.0f, 12.0f, 4.0f,
+                       32.0f, 48.0f, skin, 0.005f, -armSwing + swayPitch, swayRoll);
+                // The main hand, on the right at (40,16) - and it is the arm the
+                // blow now comes from. `humanoidRaise` was bolted to the left
+                // arm above, so all three of these swung the empty hand at you
+                // while the sword hand hung still; and the sword was never drawn
+                // at all, because this rig never called `heldItem` despite every
+                // one of the three carrying a weapon in `kSpecies`.
+                const float mainPitch = armSwing - swayPitch - humanoidRaise;
+                const float mainRoll = -swayRoll;
+                LimbEnd mainHand = legBox(place(0.0f, kBipedArmRestUp, -kPigShoulder), 4.0f, 12.0f,
+                                          4.0f, 40.0f, 16.0f, skin, 0.005f, mainPitch, mainRoll);
+                // The anchor is `bipedHandPoint`, exactly as the biped rig does
+                // it: the limb supplies the three axes, because only it has
+                // them, and the grip comes from the one function that knows
+                // where a hand ends up.
+                const ModelPoint grip = bipedHandPoint(4.0f, mainPitch, mainRoll, true);
+                mainHand.tip = place(grip.alongForward, grip.up, grip.alongSide);
+                heldItem(species.heldMainHand, mainHand, false);
                 continue;
             }
 
@@ -7674,7 +10943,17 @@ engine::MeshData Creatures::buildMesh(const World& world, engine::MeshData& tran
                 // are held still and the tail drives.
                 constexpr float kSprawl = 0.75f;
                 const float paddle = creature.inWater ? 0.0f : swing * 0.7f;
-                const float lean[4]{-kSprawl + paddle, kSprawl - paddle, -kSprawl - paddle,
+                // **The same sign on all four, and the sprawl alone alternates.**
+                // The gait term used to alternate too - `{+p, -p, -p, +p}` - and
+                // because `limbYaw` already flips the axis for indices 1 and 2,
+                // that second alternation cancelled it: working each limb back
+                // through its own yaw, all four displaced the *same* way in
+                // world space, so the animal shuffled sideways with its feet in
+                // lockstep instead of walking. With one sign, the yaw does the
+                // alternating and the diagonals fall out correctly - `{0,3}`
+                // (front one side, rear the other) swing together against
+                // `{1,2}`, which is a trot.
+                const float lean[4]{-kSprawl + paddle, kSprawl + paddle, -kSprawl + paddle,
                                     kSprawl + paddle};
                 for (int i = 0; i < 4; ++i) {
                     yawed(limbYaw[i], [&]() {

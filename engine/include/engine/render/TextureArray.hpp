@@ -46,6 +46,10 @@ public:
     std::uint8_t alphaAt(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const;
 
 private:
+    /// Everything the constructor takes, so a throw part-way through can be
+    /// released by the one function that also serves the destructor.
+    void createResources(VkCommandPool commandPool, const std::vector<std::filesystem::path>& files);
+    void destroy() noexcept;
     void generateMipmaps(VkCommandBuffer commandBuffer);
 
     const VulkanContext& m_context;
@@ -60,8 +64,21 @@ private:
     std::uint32_t m_layerCount = 0;
     std::uint32_t m_mipLevels = 1;
 
-    /// One byte per texel per layer. Roughly 46 KB for the current sheet, and
-    /// the alternative is decoding the same PNGs again elsewhere.
+    /// One byte per texel per layer, so `width * height * layerCount`.
+    ///
+    /// **The number that stood here was 46 KB, and it is out by about eight
+    /// times.** That figure matches 180 layers of 16x16, which is roughly where
+    /// the block sheet stood several milestones ago; it is a little over 1400
+    /// layers today, or about 350 KB, and the same class also holds the
+    /// creature sheet at 128 x 4704 x 1 = about 590 KB. Nearly a megabyte
+    /// across the four arrays rather than the 46 KB a reader budgeting from
+    /// this line would have assumed. The trade is still the right one - the
+    /// alternative is decoding the same PNGs a second time elsewhere - but it
+    /// is being made at a price nobody had checked since it was written.
+    ///
+    /// Left as a formula plus today's measurements rather than one absolute
+    /// number, because the sheets grow every milestone and that is exactly how
+    /// this went stale.
     std::vector<std::uint8_t> m_alpha;
 };
 

@@ -309,24 +309,6 @@ enum class ItemId : std::uint16_t {
     TurtleHelmet,
     Shield,
 
-    /// Fifteen records. **The five coined names are ours** - the rest are
-    /// ordinary words and numbers, which nobody owns.
-    MusicDisc13,
-    MusicDiscCat,
-    MusicDiscBlocks,
-    MusicDiscChirp,
-    MusicDiscFar,
-    MusicDiscMall,
-    MusicDiscDrift,
-    MusicDiscEmber,
-    MusicDiscVale,
-    MusicDiscHollow,
-    MusicDisc11,
-    MusicDiscWait,
-    MusicDiscHoofbeat,
-    MusicDiscOtherside,
-    MusicDisc5,
-
     Saddle,
     NameTag,
     Lead,
@@ -368,14 +350,19 @@ enum class ItemId : std::uint16_t {
     IronNugget,
     GoldNugget,
 
-    /// The five things you brew with that did not exist before. Magma cream,
-    /// a phantom membrane and a rabbit's foot were already in the equipment run
+    /// The two things you brew with that did not exist before. Magma cream, a
+    /// phantom membrane and a rabbit's foot were already in the equipment run
     /// above and are **not** repeated here - three of Mojang's own brewing
     /// reagents were already on the shelf.
-    BlazeRod,
-    BlazePowder,
+    ///
+    /// **`BlazeRod`, `BlazePowder` and `GhastTear` used to sit here too, and
+    /// they were a second copy of `CinderRod`, `CinderPowder` and
+    /// `DrifterTear` above** - added by a later milestone that read this run's
+    /// own comment about what was already on the shelf and missed that the
+    /// naming policy twenty lines up had already renamed them. Brewing held the
+    /// Mojang-named copies and two of the coined ids had no readers at all.
+    /// Deleted on 2026-08-18; `upgradeLegacyItemId` carries a saved one across.
     FermentedSpiderEye,
-    GhastTear,
     DragonBreath,
 
     /// **Every potion, three ways.** The reference stores one item id with a
@@ -412,6 +399,14 @@ enum class ItemId : std::uint16_t {
     /// **Named divergence: the titles are ours.** A track name is expressive
     /// work in a way that *stone* and *sheep* are not, so every one of these is
     /// a word we chose, and none of them is Mojang's.
+    ///
+    /// **This is the only disc run, and it took a duplicate to notice.** A
+    /// second run of fifteen carrying Mojang's own track titles sat above the
+    /// saddle for five milestones - `isMusicDisc` covered only this one, so the
+    /// catalogue offered thirty-seven discs of which fifteen had no reader
+    /// anywhere and could not be played. Deleted on 2026-08-18; grep an
+    /// enumerator's name before adding it, which is the lesson `RedstoneLampLit`
+    /// and the froglights had already taught.
     MusicDiscFirst,
     MusicDiscLast = MusicDiscFirst + kMusicDiscs - 1,
 
@@ -787,7 +782,13 @@ constexpr bool isThrownPotion(ItemId item) {
     return isSplashPotion(item) || isLingeringPotion(item);
 }
 
-/// Which of the forty-one this is, whichever of the three forms it came in.
+/// Which of the forty-one this is, whichever of the three forms it came in, or
+/// **-1 for anything that is not a brew at all**.
+///
+/// The tipped-arrow arithmetic used to be the unguarded tail, so this ran for
+/// every item in the game: a stick came back a large negative, and `potionKind`
+/// fed that straight into `kPotions[...]`. Every caller happened to be guarded,
+/// which is a property of today's callers rather than of this function.
 constexpr int potionIndex(ItemId item) {
     if (isDrinkablePotion(item)) {
         return static_cast<int>(item) - static_cast<int>(ItemId::PotionFirst);
@@ -798,11 +799,21 @@ constexpr int potionIndex(ItemId item) {
     if (isLingeringPotion(item)) {
         return static_cast<int>(item) - static_cast<int>(ItemId::LingeringPotionFirst);
     }
-    return static_cast<int>(item) - static_cast<int>(ItemId::TippedArrowFirst) + kFirstTippedPotion;
+    if (isTippedArrow(item)) {
+        return static_cast<int>(item) - static_cast<int>(ItemId::TippedArrowFirst) +
+               kFirstTippedPotion;
+    }
+    return -1;
 }
 
+/// **The bounds check lives here, not in the four callers.** An index off the
+/// table gives back the empty row, which is what water already is - an effect of
+/// `None` for no time, and every site that applies one already does nothing with
+/// that.
 constexpr PotionKind potionKind(ItemId item) {
-    return kPotions[static_cast<std::size_t>(potionIndex(item))];
+    const int index = potionIndex(item);
+    return index >= 0 && index < kPotionTypes ? kPotions[static_cast<std::size_t>(index)]
+                                              : PotionKind{};
 }
 
 /// The drinkable form of whatever this is. **The single owner of stepping
@@ -830,6 +841,13 @@ static_assert(isDrinkablePotion(potionAt(0, 0)) && isSplashPotion(potionAt(0, 1)
               "each form must fall inside its own run");
 static_assert(isFireworkStar(ItemId::kLastItem) && !isMusicDisc(ItemId::kLastItem),
               "the item run must end on the last firework star");
+static_assert(potionIndex(ItemId::Stick) == -1 && potionIndex(ItemId::MusicDiscFirst) == -1 &&
+                  potionIndex(ItemId::kLastItem) == -1 &&
+                  potionKind(ItemId::kLastItem).effect == effects::Effect::None,
+              "nothing that is not a brew may produce an index into kPotions. Restoring the "
+              "tipped-arrow arithmetic as an unguarded tail makes a stick a large negative and "
+              "every disc, sherd and firework star a large *positive* - and it is the positive "
+              "that reads off the end of kPotions. `< 0` here would prove neither");
 static_assert(kSherdSprites == kPotterySherds && kMusicDiscSprites == kMusicDiscs,
               "the collectible sprite runs in Block.hpp must match the item runs here");
 static_assert(kPotionSpriteTypes == kPotionTypes &&
@@ -848,7 +866,7 @@ struct ExtraItemInfo {
     int stack = 64;
 };
 
-constexpr std::array<ExtraItemInfo, 171> kExtraItems{{
+constexpr std::array<ExtraItemInfo, 153> kExtraItems{{
     {.name = "Bread", .food = true},
     {.name = "Cookie", .food = true},
     {.name = "Melon Slice", .food = true},
@@ -932,7 +950,7 @@ constexpr std::array<ExtraItemInfo, 171> kExtraItems{{
     {.name = "Cinder Powder"},
     {.name = "Drifter Tear"},
     {.name = "Void Pearl", .stack = 16},
-    {.name = "Void Eye", .stack = 16},
+    {.name = "Void Eye", .stack = 64},
     {.name = "Chorus Fruit", .food = true},
     {.name = "Popped Chorus Fruit"},
     {.name = "Rabbit Hide"},
@@ -974,24 +992,12 @@ constexpr std::array<ExtraItemInfo, 171> kExtraItems{{
     {.name = "Turtle Shell", .stack = 1},
     {.name = "Shield", .stack = 1},
 
-    {.name = "Music Disc 13", .stack = 1},
-    {.name = "Music Disc Cat", .stack = 1},
-    {.name = "Music Disc Blocks", .stack = 1},
-    {.name = "Music Disc Chirp", .stack = 1},
-    {.name = "Music Disc Far", .stack = 1},
-    {.name = "Music Disc Mall", .stack = 1},
-    {.name = "Music Disc Drift", .stack = 1},
-    {.name = "Music Disc Ember", .stack = 1},
-    {.name = "Music Disc Vale", .stack = 1},
-    {.name = "Music Disc Hollow", .stack = 1},
-    {.name = "Music Disc 11", .stack = 1},
-    {.name = "Music Disc Wait", .stack = 1},
-    {.name = "Music Disc Hoofbeat", .stack = 1},
-    {.name = "Music Disc Otherside", .stack = 1},
-    {.name = "Music Disc 5", .stack = 1},
-
     {.name = "Saddle", .stack = 1},
-    {.name = "Name Tag", .stack = 1},
+    // Name tags stack to 64 in both editions - minecraft.wiki, *Name Tag*,
+    // infobox "Stackable: Yes (64)", and the anvil section's "a stack of up to
+    // 64 name tags can be renamed at once". Only the *named* ones fail to
+    // stack together, which needs per-item text this codebase does not have.
+    {.name = "Name Tag"},
     {.name = "Lead"},
     {.name = "Elytra", .stack = 1},
     {.name = "Totem of Undying", .stack = 1},
@@ -1000,14 +1006,14 @@ constexpr std::array<ExtraItemInfo, 171> kExtraItems{{
     {.name = "Trident", .stack = 1},
     {.name = "Crossbow", .stack = 1},
     {.name = "Fishing Rod", .stack = 1},
-    {.name = "Compass", .stack = 1},
-    {.name = "Clock", .stack = 1},
+    {.name = "Compass", .stack = 64},
+    {.name = "Clock", .stack = 64},
     {.name = "Empty Map"},
     {.name = "Map", .stack = 1},
-    {.name = "Recovery Compass", .stack = 1},
+    {.name = "Recovery Compass", .stack = 64},
     {.name = "Firework Rocket"},
     {.name = "Book and Quill", .stack = 1},
-    {.name = "Written Book", .stack = 1},
+    {.name = "Written Book", .stack = 16},
 
     {.name = "Mushroom Stew", .food = true, .stack = 1},
     {.name = "Beetroot Soup", .food = true, .stack = 1},
@@ -1028,10 +1034,7 @@ constexpr std::array<ExtraItemInfo, 171> kExtraItems{{
     {.name = "Iron Nugget"},
     {.name = "Gold Nugget"},
 
-    {.name = "Blaze Rod"},
-    {.name = "Blaze Powder"},
     {.name = "Fermented Spider Eye"},
-    {.name = "Ghast Tear"},
     {.name = "Dragon's Breath"},
 }};
 
@@ -1053,6 +1056,24 @@ static_assert(kExtraItems.size() ==
                                            static_cast<int>(ItemId::Bread) + 1),
               "kExtraItems must have exactly one row per id in the appended run");
 
+/// **The sprite counts, pinned against the enum they were counted from.**
+///
+/// `Block.hpp` states at `kExtraItemSprites` exactly how this goes wrong - a
+/// count left too high "does not fail to compile and does not fail to draw. It
+/// slides every icon above the gap onto the item fifteen slots below it, which
+/// is a thing only eyes catch" - and then cannot assert it, because that header
+/// has no `ItemId` to count. **This side can see both numbers, so it owes the
+/// assert.** `Main.cpp` checks the atlas against these constants at startup,
+/// which is a different drift: it would find the pictures and the counts
+/// agreeing perfectly while both disagreed with the enum.
+static_assert(kBrewingSprites == static_cast<int>(ItemId::DragonBreath) -
+                                     static_cast<int>(ItemId::FermentedSpiderEye) + 1,
+              "kBrewingSprites must cover exactly the ids itemTextureLayer answers from it");
+static_assert(kExtraItemSprites == static_cast<int>(kExtraItems.size()) - kBrewingSprites,
+              "kExtraItemSprites must be the appended run less the brewing ids caught ahead of "
+              "it. Appending a row to kExtraItems without bumping the count in Block.hpp is "
+              "what lands here");
+
 /// The first dye, so a colour family maps onto a dye by arithmetic.
 constexpr ItemId kFirstDye = ItemId::WhiteDye;
 constexpr int kDyeColours = 16;
@@ -1072,10 +1093,184 @@ constexpr int kBowDurability = 385;
 constexpr int kLegacyFirstToolItem = 256;
 constexpr int kItemIdShift = static_cast<int>(ItemId::kFirstToolItem) - kLegacyFirstToolItem;
 
-constexpr ItemId upgradeLegacyItemId(ItemId stored) {
+/// The second move: the two duplicate runs deleted on 2026-08-18.
+///
+/// Fifteen shadow music discs sat immediately before the saddle, and three
+/// Mojang-named brewing reagents sat immediately after the gold nugget. Removing
+/// eighteen enumerators slid every id above them down, and an item id is written
+/// into a chest, a furnace and the player's inventory on disk.
+///
+/// **Both anchors are derived from ids that survived, not written down.** The
+/// saddle now occupies the slot the first shadow disc used to, so it *is* the
+/// old disc's number; and the fermented spider eye is fifteen discs plus two
+/// rods below where the blaze rod was, so adding those fifteen back recovers it.
+/// A pair of literals here would be two numbers nothing checks, going stale the
+/// first time anything is inserted below - which is the same mistake in a
+/// different costume.
+constexpr int kLegacyShadowDiscs = 15;
+constexpr int kLegacyShadowDiscFirst = static_cast<int>(ItemId::Saddle);
+constexpr int kLegacyBlazeRod = static_cast<int>(ItemId::FermentedSpiderEye) + kLegacyShadowDiscs;
+/// Eighteen ids gone in total: fifteen discs, two rods and a tear.
+constexpr int kDuplicateRunItems = kLegacyShadowDiscs + 3;
+
+/// **Stage one alone: the block/item boundary moving from 256 to 4096.**
+///
+/// Right for a file written *before* that move and for nothing else. In that
+/// era block ids were eight bits, so "at or above the old boundary" and "is an
+/// item" were the same statement.
+///
+/// **The upper bound is a courtesy to the shim below, and nothing else.** It
+/// lets an id already in the current numbering fall through untouched, which is
+/// what keeps the composed `upgradeLegacyItemId` behaving as it always has. It
+/// is inert for real legacy data - that era never had four thousand items - and
+/// it emphatically does **not** make the second stage safe on a newer file:
+/// block items live *below* 4096, so the bound never sees them. Only the era
+/// decides, and `ItemEra` in `WorldStore.cpp` is where that lives.
+constexpr ItemId upgradeItemBoundary(ItemId stored) {
     const int raw = static_cast<int>(stored);
-    return raw >= kLegacyFirstToolItem ? static_cast<ItemId>(raw + kItemIdShift) : stored;
+    const bool legacyItem = raw >= kLegacyFirstToolItem &&
+                            raw < static_cast<int>(ItemId::kFirstToolItem);
+    return legacyItem ? static_cast<ItemId>(raw + kItemIdShift) : stored;
 }
+
+/// **Stage two alone: the two duplicate runs deleted on 2026-08-18.**
+///
+/// Safe on any id from any file written since the boundary moved, **with no
+/// guard at all**, because both deleted runs sat above `kFirstToolItem` - so
+/// every block item takes the first branch and comes straight back out. That is
+/// one fact about where the runs were, not a restatement of the migration, and
+/// `WorldStore.cpp` asserts it separately so it cannot quietly stop being true.
+constexpr ItemId upgradeDuplicateRuns(ItemId stored) {
+    const int raw = static_cast<int>(stored);
+
+    // Below the first shadow disc nothing moved, which is every block item.
+    if (raw < kLegacyShadowDiscFirst) {
+        return stored;
+    }
+    if (raw < kLegacyShadowDiscFirst + kLegacyShadowDiscs) {
+        // A shadow disc, which no longer exists. It becomes the disc at the same
+        // offset in the run that survived - twenty-two are ours and fifteen were
+        // never playable, so handing back a real one is strictly better than
+        // handing back a hole, and the jukebox can read it.
+        return static_cast<ItemId>(static_cast<int>(ItemId::MusicDiscFirst) + raw -
+                                   kLegacyShadowDiscFirst);
+    }
+    if (raw < kLegacyBlazeRod) {
+        return static_cast<ItemId>(raw - kLegacyShadowDiscs);
+    }
+    // The three reagents that were a second copy of a coined id. They keep their
+    // meaning and change their name, which is the whole point of the deletion.
+    if (raw == kLegacyBlazeRod) {
+        return ItemId::CinderRod;
+    }
+    if (raw == kLegacyBlazeRod + 1) {
+        return ItemId::CinderPowder;
+    }
+    if (raw == kLegacyBlazeRod + 2) {
+        return ItemId::FermentedSpiderEye;
+    }
+    if (raw == kLegacyBlazeRod + 3) {
+        return ItemId::DrifterTear;
+    }
+    return static_cast<ItemId>(raw - kDuplicateRunItems);
+}
+
+/// Reads an id written by **any** older build and returns what it means now.
+///
+/// **Not idempotent, and it cannot be**: the second stage remaps a range that is
+/// perfectly valid in the current numbering, so this is only ever safe on bytes
+/// a version check has already declared old. That is the loader's contract, and
+/// `WorldStore` keeps it by calling this only for a file whose version says so.
+///
+/// **The two stages are separately callable, and that is the fix.** An earlier
+/// version of this comment claimed the first stage was bounded so the two
+/// composed, and that a file needing only the second could be handed the whole
+/// function. That was wrong and would have corrupted every chest: there are 580
+/// appended blocks, so most block-item ids sit squarely inside `[256, 4096)`
+/// and the first stage lifts them into the tool run. The upper bound catches
+/// nothing there, because block items are *below* it.
+///
+/// So a caller that needs one stage now asks for that stage by name.
+/// `upgradeDuplicateRuns` is safe on any post-boundary file with no guard at
+/// all, which makes this function's only correct use the oldest files.
+///
+/// **That safety has a reason and a proof, and both live where they can be
+/// checked.** The reason: both deleted runs sat above the block/item boundary,
+/// so a stored block id takes `upgradeDuplicateRuns`'s first branch and comes
+/// straight back out unchanged. The proof: `WorldStore.cpp` asserts that the
+/// runs are above the boundary, and its `ItemEra::BeforeDuplicateRuns` rung
+/// calls `upgradeDuplicateRuns(stored)` unguarded on the strength of it.
+///
+/// **This paragraph has said three different things in one session, so here is
+/// the settled one.** It first called that rung's boundary test redundant -
+/// right about the design, wrong about the call site, which at the time
+/// composed both stages behind it. It was then corrected to call the test
+/// load-bearing, which was true for exactly as long as the composition was.
+/// The rung now asks for one stage by name and the test is gone, so both
+/// readings are history. **No guard is missing and none should be added back:**
+/// the edit that breaks this is the opposite one, writing `upgradeLegacyItemId`
+/// into that rung again, and the assert beside it fails on precisely that.
+constexpr ItemId upgradeLegacyItemId(ItemId stored) {
+    return upgradeDuplicateRuns(upgradeItemBoundary(stored));
+}
+
+/// The oldest era's own number for the blaze rod - the middle era's number minus
+/// the shift that put it there - so the composition can be asserted end to end
+/// rather than one stage at a time.
+constexpr int kOldestBlazeRod = kLegacyBlazeRod - kItemIdShift;
+
+// --- Stage two, on its own. Every claim below is about the deleted runs, and
+// none of them may be asked of the composed function: it would run the boundary
+// shift over ids that are already in the current numbering.
+
+static_assert(upgradeDuplicateRuns(static_cast<ItemId>(kLegacyBlazeRod)) == ItemId::CinderRod &&
+                  upgradeDuplicateRuns(static_cast<ItemId>(kLegacyBlazeRod + 1)) ==
+                      ItemId::CinderPowder &&
+                  upgradeDuplicateRuns(static_cast<ItemId>(kLegacyBlazeRod + 3)) ==
+                      ItemId::DrifterTear,
+              "a saved blaze rod, blaze powder or ghast tear has to come back as the coined id "
+              "that always meant the same thing");
+static_assert(upgradeDuplicateRuns(static_cast<ItemId>(kLegacyBlazeRod + 2)) ==
+                      ItemId::FermentedSpiderEye &&
+                  upgradeDuplicateRuns(static_cast<ItemId>(kLegacyBlazeRod + 4)) ==
+                      ItemId::DragonBreath,
+              "the two reagents that survived must land on themselves, not on their neighbour");
+static_assert(upgradeDuplicateRuns(static_cast<ItemId>(kLegacyShadowDiscFirst)) ==
+                      ItemId::MusicDiscFirst &&
+                  upgradeDuplicateRuns(static_cast<ItemId>(
+                      kLegacyShadowDiscFirst + kLegacyShadowDiscs)) == ItemId::Saddle,
+              "the first shadow disc becomes the first real one, and the id straight after the "
+              "shadow run is the saddle it always was");
+
+/// **The whole of finding #120 in one line.** Both ends of the block-item range
+/// a post-boundary file can hold, put through the stage that file needs.
+///
+/// Fails on: writing `upgradeLegacyItemId` in place of `upgradeDuplicateRuns`
+/// here - which is precisely what this function was for its first twelve hours,
+/// and what a caller reaching for the obvious name still gets. Both ids move by
+/// `kItemIdShift`, every stored block becomes a tool, and the file loads
+/// cleanly.
+static_assert(upgradeDuplicateRuns(static_cast<ItemId>(kLegacyFirstToolItem)) ==
+                      static_cast<ItemId>(kLegacyFirstToolItem) &&
+                  upgradeDuplicateRuns(static_cast<ItemId>(
+                      static_cast<int>(ItemId::kFirstToolItem) - 1)) ==
+                      static_cast<ItemId>(static_cast<int>(ItemId::kFirstToolItem) - 1),
+              "stage two must leave every block item exactly where it is, at both ends of the "
+              "range - a chest of stone that comes back a chest of tools is what asking the "
+              "composed function for this costs");
+
+// --- Stage one, and the composition.
+
+static_assert(upgradeItemBoundary(static_cast<ItemId>(kLegacyFirstToolItem)) ==
+                      ItemId::kFirstToolItem &&
+                  upgradeItemBoundary(static_cast<ItemId>(kLegacyFirstToolItem - 1)) ==
+                      static_cast<ItemId>(kLegacyFirstToolItem - 1),
+              "the 256 boundary still shifts, and the last eight-bit block id still does not");
+static_assert(upgradeLegacyItemId(static_cast<ItemId>(kOldestBlazeRod)) == ItemId::CinderRod &&
+                  upgradeLegacyItemId(static_cast<ItemId>(kLegacyFirstToolItem - 1)) ==
+                      static_cast<ItemId>(kLegacyFirstToolItem - 1),
+              "the oldest files need both stages, in that order - swapping them, or dropping "
+              "either, loses the rod; and an eight-bit block id passes through both untouched");
 
 /// The raw foods, as one contiguous run of pairs.
 constexpr int kFoodItems = 11;
@@ -1165,9 +1360,9 @@ constexpr int itemTextureLayer(ItemId item) {
     // run of ids. **The ingredients have to be caught here rather than falling
     // into the appended-item arithmetic below**, because that run's layers are
     // followed by five more runs and growing it would slide every one of them.
-    if (item >= ItemId::BlazeRod && item <= ItemId::DragonBreath) {
+    if (item >= ItemId::FermentedSpiderEye && item <= ItemId::DragonBreath) {
         return kBrewingSpritesFirst +
-               (static_cast<int>(item) - static_cast<int>(ItemId::BlazeRod));
+               (static_cast<int>(item) - static_cast<int>(ItemId::FermentedSpiderEye));
     }
     if (isDrinkablePotion(item)) {
         return kPotionSpritesFirst + potionIndex(item);
@@ -1261,6 +1456,30 @@ constexpr int itemTextureLayer(ItemId item) {
         return -1;
     }
 }
+
+/// The last appended item that still takes its picture from the extra-item run.
+/// **Derived, never named** - it is defined as "the id below the brewing pair",
+/// so appending an item below `GoldNugget` moves it here automatically and the
+/// assert below then measures the new one.
+constexpr ItemId kLastSpritedExtraItem =
+    static_cast<ItemId>(static_cast<int>(ItemId::FermentedSpiderEye) - 1);
+
+/// **The same two counts again, through the function that actually reads them.**
+///
+/// The pair beside `kExtraItems` is arithmetic on constants, and constants can
+/// agree with each other while the reader adds a different base to them - the
+/// shape that let eleven `static_assert`s pass while pointing at the wrong
+/// texture. These evaluate the whole expression the renderer evaluates, base
+/// included, and name the neighbouring run each one must stop short of. Append
+/// an item and forget `kExtraItemSprites`, and the new last item resolves to
+/// `kBeehiveSpritesFirst`: it would have drawn the beehive front, and instead
+/// it fails the build.
+static_assert(itemTextureLayer(ItemId::Bread) == kExtraItemSpritesFirst &&
+                  itemTextureLayer(kLastSpritedExtraItem) == kBeehiveSpritesFirst - 1,
+              "the appended items must fill their sprite run exactly and stop below the beehive");
+static_assert(itemTextureLayer(ItemId::FermentedSpiderEye) == kBrewingSpritesFirst &&
+                  itemTextureLayer(ItemId::DragonBreath) == kPotionSpritesFirst - 1,
+              "the two brewing ids must fill their own run and stop below the potions");
 
 constexpr const char* itemName(ItemId item) {
     if (isExtraItem(item)) {
@@ -1416,7 +1635,7 @@ constexpr ItemId itemForBlock(BlockId block) {
 /// Which catalogue tab an item belongs under.
 ///
 /// Bedrock's four names, which are better than the alternative's thirteen. The
-/// Search tab is not a category — it shows everything — so it is a tab the UI
+/// Search tab is not a category - it shows everything - so it is a tab the UI
 /// owns rather than a value an item can carry.
 enum class ItemCategory : std::uint8_t {
     Construction,
@@ -1506,10 +1725,51 @@ constexpr int armourMaterial(ItemId item) {
     return (static_cast<int>(item) - static_cast<int>(ItemId::LeatherHelmet)) / 4;
 }
 
+/// **This is live: `armourDefence`, `armourToughness` and `armourSlot` all have
+/// real callers outside this header as of 2026-08-19.** The comment that stood
+/// here until then said the opposite - "nothing reads this ... a repo-wide grep
+/// finds no caller of any of the four" - and it warned a reader not to believe
+/// a diamond chestplate was doing anything. It is worth knowing why that was
+/// the dangerous kind of wrong rather than a stale detail: it argued for
+/// treating a load-bearing table as inert, and `CLAUDE.md` bug shape #16 ranks
+/// a comment that could make someone delete live code first of all. **Negative
+/// claims rot fastest**, which is why this one is dated and says below what
+/// would make it false again.
+///
+/// Measured rather than read - a bare-name search over all 97 comment-stripped
+/// `.cpp`/`.hpp` files under `game/src`:
+///   - `armourDefence`   - `Inventory.hpp` 3, `Survival.hpp` 4
+///   - `armourToughness` - `Inventory.hpp` 1, `Survival.hpp` 4
+///   - `armourSlot`      - `Inventory.hpp` 8, `Main.cpp` 1
+///   - `armourMaterial`  - **0 outside this header**, and that is still true.
+///     It is not dead: `armourDefence` and `armourToughness` both call it two
+///     lines down, so it is reached on every one of the counts above. A caller
+///     sweep that only counts direct call sites reports it as unreachable, and
+///     it is not - the value travels through a function rather than a name.
+/// Controls, because a scan that returns nothing for everything has proved
+/// nothing: `isArmour` came back with callers in two other files, and a
+/// fabricated name came back with zero.
+///
 /// Defence points, **Bedrock's own table**, indexed material-major then slot.
 /// Bedrock stopped being a flat 4% per point in 1.18.30 and now matches Java
 /// exactly, toughness included - so these are the shared values, not a
 /// Bedrock-only set.
+///
+/// **The three-step wiring plan this comment used to carry is two-thirds done**
+/// (`GAPS.md` G2.4; `RESEARCH.md` section 3.4 carries the reduction formula):
+///   1. **DONE.** Somewhere to wear it - `Inventory` has four armour slots
+///      (`m_armour`), and the `player.dat` bump the old comment called "the
+///      real cost" has happened: `SavedPlayer::armour` is format version 7,
+///      with a documented migration that leaves the run empty for older worlds.
+///   2. **DONE.** A consumer in `damagePlayer` (`world/Player.cpp`), sitting
+///      exactly where the old comment said it had to - `survival::armourDamageTaken`
+///      beside `effects::damageTakenScale` and after `chargeDamageWindow`,
+///      because the invulnerability window compares the *raw* blow.
+///   3. **STILL OPEN.** `Creature.cpp` has `chargeDamageWindow` and **no call
+///      to `armourDamageTaken`**, so a creature wearing armour takes full
+///      damage. The shared function the old comment asked for already exists;
+///      what is missing is the call.
+/// **This paragraph is false the moment `Creature.cpp` names `armourDamageTaken`.**
 constexpr int armourDefence(ItemId item) {
     if (item == ItemId::TurtleHelmet) {
         return 2;
@@ -1530,6 +1790,12 @@ constexpr int armourDefence(ItemId item) {
 
 /// Armour toughness, which is what makes diamond and Emberite hold up against
 /// a *big* hit rather than merely a frequent one.
+///
+/// **Called, as of 2026-08-19** - `Survival.hpp` four times and `Inventory.hpp`
+/// once; see `armourDefence` above for the measurement and its controls. This
+/// line said "Also uncalled" until then, and it was the second copy of the same
+/// rotted negative claim, which is the point: one wrong sentence about reach
+/// gets pasted beside every function it plausibly describes.
 constexpr float armourToughness(ItemId item) {
     if (!isArmour(item) || item == ItemId::TurtleHelmet) {
         return 0.0f;
@@ -1544,15 +1810,50 @@ constexpr float armourToughness(ItemId item) {
 /// A full bucket does not stack either, and an empty one stacks only to
 /// sixteen - both the reference's, and the full one matters: a stack of water
 /// buckets that emptied one at a time would need a count on each.
+///
+/// > **CROSS-FILE: lowering any cap here can fail a `static_assert` in
+/// > `world/Loot.hpp`, and that file's owner cannot see this edit coming.**
+/// > `entriesSane()` there ends its message with *"more of one item than a
+/// > single slot holds"*, and that clause is this function - every loot entry's
+/// > count range is checked against `maxStackFor` of the item it names. So a
+/// > cap lowered here fails the build in a file that did not change, with an
+/// > error naming a loot table rather than an item cap.
+/// >
+/// > **Raising a cap is always safe; lowering one is not**, and the direction
+/// > is the whole warning. The exposure is any item that appears in a loot
+/// > table with a `max` above the new value.
+/// >
+/// > Recorded 2026-08-19 11:20. **Falsified by** `entriesSane()` losing its
+/// > `maxStackFor` comparison, or by loot entries gaining their own cap - at
+/// > which point delete this paragraph rather than leaving a stale coupling
+/// > note, which is its own bug shape.
 constexpr int maxStackFor(ItemId item) {
     if (isTool(item) || item == ItemId::WaterBucket) {
         return 1;
     }
-    // A stowbox never stacks either, and for exactly the tool's reason: its
-    // `damage` names which contents it is carrying, and merging two would pick
-    // one of them and lose the other outright.
-    if (isBlockItem(item) && isStowbox(blockForItem(item))) {
-        return 1;
+    // The block items that do not stack to sixty-four. **A block item's cap
+    // comes from nowhere else** - the table below only covers the appended run,
+    // so a block that needs one has to be answered here or it silently stacks
+    // to a full sixty-four.
+    if (isBlockItem(item)) {
+        const BlockId block = blockForItem(item);
+        // A stowbox never stacks, and for exactly the tool's reason: its
+        // `damage` names which contents it is carrying, and merging two would
+        // pick one of them and lose the other outright.
+        if (isStowbox(block)) {
+            return 1;
+        }
+        // https://minecraft.wiki/w/Bed - "Stackable: No". A bed is two blocks
+        // wide and carries a colour; the reference has never stacked one.
+        if (isBed(block)) {
+            return 1;
+        }
+        // https://minecraft.wiki/w/Sign and /w/Banner - both "Yes (16)", and a
+        // hanging sign is a sign. Sixteen, not sixty-four: every one of these
+        // will carry text or a pattern the moment it is placed.
+        if (isSignLike(block)) {
+            return 16;
+        }
     }
     if (item == ItemId::Bucket) {
         return 16;
@@ -1575,6 +1876,16 @@ constexpr int maxStackFor(ItemId item) {
 
 /// An item and how many of it. A count of zero means the slot is empty, and the
 /// item is then meaningless.
+///
+/// > **There is deliberately no `space()` here.** It used to be one, and it was
+/// > a damage-blind twin of `slots::roomFor`: it restated the cap as
+/// > `kMaxStack` for an empty slot rather than asking the table that owns it -
+/// > which it could not do, having no item to ask, and that is precisely why
+/// > `roomFor` takes the *arriving* item - and it answered "how much room" for
+/// > an incoming stack without ever looking at `damage`. Every caller survived
+/// > on a `item == item` guard beside it rather than on the function. Ask
+/// > `slots::roomFor(stack, incoming)` instead; it is the one owner of the
+/// > question.
 struct ItemStack {
     ItemId item = ItemId::None;
     int count = 0;
@@ -1583,14 +1894,98 @@ struct ItemStack {
     int damage = 0;
 
     constexpr bool empty() const { return count <= 0 || item == ItemId::None; }
-    constexpr int space() const { return empty() ? kMaxStack : maxStackFor(item) - count; }
 };
+
+static_assert(maxStackFor(itemForBlock(BlockId::Stowbox)) == 1 &&
+                  maxStackFor(ItemId::VoidEye) == 64 && maxStackFor(ItemId::Compass) == 64 &&
+                  maxStackFor(ItemId::WrittenBook) == 16,
+              "the stack caps the wiki states, asked through the one function that owns them");
+static_assert(maxStackFor(itemForBlock(BlockId::BedRunFirst)) == 1 &&
+                  maxStackFor(itemForBlock(BlockId::SignRunFirst)) == 16 &&
+                  maxStackFor(itemForBlock(BlockId::HangingSignRunFirst)) == 16 &&
+                  maxStackFor(itemForBlock(BlockId::BannerRunFirst)) == 16,
+              "a block item's cap is this function's job too - deleting the isBed or isSignLike "
+              "branch drops all four back to the sixty-four they silently were");
+
+/// Bring a stack down to its item's cap, and **say how much that destroyed**.
+///
+/// Returns the number of items thrown away, zero when the stack was already
+/// legal. The count comes back so a caller can clamp and log in one line
+/// without working the loss out itself, which would put `maxStackFor`'s
+/// knowledge in a second place.
+///
+/// **This exists because the caps changed under worlds that already existed.**
+/// Beds, signs, hanging signs and banners stacked to 64 here until 2026-08-18
+/// and now stack to 1, 16, 16 and 16, which is what the wiki has always said.
+/// `WorldStore::sanitiseStack` is where an old save meets the new cap, and
+/// until this it shortened those stacks without a word.
+///
+/// **Destroying rather than spilling is deliberate.** The overflow has nowhere
+/// to go: `sanitiseStack` is handed one `ItemStack&` and does not know which
+/// container it came out of, and it runs for dropped-item entities as much as
+/// for chests, so "move the rest to a free slot" is not something every caller
+/// could do. A container that does have slots can still be full, so a spill
+/// would need this path underneath it anyway. One mechanism, announced, beats
+/// two where the second falls through to the first - and this project holds
+/// nothing in a save precious, only losses it cannot explain.
+constexpr int clampToStackLimit(ItemStack& stack) {
+    if (stack.empty()) {
+        return 0;
+    }
+    const int cap = maxStackFor(stack.item);
+    if (stack.count <= cap) {
+        return 0;
+    }
+    const int lost = stack.count - cap;
+    stack.count = cap;
+    return lost;
+}
+
+/// Fails on: assigning `stack.count = cap` before working out `lost` (which
+/// reports nothing destroyed, every time, and hands the log a zero); and on
+/// rebuilding the stack as `stack = {stack.item, cap}` instead of shortening
+/// it, which passes the first two cases and empties every stowbox in the third.
+constexpr bool stackClampReportsWhatItDestroyed() {
+    ItemStack signs{itemForBlock(BlockId::SignRunFirst), 64};
+    if (clampToStackLimit(signs) != 48 || signs.count != 16) {
+        return false;
+    }
+
+    // A legal stack is untouched and reports nothing, so a non-zero return is
+    // on its own the answer to "did this bite?".
+    ItemStack bread{ItemId::Bread, 64};
+    if (clampToStackLimit(bread) != 0 || bread.count != 64) {
+        return false;
+    }
+
+    // **`damage` survives the clamp**, because a stowbox keeps which contents
+    // it holds there. A clamp that rebuilt the stack rather than shortening it
+    // would empty one on the very next load.
+    ItemStack box{itemForBlock(BlockId::Stowbox), 4, 7};
+    if (clampToStackLimit(box) != 3 || box.count != 1 || box.damage != 7) {
+        return false;
+    }
+
+    return true;
+}
+
+static_assert(stackClampReportsWhatItDestroyed(),
+              "clamping a stack to its cap must report the loss and keep the damage");
 
 /// What a block turns into when broken.
 ///
 /// Usually itself, but not always: stone yields cobblestone, and grass yields
 /// plain dirt. Stairs and slabs collapse to their upright form so an inventory
 /// does not fill with eight orientations of the same thing.
+///
+/// > **This answers the *identity* only, and it is no longer the whole story.**
+/// > `dropsForBlock` in `item/BlockDrops.hpp` is what a break should ask: it
+/// > adds counts that are ranges, several items from one block, chances rolled
+/// > off the block's position, and the tool rows a tier gate cannot express.
+/// > **It asks this function for everything it does not override**, which is
+/// > what keeps the 640 cut shapes and the 119 candles answered in one place -
+/// > so a new family rule belongs *here*, and only a rule this shape cannot
+/// > carry belongs there.
 constexpr ItemId dropForBlock(BlockId block) {
     // Lit TNT that is broken hands back an ordinary charge rather than nothing.
     if (block == BlockId::TntPrimed) {
@@ -1630,10 +2025,15 @@ constexpr ItemId dropForBlock(BlockId block) {
     if (isComparator(block)) {
         return itemForBlock(comparatorAt(FaceDirection::NegZ, false, false));
     }
-    // A head is half of the piston it belongs to, so breaking either gives one
-    // piston and never two.
+    // **A piston head drops nothing at all.** It is a technical block, created
+    // by an extending piston and never by a player - "It is not available in
+    // the Creative inventory and does not drop anything when removed"
+    // (minecraft.wiki, *Piston/Technical components*). It used to hand back a
+    // whole piston, which is a free piston per extension the moment anything in
+    // this game learns to extend one. The base is a separate block and pays for
+    // itself below.
     if (isPistonHead(block)) {
-        return itemForBlock(pistonAt(Facing6North, false, pistonHeadSticky(block)));
+        return ItemId::None;
     }
     if (isPiston(block)) {
         return itemForBlock(pistonAt(Facing6North, false, pistonSticky(block)));
@@ -1810,9 +2210,24 @@ constexpr ItemId dropForBlock(BlockId block) {
     if (isChest(block)) {
         return itemForBlock(BlockId::Chest);
     }
+    // A nest is the FOUND half of the family and is not the hive's case: the
+    // reference drops nothing at all for a nest broken without Silk Touch, and
+    // Silk Touch is dormant here, so nothing is the whole answer. This must be
+    // asked FIRST, because isBeehive is true of a nest - the predicate was
+    // widened to cover the nest run because thirteen of its sixteen callers
+    // want the same answer for both, and this is the one caller where the
+    // wider answer is wrong. Returning None also keeps a nest out of the
+    // creative catalogue, since isCanonicalBlockItem asks whether this equals
+    // itemForBlock and None never does.
+    if (isBeeNest(block)) {
+        return ItemId::None;
+    }
     // A hive is one block however it is turned, and however full it is. What
     // the honey inside is worth is not a drop - harvesting it is the bee work,
     // and until that lands a full hive simply keeps its honey when moved.
+    // The reference drops nothing for a crafted hive either; that divergence
+    // is deliberate, because a hive you crafted and placed would otherwise be
+    // unrecoverable while Silk Touch is dormant, which is the worse trade.
     if (isBeehive(block)) {
         return itemForBlock(BlockId::Beehive);
     }
@@ -1859,6 +2274,16 @@ constexpr ItemId dropForBlock(BlockId block) {
         return ItemId::Diamond;
     case BlockId::EmeraldOre:
         return ItemId::Emerald;
+    // **The two Nether ores were missing from this list outright**, so both fell
+    // through to `default` and dropped themselves - an ore block that no recipe
+    // can consume and that nothing else in the game can produce. Nether gold ore
+    // pays 2-6 gold nuggets and nether quartz ore one quartz (minecraft.wiki,
+    // *Nether Gold Ore* and *Nether Quartz Ore*, Bedrock drops). There is no
+    // Silk Touch here (`BlockDrops.hpp`), so neither can ever be the block.
+    case BlockId::NetherGoldOre:
+        return ItemId::GoldNugget;
+    case BlockId::NetherQuartzOre:
+        return ItemId::Quartz;
     default:
         return itemForBlock(block);
     }
@@ -1869,7 +2294,21 @@ constexpr ItemId dropForBlock(BlockId block) {
 /// The reference rolls a range - copper 2-5, redstone 4-5, lapis 4-9 - and we
 /// take the middle of each rather than adding randomness a generator has no
 /// need of. Mining the same vein twice should give the same haul.
+///
+/// > **The midpoints are superseded.** `dropsForBlock` in `BlockDrops.hpp`
+/// > carries the real ranges and keeps the "same cell, same haul" property by
+/// > hashing the block's position rather than by flattening the range. This
+/// > function survives for the call sites that have not migrated yet, and for
+/// > the state-derived counts it owns outright - a candle stack and a cocoa pod,
+/// > which are not ranges at all.
 constexpr int dropCountForBlock(BlockId block) {
+    // The deepslate half of an ore yields exactly what the stone half does -
+    // and that has to be said *here* as well as in `dropForBlock`, or the two
+    // disagree. It did: deepslate lapis paid one lapis where stone lapis paid
+    // six, because only the identity was being collapsed.
+    if (isDeepslateOre(block)) {
+        block = stoneOreFor(block);
+    }
     // A ripe pod is worth three beans; anything younger, one.
     if (isCocoa(block)) {
         return cocoaAge(block) == 2 ? 3 : 1;
@@ -1884,8 +2323,12 @@ constexpr int dropCountForBlock(BlockId block) {
     if (isCropBlock(block)) {
         if (cropAge(block) < 7) {
             return 1;
-        }        const BlockId family = cropFamily(block);
+        }
+        const BlockId family = cropFamily(block);
         // Carrots and potatoes roll 2-5; wheat gives one ear; beetroot 1-2.
+        // Three is a flat stand-in inside the carrot/potato range rather than
+        // its middle - `dropsForBlock` in `BlockDrops.hpp` rolls the real one,
+        // and every live break already asks that rather than this.
         return (family == BlockId::CarrotCrop0 || family == BlockId::PotatoCrop0) ? 3 : 1;
     }
     switch (block) {
@@ -1895,6 +2338,10 @@ constexpr int dropCountForBlock(BlockId block) {
         return 4;
     case BlockId::LapisOre:
         return 6;
+    // Two to six nuggets (minecraft.wiki, *Nether Gold Ore*), middled like
+    // every other ore range here. Nether quartz is one and needs no row.
+    case BlockId::NetherGoldOre:
+        return 4;
     case BlockId::Clay:
         return 4;
     case BlockId::Glowstone:
@@ -1917,12 +2364,27 @@ constexpr int dropCountForBlock(BlockId block) {
 /// Stairs, the upper slab, a lit furnace, a chest's four facings and a beehive's
 /// four facings times its two honey states are all *placement states* of a
 /// single item rather than items of their own, and `dropForBlock` already names
-/// which state is the canonical one — so this asks it rather than listing them
+/// which state is the canonical one - so this asks it rather than listing them
 /// again. A second stair or slab material therefore needs no change here.
 ///
 /// **Anything that spends block ids on orientation or contents must be named
 /// here**, or the catalogue shows one row per id: the beehive's eight arrived
 /// as eight separate entries until it was added.
+///
+/// **`isPistonHead` used to sit at the end of that disjunction and could never
+/// be the term that decided.** `isRedstoneComponent` already contains every
+/// piston head - measured over all 3285 ids, 12 of 12 already true, against a
+/// control on the note block that came back 25 ids and 0 already true, so the
+/// instrument can tell a real hand-patch from a redundant one and says the
+/// note block is real. Deleting it is a provably zero-behaviour change; it is
+/// worth doing because it sat immediately beside `isNoteBlock`, which *is* a
+/// deliberate hand-patch, so a reader reasonably concluded that
+/// `isRedstoneComponent` must exclude piston heads. Acting on that reading
+/// means widening a family predicate that already contains the member -
+/// `CLAUDE.md` bug shape #2 approached from the wrong end. The assert below is
+/// what makes the deletion safe rather than merely tidy: narrow
+/// `isRedstoneComponent` away from piston heads and the build stops, instead of
+/// twelve catalogue rows quietly appearing.
 constexpr bool isCanonicalBlockItem(BlockId block) {
     // Neither fluid, fire nor a lit charge is something you can hold. Lava is
     // reachable through its bucket and fire through flint and steel.
@@ -1936,7 +2398,7 @@ constexpr bool isCanonicalBlockItem(BlockId block) {
         isTallFlowerUpper(block) || isCopperBulb(block) || block == BlockId::RedstoneLampLit ||
         block == BlockId::CaveVinesBerries || isCandle(block) || isDoor(block) ||
         isTrapdoor(block) || isBed(block) || isCauldron(block) || isHopper(block) ||
-        isRedstoneComponent(block) || isNoteBlock(block) || isPistonHead(block)) {
+        isRedstoneComponent(block) || isNoteBlock(block)) {
         return dropForBlock(block) == itemForBlock(block);
     }
     // A crop, a stem and tilled ground are all things the world grows or you
@@ -1951,6 +2413,19 @@ constexpr bool isCanonicalBlockItem(BlockId block) {
 
 static_assert(isCanonicalBlockItem(BlockId::Tnt) && !isCanonicalBlockItem(BlockId::TntPrimed),
               "a lit charge is a state of TNT, not a second item");
+/// **The deleted disjunct's replacement, and it is strictly stronger than the
+/// line it stands in for.** Both ends of the piston head run must already be
+/// `isRedstoneComponent`, which is what made `|| isPistonHead(block)` above
+/// unable to decide anything. The note block clause is the control: it is *not*
+/// a redstone component, so this cannot be an assert that says yes to whatever
+/// it is handed - and it is also the reason `isNoteBlock` stays in the
+/// disjunction while `isPistonHead` does not.
+static_assert(isRedstoneComponent(BlockId::PistonHeadRunFirst) &&
+                  isRedstoneComponent(BlockId::PistonHeadRunLast) &&
+                  !isRedstoneComponent(BlockId::NoteBlock),
+              "isRedstoneComponent must keep covering every piston head - isCanonicalBlockItem "
+              "stopped naming them separately once this was true, so narrowing it here puts "
+              "twelve orientation states back in the creative catalogue as items of their own");
 static_assert(!isCanonicalBlockItem(BlockId::Lava0) && !isCanonicalBlockItem(BlockId::Fire),
               "neither lava nor fire is a holdable item");
 static_assert(isCanonicalBlockItem(BlockId::SnowLayerFirst) &&
@@ -1960,6 +2435,14 @@ static_assert(isCanonicalBlockItem(BlockId::SnowLayerFirst) &&
 static_assert(dropForBlock(BlockId::BlastFurnaceExtraFirst) ==
                   itemForBlock(BlockId::BlastFurnace),
               "every facing of a blast furnace hands back the one that faces north");
+// Both halves of an ore's answer have to collapse deepslate, or they disagree
+// about the same block - which they did, silently, for every deepslate vein.
+static_assert(dropForBlock(BlockId::DeepslateLapisOre) == dropForBlock(BlockId::LapisOre) &&
+                  dropCountForBlock(BlockId::DeepslateLapisOre) ==
+                      dropCountForBlock(BlockId::LapisOre) &&
+                  dropCountForBlock(BlockId::DeepslateCopperOre) ==
+                      dropCountForBlock(BlockId::CopperOre),
+              "the deepslate half of an ore must yield what the stone half does, count and all");
 static_assert(!isCanonicalBlockItem(BlockId::BlastFurnaceExtraFirst) &&
                   !isCanonicalBlockItem(BlockId::BlastFurnaceExtraLast),
               "a blast furnace's facing and its fire are placement states, not eight items");
@@ -1986,7 +2469,7 @@ static_assert(isCanonicalBlockItem(BlockId::Stowbox) &&
 
 /// Which tab an item sits under.
 ///
-/// **This is ours, not measured** — the reference's own assignment lives in data
+/// **This is ours, not measured** - the reference's own assignment lives in data
 /// we do not have, and moving an entry is a one-line edit. A block added
 /// without a case here lands in `Items`, which is visible in the catalogue
 /// rather than silent.
@@ -2012,7 +2495,8 @@ constexpr ItemCategory categoryFor(ItemId item) {
     }
     if (!isBlockItem(item)) {
         return ItemCategory::Items;
-    }    const BlockId block = blockForItem(item);
+    }
+    const BlockId block = blockForItem(item);
     // The appended run carries its own tab, because it is no longer sorted by
     // one: a range test worked only while every natural block happened to sit
     // at the end of the enum.

@@ -24,7 +24,15 @@ struct FrameUniforms {
     /// there being a spare float here rather than a spare sixteen bytes.
     glm::vec4 sunDirection{0.0f, 1.0f, 0.0f, 0.0f};
     /// x: the ambient light every surface receives, y: what a surface facing the
-    /// sun adds on top, z: the floor below which nothing goes dark, w: spare.
+    /// sun adds on top, z: the floor below which nothing goes dark.
+    ///
+    /// **w is the sky emission scale, and calling it spare was false.**
+    /// `Renderer::drawFrame` writes `m_skyEmission` into it and
+    /// `triangle.frag` reads it as `rgb *= frame.lighting.w;` - the whole
+    /// of what `kDrawFlagEmissive` does, so it is what lets the sun be brighter
+    /// than white and bloom around its edge instead of clipping to a flat disc.
+    /// Zeroing it on the strength of the old word "spare" turns the sun, the
+    /// moon and every lightning bolt black.
     glm::vec4 lighting{1.0f, 0.0f, 0.0f, 0.0f};
     /// Two independent layer redirections, as (meshed layer, layer to sample
     /// this frame) pairs. Swapping the layer here rather than in the mesh is
@@ -100,7 +108,34 @@ struct FrameUniforms {
     /// a sunset around the moon every single night.
     glm::vec4 glow{1.0f, 0.84f, 0.62f, 0.0f};
     /// x: the world height of the water surface above the eye, while the eye is
-    /// under it. y: how strongly light shafts come down through it. zw: spare.
+    /// under it. y: how strongly light shafts come down through it.
+    ///
+    /// **z is the cloud deck's depth ceiling, and calling it spare was false.**
+    /// `Renderer::drawFrame` writes the sky's own depth less a hair into it and
+    /// `clouds.frag` reads it as
+    /// `gl_FragDepth = min(clip.z / max(clip.w, 1e-4), frame.volumetric.z);`,
+    /// which is what holds the deck just in front of the sun and moon. Zeroing
+    /// it clamps every cloud fragment to the near plane, and the deck draws in
+    /// front of the entire world.
+    ///
+    /// **`w` is the one genuinely free slot in this vec4, checked 2026-08-19 at
+    /// 11:35**: `Renderer::drawFrame` writes it as a literal `0.0f`, and no
+    /// shader reads it under any spelling. The spellings matter more than the
+    /// search did - a component can be reached as `.w`, as `.a`, as `.q`, as
+    /// `[3]`, or by assigning the whole `vec4` to a local and taking a
+    /// component off that, and only the first of those five is what anyone
+    /// types when they go looking. All five were checked; the sole
+    /// `= frame.volumetric` in the tree is `deferred.frag` taking `.x`.
+    /// It is therefore the channel to take if a new per-frame float is needed -
+    /// and the reason to say so here is that `z` was described as spare for
+    /// several milestones after it stopped being spare, which nearly cost the
+    /// cloud deck's depth clamp.
+    ///
+    /// **What would falsify this:** any shader reading the fourth component by
+    /// any of those five spellings, or `drawFrame` writing anything but `0.0f`
+    /// into it. **Re-check before claiming it** - eleven agents are writing to
+    /// this tree, and a reachability result is a measurement with a timestamp
+    /// rather than a property of the code.
     ///
     /// **Nothing else tells a shader how far under water it is.** Being
     /// submerged is one bit today (`eye.w`), which is enough to fog and to hang
@@ -108,7 +143,18 @@ struct FrameUniforms {
     glm::vec4 volumetric{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
-static_assert(sizeof(FrameUniforms) == 160 + 64 * ShadowMap::kMaxCascades + 128,
+/// The size is spelled out in counts rather than derived from the members,
+/// because a derivation cannot disagree with itself. Read it as: five `vec4`s
+/// before the matrices, the inverse view-projection, one matrix per cascade,
+/// then nine `vec4`s. Adding a member means changing the count it belongs to,
+/// and the three groups are in declaration order above.
+///
+/// The totals were 160 and 128 until 2026-08-19. Both were wrong by one `vec4`
+/// in opposite directions, so the sum stayed at 544 and the assert kept
+/// passing while describing a struct this is not - which would have sent anyone
+/// adding a member to bump whichever term they guessed at.
+static_assert(sizeof(FrameUniforms) ==
+                  5 * 16 + 64 + 64 * ShadowMap::kMaxCascades + 9 * 16,
               "FrameUniforms must match the std140 Frame block in the shaders");
 
 } // namespace engine

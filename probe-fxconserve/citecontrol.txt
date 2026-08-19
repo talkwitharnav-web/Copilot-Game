@@ -1,0 +1,27 @@
+// Planted-positive control for the citation sweep.
+// DISTINCT counts per form on purpose: a tool that collapses every result
+// to the same number - the failure that fooled fx-world - is invisible when
+// every expected count is 1. Expect 3 / 2 / 2 / 1.
+
+// FORM 1 x3 - prose line reference
+// The contract is spelled out at line 217 of Player.hpp.
+// See also line 4020 and line 98 for the other two.
+
+// FORM 2 x2 - bare file:line
+// See Survival.hpp:543 for the two missing call sites.
+// And Player.cpp:1784 for the cure.
+
+// FORM 3 x2 - split across a comment line break.
+// The second one below deliberately uses a BARE LF, because mixed endings
+// silently shrink any newline-spanning search.
+// The rule is stated in Inventory.hpp
+// :202, where wearArmour takes a per-piece cost.
+// A second, this time with a bare LF: Chest.hpp
+// :62, where empty() is declared.
+
+// FORM 4 x1 - a lines N-M range
+// Inventory.hpp lines 319-390 hold the armour asserts.
+
+// NEGATIVES - none of these may be flagged
+// The probe measured 11 items, then 22, then 44.
+// One click at 120 ms. A ten-point blow costs 3.00 in diamond.

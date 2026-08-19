@@ -14,16 +14,16 @@
   - **102** &middot; `assets/minecraft/` — art and geometry
     - **121** &middot; `sounds/` — how the naming actually works, because it is not uniform
     - **138** &middot; `models/block` is the most valuable folder here
-    - **152** &middot; `blockstates` explains connected geometry
-  - **158** &middot; `data/minecraft/` — rules and tables
-    - **176** &middot; Recipe format
-  - **201** &middot; What we need, and whether it's here
-    - **203** &middot; Textures — everything on the critical path is now covered
-    - **239** &middot; Recipes — all verified against source
-    - **243** &middot; Still genuinely missing
-    - **249** &middot; ⛔ This dump is **Java's**, and our model geometry is **Bedrock's**
-  - **271** &middot; How to use this well
-  - **287** &middot; Useful commands
+    - **154** &middot; `blockstates` explains connected geometry
+  - **160** &middot; `data/minecraft/` — rules and tables
+    - **178** &middot; Recipe format
+  - **203** &middot; What we need, and whether it's here
+    - **205** &middot; Textures — everything on the critical path is now covered
+    - **241** &middot; Recipes — all verified against source
+    - **245** &middot; Still genuinely missing
+    - **251** &middot; ⛔ This dump is **Java's**, and our model geometry is **Bedrock's**
+  - **273** &middot; How to use this well
+  - **289** &middot; Useful commands
 
 <!-- /INDEX -->
 
@@ -145,7 +145,9 @@ Every non-cube block's exact dimensions, in sixteenths of a block. Example — `
 
 That is a post spanning 0.375–0.625, which is **exactly what our `fenceBoxes()` already uses**. This folder is how to check any future shape without guessing.
 
-> ⭐ **You do not have to check them by hand any more.** `tools/check-models.ps1` measures **every block in the game** against this folder and names any that disagree by more than half a texel — **3186 drawn, 1792 matched a model and agree, 0 disagreeing, 1370 have no model to check against**. Run it after touching any block's geometry. Three divergences are named inside the tool as deliberate.
+> ⭐ **You do not have to check them by hand any more.** `tools/check-models.ps1` measures **every block in the game** against this folder and names any that disagree by more than half a texel — **3230 drawn, 2629 matched a model and agree, 0 disagreeing, 271 have no model to check against** (202 the reference draws as a block entity, 69 it ships only as a single face template, and **0 that we simply failed to find**, which is the figure that matters most here: the tool no longer gives up on a block just because its filename did not match). It also compares **359 `Model` blocks box for box** and **95 face rectangles** against the `uv` the reference states, both at 0 disagreeing. Run it after touching any block's geometry, and pass `-ReuseDump` to compare without running anything. Divergences are named inside the tool with their reasons.
+>
+> **That "0 disagreeing" is worth more than the identical-looking one it replaces.** The tool read 1792/0 while comparing union extents only, went to 2539/**275** the moment it also counted boxes and read `uv` rects, and is back to 0 after the geometry pass that answered them. A union extent cannot see a flower pot whose two X walls carry the whole pot's lid rect, nor a scaffolding missing its four top rails — both were live, both passed every earlier run.
 
 > ⛔ **Some blocks are not in here at all, and the gap is silent.** Anything the reference draws as a **block entity** has no block model: a **bell body**, a chest, a sign, a banner. `bell_floor.json` is the bell's *frame* and nothing else — reading it and assuming it is the whole bell is what made ours wrong three times. When a block is missing or only partly here, measure the artwork and say that is what you did.
 

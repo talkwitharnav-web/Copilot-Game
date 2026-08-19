@@ -205,8 +205,16 @@ GraphicsPipeline::GraphicsPipeline(VkDevice device, const PipelineDesc& desc) : 
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_layout;
 
-    vkCheck(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline),
-            "vkCreateGraphicsPipelines");
+    // **Not `vkCheck`**: `m_layout` is already owned by this half-built object,
+    // and C++ runs no destructor for a constructor that throws. Pipelines are
+    // rebuilt whenever shadow quality changes, so this is not a once-per-run
+    // leak. Three lines rather than a `destroy()` helper because the layout is
+    // the only thing that can be outstanding at this point.
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {
+        vkDestroyPipelineLayout(device, m_layout, nullptr);
+        m_layout = VK_NULL_HANDLE;
+        throw std::runtime_error("vkCreateGraphicsPipelines failed");
+    }
 }
 
 GraphicsPipeline::~GraphicsPipeline() {

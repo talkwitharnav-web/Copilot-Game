@@ -548,13 +548,20 @@ function New-CellStrip {
     return $strip
 }
 
-# The eight 9x9 status icons the survival bars are built from, in the order
+# The ten 9x9 status icons the survival bars are built from, in the order
 # `hud::StatusIcon` names them. Deliberately the cheapest possible placeholders -
 # flat blobs, no shading - because `make-reference-hud.ps1` stamps Mojang's real
 # sprites over the top and the friend authoring our art will replace them. Time
 # spent making a placeholder pretty is time spent on somebody else's job.
+#
+# **Append only, never insert.** The column order is load-bearing in three
+# places at once - this array, `$statusFiles` in make-reference-hud.ps1, and
+# `enum StatusIcon` in StatusBars.cpp - and inserting into the middle
+# mistextures every icon after the insertion with nothing to warn. The two gold
+# absorption hearts were appended on 2026-08-18 for exactly that reason, even
+# though they belong beside the red ones.
 function New-StatusStrip {
-    $count = 8
+    $count = 10
     $pitch = 10
     $size = 9
     $strip = New-Object System.Drawing.Bitmap -ArgumentList ([int]($count * $pitch)), ([int]$pitch),
@@ -565,6 +572,9 @@ function New-StatusStrip {
     $food = [System.Drawing.Color]::FromArgb(255, 150, 96, 42)
     $air = [System.Drawing.Color]::FromArgb(255, 200, 232, 255)
     $airLow = [System.Drawing.Color]::FromArgb(255, 132, 168, 200)
+    # Absorption's hearts are yellow rather than red (minecraft.wiki/w/Absorption).
+    # Ours, not the reference's gold - a placeholder is our art and ships.
+    $absorb = [System.Drawing.Color]::FromArgb(255, 240, 200, 64)
 
     # index, fill, whether only the left half is filled over an empty base
     $icons = @(
@@ -576,6 +586,8 @@ function New-StatusStrip {
         @{ Fill = $food;   Half = $true;  Base = $empty }
         @{ Fill = $air;    Half = $false; Base = $null }
         @{ Fill = $airLow; Half = $false; Base = $null }
+        @{ Fill = $absorb; Half = $false; Base = $null }
+        @{ Fill = $absorb; Half = $true;  Base = $empty }
     )
 
     for ($i = 0; $i -lt $count; $i++) {
@@ -669,7 +681,7 @@ Write-Host "  cells      at (0, $cellTop) size $($cellImage.Width) x $($cellImag
 Write-Host "  smithing   at (0, $smithingTop) size $($smithingImage.Width) x $($smithingImage.Height)"
 Write-Host "  chest      at (0, $chestTop) size $($chestImage.Width) x $($chestImage.Height)"
 Write-Host "  chest x2   at (0, $doubleChestTop) size $($doubleChestImage.Width) x $($doubleChestImage.Height)"
-Write-Host "  status     at (0, $statusTop) size $($statusImage.Width) x $($statusImage.Height): 8 icons 9x9 on a 10 px pitch, in StatusIcon order"
+Write-Host "  status     at (0, $statusTop) size $($statusImage.Width) x $($statusImage.Height): 10 icons 9x9 on a 10 px pitch, in StatusIcon order"
 Write-Host "  hopper     at (0, $hopperTop) size $($hopperImage.Width) x $($hopperImage.Height)"
 Write-Host "  stonecutter at (0, $stonecutterTop) size $($stonecutterImage.Width) x $($stonecutterImage.Height)"
 Write-Host "  character box painted out: $($CharacterBox -join ', ')"

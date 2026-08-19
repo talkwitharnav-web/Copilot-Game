@@ -32,6 +32,11 @@ public:
     static VkFormat chooseFormat(VkPhysicalDevice physicalDevice);
 
 private:
+    /// Everything the constructor takes, so a throw part-way through can be
+    /// released by the one function that also serves the destructor.
+    void createResources(VkExtent2D extent);
+    void destroy() noexcept;
+
     const VulkanContext& m_context;
     VkFormat m_format = VK_FORMAT_UNDEFINED;
     VkImage m_image = VK_NULL_HANDLE;

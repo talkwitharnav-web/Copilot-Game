@@ -196,11 +196,16 @@ if ($crops.Count -eq $tabs.Count) {
 }
 foreach ($crop in $crops.Values) { $crop.Dispose() }
 
-# The eight survival status icons, straight out of the reference's own 9x9 HUD
+# The ten survival status icons, straight out of the reference's own 9x9 HUD
 # sprites. Unlike the tabs these need no state recovery - each one ships as its
 # own file, at exactly the size we draw it, so this is a copy rather than a
 # derivation. Must match `New-StatusStrip` in make-hud-sheet.ps1 and the
 # `hud::StatusIcon` order in code.
+#
+# `absorbing_full`/`absorbing_half` are the gold hearts absorption draws with -
+# the same 9x9 as every other heart, and `absorbing_half` is opaque over its
+# left four columns exactly as `half` is, which is what says it is meant to be
+# drawn over a container rather than on its own.
 $statusTop = 1345
 $statusPitch = 10
 $statusSize = 9
@@ -208,7 +213,8 @@ $hudSprites = Join-Path $root "reference\minecraft-assets-26.2\minecraft-assets-
 $statusFiles = @(
     'heart\container.png', 'heart\full.png', 'heart\half.png',
     'food_empty.png', 'food_full.png', 'food_half.png',
-    'air.png', 'air_bursting.png'
+    'air.png', 'air_bursting.png',
+    'heart\absorbing_full.png', 'heart\absorbing_half.png'
 )
 
 $statusReplaced = 0

@@ -423,7 +423,14 @@ $sources = @(
     # The third batch, layers 249-326.
     @{ Name = 'cactus_side.png';           Path = 'block\cactus_side' }
     @{ Name = 'cactus_top.png';            Path = 'block\cactus_top' }
-    @{ Name = 'bamboo.png';                Path = 'block\bamboo_stalk'; StalkColumns = @(13, 3) }
+    # **The whole sheet, uncropped.** Bamboo used to be staged as a three-column
+    # slice re-centred on a transparent field, because it was drawn as a
+    # full-cell cross and the full sheet came out as a solid square of bamboo
+    # colour. It is drawn from `bamboo1_age0.json` now - a 2-wide post whose
+    # sides take uv `[0,0,2,16]` and whose lids take `[13,0,15,2]` - so the
+    # model's own rects pick the stalk out of the sheet, and a crop would leave
+    # the sides sampling columns the crop had cleared.
+    @{ Name = 'bamboo.png';                Path = 'block\bamboo_stalk' }
     @{ Name = 'sweet_berry_bush.png';      Path = 'block\sweet_berry_bush_stage3' }
     @{ Name = 'glow_lichen.png';           Path = 'block\glow_lichen' }
     @{ Name = 'pointed_dripstone.png';     Path = 'block\pointed_dripstone_up_tip' }
@@ -738,6 +745,17 @@ $sources += @(
     @{ Name = 'grindstone_round.png';         Path = 'block\grindstone_round' }
     @{ Name = 'lectern_sides.png';            Path = 'block\lectern_sides' }
     @{ Name = 'lectern_top.png';              Path = 'block\lectern_top' }
+    # `lectern.json` names four textures and we carried two, so the plinth and the
+    # post both wore the side art - the lectern has never had a front. These two
+    # close that (finding 716). **They are inert until `Main.cpp` lists them and
+    # `Block.hpp` names the layers**: this table is keyed by name, not by index
+    # (see the `$staged` append below), so an extra row here stages a PNG nothing
+    # reads and cannot shift any layer. The list in `Main.cpp` is what the index
+    # comes from, and per its own note the three files must be *agreed first and
+    # landed together* - append at the end of the run in all three or every layer
+    # past the seam moves by one.
+    @{ Name = 'lectern_front.png';            Path = 'block\lectern_front' }
+    @{ Name = 'lectern_base.png';             Path = 'block\lectern_base' }
     @{ Name = 'bell_side.png';                Path = 'block\bell_side' }
     @{ Name = 'bell_top.png';                 Path = 'block\bell_top' }
     @{ Name = 'cauldron_side.png';            Path = 'block\cauldron_side' }
@@ -795,7 +813,12 @@ $sources += @(
     @{ Name = 'wither_rose.png';              Path = 'block\wither_rose' }
     @{ Name = 'campfire_log.png';             Path = 'block\campfire_log' }
     @{ Name = 'campfire_log_lit.png';         Path = 'block\campfire_log_lit' }
-    @{ Name = 'soul_campfire_fire.png';       Path = 'block\soul_campfire_fire';  Frame = 0 }
+    # A replacement, not an addition - `Main.cpp` says why at the matching
+    # name. This slot used to stage `soul_campfire_fire`, the animated flame
+    # sheet, which `Block.hpp` then read as the soul campfire's ember log.
+    # `soul_campfire_log_lit` is 16x64, exactly its ordinary twin above, so
+    # it needs no `Frame` either.
+    @{ Name = 'soul_campfire_log_lit.png';    Path = 'block\soul_campfire_log_lit' }
     @{ Name = 'respawn_anchor_side.png';      Path = 'block\respawn_anchor_side0' }
     @{ Name = 'respawn_anchor_top.png';       Path = 'block\respawn_anchor_top' }
 )
@@ -908,21 +931,11 @@ $sources += @(
     # The shield has no item sprite of its own - it is drawn from a 64x64 entity
     # net - so the interface's own placeholder is what stands in for the icon.
     @{ Name = 'shield.png';                   Path = 'gui\sprites\container\slot\shield' }
-    @{ Name = 'music_disc_13.png';            Path = 'item\music_disc_13' }
-    @{ Name = 'music_disc_cat.png';           Path = 'item\music_disc_cat' }
-    @{ Name = 'music_disc_blocks.png';        Path = 'item\music_disc_blocks' }
-    @{ Name = 'music_disc_chirp.png';         Path = 'item\music_disc_chirp' }
-    @{ Name = 'music_disc_far.png';           Path = 'item\music_disc_far' }
-    @{ Name = 'music_disc_mall.png';          Path = 'item\music_disc_mall' }
-    @{ Name = 'music_disc_drift.png';         Path = 'item\music_disc_mellohi' }
-    @{ Name = 'music_disc_ember.png';         Path = 'item\music_disc_stal' }
-    @{ Name = 'music_disc_vale.png';          Path = 'item\music_disc_strad' }
-    @{ Name = 'music_disc_hollow.png';        Path = 'item\music_disc_ward' }
-    @{ Name = 'music_disc_11.png';            Path = 'item\music_disc_11' }
-    @{ Name = 'music_disc_wait.png';          Path = 'item\music_disc_wait' }
-    @{ Name = 'music_disc_hoofbeat.png';      Path = 'item\music_disc_pigstep' }
-    @{ Name = 'music_disc_otherside.png';     Path = 'item\music_disc_otherside' }
-    @{ Name = 'music_disc_5.png';             Path = 'item\music_disc_5' }
+    # **The fifteen `music_disc_*` rows that stood here are gone**, with the
+    # fifteen matching sprite-list rows in `Main.cpp`. They were a second,
+    # hand-written disc run duplicating ids the real one already owns - the
+    # twenty-two-entry `$discs` run further down, which stages the same source
+    # art plus seven more. Nothing here is orphaned by the cut.
     @{ Name = 'saddle.png';                   Path = 'item\saddle' }
     @{ Name = 'name_tag.png';                 Path = 'item\name_tag' }
     @{ Name = 'lead.png';                     Path = 'item\lead' }
@@ -1103,13 +1116,17 @@ $sources += 0..15 | ForEach-Object {
 }
 
 # ---- Brewing. ----
-# The five reagents that had no item yet. Magma cream, the phantom membrane and
+# The two reagents that had no item yet. Magma cream, the phantom membrane and
 # the rabbit's foot were already staged with the equipment.
+#
+# **Three rows shorter than it was.** `blaze_rod`, `blaze_powder` and
+# `ghast_tear` were Mojang's names for ids already staged above under the
+# project's own coined ones - `cinder_rod.png`, `cinder_powder.png` and
+# `drifter_tear.png`, which point at these very same three source paths. Two
+# staged pictures for one id is two chances to draw the wrong one, and only the
+# coined names may ship.
 $sources += @(
-    @{ Name = 'blaze_rod.png';             Path = 'item\blaze_rod' }
-    @{ Name = 'blaze_powder.png';          Path = 'item\blaze_powder' }
     @{ Name = 'fermented_spider_eye.png';  Path = 'item\fermented_spider_eye' }
-    @{ Name = 'ghast_tear.png';            Path = 'item\ghast_tear' }
     @{ Name = 'dragon_breath.png';         Path = 'item\dragon_breath' }
 )
 
@@ -1337,7 +1354,7 @@ if (Test-Path $chestNetPath) {
     # Net layout, both boxes 14 wide and 14 deep: the lid is 5 tall at uv (0,0)
     # and the base 10 tall at uv (0,19).
     #
-    # **A box's UP face is at `u+d+w`, not `u+d` — that one is DOWN.** Taking the
+    # **A box's UP face is at `u+d+w`, not `u+d` - that one is DOWN.** Taking the
     # lid from x14 gave its *underside*, which is plain dark wood, so every chest
     # in the world wore a black square with a border on its lid.
     #
@@ -1550,26 +1567,6 @@ foreach ($entry in $sources) {
 
     if ($image.Width -ne $size -or $image.Height -ne $size) {
         throw "$($entry.Name) came out $($image.Width)x$($image.Height), expected ${size}x${size}"
-    }
-
-    # A stalk is drawn from a **slice** of its texture in the reference - bamboo's
-    # model samples uv 13-16 across a 2/16 wide post - and we draw cross blades
-    # that span the whole cell, so the full sheet comes out as a solid square of
-    # bamboo colour. Cropping the slice onto a transparent field is what makes it
-    # read as a stalk.
-    if ($entry.ContainsKey('StalkColumns')) {
-        $from = $entry.StalkColumns[0]
-        $wide = $entry.StalkColumns[1]
-        $slice = New-Object System.Drawing.Bitmap -ArgumentList $size, $size,
-            ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-        $at = [int](($size - $wide) / 2)
-        for ($y = 0; $y -lt $size; $y++) {
-            for ($x = 0; $x -lt $wide; $x++) {
-                $slice.SetPixel(($at + $x), $y, $image.GetPixel(($from + $x), $y))
-            }
-        }
-        $image.Dispose()
-        $image = $slice
     }
 
     $staged += @{ Name = $entry.Name; Image = $image }

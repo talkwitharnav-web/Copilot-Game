@@ -97,6 +97,58 @@ public:
     std::uint8_t* waterloggedData() { return m_waterlogged.data(); }
     const std::uint8_t* waterloggedData() const { return m_waterlogged.data(); }
 
+    /// **The reference's one-bit blockstates, and what it means is decided by
+    /// the block sitting in the cell.** Exactly like `waterlogged`, it cannot
+    /// live in `BlockId`: that is written straight to disk and every value is
+    /// spoken for, and both of the states below are *modifiers* on an existing
+    /// id rather than a new block.
+    ///
+    /// Two readers, and only two, both in `World`:
+    ///
+    ///   leaves  - Bedrock's `persistent_bit`, "If the block persists
+    ///             regardless of having no wood nearby" (minecraft.wiki
+    ///             [[Leaves]], Block states, BE table). Set means player-placed
+    ///             and immune to decay; clear means it grew there.
+    ///   sapling - Bedrock's `age_bit`, "Specifies the sapling's growth stage"
+    ///             (minecraft.wiki [[Sapling]], Block states, BE table). One
+    ///             bit is the whole state there: stage 0, then stage 1, then
+    ///             the tree.
+    ///
+    /// **Nothing else may read it, and the two can never be confused**, because
+    /// `World::setBlock` rewrites this bit on every single write - so a cell
+    /// that was a leaf and becomes a sapling starts from a cleared bit rather
+    /// than inheriting a meaning from the block that left. That rewrite is what
+    /// makes one array safe for two states; without it this would be the
+    /// "one number meaning two things" bug in its purest form.
+    ///
+    /// Outside the chunk reads false: an unloaded neighbour is not a
+    /// player-placed leaf and is not a half-grown sapling, which is the same
+    /// reasoning `waterloggedAt` uses.
+    bool stateBitAt(int x, int y, int z) const {
+        if (!contains(x, y, z)) {
+            return false;
+        }
+        const std::size_t bit = index(x, y, z);
+        return (m_stateBits[bit >> 3] & (1u << (bit & 7u))) != 0u;
+    }
+
+    void setStateBit(int x, int y, int z, bool on) {
+        if (!contains(x, y, z)) {
+            return;
+        }
+        const std::size_t bit = index(x, y, z);
+        const auto mask = static_cast<std::uint8_t>(1u << (bit & 7u));
+        if (on) {
+            m_stateBits[bit >> 3] |= mask;
+        } else {
+            m_stateBits[bit >> 3] &= static_cast<std::uint8_t>(~mask);
+        }
+    }
+
+    static constexpr std::size_t kStateBitBytes = kBlockCount / 8;
+    std::uint8_t* stateBitData() { return m_stateBits.data(); }
+    const std::uint8_t* stateBitData() const { return m_stateBits.data(); }
+
     /// Raw storage, for bulk operations such as saving and loading. **Two bytes
     /// per block since the id was widened**, so use `kBlockBytes` rather than
     /// `kBlockCount` for anything measured in bytes.
@@ -131,6 +183,12 @@ private:
 
     /// One bit per cell, so 4 KB against the block array's 32 KB.
     std::array<std::uint8_t, kWaterloggedBytes> m_waterlogged{};
+
+    /// The same again, for the single blockstate bit described by
+    /// `stateBitAt`. Value-initialised, and clear is the natural answer for
+    /// both meanings - a generated leaf decays and a freshly planted sapling
+    /// is at stage 0 - so a chunk that has never been touched is already right.
+    std::array<std::uint8_t, kStateBitBytes> m_stateBits{};
 };
 
 } // namespace game

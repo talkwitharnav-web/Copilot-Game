@@ -1,11 +1,13 @@
 #include "world/ChunkMesher.hpp"
 
+#include "world/FaceGeometry.hpp"
 #include "world/FaceShading.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace game {
 namespace {
@@ -14,9 +16,16 @@ struct Face {
     glm::ivec3 neighbourOffset;
     /// Corners of the face on a unit cube, counter-clockwise seen from outside.
     /// Reverse any of these and that face vanishes under backface culling.
+    ///
+    /// **Read from `FaceGeometry.hpp`, which owns them** - they used to be
+    /// written out here and transcribed into the three other places a block is
+    /// drawn, and the falling cube's copy was this table's rows *reversed*: a
+    /// V-flip on all 24 corners and an inward winding on all 6 faces.
     std::array<glm::vec3, 4> corners;
     /// Texture coordinates for those same four corners, in the same order.
-    /// V grows downward, matching how image rows are stored.
+    /// V grows downward, matching how image rows are stored. Same owner as the
+    /// corners, because a rect only means anything paired with the list it was
+    /// written for.
     std::array<glm::vec2, 4> uvs;
     BlockFace facing;
     /// Fixed brightness by orientation, so surfaces stay readable even where the
@@ -41,13 +50,22 @@ struct Face {
     FaceDirection direction;
 };
 
-constexpr std::array<glm::vec2, 4> kBottomLeftWinding{glm::vec2{0, 1}, glm::vec2{1, 1}, glm::vec2{1, 0},
-                                                      glm::vec2{0, 0}};
-
+/// **Provably complete, by declared size against literal rows.** 2026-08-19.
+/// The array declares 6 and contains 6 brace-initialised rows, so every face
+/// this mesher can emit is written out longhand here. That is the property a
+/// token search cannot establish: a row produced by a cast, by arithmetic or in
+/// a loop would still count toward the declared size while contributing no
+/// literal row, and would show up as a shortfall. There is none, so there is no
+/// seventh face hiding behind an expression, and a sweep of this table is a
+/// sweep of the whole set.
+///
+/// Worth stating because the icon path in `HudPrimitives.cpp` deliberately
+/// draws only three of these, and the two files are checked against each other.
+/// **Falsified by** the declared size and the literal row count disagreeing.
 constexpr std::array<Face, 6> kFaces{{
     // +X
     {{1, 0, 0},
-     {glm::vec3{1, 0, 1}, glm::vec3{1, 0, 0}, glm::vec3{1, 1, 0}, glm::vec3{1, 1, 1}},
+     faceCorners(AxisFace::PosX),
      kBottomLeftWinding,
      BlockFace::Side,
      faceShade(AxisFace::PosX),
@@ -58,7 +76,7 @@ constexpr std::array<Face, 6> kFaces{{
      FaceDirection::PosX},
     // -X
     {{-1, 0, 0},
-     {glm::vec3{0, 0, 0}, glm::vec3{0, 0, 1}, glm::vec3{0, 1, 1}, glm::vec3{0, 1, 0}},
+     faceCorners(AxisFace::NegX),
      kBottomLeftWinding,
      BlockFace::Side,
      faceShade(AxisFace::NegX),
@@ -69,7 +87,7 @@ constexpr std::array<Face, 6> kFaces{{
      FaceDirection::NegX},
     // +Y
     {{0, 1, 0},
-     {glm::vec3{0, 1, 1}, glm::vec3{1, 1, 1}, glm::vec3{1, 1, 0}, glm::vec3{0, 1, 0}},
+     faceCorners(AxisFace::PosY),
      kBottomLeftWinding,
      BlockFace::Top,
      faceShade(AxisFace::PosY),
@@ -80,7 +98,7 @@ constexpr std::array<Face, 6> kFaces{{
      FaceDirection::Unknown},
     // -Y
     {{0, -1, 0},
-     {glm::vec3{0, 0, 0}, glm::vec3{1, 0, 0}, glm::vec3{1, 0, 1}, glm::vec3{0, 0, 1}},
+     faceCorners(AxisFace::NegY),
      kBottomLeftWinding,
      BlockFace::Bottom,
      faceShade(AxisFace::NegY),
@@ -91,7 +109,7 @@ constexpr std::array<Face, 6> kFaces{{
      FaceDirection::Unknown},
     // +Z
     {{0, 0, 1},
-     {glm::vec3{0, 0, 1}, glm::vec3{1, 0, 1}, glm::vec3{1, 1, 1}, glm::vec3{0, 1, 1}},
+     faceCorners(AxisFace::PosZ),
      kBottomLeftWinding,
      BlockFace::Side,
      faceShade(AxisFace::PosZ),
@@ -102,7 +120,7 @@ constexpr std::array<Face, 6> kFaces{{
      FaceDirection::PosZ},
     // -Z
     {{0, 0, -1},
-     {glm::vec3{1, 0, 0}, glm::vec3{0, 0, 0}, glm::vec3{0, 1, 0}, glm::vec3{1, 1, 0}},
+     faceCorners(AxisFace::NegZ),
      kBottomLeftWinding,
      BlockFace::Side,
      faceShade(AxisFace::NegZ),
@@ -209,8 +227,37 @@ struct FaceSample {
     bool sways = false;
 };
 
-/// How much of a block each level of water gives up. Level 7 is a thin film.
-constexpr float kWaterLevelDrop = 0.11f;
+/// How much of a block each level of water gives up, as a fraction of a cell.
+/// Level 7 is a thin film.
+///
+/// **One ninth exactly, not a rounded 0.11.** The reference states a fluid's
+/// fill as `amount / 9` and `Fluid.hpp::fluidHeight` divides by that same nine,
+/// so the step drawn here has to be the same ninth or the surface you see and
+/// the surface you swim against drift apart as the level rises: 0.11 agreed
+/// only at level 0 and left a level-7 film 7.8 mm above where the physics put
+/// it. Two owners for one number, which `audit.md` section 12.9 already named.
+///
+/// The drawn ladder still sits **one step high on purpose** - a source draws
+/// with no drop at all, so its top is flush with the cell boundary rather than
+/// at 8/9, which is what `kWaveDisplacement` in `engine/shaders/waves.glsl`
+/// documents and what makes a full ocean look full. Once this is exact that
+/// offset is a constant ninth at every level, which is the only way it can be
+/// stated as one sentence rather than as a table of eight differences.
+constexpr float kWaterLevelDrop = 1.0f / 9.0f;
+
+/// The nine is `kMaxWaterLevel + 2`: seven flowing levels, the source they fall
+/// away from, and the one ninth the reference leaves empty above a source. Bound
+/// to `Block.hpp`'s level range rather than to `Fluid.hpp`'s height function
+/// because **meshing may not include `Fluid.hpp`** - that would pull in
+/// `World.hpp` and end the "pure function of blocks and borders" rule this file
+/// exists under. Compared with a tolerance because the round trip through a
+/// binary float is not obliged to land back on 1 exactly.
+constexpr float kWaterLevelDropError =
+    kWaterLevelDrop * static_cast<float>(kMaxWaterLevel + 2) - 1.0f;
+static_assert(kWaterLevelDropError < 1.0e-6f && kWaterLevelDropError > -1.0e-6f,
+              "the drawn step must be the reference's ninth, derived from the level range");
+static_assert(kMaxWaterLevel == kMaxLavaLevel,
+              "one drop serves both fluids, so a level range that stops serving both breaks it");
 
 /// How much of the world shows through water.
 constexpr float kWaterAlpha = 0.72f;
@@ -229,6 +276,416 @@ constexpr float kWaterAlpha = 0.72f;
 constexpr float translucentAlpha(BlockId block) {
     return isBlendedGlass(block) ? 1.0f : kWaterAlpha;
 }
+
+/// Whether `ahead` is the **same fluid** as `block`, which is the only case the
+/// level comparison below is a rule about.
+///
+/// `isFluid` covers both fluids at once, and everything that reads it treats
+/// them as interchangeable - which is right for "can something move through
+/// this" and wrong for "does this hide my face". The two fluids are disjoint,
+/// so being water settles it.
+constexpr bool sameFluidAs(BlockId block, BlockId ahead) {
+    return isFluid(ahead) && isWater(block) == isWater(ahead);
+}
+
+static_assert(sameFluidAs(BlockId::Water0, BlockId::Water3) &&
+                  sameFluidAs(BlockId::Water0, BlockId::WaterFalling),
+              "every water cell is the same fluid as every other, whatever its level");
+static_assert(!sameFluidAs(BlockId::Water0, BlockId::Lava0) &&
+                  !sameFluidAs(BlockId::Lava0, BlockId::Water0),
+              "water and lava are not, read from either side - which is the bug this exists for");
+static_assert(!sameFluidAs(BlockId::Water0, BlockId::Stone),
+              "and nothing that is not a fluid is one");
+// The other half of that rule, and the half a comment cannot keep honest: once
+// the neighbour is a *different* fluid the face falls through to the ordinary
+// occlusion test, so the fix only closes the hole while that test lets it
+// through. Both fluids are `BlockShape::Empty`, so `occludesFace` answers false
+// at every offset. **The single edit that makes this fail is giving either
+// fluid `BlockShape::Full`** - after which lava would hide water's face and the
+// water-lava boundary would quietly be a hole again from one side.
+static_assert(!occludesFace(BlockId::Lava0, -1) && !occludesFace(BlockId::Lava0, 0) &&
+                  !occludesFace(BlockId::Lava0, 1) && !occludesFace(BlockId::Water0, -1) &&
+                  !occludesFace(BlockId::Water0, 0) && !occludesFace(BlockId::Water0, 1),
+              "no fluid hides the other fluid's face, at any offset");
+
+/// `MeshFacing` names the same six directions, in the same order, as the array
+/// the mesher actually walks.
+///
+/// **`ChunkMeshes::translucentFacings` is indexed by one and filled by the
+/// other**, so the single edit that makes this fail is moving an entry of
+/// `kFaces` - or adding one - without moving the matching enumerator. **The
+/// assert is the only guard there can be**: nothing reads the ranges today, and
+/// a consumer that did would be handed the +X run labelled -Z with every index
+/// in it still valid. It would draw, it would not crash, no validation layer
+/// would say a word, and the order would simply be wrong.
+///
+/// **"Nothing reads them" is a measurement with a date, not a property of the
+/// code - so here is the date, the test, and the control.** Re-measured
+/// 2026-08-19 11:48.
+///
+/// **Four mentions are code, and not one of them subscripts the array**: the
+/// declaration on `ChunkMeshes`, its twin on `ChunkMeshUpdate` over in
+/// `World.hpp`, the fill in `buildMesh` below, and `World.cpp` copying the
+/// array straight through into the update struct. That copy is why a call-site
+/// sweep is not enough on its own - the value travels inside a struct, so a
+/// consumer would never name this function.
+///
+/// **Prose mentions are deliberately not counted.** An earlier version of this
+/// paragraph said "seven mentions" and itemised them; hardening the paragraph
+/// added prose and the figure was stale within the hour, against a total that
+/// is nine as this is written. Worse, re-deriving it locally gave seven again
+/// from a different set - `World.cpp` and `World.hpp` omitted, extra prose
+/// counted - and the two sevens agreeing nearly justified deleting the
+/// `World.cpp` line, which is true. **A total is not a set.**
+///
+/// **This is an ABSENCE claim, so it can only ever have an instrument control.**
+/// There is no same-symbol control available: the whole content of the claim is
+/// that there is nothing there to measure, so varying a condition around the
+/// subject has nothing to move. What can be shown instead is that the detector
+/// was capable of seeing a read had one existed - and how many places it
+/// actually looked, so that a zero reads as *absent* rather than as *blind*.
+///
+/// **Denominator: 97 files under `game/src`, swept 2026-08-19 11:17.** Nine
+/// mentions today, four of them code and listed above, none a subscript.
+///
+/// **Instrument control**, all in `Main.cpp`, one search, one moment:
+/// `translucentShaped` 2 - it takes `.first` and `.count` off the update struct
+/// - against `translucentFacings` 0, against an invented `opaqueFacings` 0, a
+/// member that does not exist anywhere. Non-uniform, and the zero side includes
+/// a name that *cannot* be found, so a zero here carries information rather
+/// than merely being one. The non-zero side was predicted before it was
+/// measured, by `ChunkMesher.hpp`'s own note that "unlike the six, this one is
+/// read" - a different author in a different file, which is much harder to
+/// fool oneself with than a number chosen after the fact.
+///
+/// **`Renderer.cpp` returns 0 for both and is therefore worthless here** - it
+/// is vacuous on both sides, and correctly so, since `engine/` may not name a
+/// game type at all. Recorded because testing only there would have produced
+/// 0 and 0 and permitted any conclusion at all.
+///
+/// It also settles the struct question empirically: the consumer writes the
+/// member's own name, so searching for that name is sufficient even though the
+/// value travels inside a struct.
+///
+/// **Falsified by**: any expression that *subscripts* `translucentFacings`, or
+/// that reads `ChunkMeshUpdate::translucentFacings`, anywhere outside this file.
+/// The moment one exists, the ordering above stops being theoretical and this
+/// paragraph must be rewritten rather than re-dated - and the assert below
+/// becomes load-bearing instead of precautionary.
+///
+/// **Why this is written at all**: a correct-because-unread claim expires the
+/// instant somebody makes it read, and nothing announces that. The renderer
+/// gained a wind consumer tonight and turned another file's correct
+/// "nothing reads it" note into a live defect between two saves of the same
+/// tree. Dating the claim is what makes the recheck cost a minute.
+constexpr bool facingsMatchFaceTable() {
+    for (std::size_t i = 0; i < kFaces.size(); ++i) {
+        if (kFaces[i].neighbourOffset != facingNormal(static_cast<MeshFacing>(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// That row `i` of the face table is holding row `i`'s corners.
+///
+/// The corners come from `FaceGeometry.hpp` now, indexed by `AxisFace`, while
+/// `neighbourOffset` is still written out here and indexed by `MeshFacing` -
+/// **three orders that have to be the same one**, and only the first two were
+/// tied together. Hand `faceCorners` the wrong enumerator and the mesher emits
+/// one face's quad while testing the *opposite* neighbour for occlusion, so a
+/// buried face is drawn and a visible one is culled. Both enums are dense and
+/// start at the same direction, which is exactly why swapping them compiles.
+///
+/// Checked by deriving each corner's side from the offset the mesher actually
+/// samples with, rather than by comparing the two tables to each other.
+constexpr bool cornersSitOnTheFaceSampled() {
+    for (std::size_t i = 0; i < kFaces.size(); ++i) {
+        const glm::ivec3 offset = kFaces[i].neighbourOffset;
+        const int axis = offset.x != 0 ? 0 : (offset.y != 0 ? 1 : 2);
+        const float side = offset[axis] > 0 ? 1.0f : 0.0f;
+        for (const glm::vec3& corner : kFaces[i].corners) {
+            if (corner[axis] != side) {
+                return false;
+            }
+        }
+        if (faceOutwardNormal(static_cast<AxisFace>(i)) != offset) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(kFaces.size() == kMeshFacings, "one range per face the mesher emits, and no more");
+static_assert(facingsMatchFaceTable(), "MeshFacing and kFaces must name the same six, in order");
+static_assert(cornersSitOnTheFaceSampled(),
+              "a face's corners are on a different side of the cube from the neighbour it "
+              "samples - AxisFace and MeshFacing have drifted apart");
+
+// ---------------------------------------------------------------------------
+// **That a model box is asked per face, and that asking changed nothing on its
+// own.**
+//
+// These live here rather than in `Block.hpp` because `AxisFace` does: that
+// header declares it opaquely to stay clear of the renderer's vertex format, so
+// it can read the enumerators as the integers they are but cannot name them.
+// This file sees both headers, and it is where the real reader sits.
+
+/// The rule the three sites above replaced, kept **only** so the proofs below
+/// have something that has to fail. `axis == 1` is true of +Y and -Y alike,
+/// which is the whole defect in one line.
+constexpr float axisOnlyLayer(const ModelBox& box, AxisFace face) {
+    return faceAxis(face) == 1 ? box.lidLayer : box.sideLayer;
+}
+
+using BoxLayerRule = float (*)(const ModelBox&, AxisFace);
+
+/// A box whose floor is not its lid, answered by whichever rule is handed in.
+///
+/// `kBoxFloorLecternPlinth` is a **shipping** row rather than one written for
+/// the test, so this drives the real table through the real accessor. Its layer
+/// is `kPlanksLayer`, which `Block.hpp` separately asserts against
+/// `TextureLayer::Planks`, so the 9 below is not this table quoted back at
+/// itself.
+constexpr bool floorIsAskedSeparately(BoxLayerRule resolve) {
+    ModelBox box{};
+    box.lidLayer = 7.0f;
+    box.sideLayer = 5.0f;
+    box.floorOverride = kBoxFloorLecternPlinth;
+    return resolve(box, AxisFace::PosY) == 7.0f && resolve(box, AxisFace::NegY) == kPlanksLayer &&
+           resolve(box, AxisFace::PosX) != kPlanksLayer;
+}
+
+static_assert(floorIsAskedSeparately(boxFaceLayer),
+              "a model box's floor is answering with its lid's layer");
+static_assert(!floorIsAskedSeparately(axisOnlyLayer),
+              "the axis-only rule this replaced now passes the test written to catch it, so the "
+              "test has stopped measuring anything");
+
+/// **A box that names no row answers exactly as it did before rows existed.**
+///
+/// This is what makes "nothing moved until a box's own data was edited" a
+/// property of the encoding rather than something measured afterwards: -1 means
+/// "the answer this face already gets", so a default box's lid and floor agree
+/// and its four walls agree, rectangle, layer and turn alike.
+constexpr bool defaultBoxIsInert() {
+    ModelBox box{};
+    box.uMin = 0.125f;
+    box.vMin = 0.25f;
+    box.uMax = 0.375f;
+    box.vMax = 0.5f;
+    box.topUMin = 0.625f;
+    box.topVMin = 0.75f;
+    box.topUMax = 0.875f;
+    box.topVMax = 1.0f;
+    box.sideLayer = 5.0f;
+    box.lidLayer = 7.0f;
+    box.lidTurns = 3;
+    const FaceRect lid = boxFaceRect(box, AxisFace::PosY);
+    const FaceRect floor = boxFaceRect(box, AxisFace::NegY);
+    if (lid.uMin != floor.uMin || lid.vMin != floor.vMin || lid.uMax != floor.uMax ||
+        lid.vMax != floor.vMax || lid.uMin != box.topUMin || lid.vMax != box.topVMax) {
+        return false;
+    }
+    if (boxFaceLayer(box, AxisFace::PosY) != 7.0f || boxFaceLayer(box, AxisFace::NegY) != 7.0f) {
+        return false;
+    }
+    if (boxFaceTurns(box, AxisFace::PosY) != 3 || boxFaceTurns(box, AxisFace::NegY) != 3) {
+        return false;
+    }
+    constexpr AxisFace walls[]{AxisFace::PosX, AxisFace::NegX, AxisFace::PosZ, AxisFace::NegZ};
+    for (const AxisFace wall : walls) {
+        const FaceRect rect = boxFaceRect(box, wall);
+        if (rect.uMin != box.uMin || rect.vMin != box.vMin || rect.uMax != box.uMax ||
+            rect.vMax != box.vMax) {
+            return false;
+        }
+        if (boxFaceLayer(box, wall) != 5.0f || boxFaceTurns(box, wall) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(defaultBoxIsInert(),
+              "adding the per-face rows moved a box that names none of them");
+
+/// **A lid and a floor are turned separately**, on the two real models that
+/// need it.
+///
+/// `lidTurns` was gated on the same `axis == 1` test as the rectangle and the
+/// layer, so it says "the lid" and means both of them. `lectern.json` is the
+/// case that proves the split is real rather than tidy: it puts
+/// `"rotation": 180` on both of its `up` faces and on **neither** `down`, so
+/// one number cannot answer for both and only the floor row can hold the
+/// underside at zero.
+constexpr bool turnsAreAskedPerFace(const ModelBox& box, unsigned char lid, unsigned char floor) {
+    return boxFaceTurns(box, AxisFace::PosY) == lid && boxFaceTurns(box, AxisFace::NegY) == floor;
+}
+
+/// The control for it: the same box with its floor row taken away. If the
+/// assert below still passed on this, the row would not be what is holding the
+/// lectern's underside straight and the test would be proving nothing.
+constexpr ModelBox withoutFloorRow(ModelBox box) {
+    box.floorOverride = -1;
+    return box;
+}
+
+static_assert(turnsAreAskedPerFace(postModel(BlockId::Lectern).boxes[0], 2, 0) &&
+                  turnsAreAskedPerFace(postModel(BlockId::Lectern).boxes[2], 2, 0),
+              "lectern.json turns both of its up faces half round and neither of its down faces");
+static_assert(!turnsAreAskedPerFace(withoutFloorRow(postModel(BlockId::Lectern).boxes[0]), 2, 0) &&
+                  !turnsAreAskedPerFace(withoutFloorRow(postModel(BlockId::Lectern).boxes[2]), 2, 0),
+              "the lectern's floor rows are not what hold its undersides at zero turns, so the "
+              "assert above is not testing what it says");
+
+/// The anvil is the other half of the same reading, and the opposite answer:
+/// `template_anvil.json` turns #0 and #3 half round on **both** faces, states
+/// only the `up` of #1, and states neither face of the waist. Asserting the
+/// waist stays at zero is what stops a future "turn every anvil box" edit from
+/// looking correct.
+static_assert(turnsAreAskedPerFace(postModel(BlockId::Anvil).boxes[0], 2, 2) &&
+                  turnsAreAskedPerFace(postModel(BlockId::Anvil).boxes[3], 2, 2) &&
+                  boxFaceTurns(postModel(BlockId::Anvil).boxes[1], AxisFace::PosY) == 2 &&
+                  boxFaceTurns(postModel(BlockId::Anvil).boxes[2], AxisFace::PosY) == 0 &&
+                  boxFaceTurns(postModel(BlockId::Anvil).boxes[2], AxisFace::NegY) == 0,
+              "template_anvil.json's half turns are not where its JSON puts them");
+
+/// Every one of the five is `180`, and that is the reason they could be taken
+/// while the same two models' `90`s and `270`s could not: **half a turn is its
+/// own inverse**, so it lands correctly whether our clockwise runs the same way
+/// as the reference's or the other way. A quarter turn does not, and nothing
+/// here has yet proved the two agree.
+static_assert(boxFaceTurns(postModel(BlockId::Lectern).boxes[0], AxisFace::PosY) == 2 &&
+                  boxFaceTurns(postModel(BlockId::Anvil).boxes[0], AxisFace::PosY) == 2,
+              "a half turn stopped being a half turn");
+
+using WallSlotRule = int (*)(AxisFace);
+
+/// The slot order written backwards, so the proof below has something to
+/// reject. Same technique as `FaceGeometry.hpp`'s reversed-row test: a check
+/// that cannot fail is not a check.
+constexpr int reversedWallSlot(AxisFace face) {
+    const int slot = boxWallSlot(face);
+    return slot < 0 ? slot : 3 - slot;
+}
+
+/// **That wall slot `i` is the direction the mesher samples at row `i`.**
+///
+/// Derived twice over from things that own the answer - `faceOutwardNormal`,
+/// which `FaceGeometry.hpp` owns, and the `direction` column the texture lookup
+/// actually reads - rather than from the order the slots happen to be written
+/// in. A row of `kBoxWallFaces` in the wrong order would otherwise put a
+/// campfire's embers on its outward face and its bark on the fire, and nothing
+/// would say a word.
+constexpr bool wallSlotsRunWithTheGeometry(WallSlotRule slotOf) {
+    for (std::size_t i = 0; i < kFaces.size(); ++i) {
+        const AxisFace face = static_cast<AxisFace>(i);
+        const int slot = slotOf(face);
+        if (faceAxis(face) == 1) {
+            // A lid and a floor have no wall slot, and exactly one of them is
+            // the floor.
+            if (slot >= 0 || boxFaceIsFloor(face) == faceIsPositive(face)) {
+                return false;
+            }
+            continue;
+        }
+        const glm::ivec3 normal = faceOutwardNormal(face);
+        const int expected = normal.x > 0 ? 0 : (normal.x < 0 ? 1 : (normal.z > 0 ? 2 : 3));
+        if (slot != expected || boxWallSlotDirection(slot) != kFaces[i].direction) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(wallSlotsRunWithTheGeometry(boxWallSlot),
+              "a wall override slot names a different face from the one the mesher draws there");
+static_assert(!wallSlotsRunWithTheGeometry(reversedWallSlot),
+              "the slot order reversed still satisfies the order test, so the test proves "
+              "nothing about the order");
+
+/// Every model box in the game, every face of it, through the same three
+/// accessors the loop below calls.
+///
+/// What it can catch that reading cannot: a row constant left pointing past the
+/// end of its table after an edit, a sentinel leaking out of `boxFaceLayer` as
+/// a layer index, a rectangle stated backwards - which is a silent mirror - and
+/// a turn outside the four the switch handles, which would fall to `default:`
+/// and quietly not turn.
+constexpr bool boxFacesAreSane(int pass);
+
+/// Finer than the house 7 x 512 on purpose. Debug builds compile with
+/// `_ITERATOR_DEBUG_LEVEL=2`, which bounds-checks every `std::array` subscript
+/// and roughly triples the constexpr step count, and this sweep calls
+/// `postModel` - which returns 684 bytes by value - once per id.
+constexpr int kBoxFaceSweepStride = 128;
+
+/// **Derived from the id count, not written down.** Changed 2026-08-19.
+///
+/// This constant is the reason the change is worth making. It used to read 27
+/// with a comment explaining that 26 passes covered 3328 ids against a count of
+/// 3285, and that the twenty-four ids the bee nest added had cut the headroom
+/// to nineteen - so a hand-written number had already gone stale once tonight,
+/// and the repair was a hand-written safety margin, which is the same thing
+/// again one step later.
+///
+/// A ceiling division cannot go stale. It also makes the deliberate spare pass
+/// unnecessary: there is nothing left to trip, so the margin that existed to
+/// absorb the next family can go. Whether that lands on 26 or 27 today depends
+/// on a count in `Block.hpp` that changed twice this morning, and the point of
+/// this form is that this file no longer has to know which.
+///
+/// This is the same idiom as `kNameSweepPasses` in `Block.hpp` and
+/// `kDropModelSweepPasses` in `ItemEntity.cpp`. Search `*SweepPasses` for the
+/// full set rather than trusting this list.
+constexpr int kBoxFaceSweepPasses =
+    (static_cast<int>(kBlockIdCount) + kBoxFaceSweepStride - 1) / kBoxFaceSweepStride;
+
+constexpr bool boxFacesAreSane(int pass) {
+    const int first = pass * kBoxFaceSweepStride;
+    const int end = first + kBoxFaceSweepStride;
+    for (int raw = first; raw < end && raw < static_cast<int>(kBlockIdCount); ++raw) {
+        const ModelBoxes model = postModel(static_cast<BlockId>(raw));
+        for (int b = 0; b < model.count; ++b) {
+            const ModelBox& box = model.boxes[b];
+            if (box.floorOverride >= kBoxFloorFaceCount ||
+                box.wallOverride >= kBoxWallFaceCount) {
+                return false;
+            }
+            for (std::size_t f = 0; f < kFaces.size(); ++f) {
+                const AxisFace face = static_cast<AxisFace>(f);
+                if (boxFaceLayer(box, face) < -1.0f || boxFaceTurns(box, face) > 3) {
+                    return false;
+                }
+                const FaceRect rect = boxFaceRect(box, face);
+                if (rect.uMax < rect.uMin || rect.vMax < rect.vMin) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+template <int Pass>
+struct BoxFaceSweep {
+    static_assert(boxFacesAreSane(Pass),
+                  "a model box names an override row that is not there, or resolves a face to a "
+                  "layer, rectangle or turn nothing downstream can use");
+    static constexpr bool swept = true;
+};
+
+template <int... Pass>
+constexpr bool everyBoxFacePassSwept(std::integer_sequence<int, Pass...>) {
+    return (BoxFaceSweep<Pass>::swept && ...);
+}
+
+static_assert(everyBoxFacePassSwept(std::make_integer_sequence<int, kBoxFaceSweepPasses>{}),
+              "the failing BoxFaceSweep instantiation above names which stride");
+static_assert(kBoxFaceSweepPasses * kBoxFaceSweepStride >= static_cast<int>(kBlockIdCount),
+              "the box face sweep no longer covers every block id - the count above is a ceiling "
+              "division, so this is arithmetic rather than a stale constant; do not raise it");
 
 } // namespace
 
@@ -251,7 +708,20 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                waterAt(cornerX - 1, y, cornerZ) && waterAt(cornerX, y, cornerZ);
     };
 
-    for (const Face& face : kFaces) {
+    // **Six passes, one per direction, and each finishes before the next
+    // begins.** That was already true; recording where each one started and
+    // stopped is the whole of what `translucentFacings` and `translucentShaped`
+    // add - **they observe this loop and change nothing inside it**, so the
+    // ranges cost no geometry and cannot move a vertex.
+    //
+    // **That is a claim about the ranges, not about the loop.** The
+    // `sameFluidAs` rule further down did change what is emitted, at every
+    // water-lava boundary, and index buffers there are different as a result -
+    // deliberately, because they used to have a hole in them. Do not read this
+    // paragraph as "the mesher was not touched this round".
+    for (std::size_t facing = 0; facing < kFaces.size(); ++facing) {
+        const Face& face = kFaces[facing];
+        const auto facingFirst = static_cast<std::uint32_t>(result.translucent.indices.size());
         // The two axes the face spans. Which is called which does not matter;
         // texture scaling reads the face's own uAxis/vAxis rather than these.
         const int normal = face.axis;
@@ -342,11 +812,34 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     // fence, pane of glass and slab standing in it - the block
                     // beside the water does not supply the water's own face, so
                     // the result was a hole you could see straight through.
+                    //
+                    // **And "the neighbour is a fluid" has to mean *my* fluid.**
+                    // The level comparison says "I draw the boundary my thinner
+                    // neighbour's lower surface would leave a gap in", which is
+                    // a statement about two cells of one fluid. Water beside
+                    // lava at the same level answered `0 > 0` from *both* sides,
+                    // so neither drew the shared face and there was a hole
+                    // straight through the world where they met.
+                    //
+                    // A different fluid is then judged like any other
+                    // neighbour, and **no fluid occludes anything**: both are
+                    // `BlockShape::Empty`, so `occludesFace` reaches its
+                    // `default` and answers false at every offset. *Measured
+                    // rather than assumed* - `isOpaque(Lava0)` reads as though
+                    // a cube of lava were solid and it is false, which is the
+                    // reading this comment previously had to correct. So both
+                    // sides emit the shared quad, into different meshes: lava
+                    // is not translucent and goes to the opaque pass, water is
+                    // and goes to the blended one. Which of the two coplanar
+                    // faces survives is the depth test's business and the
+                    // renderer's; the hole is closed either way, because the
+                    // lava face alone is enough to fill it.
+                    const bool sameFluid = sameFluidAs(block, ahead);
                     const bool visible =
                         isFluid(block)
-                            ? ((!isFluid(ahead) &&
+                            ? ((!sameFluid &&
                                 !occludesFace(ahead, face.neighbourOffset.y)) ||
-                               (isFluid(ahead) && ahead != block &&
+                               (sameFluid && ahead != block &&
                                 face.neighbourOffset.y <= 0 &&
                                 fluidLevel(ahead) > fluidLevel(block)))
                             : (!occludesFace(ahead, face.neighbourOffset.y) && !cutoutInterior &&
@@ -625,9 +1118,20 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                 }
             }
         }
+
+        result.translucentFacings[facing] =
+            IndexRange{facingFirst,
+                       static_cast<std::uint32_t>(result.translucent.indices.size()) - facingFirst};
     }
 
     // Shapes that are not unit cubes, one block at a time and never merged.
+    //
+    // **Everything from here on is the `translucentShaped` tail.** This pass
+    // emits a whole block's faces together, so a run of its indices spans
+    // several directions at once and cannot join the six above. Recorded
+    // separately rather than left unaccounted for: a reader that took the six
+    // ranges to cover the buffer would stop drawing stained panes entirely.
+    const auto shapedFirst = static_cast<std::uint32_t>(result.translucent.indices.size());
     const auto lightOf = [&](const glm::ivec3& cell, float& sky, float& blockLight) {
         const std::uint8_t packed = volume.lightAt(cell.x, cell.y, cell.z);
         sky = lightCurve(static_cast<float>(packed >> 4));
@@ -745,6 +1249,57 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     continue;
                 }
 
+                if (isRail(block)) {
+                    // **A rail is one plane, not a box.** `rail_flat.json` is a
+                    // zero-thickness element at y = 1 with an `up` face and a
+                    // `down` face, and `template_rail_raised_ne.json` is that
+                    // same plane tilted - so both are one double-sided quad here
+                    // and the reference's two faces come out of `doubleSided`
+                    // rather than out of two emissions.
+                    //
+                    // **This is why the box path could not draw it.** Boxes are
+                    // axis-aligned, so an ascending rail came out as a flat
+                    // sheet lying on the floor of its own cell: a player who
+                    // built a rail ramp saw a flight of separate flat rails on
+                    // steps rather than a continuous incline. And a box has no
+                    // way to turn its texture, so north-south and east-west were
+                    // pixel-identical and rail direction was invisible.
+                    //
+                    // Every fact this needs is asked for rather than restated:
+                    // `railShape` decodes the id, `railCornerY` owns which edge
+                    // is raised, and `railUvTurns` owns the turn.
+                    lightOf({x, y, z}, sky, blockLight);
+                    const int railShapeIndex = railShape(block);
+                    const float layer = blockTextureLayer(block, BlockFace::Top);
+                    const auto turns = static_cast<std::size_t>(railUvTurns(railShapeIndex));
+
+                    // The lid's own corner order, so a rail's texture lies the
+                    // same way round as every other top face in the world - the
+                    // one table, rather than a fifth copy of it.
+                    constexpr auto lid = static_cast<std::size_t>(AxisFace::PosY);
+                    std::array<glm::vec3, 4> corners{};
+                    std::array<glm::vec2, 4> uvs{};
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        const int cornerX = kFaceCornerBits[lid][c][0];
+                        const int cornerZ = kFaceCornerBits[lid][c][2];
+                        corners[c] = cellOrigin + glm::vec3{static_cast<float>(cornerX),
+                                                            railCornerY(railShapeIndex, cornerX, cornerZ),
+                                                            static_cast<float>(cornerZ)};
+                        // Turning which uv lands on which corner turns the
+                        // picture, and the four uvs are a cycle, so a quarter
+                        // turn is a step round it.
+                        uvs[c] = kBottomLeftWinding[(c + turns) & std::size_t{3}];
+                    }
+
+                    // A ramp is at 45 degrees like a plant blade, so it has no
+                    // axis to name; a flat rail is a lid and takes the lid's.
+                    pushQuad(corners, uvs, layer, sky, blockLight, faceShade(AxisFace::PosY),
+                             railSlopes(railShapeIndex) ? engine::kNormalUnaligned
+                                                        : faceNormalCode(AxisFace::PosY),
+                             true);
+                    continue;
+                }
+
                 // Slabs and stairs are both just boxes, and they read the very
                 // same table collision does, so what you see and what you bump
                 // into cannot disagree.
@@ -782,7 +1337,15 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     const glm::vec3 lo{b.minX, b.minY, b.minZ};
                     const glm::vec3 hi{b.maxX, b.maxY, b.maxZ};
 
-                    for (const Face& face : kFaces) {
+                    for (std::size_t f = 0; f < kFaces.size(); ++f) {
+                        const Face& face = kFaces[f];
+                        // **The name of the face, not merely its axis.** A
+                        // `ModelBox` answers per face, and until it could, one
+                        // answer served +Y and -Y together and one served all
+                        // four walls. `cornersSitOnTheFaceSampled` above proves
+                        // row `f` of this table is the `AxisFace` of the same
+                        // number, so this cast is derived rather than assumed.
+                        const AxisFace axisFace = static_cast<AxisFace>(f);
                         const int axis = face.axis;
                         const bool positive = face.neighbourOffset[axis] > 0;
 
@@ -896,18 +1459,19 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                         }
 
                         // A model box paints its lid from a different corner of
-                        // its net than its walls.
+                        // its net than its walls - and its floor and each of
+                        // its four walls from different corners again, which is
+                        // what `boxFaceRect` is asked rather than told.
                         float uLow = 0.0f;
                         float uHigh = 1.0f;
                         float vLow = 0.0f;
                         float vHigh = 1.0f;
                         if (model.count > 0) {
-                            const ModelBox& m = model.boxes[i];
-                            const bool lid = axis == 1;
-                            uLow = lid ? m.topUMin : m.uMin;
-                            uHigh = lid ? m.topUMax : m.uMax;
-                            vLow = lid ? m.topVMin : m.vMin;
-                            vHigh = lid ? m.topVMax : m.vMax;
+                            const FaceRect rect = boxFaceRect(model.boxes[i], axisFace);
+                            uLow = rect.uMin;
+                            uHigh = rect.uMax;
+                            vLow = rect.vMin;
+                            vHigh = rect.vMax;
                         }
 
                         std::array<glm::vec3, 4> corners{};
@@ -920,30 +1484,36 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                             if (model.count > 0) {
                                 float fu = face.corners[c][uAxis];
                                 float fv = face.corners[c][vAxis];
-                                // A lid may be turned, which is how a model
+                                // A face may be turned, which is how a model
                                 // says which way round a texture goes when the
-                                // block itself cannot be rotated.
-                                if (axis == 1) {
-                                    switch (model.boxes[i].lidTurns) {
-                                    case 1: {
-                                        const float wasU = fu;
-                                        fu = fv;
-                                        fv = 1.0f - wasU;
-                                        break;
-                                    }
-                                    case 2:
-                                        fu = 1.0f - fu;
-                                        fv = 1.0f - fv;
-                                        break;
-                                    case 3: {
-                                        const float wasU = fu;
-                                        fu = 1.0f - fv;
-                                        fv = wasU;
-                                        break;
-                                    }
-                                    default:
-                                        break;
-                                    }
+                                // block itself cannot be rotated. **This was
+                                // gated on the same axis test as the rectangle
+                                // and the layer**, so a floor wore its lid's
+                                // quarter turn; splitting those two and leaving
+                                // this one would have put the right picture on
+                                // a repeater's belly at the wrong angle.
+                                // `boxFaceTurns` answers 0 for every wall no
+                                // box has stated one for, which is all of them
+                                // today.
+                                switch (boxFaceTurns(model.boxes[i], axisFace)) {
+                                case 1: {
+                                    const float wasU = fu;
+                                    fu = fv;
+                                    fv = 1.0f - wasU;
+                                    break;
+                                }
+                                case 2:
+                                    fu = 1.0f - fu;
+                                    fv = 1.0f - fv;
+                                    break;
+                                case 3: {
+                                    const float wasU = fu;
+                                    fu = 1.0f - fv;
+                                    fv = wasU;
+                                    break;
+                                }
+                                default:
+                                    break;
                                 }
                                 uvs[c] = {flipU ? glm::mix(uHigh, uLow, fu) : glm::mix(uLow, uHigh, fu),
                                           flipV ? glm::mix(vHigh, vLow, fv) : glm::mix(vLow, vHigh, fv)};
@@ -955,11 +1525,15 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                         pushQuad(corners, uvs,
                                  // A model box may name its own layer, which is
                                  // what lets a bell be a wooden frame round a
-                                 // gold bell rather than gold throughout.
+                                 // gold bell rather than gold throughout. It
+                                 // names it **per face**: the fallback below
+                                 // has always told Top from Bottom and named
+                                 // all four walls, and for twenty milestones
+                                 // only the override on top of it was coarser
+                                 // than that.
                                  [&] {
                                      if (model.count > 0) {
-                                         const ModelBox& m = model.boxes[i];
-                                         const float own = axis == 1 ? m.lidLayer : m.sideLayer;
+                                         const float own = boxFaceLayer(model.boxes[i], axisFace);
                                          if (own >= 0.0f) {
                                              return own;
                                          }
@@ -974,6 +1548,10 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
             }
         }
     }
+
+    result.translucentShaped =
+        IndexRange{shapedFirst,
+                   static_cast<std::uint32_t>(result.translucent.indices.size()) - shapedFirst};
 
     return result;
 }

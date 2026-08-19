@@ -45,6 +45,17 @@ struct Furnace {
 ///
 /// Fuel is only consumed when there is something worth cooking, so a furnace
 /// loaded with coal and nothing else sits cold rather than burning itself out.
-bool tickFurnace(Furnace& furnace, float deltaSeconds);
+///
+/// `cooker` is **which** of the three cookers this is, and it is passed rather
+/// than stored because it is already in the block id - putting a kind on the
+/// struct would be a second copy of the same fact and a save-format change to
+/// go with it. It decides what the thing will accept: a smoker takes food, a
+/// blast furnace takes ore and metal, a plain furnace takes everything. Without
+/// it all three accepted everything, which made the plain furnace pointless and
+/// the two specialised ones identical to each other.
+///
+/// Defaulted so a caller that does not know or care - a test, or a cooker whose
+/// id is not to hand - gets the unrestricted furnace it used to get.
+bool tickFurnace(Furnace& furnace, float deltaSeconds, BlockId cooker = BlockId::Furnace);
 
 } // namespace game

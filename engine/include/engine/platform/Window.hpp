@@ -57,9 +57,128 @@ enum class Key {
     F12,
     /// Editing commands are not characters: the OS never sends them to the
     /// character callback, so text editing needs them from the key path.
+    ///
+    /// **Grouped at the end for reading, not for deciding.** What may repeat is
+    /// `repeatsWhenHeld` below and nothing else - an ordering is not an
+    /// invariant, and `Enter` sits here while being the one member of the run
+    /// that must *not* repeat.
     Backspace,
     Enter,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    /// Not a key. Exists so `repeatsWhenHeld` can be checked over the whole
+    /// enum below; `toGlfwKey` maps it to nothing.
+    Count,
 };
+
+/// Whether holding this key down means "again" - the filter on the repeat
+/// queue, applied where keys enter it so there is one gate rather than one per
+/// caller.
+///
+/// **A mechanism, not a policy.** It says nothing about text fields or what any
+/// key does; only that auto-repeat is meaningful for it. `Enter` is deliberately
+/// out: it is grouped with the editing keys because the OS never sends it to the
+/// character callback, not because leaning on a confirm key should confirm
+/// forty times a second - that is the same bug as `E` strobing the inventory,
+/// which is the entire reason repeats live in their own queue.
+///
+/// **No `default:`, and two asserts, because the `default:` alone proves
+/// nothing here.** MSVC's C4062 - the warning for an enumerator a switch does
+/// not handle - is **off by default even at `/W4`**, and this build does not
+/// turn it on, so omitting a case is silent. Measured, not assumed: a probe
+/// with `Key::Home` removed compiled clean at `/W4` and warned only under
+/// `/w44062`. The asserts below are therefore the real net.
+constexpr bool repeatsWhenHeld(Key key) {
+    switch (key) {
+    case Key::Backspace:
+    case Key::Delete:
+    case Key::Left:
+    case Key::Right:
+    case Key::Up:
+    case Key::Down:
+    case Key::Home:
+    case Key::End:
+        return true;
+
+    // Movement is read with `isKeyDown`, so a held `W` needs no repeat and
+    // queueing it would spend the cap on the one caller that cannot use it.
+    case Key::W:
+    case Key::A:
+    case Key::S:
+    case Key::D:
+    case Key::Space:
+    case Key::LeftShift:
+    case Key::LeftControl:
+
+    // Toggles and one-shots. Every one of these would fire ~30 times a second
+    // if it repeated.
+    case Key::E:
+    case Key::F:
+    case Key::G:
+    case Key::C:
+    case Key::V:
+    case Key::Q:
+    case Key::Escape:
+    case Key::Enter:
+    case Key::Num1:
+    case Key::Num2:
+    case Key::Num3:
+    case Key::Num4:
+    case Key::Num5:
+    case Key::Num6:
+    case Key::Num7:
+    case Key::Num8:
+    case Key::Num9:
+    case Key::F1:
+    case Key::F2:
+    case Key::F3:
+    case Key::F4:
+    case Key::F5:
+    case Key::F6:
+    case Key::F7:
+    case Key::F8:
+    case Key::F9:
+    case Key::F10:
+    case Key::F11:
+    case Key::F12:
+    case Key::Count:
+        return false;
+    }
+    return false;
+}
+
+/// **The single edit that fails this: adding or removing a `Key`.** Which is
+/// exactly when someone must decide whether holding the new one means "again",
+/// and this line is the only thing in the codebase that asks.
+static_assert(static_cast<int>(Key::Count) == 44,
+              "A key was added or removed. Answer for it in `repeatsWhenHeld` above, then "
+              "correct this number.");
+
+/// And the other half, because the count above cannot see a case label move
+/// from one block to the other. This runs the real predicate over the real
+/// enum rather than restating either, so it is not a derivation compared
+/// against itself.
+///
+/// **The single edit that fails this: moving `Enter` up into the repeating
+/// block** - the tempting one, since it sits with the editing keys - or letting
+/// an editing key slip down into the toggles.
+static_assert(
+    [] {
+        int repeating = 0;
+        for (int key = 0; key < static_cast<int>(Key::Count); ++key) {
+            if (repeatsWhenHeld(static_cast<Key>(key))) {
+                ++repeating;
+            }
+        }
+        return repeating;
+    }() == 8,
+    "The repeat group changed size: Backspace, Delete, the four arrows, Home and End are "
+    "the eight keys that repeat, and Enter is deliberately not one of them.");
 
 enum class MouseButton {
     Left,
@@ -151,6 +270,30 @@ public:
     /// Keys pressed since the last call, in press order. Clears the queue.
     /// Auto-repeat is ignored, so holding a key yields exactly one press.
     std::vector<Key> consumeKeyPresses();
+
+    /// Keys the OS is **auto-repeating** because they are being held, in the
+    /// order they arrived. Clears the queue. The first press is not in here -
+    /// it is in `consumeKeyPresses` - so a text field drains both and gets one
+    /// deletion per press plus one per repeat.
+    ///
+    /// **Only keys `repeatsWhenHeld` accepts ever reach this**, so the queue is
+    /// the editing group its name implies rather than every held key. That is
+    /// what makes the cap mean something: a leaned-on `W` cannot spend it, so a
+    /// caller that drains only while a field is open still gets every Backspace
+    /// rather than finding the cap already full of movement.
+    ///
+    /// **A separate queue rather than repeats folded into `consumeKeyPresses`,
+    /// and that is the whole point.** Every other consumer of that queue is a
+    /// toggle or a one-shot: holding `E` would strobe the inventory open and
+    /// shut, `F10` would race through the tone mappers, and a held number key
+    /// would fight the hotbar. Repeat is only ever wanted by something that
+    /// eats a key per repetition, which today is the catalogue's search field
+    /// and nothing else, so it is opt-in by being somewhere else entirely.
+    ///
+    /// Draining every frame is still the tidier habit - a dropped repeat is
+    /// invisible while a queued burst arriving late is not - but it is no
+    /// longer load-bearing.
+    std::vector<Key> consumeKeyRepeats();
 
     /// Whether a key is held right now. Use this for continuous movement, and
     /// `consumeKeyPresses` for one-shot actions.
@@ -253,6 +396,11 @@ public:
     /// Called by the platform key callback. Not intended for game code.
     void recordKeyPress(Key key) { m_keyPresses.push_back(key); }
 
+    /// Called by the platform key callback for an auto-repeat. Not intended for
+    /// game code. **Filters through `repeatsWhenHeld`** - the gate is here, not
+    /// at the callback, so there is one of it.
+    void recordKeyRepeat(Key key);
+
     /// Called by the platform character callback. Not intended for game code.
     void recordTypedCharacter(unsigned int codepoint);
 
@@ -274,6 +422,9 @@ private:
     GLFWwindow* m_handle = nullptr;
     bool m_resized = false;
     std::vector<Key> m_keyPresses;
+    /// Capped, unlike the press queue: a frame that does not drain this is the
+    /// ordinary case, because only a text field wants repeats at all.
+    std::vector<Key> m_keyRepeats;
     /// Capped, so a frame that never drains it cannot grow without bound while
     /// someone leans on the keyboard.
     std::string m_typedText;

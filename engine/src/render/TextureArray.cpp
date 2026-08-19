@@ -108,8 +108,43 @@ void transitionLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayou
 TextureArray::TextureArray(const VulkanContext& context, VkCommandPool commandPool,
                            const std::vector<std::filesystem::path>& files)
     : m_context(context) {
+    // See `DepthImage`: a constructor that throws gets no destructor. This one
+    // is built once, so the leak dies with the process - but it throws in five
+    // places and a missing texture file is the most ordinary failure in the
+    // engine, so it should not also leave the device holding an image.
+    try {
+        createResources(commandPool, files);
+    } catch (...) {
+        destroy();
+        throw;
+    }
+}
+
+void TextureArray::createResources(VkCommandPool commandPool, const std::vector<std::filesystem::path>& files) {
+    const VulkanContext& context = m_context;
     if (files.empty()) {
         throw std::runtime_error("TextureArray needs at least one image");
+    }
+
+    // **A tripwire, not a gate** - the same idiom, and the same reasoning, as
+    // the `maxPushConstantsSize` check in `Renderer::createTimestampPool`. Both
+    // GPUs on this machine report a `maxImageArrayLayers` of 2048 and the game
+    // hands this array a little over 1400 layers today, so it cannot fire now.
+    // It exists because the sheet grows by a handful of layers every milestone
+    // and the failure without it is `vkCreateImage` returning a bare error code
+    // at startup with nothing anywhere naming the cause.
+    //
+    // Checked **before a single file is decoded**, so the message arrives
+    // immediately rather than after a thousand PNGs have been read off disk.
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(context.physicalDevice(), &properties);
+    if (files.size() > static_cast<std::size_t>(properties.limits.maxImageArrayLayers)) {
+        throw std::runtime_error(
+            "This texture array asks for " + std::to_string(files.size()) + " layers but this GPU allows only " +
+            std::to_string(properties.limits.maxImageArrayLayers) +
+            " (VkPhysicalDeviceLimits::maxImageArrayLayers). Every image in the array is one layer, so the fix is "
+            "to send fewer images - drop unused art from the list, or split the sheet across more than one "
+            "TextureArray.");
     }
 
     std::vector<std::unique_ptr<StbImage>> images;
@@ -127,6 +162,29 @@ TextureArray::TextureArray(const VulkanContext& context, VkCommandPool commandPo
             static_cast<std::uint32_t>(image->height()) != m_height) {
             throw std::runtime_error("All textures in an array must share one size");
         }
+    }
+
+    // **The other axis of the same tripwire, and this one is already over the
+    // line.** The layer check above guards how many images there are; nothing
+    // guarded how big one of them is, and the sheets grow on both axes. Vulkan
+    // only guarantees a `maxImageDimension2D` of 4096, and
+    // `assets/textures/creatures.png` is 128 x 4704 today - it crossed 4096
+    // between milestones with nothing to notice. Both GPUs in this machine
+    // report far more than that, so the game runs here; on any part reporting
+    // the guaranteed floor, `vkCreateImage` below fails with a bare code and
+    // nothing anywhere names the sheet. That is word for word the failure the
+    // layer check was written to abolish.
+    //
+    // Checked against the same `properties` fetched above, and after decoding
+    // rather than before, because the size is not known until a file is read.
+    if (m_width > properties.limits.maxImageDimension2D || m_height > properties.limits.maxImageDimension2D) {
+        throw std::runtime_error(
+            "This texture array's images are " + std::to_string(m_width) + "x" + std::to_string(m_height) +
+            " but this GPU allows only " + std::to_string(properties.limits.maxImageDimension2D) +
+            " on either side (VkPhysicalDeviceLimits::maxImageDimension2D). The first image is '" +
+            files.front().string() +
+            "'. A sheet that has outgrown the limit has to be split across more than one TextureArray, or laid "
+            "out in more columns and fewer rows.");
     }
 
     // Blitting halves the image each level, so the chain ends when the larger
@@ -160,8 +218,6 @@ TextureArray::TextureArray(const VulkanContext& context, VkCommandPool commandPo
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
-        vkDestroyImage(context.device(), m_image, nullptr);
-        m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for texture array");
     }
     vkCheck(vkBindImageMemory(context.device(), m_image, m_memory, 0), "vkBindImageMemory");
@@ -298,17 +354,23 @@ void TextureArray::generateMipmaps(VkCommandBuffer commandBuffer) {
                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, m_mipLevels - 1, 1, m_layerCount);
 }
 
-TextureArray::~TextureArray() {
+TextureArray::~TextureArray() { destroy(); }
+
+void TextureArray::destroy() noexcept {
     if (m_sampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_sampler, nullptr);
+        m_sampler = VK_NULL_HANDLE;
     }
     if (m_view != VK_NULL_HANDLE) {
         vkDestroyImageView(m_context.device(), m_view, nullptr);
+        m_view = VK_NULL_HANDLE;
     }
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
+        m_image = VK_NULL_HANDLE;
     }
     freeDeviceMemory(m_context.device(), m_memory);
+    m_memory = VK_NULL_HANDLE;
 }
 
 std::uint8_t TextureArray::alphaAt(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const {

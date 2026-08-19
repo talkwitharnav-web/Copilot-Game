@@ -19,7 +19,9 @@
 #include "hud/HudPrimitives.hpp"
 #include "hud/InventoryScreen.hpp"
 #include "hud/LoadingScreen.hpp"
+#include "item/BlockDrops.hpp"
 #include "item/Inventory.hpp"
+#include "item/Mining.hpp"
 #include "item/Recipe.hpp"
 #include "item/SlotOps.hpp"
 #include "item/Smelting.hpp"
@@ -29,19 +31,23 @@
 #include "world/Projectile.hpp"
 #include "world/Biome.hpp"
 #include "world/BlockOutline.hpp"
+#include "world/Campfire.hpp"
 #include "world/Chunk.hpp"
 #include "world/Collision.hpp"
+#include "world/Copper.hpp"
 #include "world/Creature.hpp"
 #include "world/Explosion.hpp"
 #include "world/Farming.hpp"
 
 #include <map>
 #include "world/FallingBlock.hpp"
+#include "world/Loot.hpp"
 #include "world/Material.hpp"
 #include "world/Player.hpp"
 #include "world/Raycast.hpp"
 #include "world/Sky.hpp"
 #include "world/TerrainGenerator.hpp"
+#include "world/Tick.hpp"
 #include "world/Particles.hpp"
 #include "world/Village.hpp"
 #include "world/Weather.hpp"
@@ -61,10 +67,13 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -112,10 +121,25 @@ constexpr int kPearlLandingLift = 3;
 // Rate a held button lands blows on a creature, distinct from digging: a swing
 // connects once and then has to be wound up again.
 constexpr float kSwingSeconds = 0.45f;
-// How often a block that takes no time at all may be broken. Creative breaks
-// are instant, so without this the dig completes every frame and each one
-// exposes the block behind it - one click strips the whole reach in a line.
-constexpr float kBreakRepeatSeconds = 0.22f;
+// The reference's own gap between one block coming apart and the next one
+// starting: **six ticks**, and it is skipped entirely when the break took a
+// single tick or less. Ours was 0.22 s and, worse, was applied to exactly the
+// breaks the reference exempts.
+constexpr float kBreakRepeatSeconds = 6.0f * game::tick::kSeconds;
+// What an instant break still costs. The reference tests the dig **once per
+// tick**, so even an exempt break can only happen twenty times a second; our
+// loop runs per frame, and without a floor here a creative click strips the
+// whole reach in a line - which is the shape this constant was added for.
+constexpr float kInstantBreakSeconds = game::tick::kSeconds;
+
+// Both gaps above are whole ticks, and this says so in the *other* spelling of
+// the rate - which is the only thing that would notice one of them being
+// written back out as a bare `1.0f / 20.0f`, as both were.
+//
+// > Fails if: either constant stops deriving from `game::tick`, or the tick
+// > rate is changed - and the tick rate is never the fix for smoothness.
+static_assert(kInstantBreakSeconds * game::tick::kPerSecond == 1.0f,
+              "the instant-break floor is exactly one tick");
 
 // Field of view in degrees, vertical. 70 matches the genre default; the range
 // is wide enough to be useful without the edge distortion that makes very high
@@ -163,9 +187,394 @@ constexpr float kLoadingStallSeconds = 3.0f;
 constexpr float kThrowSpeed = 6.0f;
 constexpr float kThrowPickupDelay = 1.2f;
 
+/// The largest coordinate a saved position may name, in blocks.
+///
+/// **A float precision limit rather than a world limit**, and derived rather
+/// than picked: a `float` carries 24 mantissa bits, so 2^21 is the last
+/// magnitude at which it still resolves a quarter of a block. Past it,
+/// movement snaps in visible steps; well past it, `static_cast<int>` of the
+/// value no longer means what the collision and chunk code read it as. A NaN
+/// is worse again - casting one to `int` is undefined behaviour and on x86
+/// yields `INT_MIN` straight into chunk arithmetic.
+constexpr float kMaxSavedCoord = 2097152.0f; // 2^21 blocks.
+
+/// A full turn in radians, for wrapping a saved yaw back into one.
+constexpr float kTwoPi = 6.2831853f;
+
+/// **What a blow lands for, before Strength and Weakness have their say.**
+///
+/// Bedrock's table (`RESEARCH.md` section 2.2, https://minecraft.wiki/w/Damage),
+/// written as its shape rather than as five rows of numbers: every row steps by
+/// one per tier and a sword is the best weapon at every tier, so the kind
+/// contributes a constant and the tier contributes itself. Wood is tier 1 and
+/// emberite is tier 5, which is why a wooden sword comes out at 5 and an
+/// emberite one at 9.
+///
+/// It replaces `kind == Sword ? (tier >= kStoneTier ? 5 : 4) : 1 + tier`, which
+/// flattened every sword from stone upwards to a single 5 and **made an
+/// emberite shovel the strongest weapon in the game**.
+constexpr int weaponDamage(game::ToolKind kind, int tier) {
+    switch (kind) {
+    case game::ToolKind::Sword:
+        return 4 + tier;
+    case game::ToolKind::Axe:
+        return 3 + tier;
+    // Bedrock's hoe matches its pickaxe. `[JE]` a hoe always deals 1 and an axe
+    // out-damages a sword; we follow Bedrock, so swords win and the tiering is
+    // clean.
+    case game::ToolKind::Pickaxe:
+    case game::ToolKind::Hoe:
+        return 2 + tier;
+    case game::ToolKind::Shovel:
+        return 1 + tier;
+    // A bare fist, and anything that is not a tool at all. **Named rather than
+    // left to a `default:`**, so the next kind added is a compiler error here
+    // instead of silently dealing one.
+    case game::ToolKind::None:
+    case game::ToolKind::Shears:
+        break;
+    }
+    return 1;
+}
+
+static_assert(weaponDamage(game::ToolKind::Sword, game::kWoodTier) == 5 &&
+                  weaponDamage(game::ToolKind::Sword, game::kStoneTier) == 6 &&
+                  weaponDamage(game::ToolKind::Sword, game::kIronTier) == 7 &&
+                  weaponDamage(game::ToolKind::Sword, game::kDiamondTier) == 8 &&
+                  weaponDamage(game::ToolKind::Sword, game::kEmberiteTier) == 9,
+              "Bedrock's sword row, verbatim. Change 4 to anything else and this fails.");
+static_assert(weaponDamage(game::ToolKind::Axe, game::kWoodTier) == 4 &&
+                  weaponDamage(game::ToolKind::Pickaxe, game::kWoodTier) == 3 &&
+                  weaponDamage(game::ToolKind::Hoe, game::kWoodTier) == 3 &&
+                  weaponDamage(game::ToolKind::Shovel, game::kWoodTier) == 2 &&
+                  weaponDamage(game::ToolKind::Axe, game::kEmberiteTier) == 8 &&
+                  weaponDamage(game::ToolKind::Pickaxe, game::kEmberiteTier) == 7 &&
+                  weaponDamage(game::ToolKind::Hoe, game::kEmberiteTier) == 7 &&
+                  weaponDamage(game::ToolKind::Shovel, game::kEmberiteTier) == 6,
+              "Bedrock's other four rows, both ends. RESEARCH.md 2.2 is the table; the single edit "
+              "that breaks this is changing a kind's constant to make one tool feel better.");
+
+/// Whether a sword still beats every other tool **at its own tier**, which is
+/// the property the expression this replaced actually broke. Written as the
+/// whole comparison a player makes rather than as one hand-picked pair, because
+/// an assert that names two tiers proves nothing about the other four.
+constexpr bool swordLeadsAtEveryTier() {
+    for (int tier = game::kWoodTier; tier <= game::kEmberiteTier; ++tier) {
+        const int sword = weaponDamage(game::ToolKind::Sword, tier);
+        if (sword <= weaponDamage(game::ToolKind::Axe, tier) ||
+            sword <= weaponDamage(game::ToolKind::Pickaxe, tier) ||
+            sword <= weaponDamage(game::ToolKind::Hoe, tier) ||
+            sword <= weaponDamage(game::ToolKind::Shovel, tier)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(swordLeadsAtEveryTier(),
+              "a sword out-damages every other tool of its own tier, which is Bedrock's shape and "
+              "the reason we follow it. The single edit that breaks this is flattening the sword "
+              "row - `tier >= kStoneTier ? 5 : 4` is exactly what shipped, and it let an emberite "
+              "shovel out-hit a diamond sword.");
+static_assert(weaponDamage(game::ToolKind::None, game::kHandTier) == 1,
+              "a bare fist deals 1, and so does anything that is not a tool");
+
+/// The hardest a blow of ours can land without effects, which is what the
+/// rumble strength is scaled against. Read off the table rather than restated,
+/// or a new tier silently pins the controller at maximum.
+constexpr int kStrongestBlow = weaponDamage(game::ToolKind::Sword, game::kEmberiteTier);
+
 /// Slower than breaking or placing: emptying a stack by accident is more
 /// annoying than having to hold the key a moment longer.
 constexpr float kDropRepeatSeconds = 0.22f;
+
+/// **Whether merging two slabs of `family` gives back what it swallowed.**
+///
+/// Two halves meeting in one cell become the parent block, because there is no
+/// double-slab id to hold the pair. minecraft.wiki *Slab*: "Double slabs are
+/// handled as a single block instead of two different slabs; as such, breaking
+/// one destroys the whole block and drops two slabs." For fifty-four of the
+/// fifty-five families the parent hands its own item back, so the merge is
+/// reversible in a crafting grid and costs nothing. **Stone is the fifty-fifth
+/// and it is a real loss**: `StoneSlab`'s parent is `Stone`, and `Stone` drops
+/// `Cobblestone` even under Silk Touch, so two stone slabs merged and then
+/// mined came back as one cobblestone with no way to get the slabs again.
+///
+/// So the merge asks first, and a family that would eat the pair simply does
+/// not merge - the second slab stands in its own cell like any other block,
+/// which is worse to build with and takes nothing off the player. **The right
+/// fix is a double-slab id per family and it is not in this file**; this is the
+/// guard that stops the loss until `Block.hpp` grows one.
+///
+/// `primaryDrop` rather than the whole table because a slab parent is a plain
+/// one-row block - none of the fifty-five rolls, and none pays two of itself.
+constexpr bool slabMergeReturnsItsMaterial(int family) {
+    const game::BlockId parent =
+        game::kSlabFamilies[static_cast<std::size_t>(family)].parent;
+    return game::primaryDrop(parent) == game::itemForBlock(parent);
+}
+
+/// Counted rather than stated, so the assert below measures the table instead
+/// of repeating a number somebody typed.
+constexpr int mergeableSlabFamilies() {
+    int total = 0;
+    for (int family = 0; family < game::kSlabFamilyCount; ++family) {
+        total += slabMergeReturnsItsMaterial(family) ? 1 : 0;
+    }
+    return total;
+}
+
+// **The single edit that makes this fail:** giving one more slab family a
+// parent whose drop row is not itself - a deepslate or a blackstone variant
+// would do it - or changing an existing parent's row. Either way the merge
+// starts destroying slabs again, and the build says so rather than a
+// playtester finding it four milestones later.
+static_assert(mergeableSlabFamilies() == game::kSlabFamilyCount - 1,
+              "exactly one slab family (Stone, whose parent drops Cobblestone) must be excluded "
+              "from the merge - a second one means another pair of slabs is being eaten");
+static_assert(!slabMergeReturnsItsMaterial(game::slabFamily(game::BlockId::StoneSlab)),
+              "and it must be Stone that is excluded, not some other family that has drifted");
+
+/// **How long a button stays down.** Bedrock holds a wooden button for 30 ticks
+/// and a stone one for 20 (https://minecraft.wiki/w/Button). Which is which is
+/// read off the family table's own parent rather than off the index, so a
+/// thirteenth family cannot quietly inherit the wrong number by being added in
+/// the wrong place.
+///
+/// **`isPlanksBlock` and not `isFlammable`**, which was the first thing written
+/// here and was wrong: crimson and warped planks do not burn, so two perfectly
+/// wooden buttons would have taken the stone timing. The assert below is what
+/// said so, before anything was played.
+constexpr float buttonHeldSeconds(int family) {
+    const game::BlockId parent =
+        game::kButtonFamilies[static_cast<std::size_t>(family)].parent;
+    return static_cast<float>(game::isPlanksBlock(parent) ? 30 : 20) * game::tick::kSeconds;
+}
+
+constexpr int woodenButtonFamilies() {
+    int total = 0;
+    for (int family = 0; family < game::kButtonFamilyCount; ++family) {
+        total +=
+            game::isPlanksBlock(game::kButtonFamilies[static_cast<std::size_t>(family)].parent)
+                ? 1
+                : 0;
+    }
+    return total;
+}
+
+// **The single edit that makes this fail:** adding a button family cut from
+// something that is not planks - a polished blackstone button, which the
+// reference does have - which would take the stone timing without anyone
+// deciding it should, or moving the stone family out of last place.
+static_assert(woodenButtonFamilies() == game::kButtonFamilyCount - 1,
+              "eleven wooden button families and one stone one - a second non-wooden family "
+              "means the 20/30 tick split has stopped being derivable from the table");
+
+/// A compass direction as one step, so the four-way walks below share one
+/// spelling of it instead of each writing the ternary chain out again.
+inline glm::ivec3 stepAlong(game::FaceDirection direction) {
+    switch (direction) {
+    case game::FaceDirection::PosX:
+        return glm::ivec3{1, 0, 0};
+    case game::FaceDirection::NegX:
+        return glm::ivec3{-1, 0, 0};
+    case game::FaceDirection::PosZ:
+        return glm::ivec3{0, 0, 1};
+    case game::FaceDirection::NegZ:
+        return glm::ivec3{0, 0, -1};
+    default:
+        return glm::ivec3{0, 0, 0};
+    }
+}
+
+/// **The wall a block is held up by, or `Unknown` when nothing holds it
+/// sideways.**
+///
+/// A direction pointing *from* the block *at* the cell that supports it, so one
+/// caller can ask "did the cell that just went hold this up" and another can
+/// ask "is there anything here to hang this on" off the same answer.
+///
+/// `settleAround` had this rule for **ladders alone**, and it was right there.
+/// Five other families hang off the side of a block and none of them was asked,
+/// so mining a wall left every wall sign, wall banner, wall torch, lever,
+/// button and cocoa pod floating in mid-air paying no drop
+/// (https://minecraft.wiki/w/Sign, https://minecraft.wiki/w/Banner: a sign or
+/// banner "breaks and drops itself as an item if the block it is attached to is
+/// moved, removed or destroyed"). The other half is the same missing answer
+/// read backwards and is worse: `needsSupportBelow` is true for every torch id
+/// including the eight wall ones, the only support test was the floor, so a
+/// redstone torch could not be put on a wall over open air at all and was
+/// deleted the moment the ground beneath it was mined - against
+/// https://minecraft.wiki/w/Redstone_Torch, where what a torch needs is its
+/// **attachment** block.
+///
+/// **Every direction is read from the accessor that owns it**, and where the
+/// stored value is the way the block *looks* rather than the way it leans - a
+/// sign faces out of its wall - the flip is taken here, once, rather than at
+/// each call site.
+///
+/// > Three families are deliberately absent and are reported rather than
+/// > guessed: a hanging sign holds on above rather than sideways, a vine can
+/// > cling to several sides at once and would need its remaining sides rewritten
+/// > rather than simply dropping, and the tripwire hook and lightning rod store
+/// > a direction whose meaning `Block.hpp`'s own comment and this file's
+/// > placement branch disagree about.
+constexpr game::FaceDirection wallBehind(game::BlockId id) {
+    if (game::isLadder(id)) {
+        return game::ladderFacing(id);
+    }
+    if (game::isTorchBlock(id)) {
+        // `isWallTorch` is this test; the direction comes back from the same
+        // accessor, so there is no second decode to drift.
+        return game::redstoneTorchWall(id);
+    }
+    if (game::isLever(id)) {
+        const int mount = game::leverMount(id);
+        return mount >= game::LeverWallFirst
+                   ? static_cast<game::FaceDirection>(mount - game::LeverWallFirst)
+                   : game::FaceDirection::Unknown;
+    }
+    if (game::isButton(id)) {
+        // Floor is 0 and ceiling is 1; the four walls follow in `FaceDirection`
+        // order, which is what `buttonMount`'s own comment says.
+        const int mount = game::buttonMount(id);
+        return mount >= 2 ? static_cast<game::FaceDirection>(mount - 2)
+                          : game::FaceDirection::Unknown;
+    }
+    if (game::isCocoa(id)) {
+        return game::cocoaFacing(id);
+    }
+    if (game::isSignLike(id) && game::signOnWall(id)) {
+        return game::oppositeDirection(game::signFacing(id));
+    }
+    return game::FaceDirection::Unknown;
+}
+
+// **The single edit that makes these fail:** changing what any one of those
+// accessors stores without changing the placement branch that writes it - which
+// is exactly how a facing gets inverted and stays inverted for four milestones.
+// Each pair below is written the way placement writes it and read the way
+// `settleAround` reads it, so the two ends are asserted against each other
+// rather than against themselves.
+static_assert(wallBehind(game::ladderFacing(game::FaceDirection::PosX)) ==
+                  game::FaceDirection::PosX,
+              "a ladder's stored facing is the wall it hangs on");
+static_assert(wallBehind(game::redstoneTorchAt(game::FaceDirection::NegZ, true)) ==
+                      game::FaceDirection::NegZ &&
+                  wallBehind(game::redstoneTorchAt(game::FaceDirection::Unknown, true)) ==
+                      game::FaceDirection::Unknown,
+              "a wall torch leans on its wall and a floor torch leans on nothing");
+static_assert(wallBehind(game::leverAt(
+                  game::LeverWallFirst + static_cast<int>(game::FaceDirection::PosZ), false)) ==
+                      game::FaceDirection::PosZ &&
+                  wallBehind(game::leverAt(game::LeverFloorX, false)) ==
+                      game::FaceDirection::Unknown,
+              "a wall lever leans on its wall and a floor lever does not");
+static_assert(wallBehind(game::buttonAt(0, 2 + static_cast<int>(game::FaceDirection::NegX),
+                                        false)) == game::FaceDirection::NegX &&
+                  wallBehind(game::buttonAt(0, 0, false)) == game::FaceDirection::Unknown,
+              "and the same for a button, whose mount counts from floor and ceiling");
+static_assert(wallBehind(game::signAt(0, 0, game::FaceDirection::PosX, true)) ==
+                      game::FaceDirection::NegX &&
+                  wallBehind(game::signAt(0, 0, game::FaceDirection::PosX, false)) ==
+                      game::FaceDirection::Unknown,
+              "a wall sign looks away from what holds it up, so the wall is the opposite of "
+              "its facing - and a standing sign has no wall at all");
+
+/// The four two-block flowers are stored bottom then top, so a plant's halves
+/// are one id apart. Placement writes `lower + 1` and `clearPairedHalf` reads
+/// `removed - 1`; **inserting any id between a pair, or reordering the eight so
+/// a top comes first, makes both write the wrong cell's block** and there is no
+/// type change to catch it.
+static_assert(!game::isTallFlowerUpper(game::BlockId::SunflowerLower) &&
+                  game::isTallFlowerUpper(static_cast<game::BlockId>(
+                      static_cast<int>(game::BlockId::SunflowerLower) + 1)) &&
+                  game::isTallFlower(game::BlockId::PeonyUpper) &&
+                  game::isTallFlowerUpper(game::BlockId::PeonyUpper),
+              "tall flowers pair as bottom-then-top, one id apart, and the run ends on a top "
+              "half - placement and the paired break both derive the twin from that");
+
+/// **A `FallingBlocks::Crushed` names one of two very different debts, and this
+/// sweep is what makes telling them apart a classification rather than a guess.**
+///
+/// `applyFallingLanding` reports either the *occupant* a landing displaced, or
+/// the *faller itself* when it broke on something it may not replace - the torch
+/// trick. Those owe different items. The occupant owes the **mining table**: a
+/// sand column falling on tall grass drops what breaking that grass drops, seed
+/// roll and all. The faller owes **itself**, because nothing was swung at it -
+/// and running it through `resolveBreak` instead paid flint for gravel 9,942
+/// times in 100,000 breaks, measured. That is a conserved *count* carrying the
+/// wrong *item*, which is worse than a missing one because nothing looks wrong.
+///
+/// The drain tells the two arms apart with `isFalling(hit.block)`, and that is
+/// only sound because the occupant arm is gated on `isReplaceable(occupying)`.
+/// This proves the two sets never meet across every id rather than the three a
+/// reader would think of, so the day a replaceable block is given gravity the
+/// **build** breaks instead of the item quietly changing. It also proves every
+/// faller has an item to become: `itemForBlock` has a `None` answer, and paying
+/// that would delete the block outright rather than mis-name it.
+constexpr int kFallerSweepStride = 512;
+
+/// One owner for the count, for the reason `Block.hpp`'s name sweep records:
+/// the passes are generated from this and the coverage assert multiplies the
+/// same constant, so raising it cannot quieten the alarm without also sweeping
+/// the ids it just admitted.
+constexpr int kFallerSweepPasses = 7;
+
+constexpr bool fallersAreNeverOccupants(int stride) {
+    const int first = stride * kFallerSweepStride;
+    const int end = first + kFallerSweepStride;
+    for (int id = first; id < end && id < static_cast<int>(game::kBlockIdCount); ++id) {
+        const game::BlockId block = static_cast<game::BlockId>(id);
+        if (!game::isFalling(block)) {
+            continue;
+        }
+        if (game::isReplaceable(block) || game::itemForBlock(block) == game::ItemId::None) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// **The per-pass assert lives inside the template on purpose**, exactly as the
+/// name sweep in `Block.hpp` explains: each instantiation is its own constant
+/// evaluation with its own step budget, which is the entire point of striding.
+/// Folding all seven into one expression spends a single allowance on the lot.
+template <int Pass>
+struct FallerSweep {
+    static_assert(fallersAreNeverOccupants(Pass),
+                  "a block that falls is also replaceable, or has no item of its own - either "
+                  "one makes the falling-block drain pay the wrong thing");
+    static constexpr bool swept = true;
+};
+
+template <int... Pass>
+constexpr bool everyFallerPassSwept(std::integer_sequence<int, Pass...>) {
+    return (FallerSweep<Pass>::swept && ...);
+}
+
+static_assert(everyFallerPassSwept(std::make_integer_sequence<int, kFallerSweepPasses>{}),
+              "the failing FallerSweep instantiation above names which stride");
+/// **The control, and without it the sweep above could pass while inspecting
+/// nothing.** `fallersAreNeverOccupants` `continue`s past every id `isFalling`
+/// rejects, so if that predicate ever collapsed - narrowed to nothing by a
+/// widened family test, which is the shape that turned eight `blockName` cases
+/// into dead code - all seven passes would go on returning true over an empty
+/// population and the alarm would be silent. Measured today: the sweep inspects
+/// 25 ids, and the identical rule with its gate opened to every id returns false
+/// in 2 of the 7 passes, so it demonstrably *can* say no. These three keep that
+/// true in the build rather than in a probe somebody deleted: **a zero from a
+/// test that cannot produce a one is not evidence.** Named ids rather than a
+/// count, because a count over 3309 ids is a constant-evaluation budget this
+/// does not need to spend, and because sand and gravel will not stop falling.
+static_assert(game::isFalling(game::BlockId::Sand) && game::isFalling(game::BlockId::Gravel) &&
+                  game::isFalling(game::BlockId::Anvil),
+              "isFalling answers no for sand, gravel or an anvil, so the sweep above is now "
+              "proving nothing about an empty set");
+/// The passes are generated, so this is what proves there are enough of them:
+/// without it, ids appended past the last stride would simply stop being swept.
+static_assert(kFallerSweepPasses * kFallerSweepStride >= static_cast<int>(game::kBlockIdCount),
+              "the faller sweep no longer covers every block id - raise kFallerSweepPasses");
 
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
@@ -201,10 +610,28 @@ static_assert(kCloudQualityNames.size() == game::Settings::kCloudQualityCount);
 static_assert(game::Settings::kCloudQualityCount ==
               static_cast<unsigned>(engine::Renderer::kCloudQualityCount));
 
-// Blocks a second the deck drifts west. The reference's own figure is not
-// published anywhere; this is ours, chosen so a cloud crosses the view in about
-// a minute rather than the several the reference's estimated 0.6 would take.
+// Blocks a second the deck drifts west **in a calm**. The reference's own
+// figure is not published anywhere; this is ours, chosen so a cloud crosses the
+// view in about a minute rather than the several the reference's estimated 0.6
+// would take.
+//
+// It is a gain on `Weather::windSpeed()` rather than the whole answer. That
+// accessor rests at exactly 1.0 in a calm - `Weather.cpp` writes
+// `1.0f + rain * 5 + thunder * 6` and seeds the member at 1.0 - so multiplying
+// by it leaves a clear day at precisely this number and nothing else changes.
 constexpr float kCloudDriftPerSecond = 1.1f;
+
+// `Weather::windSpeed()` in a calm. Subtracted where a reader wants a strength
+// that starts at nothing rather than a multiplier that starts at one: the gust
+// model below is deliberately zero-floored so a clear day can stand completely
+// still, and adding the weather's baseline to it would take that away.
+constexpr float kCalmWindSpeed = 1.0f;
+
+// The deck's own ceiling, in the same spirit as the rain slant's twenty degrees
+// and the foliage bend's 0.22. A full storm takes the wind to 12, and 12 x 1.1
+// would cross the view in five seconds - which stops reading as weather and
+// starts reading as a time-lapse. Four keeps a gale dramatic at about fifteen.
+constexpr float kMaxDeckWindFactor = 4.0f;
 
 std::string describeCap(double fps) {
     return fps > 0.0 ? std::to_string(static_cast<int>(fps)) + " fps" : "uncapped";
@@ -262,6 +689,13 @@ void probeBlockShapes() {
         case game::BlockShape::Bed: return "Bed";
         case game::BlockShape::Tilled: return "Tilled";
         case game::BlockShape::Flat: return "Flat";
+        // The three that were missing, and the dump said `?` for every button,
+        // pressure plate, sign and banner in the game because of it - which is
+        // a shape column `tools/check-models.ps1` groups its report by. Found
+        // by building once under `/w44062`; see `DECISIONS.md`.
+        case game::BlockShape::Button: return "Button";
+        case game::BlockShape::Plate: return "Plate";
+        case game::BlockShape::Sign: return "Sign";
         }
         return "?";
     };
@@ -973,6 +1407,47 @@ void probeWorldgen() {
 }
 // PROBE-END
 
+/// Tilts a look direction upward by `degrees`, so a thrown potion arcs instead
+/// of flying flat.
+///
+/// **Source: Mojang's own published Bedrock behaviour packs**
+/// (`Mojang/bedrock-samples`, `behavior_pack/entities/`), which are a primary
+/// source and beat minecraft.wiki - the wiki documents Java in several places
+/// without saying so. `splash_potion.json` and `lingering_potion.json` both
+/// carry `"angle_offset": -20.0` on their `minecraft:projectile` component;
+/// `egg.json` and `ender_pearl.json` both publish `0.0`. **That split is why
+/// the caller gates this on `isThrownPotion` rather than on "is it thrown"** -
+/// two of the four things the player can throw arc, and two do not.
+///
+/// **What it does, and the alternative that was rejected.** The offset moves
+/// the pitch used for the *vertical* component only; the horizontal keeps the
+/// unmodified aim's cos(pitch), and the result is renormalised. Java spells the
+/// identical rule as `shootFromRotation(shooter, xRot, yRot, -20.0F, ...)` and
+/// passes the *same* -20.0 constant, which is the evidence that the two
+/// editions share the semantics rather than merely the number.
+///
+/// A **pure rotation about the right vector** was tried and rejected: it tips
+/// over the top. At 80 degrees up it hands back a direction pointing 10 degrees
+/// past vertical, so the potion flies *behind* the thrower - measured in
+/// `probe-fxconserve/potion.cpp`, which keeps that rule as a control. The
+/// decomposed form has no degenerate case: at a straight-up or straight-down
+/// aim the horizontal part is already zero, so it simply stays vertical.
+///
+/// **The honest cost:** decomposing means a level aim leaves at 18.9 degrees,
+/// not exactly 20 - renormalising shortens the vertical relative to a
+/// horizontal that was never scaled. The reference does the same, and it is the
+/// length of the throw that moves, not the direction of it.
+[[nodiscard]] glm::vec3 liftedThrowAim(const glm::vec3& aim, float degrees) {
+    // Minecraft's pitch is positive looking *down*, so `aim.y` is -sin(pitch).
+    const float cosPitch = std::sqrt(aim.x * aim.x + aim.z * aim.z);
+    const float pitch = std::atan2(-aim.y, cosPitch);
+    const float lifted = pitch + glm::radians(degrees);
+    // Never the zero vector: that would need the horizontal to vanish *and* the
+    // lifted pitch to come out level at the same time, and the horizontal only
+    // vanishes at a straight-up or straight-down aim, where it does not.
+    return glm::normalize(glm::vec3{aim.x, -std::sin(lifted), aim.z});
+}
+
 } // namespace
 
 int main() {
@@ -1000,7 +1475,20 @@ int main() {
         engine::AudioEngine audio;
         game::Sounds sounds;
         sounds.load(audio, engine::executableDirectory() / "sounds-reference");
-        audio.setMasterVolume(settings.soundVolume);
+        // **What the bank can say against what the game can name.** Three
+        // faults that never produce a warning, a validation error or a
+        // wrong-looking line: a staged stem this file spells one way and the
+        // script spells another, a creature voice with nothing behind it, and
+        // the one that cost the most - a bank that loaded perfectly and that
+        // nothing in `game/` ever plays. Thirteen of those were found at once.
+        // A query, so the logging is here rather than buried in the loader.
+        for (const std::string& line : sounds.sweep()) {
+            engine::logWarn(line);
+        }
+        // **`setSoundVolume`, not `setMasterVolume`.** Music has its own
+        // multiplier now, which is what `Settings.hpp` always claimed - the old
+        // name silenced both, so `sound_volume=0` took the soundtrack with it.
+        audio.setSoundVolume(settings.soundVolume);
         audio.setMusicVolume(settings.musicVolume);
 
         engine::Window window(kWindowWidth, kWindowHeight, "Voxel Game");
@@ -1068,15 +1556,13 @@ int main() {
             blockTexture("bedrock.png"),        blockTexture("terracotta.png"),
             blockTexture("packed_ice.png")};
 
-        if (!missingTextures.empty()) {
-            std::string names;
-            for (const std::string& name : missingTextures) {
-                names += (names.empty() ? "" : ", ") + name;
-            }
-            engine::logError(std::to_string(missingTextures.size()) +
-                             " block textures are missing and will draw blank: " + names);
-        }
-
+        // The missing-texture report used to stand here, which is where
+        // `blockTextures` ends and where about nine tenths of the list has not
+        // been built yet: `blockTexture` keeps being called for every appended
+        // sprite run for another seven hundred lines, and every one of those
+        // names went unreported because the only drain had already run. It now
+        // lives immediately before `engine::Renderer`, where the list is
+        // complete and still ahead of first use.
 
         // Spawn egg sprites, staged beside the exe rather than under assets/ for
         // the same reason the reference skins are: they are placeholder art and
@@ -1406,6 +1892,32 @@ int main() {
                   "blast_furnace_side.png", "blast_furnace_top.png",
                   "loom_side.png", "loom_top.png",
                   "stonecutter_side.png", "stonecutter_top.png",
+                  // `grindstone_pivot.png` is **deliberately absent**, and this
+                  // is the only place a reader would look for it. The two
+                  // pivots borrow `grindstone_side` (`Block.hpp` says so at the
+                  // model), and staging the right picture needs a *new* layer,
+                  // not a swap: 473 is also this block's `extraBlockInfo.layer`,
+                  // so the icon and the dropped entity paint from it too.
+                  //
+                  // **When it is picked up, the row does not go here.** This
+                  // list's order *is* the atlas order, so where the row sits is
+                  // the layer number, and that position is the entire decision.
+                  // Inserting it beside its sibling moves 183 literals inside
+                  // `Block.hpp`'s table - of which only 3 are pinned by an
+                  // assert, because the table *is* the thing a layer would be
+                  // checked against - so a single miscount survives `/W4`,
+                  // every assert and `check-models.ps1`, and lands as the wrong
+                  // texture on several hundred blocks. **Appended to the end of
+                  // the table run instead, it moves 3**, and all three are
+                  // absolute atlas literals that fail to compile if they are
+                  // wrong. The atlas is an unordered bag; nothing here requires
+                  // the reference's file order, and `kComposterCompostLayer` is
+                  // already a table texture that was appended rather than slotted
+                  // in. So: end of the run, in this file and in
+                  // `tools/make-reference-blocks.ps1`, matching whatever index
+                  // `Block.hpp` takes - **agreed first, landed together.** If
+                  // one file inserts and another appends, nothing fails and
+                  // every layer after the seam is off by one.
                   "grindstone_side.png", "grindstone_round.png",
                   "lectern_sides.png", "lectern_top.png",
                   "bell_side.png", "bell_top.png",
@@ -1430,7 +1942,22 @@ int main() {
                   "sunflower_bottom.png", "sunflower_top.png", "lilac_bottom.png", "lilac_top.png",
                   "rose_bush_bottom.png", "rose_bush_top.png", "peony_bottom.png", "peony_top.png",
                   "wither_rose.png",
-                  "campfire_log.png", "campfire_log_lit.png", "soul_campfire_fire.png",
+                  // **The third name here is a replacement, not an addition**,
+                  // and it has to stay one: `Block.hpp` pins this run by
+                  // literal offset (`kCampfireLogLayer` 534, `kCampfireLitLog`
+                  // 535, `kSoulCampfireLitLog` 536) and four `static_assert`s
+                  // hold those against the two campfires' `topLayer` rows.
+                  // Inserting a name would slide every layer after it and give
+                  // several hundred blocks someone else's texture, silently.
+                  //
+                  // 536 held `soul_campfire_fire.png`, the animated *flame*
+                  // sheet, and was read as the soul campfire's *ember log* -
+                  // so the blue variant wore a frame of its own fire where its
+                  // ordinary twin wears a lit plank. The flame sheet had no
+                  // other reader anywhere (the campfire model is five solid
+                  // boxes and no flame quad), so swapping the name in place
+                  // fixes it and moves nothing.
+                  "campfire_log.png", "campfire_log_lit.png", "soul_campfire_log_lit.png",
                   "respawn_anchor_side.png", "respawn_anchor_top.png",
                   // The sixth run: the candles, declared white-first after the
                   // plain one like every other colour family.
@@ -1536,9 +2063,15 @@ int main() {
                   "chorus_fruit.png", "popped_chorus_fruit.png", "rabbit_hide.png",
                   "rabbit_foot.png", "echo_shard.png", "water_bottle.png", "bow.png", "arrow.png",
                   "shears.png", "cocoa_beans.png",
-                  // The seventy-four appended items, in `ItemId` order. Armour
+                  // The sixty-one appended items, in `ItemId` order. Armour
                   // runs helmet-chest-legs-boots by rising material, which is
                   // the order the enum uses, so a piece's icon is one offset.
+                  //
+                  // The number in that first line is a courtesy and drifts - it
+                  // said seventy-four while the run held seventy-six. The count
+                  // that is actually load-bearing is `kExtraItemSprites`, and
+                  // the `spriteLayers.size()` check below is what proves this
+                  // list and that constant still agree.
                   "nether_wart.png",
                   "leather_helmet.png", "leather_chestplate.png", "leather_leggings.png",
                   "leather_boots.png", "chainmail_helmet.png", "chainmail_chestplate.png",
@@ -1549,11 +2082,15 @@ int main() {
                   "diamond_leggings.png", "diamond_boots.png", "emberite_helmet.png",
                   "emberite_chestplate.png", "emberite_leggings.png", "emberite_boots.png",
                   "turtle_helmet.png", "shield.png",
-                  "music_disc_13.png", "music_disc_cat.png", "music_disc_blocks.png",
-                  "music_disc_chirp.png", "music_disc_far.png", "music_disc_mall.png",
-                  "music_disc_drift.png", "music_disc_ember.png", "music_disc_vale.png",
-                  "music_disc_hollow.png", "music_disc_11.png", "music_disc_wait.png",
-                  "music_disc_hoofbeat.png", "music_disc_otherside.png", "music_disc_5.png",
+                  // **The fifteen `music_disc_*` rows that stood here are gone.**
+                  // They were a second, hand-written disc run whose ids
+                  // duplicated the real `MusicDiscFirst..MusicDiscLast` one -
+                  // which is the loop over `music_disc_%02d.png` in the
+                  // collectibles section below, twenty-two of them, and is the
+                  // run that stays. Different file names, so nothing above or
+                  // below moved by accident; `kExtraItemSprites` went 166 to
+                  // 151 in `Block.hpp` to match, and the `spriteLayers.size()`
+                  // check is what catches it if these two ever disagree again.
                   "saddle.png", "name_tag.png", "lead.png", "elytra.png", "totem_of_undying.png",
                   "spyglass.png", "brush.png", "trident.png", "crossbow.png", "fishing_rod.png",
                   "compass.png", "clock.png", "empty_map.png", "filled_map.png",
@@ -1643,9 +2180,14 @@ int main() {
             // arithmetic; writing them out by hand in a fixed order is exactly
             // where an off-by-one hides, and the bed's sixty-four layers proved
             // it once already.
-            for (const char* name : {"blaze_rod.png", "blaze_powder.png",
-                                     "fermented_spider_eye.png", "ghast_tear.png",
-                                     "dragon_breath.png"}) {
+            // **Three rows shorter than it was.** `blaze_rod`, `blaze_powder`
+            // and `ghast_tear` were Mojang's names for ids the project already
+            // has under its own coined ones - `CinderRod`, `CinderPowder` and
+            // `DrifterTear`, whose `cinder_rod.png`, `cinder_powder.png` and
+            // `drifter_tear.png` sit in the appended-items list above. Two
+            // pictures for one id is two chances to draw the wrong one, and
+            // only the coined names may ship. `kBrewingSprites` is 2 to match.
+            for (const char* name : {"fermented_spider_eye.png", "dragon_breath.png"}) {
                 spriteLayers.push_back(blockTexture(name));
             }
             {
@@ -1809,6 +2351,29 @@ int main() {
                                  std::to_string(expected) + "x" + std::to_string(expected) +
                                  " - every glyph will be wrong. Re-run tools\\make-font.ps1");
             }
+        }
+
+        // **Every name `blockTexture` could not find, reported once, here.**
+        //
+        // It has to be the last thing before the array is handed to the
+        // renderer, because that lambda is called from the first block name
+        // down to the last redstone sprite roughly seven hundred lines below
+        // where the first run ends - and it appends as it goes. Draining the
+        // list where `blockTextures` was built reported the first sixty-seven
+        // names and silently ignored the thousand after them, which is the
+        // opposite of what this check is for: a name out of order there gives a
+        // block someone else's texture, and this line is the only thing besides
+        // a pair of eyes that catches it.
+        //
+        // **The single edit that breaks this:** move it back above any call to
+        // `blockTexture`, or add a sprite run below it.
+        if (!missingTextures.empty()) {
+            std::string names;
+            for (const std::string& name : missingTextures) {
+                names += (names.empty() ? "" : ", ") + name;
+            }
+            engine::logError(std::to_string(missingTextures.size()) +
+                             " block textures are missing and will draw blank: " + names);
         }
 
         engine::Renderer renderer(context, window, spriteLayers, hudTexture, fontTexture, skinTexture);
@@ -1990,16 +2555,27 @@ int main() {
                 ChunkHandles& handles =
                     existing != chunkMeshes.end() ? existing->second : chunkMeshes[update.coord];
 
-                const auto apply = [&](engine::MeshHandle& handle, const engine::MeshData& mesh, bool translucent) {
+                // `shapedTail` is only ever non-empty for the translucent buffer:
+                // the shape pass emits a whole non-cube block's faces together, so
+                // they belong to no face direction and are appended after the six
+                // that do. The renderer draws that tail **last**, because a pane is
+                // far more often in front of water than inside it. Defaulted on
+                // both sides, which is why this pass-through could go missing and
+                // still compile - stained panes simply drew in emission order.
+                const auto apply = [&](engine::MeshHandle& handle, const engine::MeshData& mesh,
+                                       bool translucent,
+                                       const engine::MeshIndexRange& shapedTail = {}) {
                     if (handle != engine::kInvalidMesh) {
-                        renderer.updateMesh(handle, mesh);
+                        renderer.updateMesh(handle, mesh, shapedTail);
                     } else if (!mesh.empty()) {
-                        handle = renderer.addMesh(mesh, translucent);
+                        handle = renderer.addMesh(mesh, translucent, shapedTail);
                     }
                 };
 
                 apply(handles.opaque, update.mesh, false);
-                apply(handles.translucent, update.translucentMesh, true);
+                apply(handles.translucent, update.translucentMesh, true,
+                      engine::MeshIndexRange{update.translucentShaped.first,
+                                             update.translucentShaped.count});
                 trianglesPerChunk[update.coord] = update.mesh.indices.size() / 3;
             }
         };
@@ -2013,9 +2589,34 @@ int main() {
         game::Player player;
         const std::optional<game::SavedPlayer> savedPlayer = world.store().loadPlayer();
         if (savedPlayer.has_value()) {
-            player.position = savedPlayer->position;
-            camera.yaw = savedPlayer->yaw;
-            camera.pitch = savedPlayer->pitch;
+            // **Checked, not trusted - the same rule as the health below, which
+            // states it out loud and then stopped one line short of where it
+            // started.** These three were the only saved player floats nobody
+            // looked at, and the round trip is closed: `saveEverything` writes
+            // `player.position` verbatim, so one NaN produced anywhere in the
+            // movement code is written to disk and read straight back on every
+            // launch afterwards. `static_cast<int>` of a NaN is undefined
+            // behaviour, so the world does not merely load wrong, it stays
+            // wrong - see `kMaxSavedCoord`.
+            const glm::vec3 where = savedPlayer->position;
+            const bool placeable = std::isfinite(where.x) && std::isfinite(where.y) &&
+                                   std::isfinite(where.z) && std::fabs(where.x) <= kMaxSavedCoord &&
+                                   std::fabs(where.y) <= kMaxSavedCoord &&
+                                   std::fabs(where.z) <= kMaxSavedCoord;
+            if (!placeable) {
+                engine::logError("The saved player position is not a place - putting you back at "
+                                 "spawn rather than trusting it.");
+            }
+            player.position = placeable ? where : spawn;
+            // **Applied through `addLook` rather than assigned**, because that
+            // is the one owner of how far up and down a look may go: a second
+            // copy of the limit here is a second thing to get wrong the day it
+            // changes. Zeroed first so the delta *is* the saved angle.
+            camera.yaw = 0.0f;
+            camera.pitch = 0.0f;
+            if (std::isfinite(savedPlayer->yaw) && std::isfinite(savedPlayer->pitch)) {
+                camera.addLook(std::fmod(savedPlayer->yaw, kTwoPi), savedPlayer->pitch);
+            }
             // Clamped on the way in rather than trusted: this is the one place
             // the game reads bytes it did not write this run, and a health of
             // zero out of a corrupt file would kill you on the first frame.
@@ -2025,6 +2626,51 @@ int main() {
                 game::survival::clampSaturation(std::max(0.0f, savedPlayer->saturation), player.food);
             player.exhaustion = std::clamp(savedPlayer->exhaustion, 0.0f,
                                            game::survival::kExhaustionPerLevel);
+            // **The other end of the effect round trip.** Checked on the way in
+            // for the same reason as the health above - these are bytes this
+            // run did not write.
+            for (const game::SavedEffect& record : savedPlayer->effects) {
+                if (record.id <= 0 ||
+                    record.id >= static_cast<std::int32_t>(game::effects::Effect::Count)) {
+                    continue;
+                }
+                const auto id = static_cast<game::effects::Effect>(record.id);
+                // An id this build does not name - a file written by a later
+                // build, or a corrupt one. `effectInfo` answers an empty name
+                // for those rather than reading off the end of anything, which
+                // is what makes this a test and not a hope. `Effects::apply`
+                // refuses the instant ones on its own, so they need no second
+                // test here.
+                if (game::effects::effectInfo(id).name[0] == '\0') {
+                    continue;
+                }
+                if (!std::isfinite(record.secondsLeft) || record.secondsLeft <= 0.0f) {
+                    continue;
+                }
+                player.effects.apply(id, std::max(0, record.amplifier), record.secondsLeft);
+            }
+            // **The pool, clamped against the grant that is now running rather
+            // than against a number written here.** `Player::update` only ever
+            // raises it to `effects::absorptionPoints`, so the pool can never
+            // honestly exceed that, and a corrupt file offering a thousand
+            // hearts is refused by arithmetic rather than by a second constant.
+            player.absorption =
+                std::clamp(std::isfinite(savedPlayer->absorption) ? savedPlayer->absorption : 0.0f,
+                           0.0f, game::effects::absorptionPoints(player.effects));
+            // **And the second half of the pair, which is derived rather than
+            // saved, and without it this fix would be an exploit.**
+            // `Player::update` reconciles the pool by comparing the effect's
+            // remaining seconds against `absorptionSeconds`, and treats a rise
+            // as "it was granted again" - so leaving this at zero makes the
+            // very first tick after a load look like a fresh golden apple and
+            // refill the pool to full. Spend your absorption hearts, quit,
+            // come back and they are all there again.
+            //
+            // It needs no field on disk: what the tick would have left here is
+            // exactly the restored effect's own remaining seconds, so it comes
+            // off the one table that owns it.
+            player.absorptionSeconds =
+                player.effects.secondsLeft(game::effects::Effect::Absorption);
         } else {
             player.position = spawn;
         }
@@ -2181,6 +2827,44 @@ int main() {
                                        static_cast<int>(std::floor(player.position.z))));
                 engine::logWarn("Saved position was inside terrain; lifted to the surface.");
             }
+            // **The hour, wrapped by the same expression that advances it.**
+            // `timeOfDay` is a phase in [0, 1) and the day cycle keeps it there
+            // with `timeOfDay -= std::floor(timeOfDay)`; reusing that identical
+            // form rather than a `clamp` or an `fmod` means the wrap has one
+            // owner, and a saved 1.0f lands on sunrise instead of on a value
+            // the first frame's advance would have to correct.
+            //
+            // Guarded by `isfinite` like `yaw`/`pitch` above and `absorption`
+            // below. `WorldStore::loadPlayer` sanitises *stacks*, because that
+            // is what it can know the shape of; it cannot know what a bare
+            // float means, so a hand-edited `player.dat` carrying a NaN would
+            // propagate straight into `sunDirection` and stop the sky being
+            // drawn - which reads as a renderer bug, a long way from its cause.
+            if (std::isfinite(savedPlayer->timeOfDay)) {
+                timeOfDay = savedPlayer->timeOfDay - std::floor(savedPlayer->timeOfDay);
+            }
+            // **The weather, restored beside the hour.** `restore` takes the
+            // two flags and the two remaining countdowns and leaves the five
+            // ramps alone, so a world reloaded mid-storm fades up over about
+            // five seconds instead of snapping. `Weather.hpp` argues that case
+            // and I am not second-guessing it here.
+            //
+            // **`settings.startWeather` still wins where it is set**, and that
+            // is deliberate rather than an ordering accident: the `force` call
+            // beside the declaration above is an explicit instruction from the
+            // settings file, while this writes the *simulated* state. They are
+            // two different facts, and `restore` does not touch `m_forced`, so
+            // neither erases the other.
+            //
+            // **No sanitising on this side, on purpose.** `restore` is
+            // documented as defensive about negative, infinite and NaN timers,
+            // and NaN is the one that matters - `m_rainSeconds <= 0.0f` is
+            // *false* for NaN, so an unguarded one never expires and the
+            // weather freezes for the rest of the session. One owner for that
+            // check, and it is not this call site.
+            weather.restore(savedPlayer->weatherRaining != 0,
+                            savedPlayer->weatherThundering != 0, savedPlayer->weatherRainSeconds,
+                            savedPlayer->weatherThunderSeconds);
             engine::logInfo("Resumed from the last saved position.");
         } else {
             // Only the fresh-world placement is left here: it reads blocks, so
@@ -2283,6 +2967,16 @@ int main() {
         int framesSinceReport = 0;
 
         float placeTimer = 0.0f;
+        /// **Buttons that are still down, and when they let go.**
+        ///
+        /// A button is the one hand toggle that undoes itself, so the press has
+        /// to outlive the frame that made it. Deliberately **not saved**: it
+        /// lasts a second and a half at most, nothing but the picture reads it
+        /// while there is no signal engine, and a press that survives a quit is
+        /// undone by the next one - pressing an already-down button re-arms this
+        /// and the sweep releases it. A handful at a time, so a plain vector is
+        /// the whole of the storage.
+        std::vector<std::pair<glm::ivec3, float>> heldButtons;
         /// Which two-input bench is open, so the previewed result can be the
         /// smithing upgrade or the repair without a second screen kind.
         game::BlockId openBench = game::BlockId::SmithingTable;
@@ -2315,16 +3009,39 @@ int main() {
         /// **Named divergence: this is not saved.** A disc left in a jukebox
         /// comes back to you when the world reloads rather than still being in
         /// there, because the block-entity file has no room for it yet.
+        ///
+        /// **That sentence was a claim rather than a description until
+        /// 2026-08-18.** Loading a jukebox consumes the disc from the bag and
+        /// nothing ever restored this vector, so what actually happened on
+        /// reload was that the disc ceased to exist - a music disc is a
+        /// dungeon-loot item you get one of, so "it comes back to you" and "it
+        /// is destroyed" are a long way apart from the player's side. The fold
+        /// in `saveEverything` is what makes the comment true; the divergence
+        /// that remains is only that the jukebox is empty afterwards.
         std::vector<std::pair<glm::ivec3, game::ItemId>> jukeboxDiscs;
         /// **One inventory for every ender chest in the world.** It belongs to
         /// the player rather than to any block, which is the whole point of it,
         /// so it lives here and not in the chest map.
         game::Chest enderChest;
-        /// Where a bed that has been slept in stands, if any. Not saved yet, so
-        /// it lasts the session - the reference keeps it on the player, which
-        /// would mean a `player.dat` format bump.
+        /// Where a bed that has been slept in stands, if any.
+        ///
+        /// **Restored here rather than beside the rest of the saved player**,
+        /// for the same reason the inventory is: this is where the variable
+        /// first exists, and dragging the declaration up to the load would put
+        /// it four hundred lines from everything that reads it.
+        ///
+        /// `SavedPlayer::respawnBed` spells "no bed" as a negative `y` and
+        /// `loadPlayer` has already forgotten any cell that is not a place in
+        /// this world, so the single test below is the whole of the validation
+        /// - there is no second, staler copy of "is the bed still there" on
+        /// disk, because that question is asked of the live world at the moment
+        /// of death and can only be answered there.
         glm::ivec3 respawnPoint{0};
         bool hasRespawnPoint = false;
+        if (savedPlayer.has_value() && savedPlayer->respawnBed.y >= 0) {
+            respawnPoint = savedPlayer->respawnBed;
+            hasRespawnPoint = true;
+        }
         /// The composter's own roll. A plain linear generator rather than a
         /// shared one, so filling a tub cannot perturb worldgen or spawning.
         std::uint32_t composterRandom = 0x2545F491u;
@@ -2360,12 +3077,34 @@ int main() {
         /// was actually lost. Nothing else reports the size of a hit.
         int lastHealth = 0;
         bool wasInWater = false;
+        /// Whether a stroke was already under way, so `Swim` sounds once per
+        /// stroke rather than every frame of one. `Player::treading` is latched
+        /// across exactly one stroke by the fluid model, which is what makes its
+        /// rising edge the right clock for this - and the reason nothing here
+        /// invents a cadence of its own.
+        bool wasTreading = false;
         float lastFallDistance = 0.0f;
         /// Whether the player was standing last frame, so a landing is an edge
         /// rather than a state - trampling must fire once per fall, not every
         /// frame you stand on the field afterwards.
         bool wasOnGround = true;
         float caveTimer = 0.0f;
+        /// Where the scenery ambiences stand as of the last scan, and how long
+        /// until the next one.
+        ///
+        /// **Cached because the answer costs a hundred and twenty-five
+        /// `blockAt` calls and the question does not change in a tenth of a
+        /// second.** `tickAmbient` has to be called every frame - that is its
+        /// contract, a cue that lapses forgets its timer - but the *scan* that
+        /// feeds it must not be, or four cues become five hundred lookups a
+        /// frame and the cost lands as a frame-time regression nobody would
+        /// think to blame on audio. One scan answers all three, because they
+        /// are three readings of the same box.
+        float ambientScanTimer = 0.0f;
+        bool fireNearby = false;
+        bool lavaNearby = false;
+        glm::vec3 fireAt{0.0f};
+        glm::vec3 lavaAt{0.0f};
         constexpr float kStepDistance = 2.1f;
         constexpr float kBigFallDistance = 7.0f;
         // Rolled rarely rather than every frame; the reference's own cave
@@ -2373,12 +3112,13 @@ int main() {
         // indistinguishable from one every tick.
         constexpr float kCaveCheckSeconds = 22.0f;
         // What the status bars last drew. Compared rather than flagged, because
-        // health, food and air all change from inside the physics and nothing
-        // there knows the HUD exists.
+        // health, food, air and the absorption pool all change from inside the
+        // physics and nothing there knows the HUD exists.
         int lastShownHealth = -1;
         int lastShownFood = -1;
         game::hud::AirRow lastShownAir;
         bool lastShownHurt = false;
+        int lastShownAbsorbHearts = -1;
 
         // Creative starts with one of everything placeable; survival starts with
         // nothing and fills up from what you break.
@@ -2396,6 +3136,94 @@ int main() {
 
         game::Inventory inventory;
         bool creative = settings.creativeMode;
+
+        /// **Every way the player can be hurt goes through here.** The gate is
+        /// the whole point: four of the seven damage sources checked `creative`
+        /// and three did not, so a creative player drowned in a thunderstorm,
+        /// died to a witch's splash potion, and could kill themselves with a
+        /// bottle of Harming. The rule was stated in a comment at one of the
+        /// guarded sites - "creative takes the hit and not the damage, which is
+        /// the rule every other source of harm here already follows" - and was
+        /// simply not true of three of them.
+        ///
+        /// `damagePlayer` still owns the half-second invulnerability window;
+        /// this owns only who is allowed to be hurt at all.
+        ///
+        /// **`armour` has no default, and that is the point.** It was a
+        /// two-argument lambda, so every combat blow in the game reached
+        /// `damagePlayer`'s own defaulted `kNoArmour` and a full diamond set
+        /// reduced nothing - while the *same* set worked correctly against lava
+        /// and fire, because `Player.cpp` passes a real one there. A playtester
+        /// standing in lava would have concluded armour was wired.
+        ///
+        /// That is `CLAUDE.md` bug shape #14 in its purest form: a rule that is
+        /// correct and commented in one of the two places that need it.
+        /// Removing the default is what makes the compiler name every site, so
+        /// the next source of harm cannot inherit the silence.
+        ///
+        /// **Which blows armour touches is `Survival.hpp`'s list, not a
+        /// judgement made here** - reduced: explosions, projectiles, lightning,
+        /// a falling anvil; not reduced: magic, and everything `Player.cpp`
+        /// already decides for itself.
+        const auto hurtPlayer = [&](int amount, game::survival::ArmourSet armour) {
+            if (creative || amount <= 0) {
+                return;
+            }
+            game::damagePlayer(player, amount, false, armour);
+        };
+        /// **One owner for "grant this effect to the player".**
+        ///
+        /// The split matters and is easy to get wrong: `Effects::apply` holds a
+        /// timer, so it refuses the two instant effects outright and returns
+        /// false - hand it an Instant Health and nothing at all happens, with no
+        /// warning anywhere. The three-way test was written correctly at the
+        /// drink site and copied to the splash-and-cloud site, and adding the
+        /// food grants was about to make a third copy of it. A row in the food
+        /// table asking for an instant effect would then work in two of three
+        /// places, which is this project's most expensive bug shape.
+        ///
+        /// `scale` is how much of it reaches you - a splash falls off with
+        /// distance and a cloud applies a quarter. **It multiplies the amount
+        /// for an instant and the duration for a timed one**, because those are
+        /// the two different things "a quarter of a potion" means.
+        ///
+        /// **Granting is not the same as being read**, and this is the one place
+        /// that sees every grant, so the gap is recorded here. `Effects.hpp`
+        /// keeps the list and says whose file each missing reader belongs in;
+        /// two of its entries have moved since:
+        ///
+        ///   - **Night Vision is now read** (`setSunLighting`, below), so both
+        ///     brewing rows finally do something.
+        ///   - **Invisibility is not, and `Effects.hpp`'s note that it "skips
+        ///     drawing the player and held item" cannot be acted on: there is
+        ///     no player model and no first-person hand in the game at all**,
+        ///     so there is nothing to skip. What is left of it is entirely
+        ///     `Creature.cpp`'s - it already shortens its notice range for a
+        ///     crouched player, and invisibility is the same multiplier.
+        ///
+        /// Nausea and Blindness want a post-process the renderer does not have;
+        /// Health Boost and Saturation are `Survival.hpp` numbers. None of the
+        /// four is grantable today, so none is a live hole - Night Vision and
+        /// Invisibility were, because they brew.
+        const auto grantEffect = [&](game::effects::Effect effect, int amplifier, float seconds,
+                                     float scale = 1.0f) {
+            if (effect == game::effects::Effect::None || scale <= 0.0f) {
+                return;
+            }
+            if (effect == game::effects::Effect::InstantHealth) {
+                game::healPlayer(player, static_cast<int>(
+                                             game::effects::instantAmount(effect, amplifier) * scale));
+            } else if (effect == game::effects::Effect::InstantDamage) {
+                // **Magic, which armour does not touch** - `Survival.hpp`'s
+                // "NOT reduced" list names it, and Bedrock's own cause enum
+                // routes a Harming potion through `magic`. A splash of Harming
+                // through full diamond costs exactly what it costs naked.
+                hurtPlayer(static_cast<int>(game::effects::instantAmount(effect, amplifier) * scale),
+                           game::survival::kNoArmour);
+            } else {
+                player.effects.apply(effect, amplifier, seconds * scale);
+            }
+        };
         const auto fillCreativeKit = [&] {
             for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
                 inventory.slot(i) = game::ItemStack{};
@@ -2601,9 +3429,63 @@ int main() {
         // saved on worker threads, and block-entity data does not need to go
         // anywhere near that. Entries outlive their chunk being unloaded, which
         // costs nothing for something a player places a handful of.
+        //
+        // **They also outlive their chunk being *discarded*, and one path out of
+        // that is still real.** None of these tables is chunk-keyed and the
+        // loads below are unconditional, so a `kChunkFormatVersion` bump - which
+        // throws away every modified chunk and regenerates it - takes the
+        // container block away and leaves the record behind.
+        //
+        // Two of the three ways that used to bite are now closed, and the third
+        // is not. **Closed:** placing a block clears the cell's records first,
+        // for every placement rather than only for containers, so building a
+        // fresh chest on a stale cell no longer opens it full of someone else's
+        // gear. **Closed:** the save path drops any entry whose block is no
+        // longer a container once its column is resident, so a stale record is
+        // not carried in the file for the life of the world.
+        //
+        // **Closed too, and it was the one nobody walked past:** a regenerated
+        // `LootChest` standing over a stale entry. Worldgen places it, so no
+        // placement ran to clear the cell, and `materialise` took `chests[at]` -
+        // which *finds* the stale contents rather than starting empty - and
+        // rolled the table into it on top. Measured on the real table before the
+        // fix: 11 items became 22 after one format bump and 44 after three, and
+        // a chest the player had already emptied handed back a full 11 every
+        // time. That is the same duplication shape as the drag cluster, arriving
+        // through a different door.
+        //
+        // The cure is `rolledLoot` below, and the point of it is that **"this
+        // chest has been rolled" was recorded in exactly one place - the block
+        // id - and that place does not survive a format bump.** So it is now
+        // recorded in the store as well, and the two have different lifetimes on
+        // purpose. `materialise` rolls only on a cell it has never seen, and an
+        // emptied loot chest keeps an otherwise-pointless empty record so the
+        // flag survives. **The guard alone is not enough and the probe says so
+        // numerically** - without the empty record a fully looted chest, which
+        // is the ordinary case, still refilled with 11.
+        //
+        /// **The rule for a stack out of a file lives in `WorldStore`**, and this
+        /// was a lambda restating it letter for letter. Four restores need the
+        /// answer, `WorldStore`'s own readers already apply it before handing
+        /// anything back, and a second copy here is precisely how the two would
+        /// drift - the copy would keep the old bound while the real one grew a
+        /// new clause, and nothing would say so. `game::sanitiseStack`,
+        /// `sanitiseChest`, `plausibleStowHandle` and `plausibleBlockPosition`
+        /// are all exported for exactly this.
         std::unordered_map<glm::ivec3, game::Furnace, BlockPositionHash> furnaces;
         for (const game::PlacedFurnace& placed : world.store().loadFurnaces()) {
-            furnaces.emplace(placed.position, placed.furnace);
+            // **A position out of a file is as suspect as a count out of one.**
+            // It is a map key here and it becomes chunk arithmetic the moment
+            // anything asks `blockAt` about it, so an implausible one is
+            // dropped rather than stored. Same owner as the stack rule.
+            if (!game::plausibleBlockPosition(placed.position)) {
+                continue;
+            }
+            game::Furnace restored = placed.furnace;
+            game::sanitiseStack(restored.input);
+            game::sanitiseStack(restored.fuel);
+            game::sanitiseStack(restored.output);
+            furnaces.emplace(placed.position, restored);
         }
         if (!furnaces.empty()) {
             engine::logInfo("Restored " + std::to_string(furnaces.size()) + " furnaces.");
@@ -2611,11 +3493,56 @@ int main() {
 
         // Chests, on the same arrangement and for the same reasons.
         std::unordered_map<glm::ivec3, game::Chest, BlockPositionHash> chests;
+
+        /// Every cell whose loot table has already been rolled.
+        ///
+        /// **The second home of a fact that used to have only one**, and the
+        /// whole of the fix described above. The block id says "rolled" by no
+        /// longer being a `LootChest`, which is the right place for it and is
+        /// enough for everything except the one event that throws the block
+        /// away and keeps the store - a `kChunkFormatVersion` bump. This set
+        /// rides in the store instead, so the two survive different things.
+        ///
+        /// It is seeded from the empty records, because **an empty chest record
+        /// is written for exactly one reason**: the save filter keeps one only
+        /// when the cell is in here. A record that sanitised down to nothing is
+        /// swept up by the same rule, which is the conservative way round - it
+        /// costs a chest whose every stack was unreadable its re-roll, and the
+        /// alternative is handing the player a free one.
+        ///
+        /// A stale entry is inert. The save loop walks `chests`, so a cell with
+        /// no chest entry is never asked about, and the break and placement
+        /// paths need no clearing pass of their own.
+        std::unordered_set<glm::ivec3, BlockPositionHash> rolledLoot;
         for (const game::PlacedChest& placed : world.store().loadChests()) {
-            chests.emplace(placed.position, placed.chest);
+            if (!game::plausibleBlockPosition(placed.position)) {
+                continue;
+            }
+            game::Chest restored = placed.chest;
+            game::sanitiseChest(restored);
+            if (restored.empty()) {
+                rolledLoot.insert(placed.position);
+            }
+            chests.emplace(placed.position, restored);
         }
         if (!chests.empty()) {
             engine::logInfo("Restored " + std::to_string(chests.size()) + " chests.");
+        }
+
+        // Campfires, on the same arrangement again. **`sanitiseStack` and the
+        // timer clamp both happen in `loadCampfires`**, not here, for the reason
+        // the comment above the furnaces gives: the rule for a record out of a
+        // file belongs to `WorldStore`, and a second copy at the call site is
+        // how the two drift.
+        std::unordered_map<glm::ivec3, game::Campfire, BlockPositionHash> campfires;
+        for (const game::PlacedCampfire& placed : world.store().loadCampfires()) {
+            if (!game::plausibleBlockPosition(placed.position)) {
+                continue;
+            }
+            campfires.emplace(placed.position, placed.campfire);
+        }
+        if (!campfires.empty()) {
+            engine::logInfo("Restored " + std::to_string(campfires.size()) + " campfires.");
         }
 
         // What is inside every stowbox that is currently an item rather than a
@@ -2624,7 +3551,20 @@ int main() {
         std::unordered_map<int, game::Chest> stowed;
         int nextStowHandle = 1;
         for (const game::StowedBox& box : world.store().loadStowboxes()) {
-            stowed.emplace(box.handle, box.contents);
+            // **A handle has to be positive or nothing can reach it**, and it
+            // has to be small enough that `nextStowHandle` cannot be pushed to
+            // overflow by one corrupt record. Handles ride in an
+            // `ItemStack::damage`, which the inventory restore only floors at
+            // zero - so a negative one names a map entry the box item in the
+            // bag can no longer ask for, and zero is what an item carrying no
+            // box at all looks like. `plausibleStowHandle` owns both bounds;
+            // this used to be a hand-rolled `<= 0` that had only the lower one.
+            if (!game::plausibleStowHandle(box.handle)) {
+                continue;
+            }
+            game::Chest restored = box.contents;
+            game::sanitiseChest(restored);
+            stowed.emplace(box.handle, restored);
             nextStowHandle = std::max(nextStowHandle, box.handle + 1);
         }
 
@@ -2644,36 +3584,519 @@ int main() {
         // Moves a single item from one container into another, stacking onto a
         // match before taking an empty slot, which is the same preference the
         // player's own inventory has.
-        const auto moveOneItem = [](game::Chest& from, std::size_t fromSlots, game::Chest& to,
-                                    std::size_t toSlots) {
+        //
+        // **It takes a slot range, not a `Chest`.** A furnace's three slots are
+        // three separate destinations with three separate rules - the hopper
+        // above feeds the input, the one beside it feeds the fuel, the one below
+        // pulls the output - so there is nothing for a whole-container mover to
+        // point at. Widening this to a pointer and a length is what let the
+        // furnace join in without a second copy of the stacking preference, the
+        // `damage` rule and the `roomFor`/`moveOne` pairing below.
+        //
+        // `accepts` is the destination's own filter, and null means "anything":
+        // a furnace's fuel slot is the only caller that has one today, and it
+        // exists because a hopper beside a furnace feeding it raw iron would
+        // otherwise wedge the fuel slot with something that cannot burn and can
+        // only be recovered by breaking the block.
+        //
+        // **`damage` rides along, and the merge test asks `slots::roomFor`.**
+        // Rebuilding the stack as `{source.item, 1}` let its third member
+        // default to zero, which is a tool's wear and a stowbox's contents: a
+        // hopper handed back a fully repaired tool - two of them in a loop made
+        // durability optional - and emptied every box that passed through it,
+        // stranding the real contents in `stowboxes.dat` behind a handle
+        // nothing could ever name again. `roomFor` is the one owner of "will
+        // this fit" and `moveOne` is the one owner of the move itself, and both
+        // compare `damage`, so the merge pass can no longer stack two different
+        // kinds together either.
+        const auto moveOneItem = [](game::ItemStack* from, std::size_t fromSlots,
+                                    game::ItemStack* to, std::size_t toSlots,
+                                    bool (*accepts)(game::ItemId) = nullptr) {
             for (std::size_t i = 0; i < fromSlots; ++i) {
-                game::ItemStack& source = from.slots[i];
+                game::ItemStack& source = from[i];
                 if (source.empty()) {
+                    continue;
+                }
+                if (accepts != nullptr && !accepts(source.item)) {
                     continue;
                 }
                 for (int pass = 0; pass < 2; ++pass) {
                     for (std::size_t j = 0; j < toSlots; ++j) {
-                        game::ItemStack& into = to.slots[j];
+                        game::ItemStack& into = to[j];
                         const bool usable =
-                            pass == 0 ? (!into.empty() && into.item == source.item &&
-                                         into.space() > 0)
+                            pass == 0 ? (!into.empty() && game::slots::roomFor(into, source) > 0)
                                       : into.empty();
                         if (!usable) {
                             continue;
                         }
-                        if (into.empty()) {
-                            into = game::ItemStack{source.item, 1};
-                        } else {
-                            ++into.count;
+                        // **The move itself belongs to `slots`, not here.**
+                        // This was the twelfth site writing a stack's fields by
+                        // hand, and the primitive exists now precisely so it is
+                        // the last: `moveOne` gives an empty destination the
+                        // source's `damage` and empties the source when it hits
+                        // zero. Tested rather than assumed - both passes above
+                        // have already proved there is room, so a zero here
+                        // would mean `roomFor` and `merge` disagree, and moving
+                        // on is a better answer than reporting a transfer that
+                        // did not happen.
+                        if (game::slots::moveOne(into, source) > 0) {
+                            return true;
                         }
-                        if (--source.count <= 0) {
-                            source = game::ItemStack{};
-                        }
-                        return true;
                     }
                 }
             }
             return false;
+        };
+
+        /// Which break this is, counted from the start of the session.
+        ///
+        /// **Gameplay state, not worldgen**, which is why it can exist at all:
+        /// `dropHash` is otherwise a pure function of the cell, and a cell that
+        /// grows its block back - a crop, a stem, a melon, a leaf - would
+        /// otherwise pay the identical haul on every harvest until the end of
+        /// the world. `resolveBreak` in `BlockDrops.hpp` is what decides which
+        /// blocks this reaches; every one-shot feature ignores it and keeps the
+        /// "same cell, same haul" rule gravel's flint was written with.
+        ///
+        /// It does not survive a restart, and does not need to: two breaks only
+        /// have to disagree with each other, and the first break of a session
+        /// repeating the first break of the last one is not worth a byte in the
+        /// save file.
+        std::uint32_t breakNonce = 0;
+
+        /// Asks the frame loop to save at the end of this frame.
+        ///
+        /// A flag rather than a direct call, because closing a screen happens in
+        /// the middle of the break path and the middle of the explosion loop -
+        /// writing the whole world to disk from inside either would stutter the
+        /// frame, and a blast that destroys four open containers would do it
+        /// four times.
+        bool savePending = false;
+
+        /// True while the last save failed to write every table, so that keeping
+        /// `savePending` set - which is what makes a failure retry rather than
+        /// be forgotten - does not turn into a save attempt every frame. The
+        /// retry waits for the autosave timer instead.
+        bool saveFailing = false;
+
+        // **The one place a destroyed block becomes items.** Mining it,
+        // blasting it, washing it away, dropping a gravel column on it, pulling
+        // its support out from under it - all of them come here, because a drop
+        // is no longer "one item, this many": `dropsForBlock` can hand back
+        // three entries and `resolveBreak` settles every count and every chance.
+        //
+        // **The roll is a pure function of the cell for anything you can only
+        // harvest once**, so breaking the same gravel twice gives the same haul
+        // twice and a reloaded save cannot re-roll it - while a block that grows
+        // back takes a fresh roll each time, or the cell becomes a rate the
+        // player owns rather than a thing they found. And **entries sharing a
+        // salt are alternatives decided by one roll**, in table order - which is
+        // why gravel gives flint *instead of* its gravel rather than beside it.
+        // Two independent rolls at 10% and 90% would hand back both about one
+        // time in eleven, which is precisely the bug the salt exists to close,
+        // so nothing here may take a second roll per entry.
+        //
+        // `stowHandle` rides on the first stack: a stowbox's row is a single
+        // identity entry, and that handle is the only thing standing between
+        // its contents and being stranded in `stowboxes.dat` forever. The count
+        // comes back so a caller that keeps a tally - the blast does - does not
+        // have to resolve the drop a second time to get one.
+        //
+        // **The nonce is taken here rather than passed in**, so no call site can
+        // forget it and no two breaks can share one. It is counted for every
+        // break, whatever was broken, so what a renewable block rolls does not
+        // depend on how much stone was mined in between.
+        const auto spillBlockDrop = [&drops, &breakNonce](const glm::ivec3& at,
+                                                          game::BlockId block,
+                                                          const game::BreakContext& context,
+                                                          int stowHandle = 0) -> int {
+            const game::ResolvedDrop rolled =
+                game::resolveBreak(block, context, at.x, at.y, at.z, ++breakNonce);
+            const glm::vec3 centre = glm::vec3{at} + glm::vec3{0.5f};
+            for (int i = 0; i < rolled.count; ++i) {
+                game::ItemStack stack = rolled.stacks[static_cast<std::size_t>(i)];
+                if (i == 0) {
+                    stack.damage = stowHandle;
+                }
+                // **Through `dropStack`, never `spawn`** - it is the one helper
+                // that carries `damage`, and `damage` is both a tool's wear and
+                // which stowbox this is.
+                game::dropStack(drops, centre, stack);
+            }
+            return rolled.count;
+        };
+
+        /// **What a landed cube owes, and it is not always the same debt.**
+        ///
+        /// One owner for both falling-block drains - the frame update and
+        /// `settleAll` on the way out - because they were paying the identical
+        /// channel two lines apart, so fixing one would have left the other.
+        ///
+        /// `FallingBlocks::Crushed` is a **union channel**: `applyFallingLanding`
+        /// reports either the occupant a landing displaced *or* the faller itself
+        /// when it broke, never both for one landing, so `hit.block` is always
+        /// exactly the one thing that owes an item. That is what conserves the
+        /// count. It does **not** say which arm sent it, and the two arms owe
+        /// different items:
+        ///
+        /// - A displaced **occupant** owes the mining table. Sand landing on tall
+        ///   grass really does drop what breaking that grass drops.
+        /// - A **faller that broke** owes *itself*. Nothing was swung at it, so
+        ///   gravel popped off a torch is gravel - and `resolveBreak` was paying
+        ///   flint for it 10% of the time, measured at 9,942 in 100,000. The
+        ///   count was right and the item was wrong, which is the one error no
+        ///   conservation probe can see.
+        ///
+        /// `isFalling` separates them, and the strided sweep at the top of this
+        /// file is what makes that a classification instead of a guess: the
+        /// occupant arm is gated on `isReplaceable`, nothing that falls is
+        /// replaceable, and every faller has an item to become. Give a
+        /// replaceable block gravity and the build stops, rather than the item
+        /// quietly changing.
+        ///
+        /// **Two of the twenty-five fallers are destroyed rather than dropped,
+        /// and the drop table is what says which.** "It drops nothing if it
+        /// breaks, and will break if it falls or is moved"
+        /// (https://minecraft.wiki/w/Suspicious_Sand) - and on Bedrock that is
+        /// the whole story, the "falls for more than 30 seconds and drops as an
+        /// item" escape being Java only. Paying every faller its own item was
+        /// therefore an overshoot in the opposite direction from the bug: it
+        /// would have made suspicious sand obtainable, which on Bedrock it is
+        /// not outside Creative. The guard is `primaryDrop == None`, read off
+        /// the table that owns "what does destroying this give you" rather than
+        /// written as a list of two ids - and a probe over the whole enum
+        /// confirms it selects **exactly** Suspicious Sand and Suspicious
+        /// Gravel out of the twenty-five, nothing else.
+        ///
+        /// **Bare hands, not the wash path's context.** The reference lists
+        /// exactly three things that cut a cobweb - a sword, water and a piston -
+        /// and a block falling on one is none of them.
+        const auto payForCrushed = [&drops,
+                                    &spillBlockDrop](const game::FallingBlocks::Crushed& hit) {
+            if (game::isFalling(hit.block)) {
+                if (game::primaryDrop(hit.block) == game::ItemId::None) {
+                    return;
+                }
+                game::dropStack(drops, glm::vec3{hit.position} + glm::vec3{0.5f},
+                                game::ItemStack{game::itemForBlock(hit.block), 1});
+                return;
+            }
+            spillBlockDrop(hit.position, hit.block, game::BreakContext{});
+        };
+
+        // The chest at `at`, **rolled if it has never been touched**.
+        //
+        // A village places its chests as `LootChest` ids carrying nothing but
+        // which table they owe; this is the one place that turns one into real
+        // contents. It is **idempotent** - the second call finds a plain chest
+        // and does nothing - which is what lets the open path ask twice for the
+        // two halves of a double chest.
+        //
+        // **Every caller must reach here before it writes Air over the cell.**
+        // The table lives in the block id and nowhere else, so a break or a
+        // blast that clears the block first has nothing left to ask and spills
+        // an empty chest.
+        const auto materialise = [&](const glm::ivec3& at) -> game::Chest& {
+            // **Asked before `chests[at]`, because that call is what creates
+            // the entry it reads.** Both terms are here and neither is spare:
+            // the flag catches a chest already emptied or broken, whose record
+            // is empty or gone, and the map catches a save written before the
+            // flag existed, which has a record and no flag.
+            const bool firstTouch = chests.find(at) == chests.end() && rolledLoot.count(at) == 0;
+            game::Chest& chest = chests[at];
+            const game::BlockId id = world.blockAt(at.x, at.y, at.z);
+            if (game::isLootChest(id)) {
+                if (firstTouch) {
+                    game::loot::rollInto(chest, game::loot::tableFor(id), world.seed(), at);
+                }
+                // **Two records of one fact, on purpose, because they survive
+                // different things.** The block id says "rolled" by no longer
+                // being a `LootChest`, and writing it flags the chunk modified,
+                // so an emptied chest stays emptied. That is the right home for
+                // it and it is enough for everything except the one event that
+                // throws the chunk away and keeps the store - a
+                // `kChunkFormatVersion` bump, after which worldgen puts the
+                // marker back over a live record and this rolled a second time
+                // on top of it. Measured before the guard: 11 items became 22
+                // after one bump and 44 after three, and a chest the player had
+                // already emptied handed back a full 11 every time.
+                rolledLoot.insert(at);
+                world.setBlock(at.x, at.y, at.z, game::plainChestFor(id));
+                // **And the world is written at the end of this frame.** The
+                // two halves of a rolled chest are saved by two different
+                // things: the block goes out with its chunk, which happens on
+                // unload as well as on a save, and the contents go out only
+                // with `chests.dat`, which nothing but `saveEverything` writes.
+                // Walk far enough away to unload the chunk and then lose the
+                // process before the next autosave, and the world comes back
+                // holding a plain empty chest - the marker id that made the
+                // loot re-derivable from the seed has already been overwritten,
+                // so it is gone for good. The flag collapses that window to one
+                // frame.
+                savePending = true;
+            }
+            return chest;
+        };
+
+        /// **The one place a campfire's contents become items.** Called from the
+        /// break path and from the blast path, which is the whole reason it is a
+        /// lambda rather than a loop written twice: the furnace above it *is*
+        /// written twice, and that is exactly the shape - a rule that exists, is
+        /// correct, and lives in only one of the two places that need it - which
+        /// has cost this project more than any other.
+        ///
+        /// The reference always drops what is cooking, with no tool and no
+        /// silk-touch exception, and it drops the raw item rather than the
+        /// finished one however far along the timer was. Partial progress is not
+        /// an item and there is nowhere to put it.
+        const auto spillCampfire = [&](const glm::ivec3& at) {
+            const auto found = campfires.find(at);
+            if (found == campfires.end()) {
+                return;
+            }
+            const glm::vec3 centre = glm::vec3{at} + glm::vec3{0.5f};
+            for (const game::ItemStack& stack : found->second.items) {
+                if (!stack.empty()) {
+                    game::dropStack(drops, centre, stack);
+                }
+            }
+            campfires.erase(found);
+        };
+
+        /// **The disc a jukebox is holding, handed back when the block goes.**
+        ///
+        /// One owner and three callers, for the reason the campfire above is
+        /// one: `jukeboxDiscs` is keyed by cell and **nothing but a right-click
+        /// ever emptied it**, so breaking or blowing up a loaded jukebox left
+        /// the entry stranded at a cell that no longer held one. The disc was
+        /// not merely dropped on the floor and missed - it stopped existing
+        /// anywhere the player could reach, recoverable only by building a new
+        /// jukebox on that exact block, and a music disc is a one-per-dungeon
+        /// item. There is no periodic autosave, so "it comes back on reload"
+        /// meant "quit the game and come back".
+        ///
+        /// The reference's own rule, and the same one the right-click uses: a
+        /// broken jukebox ejects its disc (https://minecraft.wiki/w/Jukebox).
+        /// Through `dropStack`, like every other parting of a player and an
+        /// `ItemStack`.
+        const auto spillJukeboxDisc = [&](const glm::ivec3& at) {
+            const auto found =
+                std::find_if(jukeboxDiscs.begin(), jukeboxDiscs.end(),
+                             [&](const std::pair<glm::ivec3, game::ItemId>& entry) {
+                                 return entry.first == at;
+                             });
+            if (found == jukeboxDiscs.end()) {
+                return;
+            }
+            game::dropStack(drops, glm::vec3{at} + glm::vec3{0.5f, 1.1f, 0.5f},
+                            game::ItemStack{found->second, 1});
+            *found = jukeboxDiscs.back();
+            jukeboxDiscs.pop_back();
+        };
+
+        /// **"May something be put in this cell without deleting anything?"**
+        ///
+        /// Three sites ask it - lighting a fire, sowing a seed, planting nether
+        /// wart - and all three used to spell it `inCell == Air ||
+        /// isWashedAway(inCell)`, which was *nearly* right for as long as
+        /// `isWashedAway` happened to mean "cross plants, vines and torches".
+        /// The day it widened to the reference's real list, those three sites
+        /// silently gained the power to write over a rail, a carpet, a redstone
+        /// line, tripwire and any depth of snow, with no drop and no feedback.
+        /// **They never asked "would a fluid sweep this away"; they asked "is
+        /// this cell free", and the two only looked alike.** `isReplaceable` is
+        /// the predicate for the second question and already excludes all five
+        /// families - its own `static_assert` says so in as many words.
+        ///
+        /// The `!isFluid` half is the part `isReplaceable` alone does not give.
+        /// Replacing water is correct for *placing a block* - we have no
+        /// waterlogging, so the reference's own answer is that the water goes -
+        /// but a torch of fire or a wheat seed must not delete a lake, and
+        /// `fireCanSurvive` cannot catch it because it asks about the block
+        /// below and the neighbours, never the cell itself.
+        const auto cellIsFree = [](game::BlockId id) {
+            return game::isReplaceable(id) && !game::isFluid(id);
+        };
+        // **Every one of its three callers spills first.** This says a cell may
+        // be *built into*, not that it is empty: tall grass, a fern, a dead
+        // bush, a large fern and a one-deep snow layer all pass and all owe an
+        // item. Striking a fire or sowing a seed into one destroyed that item
+        // until the `spillReplaced` calls beside each `setBlock` were added -
+        // add a fourth caller and it needs the same line.
+
+        /// **Somewhere to stand next to a bed, or nothing.** The other half of
+        /// the reference's respawn rule, and the half the message at the death
+        /// site claimed to check for twenty milestones without checking.
+        ///
+        /// Asked through `overlapsSolid`, which is the one owner of "does a
+        /// body fit here" - a second answer written out of `isSolid` would be
+        /// wrong for every slab, stair and fence the moment either changed, and
+        /// wrong invisibly, since the failure is a respawn that looks fine and
+        /// leaves you standing inside a wall.
+        ///
+        /// Order is the reference's: **beside the bed at its own level first**,
+        /// then on top of it, then one down for a bed on a ledge. Nine columns
+        /// in each ring, so a bed walled in on three sides still finds the open
+        /// one.
+        const auto standingRoomBeside =
+            [&world](const glm::ivec3& bed) -> std::optional<glm::vec3> {
+            constexpr int kRings[3] = {0, 1, -1};
+            constexpr int kWorldTop = game::kWorldHeightChunks * game::Chunk::kSize;
+            for (const int dy : kRings) {
+                const int feet = bed.y + dy;
+                if (feet < 1 || feet + 2 >= kWorldTop) {
+                    continue;
+                }
+                for (int dz = -1; dz <= 1; ++dz) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const glm::vec3 at{static_cast<float>(bed.x + dx) + 0.5f,
+                                           static_cast<float>(feet),
+                                           static_cast<float>(bed.z + dz) + 0.5f};
+                        constexpr float kHalf = game::player_constants::kWidth * 0.5f;
+                        const game::Aabb box{
+                            glm::vec3{at.x - kHalf, at.y, at.z - kHalf},
+                            glm::vec3{at.x + kHalf, at.y + game::player_constants::kHeight,
+                                      at.z + kHalf}};
+                        if (game::overlapsSolid(world, box)) {
+                            continue;
+                        }
+                        // And something under the feet, or this is a respawn
+                        // into open air over a ravine. The same owner again -
+                        // and the bed's own top counts, which is what stands
+                        // you on the bed when all four sides are walled in.
+                        if (game::worldCollisionBoxes(world, bed.x + dx, feet - 1, bed.z + dz)
+                                .count == 0) {
+                            continue;
+                        }
+                        return at;
+                    }
+                }
+            }
+            return std::nullopt;
+        };
+
+        /// **The other cell of a two-cell block, taken without paying for it.**
+        ///
+        /// A door, a bed and a tall flower are each two cells and one thing:
+        /// whichever half goes, the other goes with it, and only one item is
+        /// owed because both halves map back to the same item
+        /// (`itemForBlock(SunflowerUpper)` is the sunflower). Paying twice
+        /// duplicates the plant, which is why the paired *write* below and this
+        /// paired *break* had to arrive in the same edit.
+        ///
+        /// It lives out here rather than inside `settleAround` because there are
+        /// **three** callers, not one, and the third is the one that made this
+        /// blocking. `settleAround` covers the mined and blasted cell;
+        /// `spillReplaced` covers a cell written over, which the raycast can
+        /// hand any occupant at all (finding 142's thin-box skim, and the bucket
+        /// pour, which writes whatever cell it reached); and the **fluid wash
+        /// drain** covers the one path that can take either half *on its own*,
+        /// because a flow arrives one cell at a time. That last one was missing,
+        /// and a bucket poured over a sunflower paid a flower for the top and
+        /// then a second flower for the bottom, repeatably, out of one plant.
+        ///
+        /// Returns the cell it emptied, so a caller draining a batch can tell
+        /// that a later entry in the same batch has already been paid for.
+        ///
+        /// > An earlier version of this comment claimed the tall-flower ids are
+        /// > `isReplaceable`. **They are not** - `Block.hpp`'s list is air,
+        /// > fluid, fire, the dry ground cover, the nether roots, vines and
+        /// > one-deep snow, and `LargeFern` in it is a separate single-cell id.
+        /// > Nothing that needs a twin carries the tag, which is why the wash
+        /// > and not the placement was where the item was actually being
+        /// > duplicated.
+        const auto clearPairedHalf = [&world](const glm::ivec3& cell,
+                                              game::BlockId removed) -> std::optional<glm::ivec3> {
+            glm::ivec3 other = cell;
+            bool paired = false;
+            if (game::isDoor(removed)) {
+                other.y += game::doorIsUpper(removed) ? -1 : 1;
+                const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
+                paired = game::isDoor(twin) && game::doorFamily(twin) == game::doorFamily(removed);
+            } else if (game::isBed(removed)) {
+                // Lying down rather than standing up: one step along the facing,
+                // forward from the foot or back from the head.
+                other += stepAlong(game::bedIsHead(removed)
+                                       ? game::oppositeDirection(game::bedFacing(removed))
+                                       : game::bedFacing(removed));
+                const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
+                paired = game::isBed(twin) && game::bedColour(twin) == game::bedColour(removed);
+            } else if (game::isTallFlower(removed)) {
+                // Bottom then top for each of the four, so the halves are one id
+                // apart and that id *is* the family test - a lilac top is not a
+                // sunflower bottom's other half.
+                const int step = game::isTallFlowerUpper(removed) ? -1 : 1;
+                other.y += step;
+                paired = world.blockAt(other.x, other.y, other.z) ==
+                         static_cast<game::BlockId>(static_cast<int>(removed) + step);
+            }
+            if (!paired) {
+                return std::nullopt;
+            }
+            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
+            return other;
+        };
+
+        /// **Writing a block into an occupied cell is a break, so it drops.**
+        ///
+        /// minecraft.wiki *Block* names exactly three ways a block is broken
+        /// without its sound or its particles: washed away by a fluid,
+        /// **replaced by another block**, and its supporting block removed. All
+        /// three are breaks and all three still pay their drop - only the noise
+        /// is suppressed. Two of them were honoured here and the third was not:
+        /// the wash spills below, losing a support spills through
+        /// `settleAround`, and a placement simply wrote over whatever was
+        /// standing there. **A rule that did not travel**, and the proof it was
+        /// never a decision is that nearly every replaceable id is *also* washed
+        /// away - so the identical block dropped when water reached it and
+        /// dropped nothing when a block did. A four-high candle stack was the
+        /// sharpest case: one right-click, four candles gone.
+        ///
+        /// **The numbers, measured, because the ones that used to stand here
+        /// were wrong by an order of magnitude and argued for a `static_assert`
+        /// that would not hold.** Of 3309 ids, **27** are replaceable and
+        /// neither Air nor a fluid - Air owes nothing and returns early below -
+        /// and **7** of those pay something to a bare hand. **26 of the 27 are
+        /// `isWashedAway`, and the exception is Glow Lichen**, which the
+        /// reference waterlogs rather than breaks. So this is very nearly a
+        /// subset and deliberately not asserted as one.
+        ///
+        /// **The occupant is not always something `isReplaceable` allowed.**
+        /// `Raycast` walks `worldSelectionBoxes`, and a rail, carpet, redstone
+        /// line, tripwire or thin snow box is a sixteenth of a block tall, so a
+        /// near-horizontal ray skims over it, strikes the side face of the block
+        /// beyond and hands back a normal pointing *back into* the cell that
+        /// holds it. That is a further 91 ids - the `Flat` family, of which
+        /// exactly one is replaceable, so all but one of them arrive here by
+        /// this route and no other - and they reach every writer of a cell,
+        /// which is why this asks what is there rather than trusting how the
+        /// cell was chosen.
+        ///
+        /// Bare hands by default, for the same reason `settleAround` uses them:
+        /// nothing was swung at it. Air and fluids return early rather than
+        /// being rolled - neither owes anything, and a roll would spend a break
+        /// nonce for nothing.
+        ///
+        /// > A container is out of scope here on purpose. Every container id is
+        /// > non-replaceable, and the only occupant a *non*-replaceable cell can
+        /// > hand this helper is the thin-box skim above, whose victim set is
+        /// > the 89 `Flat` ids and holds no block entity. Spilling twenty-seven
+        /// > slots would mean a second copy of the break path's container rules,
+        /// > which is the one thing this project pays for hardest.
+        const auto spillReplaced = [&](const glm::ivec3& cell,
+                                       const game::BreakContext& context = game::BreakContext{}) {
+            const game::BlockId standing = world.blockAt(cell.x, cell.y, cell.z);
+            if (standing == game::BlockId::Air || game::isFluid(standing)) {
+                return;
+            }
+            spillBlockDrop(cell, standing, context);
+            // **The occupant may be half of something.** No two-cell block is
+            // `isReplaceable`, so the cell was never *chosen* for holding one -
+            // but this helper is handed cells the ray only skimmed and the cell
+            // a bucket reached, and either can be a door half or a bed foot.
+            // Leaving the other half standing on nothing is the same bug in a
+            // different path, so it asks the same owner the break path does.
+            clearPairedHalf(cell, standing);
         };
 
         // Two chests shoulder to shoulder open as one. **Which of a row pairs
@@ -2694,25 +4117,78 @@ int main() {
         // the world's animals into a frozen roster is exactly what stopped "one
         // species alone" being one species - they arrive after the subjects are
         // placed and, with the spawner off, nothing ever retires them.
-        if (settings.creatureShowcase == 0) {
-            std::size_t restored = 0;
+        //
+        // **`<= 0`, the negation of the one test that turns the showcase on**
+        // (`if (settings.creatureShowcase > 0)`, where the subjects are placed).
+        // It cited that test by line number and the number had rotted into an
+        // unrelated `applyUpdates` call - measured tree-wide, 13 of 18
+        // line-numbered citations were stale, so they are named rather than
+        // numbered now. "On" is `> 0` there and "off" was `== 0` at the three
+        // sites that turn the
+        // world's own creatures back on, so a negative `creature_showcase` fell
+        // into a dead zone where every branch took "no": no showcase, no
+        // restore, no spawner - and, because the save path asks the same way,
+        // **no `saveCreatures`, which silently deleted the population.**
+        if (settings.creatureShowcase <= 0) {
+            // **Counted off the roster rather than off the loop.** Two guards can
+            // drop a record and they are not the same guard: this one checks the
+            // raw `std::int32_t` as it came off the disk, and `Creatures::restore`
+            // checks the `CreatureKind` it was handed - which is a `std::uint8_t`,
+            // so a stored 300 arrives there as a perfectly valid 44 and only the
+            // check here can refuse it. Both stay; a `++` beside the call would
+            // count what was attempted, and the line says "Restored".
+            const std::size_t before = creatures.count();
             for (const game::SavedCreature& saved : world.store().loadCreatures()) {
-                if (saved.kind >= static_cast<std::uint8_t>(game::CreatureKind::Count)) {
+                if (saved.kind < 0 ||
+                    saved.kind >= static_cast<std::int32_t>(game::CreatureKind::Count)) {
                     continue;
                 }
+                // **The three claim cells travel with the villager.** Without
+                // them an armourer reloads employed but owning nothing: it can
+                // never work again, it is refused a fresh claim because it
+                // already has a profession, and the next villager to wake takes
+                // the same anvil - so the village quietly ends up with two of
+                // every trade. `kCreatureVersion` was bumped to 4 for this.
                 creatures.restore(static_cast<game::CreatureKind>(saved.kind),
                                   glm::vec3{saved.x, saved.y, saved.z}, saved.yaw, saved.health,
                                   saved.scale, saved.charged != 0, saved.playerBuilt != 0,
-                                  saved.profession);
-                ++restored;
+                                  saved.profession, saved.bedCell, saved.jobCell, saved.meetCell);
             }
+            const std::size_t restored = creatures.count() - before;
             if (restored > 0) {
                 engine::logInfo("Restored " + std::to_string(restored) + " creatures.");
+            }
+            // **The marker set, and it is not derivable from the loop above.**
+            // A column stays populated after everything in it has been eaten,
+            // and quitting anywhere but on top of a village means its animals
+            // are not in memory to imply it - so rebuilding this from the
+            // restored creatures marks nothing, the one-off pass runs again on
+            // load, and the population grows every session until the village is
+            // solid villagers.
+            //
+            // **Unpacked at both ends on purpose.** `populatedKey` is private to
+            // `Creature.cpp` and must stay the only thing that packs a column;
+            // `WorldStore` stores two `std::int32_t` and this loop hands them
+            // straight back, so neither file is a second owner of the packing.
+            // If it were, changing the packing would silently stop matching
+            // everything already on disk, with no error and no warning.
+            //
+            // Inside this gate deliberately, and symmetric with the save: the
+            // showcase leaves the world's own creature state alone at both ends
+            // rather than restoring half of it.
+            for (const game::PopulatedColumn& column : world.store().loadPopulatedColumns()) {
+                creatures.restorePopulatedColumn(column.x, column.z);
             }
         }
 
         // Which furnace the open screen is looking at, if any.
         glm::ivec3 openFurnacePosition{0};
+        // And which workbench, stonecutter, anvil, grindstone, brewing stand or
+        // smithing table. **Only the furnace and the containers had one**, so
+        // breaking the table you were standing at left its screen open with a
+        // live crafting grid - and the ingredients in that grid were still
+        // yours to take from a block that no longer existed.
+        glm::ivec3 openBenchPosition{0};
         glm::ivec3 openChestPosition{0};
         // The second half of an open double chest, and equal to the first when
         // there is only one, so nothing has to ask which case it is.
@@ -2723,13 +4199,84 @@ int main() {
         // slot it crosses.
         //
         // The distribution is recomputed from scratch every frame rather than
-        // applied incrementally, which is why each slot's contents from before
-        // the drag are kept: replaying from the original state is the only way
-        // to show a live preview that stays correct as more slots are added.
+        // applied incrementally, because adding one more slot changes every
+        // other slot's share - so each frame has to be able to undo the last.
+        //
+        /// **A sweep owns what the sweep put there, and nothing else.**
+        ///
+        /// This was a *snapshot*: each swept slot's contents from before the
+        /// sweep, written back verbatim. That is sound only while nothing
+        /// outside the screen may write those slots with the button down, and
+        /// **three things may**. A furnace keeps smelting under an open screen,
+        /// so holding the button on its input slot restored the input the tick
+        /// had already eaten and the ingots were free - 65 raw iron and 8 coal
+        /// in, 65 raw iron, 7 coal and **2 iron ingots** out, once per smelt,
+        /// for as long as the button was held. A hopper keeps draining a chest
+        /// the same way: 32 diamonds in the chest and 8 on the cursor came back
+        /// out as 40 in the chest **and** 20 in the hopper. And a drop picked
+        /// up off the floor tops up the very slot the sweep photographed, so
+        /// the rewind erased it - 32 coal plus 16 held plus 5 collected gave
+        /// back 48.
+        ///
+        /// **Three symptoms, one question**: what may mutate a slot while a
+        /// drag holds a claim on it? Guarding the three known writers is three
+        /// answers to remember separately and a fourth writer that arrives
+        /// unguarded - and the third of them, the pickup, writes an ordinary
+        /// inventory slot, so a fix that only re-reads the block-entity views
+        /// closes two of the three and reads as complete.
+        ///
+        /// So the drag stops making a claim it cannot defend. It records **how
+        /// many it deposited**; a rewind takes back at most that many, only
+        /// while the slot still holds that item at that damage, and hands the
+        /// cursor exactly what it recovered - through `slots::merge`, which is
+        /// this project's one owner of item, damage and stack cap. Anything
+        /// else that happened to the slot in between simply stays happened,
+        /// which is what balances the arithmetic for every writer, including
+        /// the ones not written yet.
+        ///
+        /// **The single edit that breaks this:** storing the slot's contents
+        /// here instead of the deposit, or restoring the cursor from a
+        /// remembered value rather than from what the rewind actually
+        /// recovered. Either one is the snapshot again.
         enum class DragButton { None, Left, Right };
+        struct DragDeposit {
+            game::inventoryScreen::SlotHit at;
+            // What was put there, so a slot whose contents were replaced
+            // wholesale by something else is recognised and left alone.
+            game::ItemId item = game::ItemId::None;
+            int damage = 0;
+            // Zero for a slot the distribution skipped - recorded anyway,
+            // because "the sweep never left its first slot" is a question about
+            // how many slots were crossed, not about how many took anything.
+            int placed = 0;
+        };
         DragButton dragButton = DragButton::None;
-        game::ItemStack dragOriginalCursor;
-        std::vector<std::pair<game::inventoryScreen::SlotHit, game::ItemStack>> draggedSlots;
+        std::vector<DragDeposit> draggedSlots;
+
+        /// **Ends a sweep wherever it has got to, committing it rather than
+        /// rewinding it.** One owner, because three things outside the drag
+        /// block need it and none of them can call `rewindDrag`.
+        ///
+        /// Committing is the safe half of the choice: `applyDrag` is
+        /// rewind-then-`distribute`, so at the end of every frame the slots
+        /// hold their share and the cursor holds the remainder and the sum is
+        /// already right. Rewinding here would need `stackAt`, which resolves a
+        /// `SlotHit` against **whichever screen is open now** - so a deposit
+        /// recorded in a chest would be taken back out of a hopper slot no
+        /// screen can reach.
+        ///
+        /// **This is what closes the duplication.** The variables above outlive
+        /// the screen block that reads them, and only that block ever cleared
+        /// them. A sweep armed in a chest therefore survived `closeScreen`,
+        /// which had already handed the cursor stack back to the inventory -
+        /// and the next screen to open rewound first, putting the same items on
+        /// the cursor a second time. Sixty-four cobble in, a hundred and
+        /// twenty-seven out, with any item, in any container, as fast as a
+        /// screen can be reopened.
+        const auto cancelDrag = [&] {
+            dragButton = DragButton::None;
+            draggedSlots.clear();
+        };
 
         // Two left clicks on one slot inside this window pull every matching
         // item onto the cursor.
@@ -2757,23 +4304,50 @@ int main() {
                 std::any_of(savedPlayer->inventory.begin(), savedPlayer->inventory.end(),
                             [](const game::ItemStack& stack) { return stack.count > 0; });
             for (std::size_t i = 0; carried && i < game::kInventorySlots; ++i) {
-                const game::ItemStack& stored = savedPlayer->inventory[i];
                 game::ItemStack& into = inventory.slot(i);
                 // Assigned rather than merged, so the saved inventory is the
                 // whole answer: a slot deliberately emptied stays empty instead
                 // of being restocked by the starting kit above.
-                if (stored.item <= game::ItemId::None || stored.item > game::ItemId::kLastItem ||
-                    stored.count <= 0) {
-                    into = {};
-                    continue;
-                }
-                into.item = stored.item;
-                into.count = std::min(stored.count, game::maxStackFor(stored.item));
-                into.damage = std::max(0, stored.damage);
+                //
+                // **Through `game::sanitiseStack`, which is the single owner of
+                // this rule.** It was written here as a local lambda, correctly,
+                // and then not carried to the chest, furnace and stowbox
+                // restores - so the one door that was guarded had three
+                // unguarded ones beside it. `WorldStore` now exports it and the
+                // copy here is gone.
+                into = savedPlayer->inventory[i];
+                game::sanitiseStack(into);
             }
             selectedSlot = static_cast<std::size_t>(
                 std::clamp<std::int32_t>(savedPlayer->selectedSlot, 0,
                                          static_cast<std::int32_t>(game::kHotbarSlots) - 1));
+            // **The ender chest, which no save path ever saw.** It belongs to
+            // the player rather than to a block, so it has no position, no entry
+            // in `chests` and no place in `chests.dat` - and the one block the
+            // reference promises is safe came back empty every launch. Through
+            // the same rule as everything else, because a record read off disk
+            // is a record read off disk - and `sanitiseChest` is that rule for
+            // a whole container, so this is one call rather than a loop.
+            enderChest = savedPlayer->enderChest;
+            game::sanitiseChest(enderChest);
+            // **The worn set, restored outside the `carried` gate on purpose.**
+            // That flag asks "did the saved *bag* have anything in it", and a
+            // player who quit wearing a full set with an empty inventory is an
+            // ordinary thing to be - gating the armour on it would take the set
+            // off exactly the player who had spent everything else.
+            //
+            // Assigned rather than merged, like the bag above, so a piece
+            // deliberately taken off stays off.
+            //
+            // **No second sanitise.** `WorldStore::loadPlayer` runs
+            // `sanitiseStack` over `player.armour` at the trust boundary, and
+            // `armourSet` independently declines to count a piece sitting in
+            // the wrong cell - so a corrupt file can put a sword in the head
+            // slot and it grants nothing. A third check here would be a third
+            // owner of one rule.
+            for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
+                inventory.armourAt(i) = savedPlayer->armour[i];
+            }
         }
         bool hudDirty = true;
         /// Whether the camera itself is inside a water cell, which is a
@@ -2782,39 +4356,95 @@ int main() {
         bool eyeUnderwater = false;
         bool eyeInLava = false;
 
+        /// Every stack an open screen is holding that lives **nowhere else**:
+        /// the cursor, then the crafting grid behind it. Both exist only while
+        /// the screen is up, so whoever is asked here is who has to be given
+        /// them back or write them down.
+        ///
+        /// **A furnace's two slots are not on the list.** They are a view onto
+        /// the block, which owns them and is saved in its own file, so handing
+        /// them over would hand out a free copy of whatever is smelting.
+        ///
+        /// One owner of that rule, because two things need the answer - closing
+        /// a screen and saving the world - and the whole reason the autosave
+        /// reloaded a world with the cursor stack missing is that only one of
+        /// them knew about it.
+        const auto forEachScreenStack = [&](auto&& visit) {
+            visit(heldStack);
+            if (openScreen != game::inventoryScreen::Kind::Furnace) {
+                for (game::ItemStack& slot : craftSlots) {
+                    visit(slot);
+                }
+            }
+        };
+
+        // **One owner of "the search field lost the keyboard".** Four places
+        // let it go - the screen closing, a tab clicked, a tab cycled with the
+        // stick, and a click landing anywhere but the field - and they are the
+        // four that would each have to remember to reconcile the caret if the
+        // query ever started being cleared on blur. Today none of them clears
+        // it, which is exactly why this exists now rather than later: a fifth
+        // caller is free, and adding `setQuery({})` here later is one edit
+        // instead of four, three of which would be forgotten.
+        //
+        // `clampCaret` is the cheap half of the same guarantee - it is
+        // idempotent, and it is what stops a caret outliving its string if
+        // anything ever shortens `query` without going through the mutators.
+        const auto blurSearch = [&] {
+            catalogue.searchFocused = false;
+            catalogue.clampCaret();
+        };
+
         // Hands back everything the screen was holding: the cursor stack, then
         // the crafting grid. **Every** way of closing has to do this, which is
         // why it is one function - Escape used to close without it and stranded
         // whatever was in the grid.
         const auto closeScreen = [&] {
+            // **First, and unconditionally.** A sweep still armed when the
+            // screen goes away is the one way an item can be handed back here
+            // *and* claimed by the next screen's first rewind - see
+            // `cancelDrag` for the full journey. At the top rather than beside
+            // `openScreen.reset()` so that every line below it, and every
+            // screen kind added later, is already downstream of the one exit
+            // path that reconciles the cursor.
+            //
+            // **The single edit that breaks this:** move this call below
+            // `forEachScreenStack(giveBack)`. Under the snapshot rewind that
+            // put the cursor's stack in the bag and then refilled the cursor
+            // from the snapshot, for a free copy; now it leaves live deposits
+            // whose `SlotHit`s the next screen resolves against *its* slots, so
+            // the sweep takes its share back out of whatever container is open
+            // next.
+            cancelDrag();
             const auto giveBack = [&](game::ItemStack& stack) {
                 if (stack.empty()) {
                     return;
                 }
-                const int left = inventory.add(stack.item, stack.count);
+                // **`damage` on both halves.** It is a tool's wear and it is
+                // which stored contents a stowbox holds, so the old pair - an
+                // `add` and a `spawn` that both dropped it - handed back a
+                // repaired tool and an empty box every time a screen closed.
+                const int left = inventory.add(stack.item, stack.count, stack.damage);
                 if (left > 0) {
-                    drops.spawn(camera.position + camera.forward() * 0.5f, stack.item, left,
-                                camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                    game::dropStack(drops, camera.position + camera.forward() * 0.5f, stack, left,
+                                    camera.forward() * kThrowSpeed, kThrowPickupDelay);
                 }
                 stack = game::ItemStack{};
             };
 
-            giveBack(heldStack);
+            forEachScreenStack(giveBack);
             // A furnace keeps what is inside it - the slots were only ever a
             // view onto the block, so they are DISCARDED here rather than
             // handed back. Leaving them populated would show the furnace's
             // contents in the next screen's crafting grid, and hand the player
             // a free copy when *that* screen closed. A crafting grid's own
-            // contents do come back, because they exist only while it is up.
+            // contents do come back, because they exist only while it is up,
+            // which is the split `forEachScreenStack` above owns.
             if (openScreen == game::inventoryScreen::Kind::Furnace) {
                 craftSlots.fill(game::ItemStack{});
                 furnaceOutput = game::ItemStack{};
-            } else {
-                for (game::ItemStack& slot : craftSlots) {
-                    giveBack(slot);
-                }
             }
-            catalogue.searchFocused = false;
+            blurSearch();
             // A lid closing is placed at the chest, not at the ear: you hear it
             // from wherever you walked off to.
             if (openScreen == game::inventoryScreen::Kind::Chest ||
@@ -2825,7 +4455,633 @@ int main() {
             openScreen.reset();
             window.setCursorCaptured(true);
             hudDirty = true;
+            // A screen closing is when a chest, a furnace or the crafting grid
+            // last changed hands, so it is the cheapest honest moment to write
+            // the lot down.
+            savePending = true;
         };
+
+        /// **Whether the open screen is a window onto `cell`.** One owner for a
+        /// question the break path and the blast path each answered with their
+        /// own expression, and neither answer covered the benches: a crafting
+        /// table, stonecutter, anvil, grindstone, brewing stand or smithing
+        /// table could be destroyed while you stood in its screen, and the grid
+        /// kept working over a block that was now Air. Closing it returns the
+        /// grid's contents through `closeScreen`, which is the only path that
+        /// reconciles them.
+        const auto screenLooksAt = [&](const glm::ivec3& cell) {
+            if (!openScreen.has_value()) {
+                return false;
+            }
+            switch (*openScreen) {
+            case game::inventoryScreen::Kind::Furnace:
+                return openFurnacePosition == cell;
+            case game::inventoryScreen::Kind::Chest:
+            case game::inventoryScreen::Kind::DoubleChest:
+            case game::inventoryScreen::Kind::Hopper:
+                return openChestPosition == cell || openChestPartner == cell;
+            case game::inventoryScreen::Kind::CraftingTable:
+            case game::inventoryScreen::Kind::SmithingTable:
+            case game::inventoryScreen::Kind::Stonecutter:
+                return openBenchPosition == cell;
+            // The player's own screen is not attached to a block at all, so no
+            // block being destroyed can close it. **Named rather than left to a
+            // `default:`**, so a new screen kind is a compile error here instead
+            // of silently answering "no" and reopening this bug.
+            case game::inventoryScreen::Kind::Inventory:
+                break;
+            }
+            return false;
+        };
+
+        /// **Hands the player an item and puts on the floor whatever did not
+        /// fit.** `Inventory::add` returns the count it could **not** take, and
+        /// four paths through the interaction block below simply discarded that
+        /// return: emptying a bucket, swapping one at a cauldron, taking bone
+        /// meal out of a composter and filling a glass bottle each destroyed
+        /// what they were handing over the moment the inventory was full. The
+        /// bookshelf path a few hundred lines away got it right and said why,
+        /// and the rule did not travel - so this is the one owner of it, and a
+        /// fifth path cannot reintroduce the deletion.
+        ///
+        /// **`damage` goes in and comes out**, and the remainder leaves through
+        /// `dropStack` rather than `spawn`, which is exactly why `dropStack`
+        /// exists.
+        const auto giveOrDrop = [&](const game::ItemStack& stack, const glm::vec3& where) {
+            if (stack.empty()) {
+                return;
+            }
+            const int left = inventory.add(stack.item, stack.count, stack.damage);
+            if (left > 0) {
+                game::dropStack(drops, where, stack, left);
+            }
+            hudDirty = true;
+        };
+
+        /// **Wears the held tool and destroys it once it is spent.** One owner
+        /// for the three places that do it - breaking a block, working the
+        /// world with a hoe, shovel, shears or axe, and landing a blow - which
+        /// between them carried three copies of the same six lines, and only
+        /// one of them made a sound when the tool finally snapped. `ItemBreak`
+        /// was decoded at startup and never played.
+        ///
+        /// `points` is 1 everywhere except an attack with something that is not
+        /// a sword or a hoe, which Bedrock charges 2 for
+        /// (https://minecraft.wiki/w/Durability).
+        const auto wearTool = [&](game::ItemId tool, int points) {
+            if (creative || points <= 0) {
+                return;
+            }
+            const game::ToolProperties properties = game::toolFor(tool);
+            if (properties.durability <= 0) {
+                return;
+            }
+            game::ItemStack& slot = inventory.slot(selectedSlot);
+            slot.damage += points;
+            if (slot.damage >= properties.durability) {
+                slot = game::ItemStack{};
+                sounds.playGlobal(audio, game::SoundEvent::ItemBreak, 0.9f);
+            }
+            hudDirty = true;
+        };
+
+        /// **Lands every cube still in the air, because a save writes the hole
+        /// it came out of and not the cube.** Finding 873.
+        ///
+        /// `World::updateFalls` air-writes the source cell the moment a column
+        /// starts falling and flags that chunk modified, so a cube in flight
+        /// when the world is written is a block **deleted** from the saved world
+        /// rather than merely misplaced: knock the base out of a twenty-high
+        /// sand pillar, lose the process inside the two seconds it takes to
+        /// fall, and twenty sand never existed. Measured over the real landing
+        /// rule at twenty cubes above bedrock: before this ran, in 20, world 0,
+        /// items 0 - all twenty annihilated; after it, in 20, world 20, items 0.
+        ///
+        /// **Chosen over persisting the flight state**, which would have cost a
+        /// new `WorldStore` section and a format-version bump to keep something
+        /// that lasts under two seconds and that no player can tell apart from
+        /// "it had already landed". `FallingBlocks::settleAll` walks each cube
+        /// down through the same `fallingCubeRest` the frame update uses and
+        /// lands it through the same `applyFallingLanding`, so this is not a
+        /// second, simpler rule that happens to agree today.
+        ///
+        /// **The two terminal saves only, never the autosave timer**, and that
+        /// is the one judgement here. The landing goes through `setBlock`, which
+        /// is what flags a chunk modified, so it rides out with the save that is
+        /// about to happen either way - but on the timer it would also be
+        /// *visible*, snapping a collapse to the floor in front of a player who
+        /// is still playing. What it would buy there is the window between an
+        /// autosave and the landing, which only matters if the process is killed
+        /// outright inside it - and that is the one case no save path can reach.
+        ///
+        /// **The vector it returns has to be drained or settling loses items.**
+        /// A cube that finishes its fall on a torch or a slab becomes an item
+        /// rather than a block, so it goes through `payForCrushed` - the *same*
+        /// owner the frame drain uses, and sharing it is the point rather than
+        /// tidiness. This called `spillBlockDrop` directly until finding 888,
+        /// which means a gravel column settled at shutdown was paid flint 10% of
+        /// the time exactly as the frame drain was, and a fix to one of the two
+        /// would have read as complete. Those items are then destroyed by
+        /// finding 592 - dropped items have no save file - but that is the
+        /// pre-existing gap and not one this opens: before this ran, the cube
+        /// was lost as *well as* the item.
+        const std::function<void()> settleFallersBeforeFinalSave = [&] {
+            for (const game::FallingBlocks::Crushed& hit : fallingBlocks.settleAll(world)) {
+                payForCrushed(hit);
+            }
+        };
+
+        /// **Everything that "save the world" means, in one place.**
+        ///
+        /// It used to exist only after the frame loop, so the crash path threw
+        /// it away wholesale: `vkCheck` throws on any Vulkan failure and a
+        /// `VK_ERROR_DEVICE_LOST` is a thing laptop GPUs really do. Terrain that
+        /// unloaded mid-session is written as it goes, so what survived a crash
+        /// was a world where the chest is still standing and empty.
+        ///
+        /// Cheap enough to run on a timer: `saveAll` writes only chunks flagged
+        /// modified and clears the flag, so a second call moments later writes
+        /// nothing at all.
+        ///
+        /// **Returns whether every table wrote**, because the caller clears the
+        /// dirty flag on the strength of it. Discarding these five results and
+        /// then logging success was the `saveIfModified` shape one layer up: the
+        /// writer announces its own failure, and then this function contradicts
+        /// it and the caller clears the flag, so a world that failed to write is
+        /// marked clean and never retried.
+        const std::function<bool()> saveEverything = [&] {
+            // **Which tables did not write, by name.** Named rather than
+            // counted, because they are not equally recoverable. Furnaces,
+            // stowboxes and creatures mostly re-derive or are simply lost;
+            // `chests.dat` is the one that cannot heal, and it is worth knowing
+            // it was the one that failed. `materialise` overwrites the
+            // `LootChest` marker in the *block* - which rides out with the chunk
+            // and succeeds on its own path - while the rolled contents live only
+            // here, so losing this write loses the marker that made the loot
+            // re-derivable from the seed.
+            //
+            // **`saveAll` is not in this count and cannot be**: it returns
+            // `void`, so a chunk that failed to write is invisible from here.
+            // That half belongs to `World.hpp`'s owner.
+            std::string unwritten;
+            const auto wrote = [&unwritten](bool ok, const char* table) {
+                if (!ok) {
+                    unwritten += unwritten.empty() ? table : std::string{", "} + table;
+                }
+                return ok;
+            };
+            const std::size_t chunksBefore = world.savedChunkCount();
+            world.saveAll();
+            {
+                game::SavedPlayer saved{player.position,   camera.yaw,        camera.pitch,
+                                        player.health,     player.food,       player.saturation,
+                                        player.exhaustion};
+                // **The cursor and the crafting grid are part of the carried
+                // inventory as far as the disk is concerned**, because they are
+                // written nowhere else: only `closeScreen` hands them back, and
+                // neither the autosave timer nor the emergency save closes
+                // anything. Hold a stack, wait thirty seconds, lose the GPU, and
+                // those items simply did not exist in the reloaded world - from
+                // the save added to *stop* losing items.
+                //
+                // Folded into a **copy** rather than given back for real,
+                // because this runs at the end of a frame in which a drag may
+                // still be in progress: the sweep goes on writing `heldStack`
+                // every frame the button is held - it takes its deposits back
+                // onto the cursor and spreads them again - so emptying the real
+                // one here would put those items in the inventory *and* leave
+                // the sweep free to hand them out again. The copy dies with this
+                // block, so it cannot double-add and the player never sees the
+                // screen twitch.
+                //
+                // What will not fit is discarded rather than dropped, and that
+                // is the honest answer rather than an oversight: `ItemEntities`
+                // has no save file at all, so a drop made here would be gone on
+                // reload exactly as it is when a screen closes onto a full
+                // inventory.
+                game::Inventory carried = inventory;
+                forEachScreenStack([&carried](const game::ItemStack& stack) {
+                    if (!stack.empty()) {
+                        carried.add(stack.item, stack.count, stack.damage);
+                    }
+                });
+                // **And every disc sitting in a jukebox**, for exactly the same
+                // reason and into the same copy. `jukeboxDiscs` is the third
+                // place an `ItemStack` lives that no save file can see, and the
+                // only one whose comment already promised the disc "comes back
+                // to you when the world reloads" - it did not, because loading
+                // a jukebox consumes the disc and nothing restores this list.
+                //
+                // **Survival only, matching the consume.** Creative never took
+                // the disc out of the bag in the first place, so folding one in
+                // here would hand back a copy of an item the player still has.
+                if (!creative) {
+                    for (const std::pair<glm::ivec3, game::ItemId>& entry : jukeboxDiscs) {
+                        carried.add(entry.second, 1, 0);
+                    }
+                }
+                for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
+                    saved.inventory[i] = carried.slot(i);
+                }
+                saved.selectedSlot = static_cast<std::int32_t>(selectedSlot);
+                // **The ender chest rides with the player, because it is the
+                // player's.** `saveEverything` issued five store calls and not
+                // one of them could see it: it is a plain local routed around
+                // the `chests` map, keyed by nothing, so it had no file to be in
+                // until `SavedPlayer` grew a tail for it.
+                saved.enderChest = enderChest;
+                // **The bed, which is the player's and not the world's.** It
+                // was a plain local for as long as beds have existed: sleep,
+                // quit, come back, die, and you woke at world spawn with
+                // nothing on screen to say why - which from the outside is
+                // indistinguishable from beds simply not working.
+                //
+                // Only *where* it stands. Whether it is still standing is asked
+                // of the live world at the moment of death, so there is nothing
+                // here that can go stale while the game is not running.
+                saved.respawnBed = hasRespawnPoint ? respawnPoint : glm::ivec3{0, -1, 0};
+                // **Every running effect, and the absorption pool that is not
+                // one of them.** `SavedPlayer` grew room for both and nothing
+                // ever filled it - the format was written, asserted and proved
+                // on bytes, and then left one call site short of being
+                // reachable, which is `CLAUDE.md` bug shape #15.
+                //
+                // **A straight copy, deliberately.** `SavedEffect::secondsLeft`
+                // and `effects::ActiveEffect::secondsLeft` are both a
+                // *remaining duration* in seconds, so nothing here converts a
+                // clock. Spelling either as a `time_point` is what would make a
+                // world left overnight come back with everything expired.
+                static_assert(static_cast<std::size_t>(game::effects::kMaxActive) <=
+                                  game::kSavedEffectSlots,
+                              "a player can run more effects than the save record has room "
+                              "for; widen kSavedEffectSlots and bump the player version");
+                std::size_t effectsWritten = 0;
+                for (const game::effects::ActiveEffect& active : player.effects.all()) {
+                    // An empty slot and an expired one are the same thing on
+                    // disk; `Effects::tick` clears them, so this is belt as well
+                    // as braces against saving mid-frame.
+                    if (active.id == game::effects::Effect::None || active.secondsLeft <= 0.0f) {
+                        continue;
+                    }
+                    saved.effects[effectsWritten] = {static_cast<std::int32_t>(active.id),
+                                                     active.amplifier, active.secondsLeft};
+                    ++effectsWritten;
+                }
+                // **The pool, and it is not the grant.** Effect 22 is written
+                // above and says what a golden apple *offered*; this is what is
+                // left of it after the player has been hit. Writing only the
+                // effect hands back a full pool, and writing only the pool
+                // hands back hearts that nothing is keeping alive.
+                saved.absorption = player.absorption;
+                // **And the worn set, written by the loop below since
+                // 2026-08-19.** Dated, because this paragraph used to call it
+                // "the only one still empty" - true when written, false an hour
+                // later, and that exact rot put four finished features within
+                // one step of being re-queued as gaps tonight.
+                // **Falsified by**: `saved.armour` matching nothing here.
+                //
+                // The format was written, asserted and proved on hand-built
+                // bytes before any of it could be filled, and then left one
+                // call site short, so a full diamond set vanished at the next
+                // launch. `CLAUDE.md` bug shape #15, and it arrived the same
+                // day as the hit test that finally let a set be worn at all.
+                //
+                // **On "version 6 plus the absorption clock and the worn
+                // armour" - the clock is a FIELD, not a written value, and it
+                // must stay that way.** `SavedPlayer::absorptionSeconds` goes
+                // to disk as 0.0f every time, deliberately: the live value is
+                // derived on load from `effects.secondsLeft(Absorption)` - grep
+                // that call rather than trusting a line number, because the one
+                // this sentence used to carry was already two lines stale - and
+                // that is the one table that owns it, so there is nothing to
+                // keep in step. A sweep therefore finds that name on neither
+                // `saved.*` nor `savedPlayer->*`, which reads exactly like an
+                // unwired field - it has now been filed as one twice, off the
+                // strength of the sentence this paragraph used to end with.
+                // **Do not wire it.** A second answer beside a settled one is
+                // bug shape #1, and this particular one would also be an
+                // exploit: a stored clock disagreeing with the restored effect
+                // reads as a fresh grant and refills the pool on the first tick.
+                // `WorldStore.hpp` says the same thing over the field itself.
+                //
+                // **From `inventory`, not from `carried`.** The two hold the
+                // same four stacks - `carried` is a copy - but `carried` exists
+                // to fold the cursor and the crafting grid into the *bag*, and
+                // reading the worn set off it would suggest those stacks can
+                // reach here. They cannot: armour is a separate array with a
+                // separate restore.
+                //
+                // In `ArmourSlot`'s own order, which is the order
+                // `Inventory::armourAt` indexes and the order `loadPlayer`
+                // sanitises - one order, three readers.
+                for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
+                    saved.armour[i] = inventory.armourAt(i);
+                }
+                // **The hour, and it is world state living in the player record
+                // on purpose.** `WorldStore.hpp` argues that above the field:
+                // there is exactly one such fact today, and a `level.dat`
+                // holding a single float would be a second format to version
+                // and migrate for no gain. It moves the day the *second* piece
+                // of true world state arrives.
+                //
+                // Copied from the live local because there is nothing to
+                // recompute it from - `timeOfDay` is a plain accumulator
+                // advanced once per frame by `deltaSeconds / dayLengthSeconds`
+                // and is the only copy of the fact. Without this line every
+                // launch began at 0.18, mid-morning, however long the world had
+                // run.
+                saved.timeOfDay = timeOfDay;
+                // **The weather - and `thundering()` deliberately, never
+                // `storming()`.** `storming()` is the conjunction
+                // `raining() && thundering()`, so a false answer does not say
+                // which side was false, and thunder running while rain is off
+                // is an ordinary reachable state because the two countdowns in
+                // `update` never consult each other. Save the conjunction and
+                // the thunder flag is lost; its timer then expires and flips it
+                // *on*, so the world comes back in the opposite phase to the
+                // one it was saved in. `Weather.hpp` states this above
+                // `restore`, and I had reached for `storming()` before reading
+                // it.
+                //
+                // The two timers are **seconds remaining** - not elapsed, not
+                // ticks. All three spellings compile and validate, which is why
+                // `Weather.hpp` says so and why it is worth repeating at the
+                // one place that writes them to disk.
+                //
+                // The five ramps are not saved. They chase these two flags at
+                // `kLevelRampPerSecond` and are back at full within about five
+                // seconds, so storing one would freeze a presentation detail
+                // into the format and give a single fact two owners.
+                saved.weatherRaining = weather.raining() ? 1 : 0;
+                saved.weatherThundering = weather.thundering() ? 1 : 0;
+                saved.weatherRainSeconds = weather.rainSeconds();
+                saved.weatherThunderSeconds = weather.thunderSeconds();
+                wrote(world.store().savePlayer(saved), "player");
+            }
+
+            // **A block entity whose block is gone is not saved.** `chests.dat`
+            // and `furnaces.dat` are keyed by position and carry their own
+            // format version, so they outlive a `kChunkFormatVersion` bump that
+            // regenerates every chunk under them - and a chunk file is only
+            // written when the player modified it, so rejecting one discards the
+            // container *block* while its contents stay in the map. That is dead
+            // weight in the file forever and, until the placement path started
+            // clearing the cell, free gear for whoever built there next.
+            //
+            // **Only asked of a chunk that is actually loaded**, because an
+            // unloaded one reads as Air and would delete every container in the
+            // world the moment you walked away from it.
+            //
+            // **The "what counts" half is the caller's, passed in.** It used to
+            // be a `bool furnace` with the two answers written out here, and a
+            // third kind of block entity is exactly what a two-valued flag
+            // cannot grow to hold - the next reader adds `bool campfire` beside
+            // it and the day after that the pair means four things, two of which
+            // are nonsense. A predicate has no such ceiling, and each caller now
+            // names the same family predicate the break path names.
+            const auto stillHasItsBlock = [&](const glm::ivec3& at, auto&& isKind) {
+                // `columnResident` rather than a chunk lookup, because it is the
+                // public question and it already carries the warning this needs:
+                // *an absent chunk reads as air*.
+                if (!world.columnResident(at.x, at.z)) {
+                    return true;
+                }
+                const game::BlockId here = world.blockAt(at.x, at.y, at.z);
+                return isKind(here);
+            };
+
+            // Empty ones are dropped rather than written: a furnace nobody has
+            // used is indistinguishable from one that has never been opened.
+            std::vector<game::PlacedFurnace> savedFurnaces;
+            savedFurnaces.reserve(furnaces.size());
+            for (const auto& [position, furnace] : furnaces) {
+                if (!furnace.idle() &&
+                    stillHasItsBlock(position,
+                                     [](game::BlockId here) { return game::isFurnace(here); })) {
+                    savedFurnaces.push_back(game::PlacedFurnace{position, furnace});
+                }
+            }
+            wrote(world.store().saveFurnaces(savedFurnaces), "furnaces");
+
+            std::vector<game::PlacedChest> savedChests;
+            savedChests.reserve(chests.size() + rolledLoot.size());
+            for (const auto& [position, chest] : chests) {
+                // The break path's own three, so this cannot drift from what
+                // counts as a container there.
+                const bool keep =
+                    !chest.empty() && stillHasItsBlock(position, [](game::BlockId here) {
+                        return game::isChest(here) || game::isHopper(here) ||
+                               here == game::BlockId::Lectern;
+                    });
+                if (keep) {
+                    savedChests.push_back(game::PlacedChest{position, chest});
+                } else if (rolledLoot.count(position) != 0) {
+                    // **Dropped for its contents, kept for its flag.** One
+                    // predicate, asked once, and the two answers are different
+                    // questions: whether there is anything worth carrying, and
+                    // whether this cell has already been paid for.
+                    savedChests.push_back(game::PlacedChest{position, game::Chest{}});
+                }
+            }
+            // And the rolled cells with no entry left at all, which is what
+            // breaking a loot chest leaves behind - it spills the contents and
+            // erases the record, so the only thing left to save is the fact
+            // that it happened.
+            //
+            // **Deliberately not asked `stillHasItsBlock`**, and that is the
+            // point rather than an oversight: a cell whose block is gone is the
+            // case this exists for, because a `kChunkFormatVersion` bump
+            // regenerates the chunk and puts the `LootChest` marker back over
+            // it. An empty record is not the "free gear for whoever builds there
+            // next" that guard was written against, and the placement path
+            // clears a cell's records before it builds anyway.
+            //
+            // Measured: with the `materialise` guard alone and no record kept,
+            // a chest the player had fully emptied - the ordinary case - still
+            // handed back a full 11 items after one bump, and a broken one did
+            // too.
+            //
+            // **This knowingly departs from `Chest.hpp`, which says an empty
+            // chest "can be forgotten rather than written to disk".** That
+            // sentence rests on the roll being recorded in the block id, and a
+            // format bump regenerates the block - so for a *rolled* cell the two
+            // rules disagree and this one wins. The observable behaviour is the
+            // same either way, "this chest gives you nothing"; only the reason
+            // differs. Filed against `Chest.hpp` rather than edited, because the
+            // contract is not this file's to rewrite.
+            //
+            // **And the marker is proved to survive the disk, not assumed to.**
+            // Driving the real `WorldStore` on real bytes: two records in, two
+            // out, the empty one keeping its position and seeding `rolledLoot`
+            // on the next launch, so the chest pays 0. Three controls, all
+            // firing - the same cell pays 10 without the marker, so it is
+            // load-bearing; a table containing *only* markers reads back as one
+            // record rather than being mistaken for the `saveChests({})` that
+            // deletes the file; and a genuinely empty table still clears it, so
+            // the older "stale chests come back" exploit stays closed.
+            for (const glm::ivec3& cell : rolledLoot) {
+                if (chests.find(cell) == chests.end()) {
+                    savedChests.push_back(game::PlacedChest{cell, game::Chest{}});
+                }
+            }
+            wrote(world.store().saveChests(savedChests), "chests");
+
+            // A campfire with nothing on it is not written either - it is
+            // indistinguishable from one nobody has used, and the block itself
+            // is already in the chunk.
+            std::vector<game::PlacedCampfire> savedCampfires;
+            savedCampfires.reserve(campfires.size());
+            for (const auto& [position, campfire] : campfires) {
+                if (!campfire.idle() &&
+                    stillHasItsBlock(position,
+                                     [](game::BlockId here) { return game::isCampfire(here); })) {
+                    savedCampfires.push_back(game::PlacedCampfire{position, campfire});
+                }
+            }
+            wrote(world.store().saveCampfires(savedCampfires), "campfires");
+
+            std::vector<game::StowedBox> savedStowboxes;
+            savedStowboxes.reserve(stowed.size());
+            for (const auto& [handle, contents] : stowed) {
+                if (!contents.empty()) {
+                    savedStowboxes.push_back(game::StowedBox{handle, contents});
+                }
+            }
+            wrote(world.store().saveStowboxes(savedStowboxes), "stowboxes");
+
+            // And it must not write one back either. The showcase population is
+            // three copies of whatever was being looked at; saving that would
+            // replace the world's animals with it.
+            //
+            // **`<= 0`, matching the other three sites**: `== 0` here meant a
+            // negative `creature_showcase` skipped the save entirely, so every
+            // creature in the world was deleted on quit by a setting that
+            // showed nothing and logged nothing.
+            std::vector<game::SavedCreature> savedCreatures;
+            if (settings.creatureShowcase <= 0) {
+                savedCreatures.reserve(creatures.all().size());
+                for (const game::Creature& creature : creatures.all()) {
+                    // Something caught part-way through falling over is already
+                    // gone; the body is only still there so the fall can finish.
+                    // Writing it out would reload a corpse that dies again on
+                    // sight.
+                    if (creature.health <= 0) {
+                        continue;
+                    }
+                    // Written field-by-field rather than as a positional
+                    // aggregate: the record carries a named `reserved` byte and
+                    // three claim cells, and a positional list silently puts the
+                    // wrong value in the wrong slot the next time one is added.
+                    game::SavedCreature record{};
+                    record.kind = static_cast<std::int32_t>(creature.kind);
+                    record.x = creature.position.x;
+                    record.y = creature.position.y;
+                    record.z = creature.position.z;
+                    record.yaw = creature.yaw;
+                    record.health = creature.health;
+                    record.scale = creature.scale;
+                    record.charged = static_cast<std::uint8_t>(creature.charged ? 1 : 0);
+                    record.playerBuilt = static_cast<std::uint8_t>(creature.playerBuilt ? 1 : 0);
+                    record.profession = creature.profession;
+                    record.bedCell = creature.bedCell;
+                    record.jobCell = creature.jobCell;
+                    record.meetCell = creature.meetCell;
+                    savedCreatures.push_back(record);
+                }
+                // **The second argument, which the deprecated overload existed
+                // to point at.** Without it a village breeds a fresh population
+                // on every load: the marker set is not derivable from the
+                // creature list, so a one-argument save wrote a valid file whose
+                // marker table was empty and the one-off pass ran again.
+                //
+                // Converted a pair at a time rather than handed over whole,
+                // because the two types are deliberately different: `Creatures`
+                // speaks `glm::ivec2` and `WorldStore` writes a
+                // `PopulatedColumn` of two `std::int32_t`, and neither knows how
+                // the other packs a column key. That is the point - `populatedKey`
+                // is private to `Creature.cpp` and stays the only owner of the
+                // packing, so a change to it cannot silently orphan every marker
+                // already on disk.
+                std::vector<game::PopulatedColumn> savedColumns;
+                {
+                    const std::vector<glm::ivec2> columns = creatures.populatedColumns();
+                    savedColumns.reserve(columns.size());
+                    for (const glm::ivec2& column : columns) {
+                        savedColumns.push_back(game::PopulatedColumn{column.x, column.y});
+                    }
+                }
+                wrote(world.store().saveCreatures(savedCreatures, savedColumns), "creatures");
+            }
+
+            // The chunk count is a running total, so the difference is what this
+            // save actually wrote - and an autosave line reading zero chunks is
+            // how you tell "nothing changed" from "the timer stopped firing".
+            engine::logInfo("Saved " + std::to_string(world.savedChunkCount() - chunksBefore) +
+                            " modified chunks, " + std::to_string(savedFurnaces.size()) +
+                            " furnaces, " + std::to_string(savedChests.size()) + " chests, " +
+                            std::to_string(savedCampfires.size()) + " campfires and " +
+                            std::to_string(savedCreatures.size()) + " creatures.");
+            // **Said again, above the counts, because the counts are what was
+            // *intended*.** Each writer already logged its own failure, and a
+            // success line printed underneath it is how a reader talks
+            // themselves out of believing the first one.
+            if (!unwritten.empty()) {
+                engine::logError("Save incomplete - these did not write: " + unwritten +
+                                 ". The world stays dirty so the next save retries.");
+            }
+            return unwritten.empty();
+        };
+
+        /// Set once the ordinary shutdown save has run, so the guard below knows
+        /// there is nothing left to do.
+        bool worldSaved = false;
+
+        /// **The emergency save, and the only place it can safely live.**
+        ///
+        /// The obvious home is the `catch` at the bottom of `main`, and that
+        /// would be a use-after-free: unwinding destroys this block's locals -
+        /// `world` included - *before* the handler outside it runs, so a save
+        /// written there would be calling `saveAll` on a dead object. A
+        /// destructor declared here runs first, because destruction is the
+        /// reverse of construction and everything `saveEverything` touches was
+        /// constructed earlier. The alternative was wrapping six thousand lines
+        /// of frame loop in a second `try`.
+        struct SaveOnUnwind {
+            const std::function<bool()>& save;
+            /// **Run before `save`, because it writes blocks and `save` writes
+            /// chunks.** Held here rather than called from the frame loop for
+            /// the same reason the save is: this destructor is the only thing
+            /// that runs on the crash path, and a cube in flight when the GPU
+            /// is lost is deleted from the world exactly as it is at shutdown.
+            const std::function<void()>& settleFallers;
+            const bool& done;
+
+            ~SaveOnUnwind() {
+                if (done) {
+                    return;
+                }
+                engine::logError("Unwinding without a save. Trying to write the world out anyway.");
+                // A throw out of a destructor during unwinding calls
+                // `std::terminate` outright, and a second failure here must not
+                // replace the first as the reason the game died. So it swallows
+                // and says so.
+                try {
+                    settleFallers();
+                    // **"Finished" is not "worked".** This is the last thing that
+                    // will ever run for this world, so the one line the player
+                    // has to go on had better not claim more than it did.
+                    if (save()) {
+                        engine::logError("Emergency save finished.");
+                    } else {
+                        engine::logError("Emergency save ran but did not write everything.");
+                    }
+                } catch (const std::exception& error) {
+                    engine::logError(std::string("Emergency save failed: ") + error.what());
+                } catch (...) {
+                    engine::logError("Emergency save failed for an unknown reason.");
+                }
+            }
+        } saveOnUnwind{saveEverything, settleFallersBeforeFinalSave, worldSaved};
 
         /// Copies the open furnace into the shared slot storage and back.
         ///
@@ -2932,14 +5188,32 @@ int main() {
                                                     game::inventoryScreen::craftSize(*openScreen));
                 }
 
+                // **An ender chest draws its own twenty-seven.** `stackAt` and
+                // `quickMoveTargets` both resolve it that way, but the draw
+                // path went to the block map instead - where opening one has
+                // `try_emplace`d an empty chest at that very position - so the
+                // screen showed twenty-seven empty slots while every click,
+                // shift-click and drag moved real items behind it. One
+                // question, one answer.
+                const bool drawingEnderChest =
+                    *openScreen == game::inventoryScreen::Kind::Chest &&
+                    game::isEnderChest(world.blockAt(openChestPosition.x, openChestPosition.y,
+                                                     openChestPosition.z));
+                const game::Chest* const shownChest =
+                    drawingEnderChest                      ? &enderChest
+                    : chests.count(openChestPosition) != 0 ? &chests.at(openChestPosition)
+                                                           : nullptr;
+                const game::Chest* const shownPartner =
+                    drawingEnderChest                     ? nullptr
+                    : chests.count(openChestPartner) != 0 ? &chests.at(openChestPartner)
+                                                          : nullptr;
+
                 append(game::inventoryScreen::build(
                     *openScreen, inventory, craftSlots.data(),
                     *openScreen == game::inventoryScreen::Kind::Stonecutter ? shownCuts.data()
                                                                            : &shownResult,
                     heldStack, pointerX, pointerY, renderer.aspectRatio(),
-                    catalogue, progress, creative,
-                    chests.count(openChestPosition) != 0 ? &chests.at(openChestPosition) : nullptr,
-                    chests.count(openChestPartner) != 0 ? &chests.at(openChestPartner) : nullptr, clipped,
+                    catalogue, progress, creative, shownChest, shownPartner, clipped,
                     topLayer));
 
                 // The pad has no pointer of its own, so it gets one drawn.
@@ -2964,6 +5238,11 @@ int main() {
                     status.health = player.health;
                     status.food = player.food;
                     status.airFraction = player.air / game::fluid::kAirSeconds;
+                    // The pool, not what a grant is worth. `Player::absorption`
+                    // is the balance that `damagePlayer` spends;
+                    // `effects::absorptionPoints` would report full hearts for
+                    // the whole two minutes after they had been eaten through.
+                    status.absorption = player.absorption;
                     status.hurtFlash = player.hurtFlash;
                     append(game::hud::makeStatusBars(status));
                 }
@@ -2990,10 +5269,303 @@ int main() {
         };
 
         // A lily pad floats, so the water under it is what holds it up where
-        // every other plant needs something solid.
-        const auto hasSupportUnder = [&world](game::BlockId block, int x, int y, int z) {
+        // every other plant needs something solid - and a wall torch, a lever, a
+        // button, a sign, a ladder or a cocoa pod is held up **sideways**, which
+        // this asked nobody about. `needsSupportBelow` is `Cross || Flat ||
+        // isTorchBlock`, so it says yes to all eight wall torch ids and the only
+        // question here was the floor: a redstone torch could not be hung on a
+        // wall over open air, and one that was standing came down when the block
+        // *beneath* it was mined. `wallBehind` is the one owner of which way a
+        // thing leans; this is the reader that turns it into a cell.
+        /// **Track shape is derived, never chosen.** A rail works out its own
+        /// shape from what is next to it and works it out again every time a
+        /// neighbour appears or goes. Placement here used to emit two of the ten
+        /// shapes and nothing ever revised them, so the plain rail's four slopes
+        /// and four curves and the four slopes of each of the other three
+        /// families - **twenty block ids** - decoded, drew and could never be
+        /// built. That is this project's other standing bug shape: a complete
+        /// feature one call site short of being reachable at all.
+        ///
+        /// This is **not** the redstone decision and needs no signal engine. A
+        /// rail's shape is a function of which cells hold rails, and of nothing
+        /// else.
+        ///
+        /// The reference's adjacency, quoted rather than remembered: a rail
+        /// joins one in that direction at the same level, and "existing rail
+        /// lines one block up and down are considered for adjacency in the same
+        /// manner" (https://minecraft.wiki/w/Rail).
+        const auto railJoins = [&world](const glm::ivec3& cell, game::FaceDirection dir) {
+            const glm::ivec3 step = stepAlong(dir);
+            const glm::ivec3 side = cell + step;
+            return game::isRail(world.blockAt(side.x, side.y, side.z)) ||
+                   game::isRail(world.blockAt(side.x, side.y + 1, side.z)) ||
+                   game::isRail(world.blockAt(side.x, side.y - 1, side.z));
+        };
+
+        /// Whether the rail that way stands one cell **higher**, which is the
+        /// only thing that makes a ramp. **The ramp is always the lower of the
+        /// two** - it ascends *toward* the higher neighbour - so a rail with a
+        /// neighbour one cell down stays flat and that neighbour becomes the
+        /// ramp when its own turn comes.
+        const auto railClimbs = [&world](const glm::ivec3& cell, game::FaceDirection dir) {
+            const glm::ivec3 step = stepAlong(dir);
+            return game::isRail(world.blockAt(cell.x + step.x, cell.y + 1, cell.z + step.z));
+        };
+
+        /// One rail, re-derived in place. Silent for every cell that is not a
+        /// rail, which is what lets the caller sweep a neighbourhood blind.
+        const auto solveRailShape = [&](const glm::ivec3& cell) {
+            const game::BlockId self = world.blockAt(cell.x, cell.y, cell.z);
+            if (!game::isRail(self)) {
+                return;
+            }
+            const int family = game::railFamily(self);
+            // **Only the plain rail bends**, which is why `railShape` is ten
+            // wide for family 0 and six for the other three. Emitting a curve
+            // for a powered rail would fold to a flat id inside `railAt` and
+            // look like the solver had simply got it wrong.
+            const bool mayCurve = family == 0;
+            const bool east = railJoins(cell, game::FaceDirection::PosX);
+            const bool west = railJoins(cell, game::FaceDirection::NegX);
+            const bool south = railJoins(cell, game::FaceDirection::PosZ);
+            const bool north = railJoins(cell, game::FaceDirection::NegZ);
+
+            // Shapes 0 and 1 are the two flat runs, 2-5 the slopes and 6-9 the
+            // curves. `railSlopeToward` owns the slope numbering and is asked
+            // for it here rather than being written out backwards - shape
+            // `2 + int(direction)` climbs toward that direction. **Block.hpp
+            // does not name the four curves**, so this is where the convention
+            // is stated and it is the reference's own: 6 joins south and east,
+            // 7 south and west, 8 north and west, 9 north and east. Nothing else
+            // in the tree reads a curve apart from the corner sprite, which does
+            // not care which corner it is.
+            constexpr int kFlatNorthSouth = 0;
+            constexpr int kFlatEastWest = 1;
+            constexpr int kCurveSouthEast = 6;
+            constexpr int kCurveSouthWest = 7;
+            constexpr int kCurveNorthWest = 8;
+            constexpr int kCurveNorthEast = 9;
+            int shape = -1;
+            if ((north || south) && !east && !west) {
+                shape = kFlatNorthSouth;
+            }
+            if ((east || west) && !north && !south) {
+                shape = kFlatEastWest;
+            }
+            if (mayCurve) {
+                if (south && east && !north && !west) {
+                    shape = kCurveSouthEast;
+                }
+                if (south && west && !north && !east) {
+                    shape = kCurveSouthWest;
+                }
+                if (north && west && !south && !east) {
+                    shape = kCurveNorthWest;
+                }
+                if (north && east && !south && !west) {
+                    shape = kCurveNorthEast;
+                }
+            }
+            // Three or four ways to go. **The order these are written in is the
+            // rule**, because each one overwrites the last: the reference's
+            // T-junction resolves to a curve and its four-way junction "always
+            // curves south-to-east" (https://minecraft.wiki/w/Rail), which is
+            // exactly what falls out of testing south-east last.
+            if (shape < 0) {
+                if (north || south) {
+                    shape = kFlatNorthSouth;
+                }
+                if (east || west) {
+                    shape = kFlatEastWest;
+                }
+                if (mayCurve) {
+                    if (west && north) {
+                        shape = kCurveNorthWest;
+                    }
+                    if (east && north) {
+                        shape = kCurveNorthEast;
+                    }
+                    if (west && south) {
+                        shape = kCurveSouthWest;
+                    }
+                    if (south && east) {
+                        shape = kCurveSouthEast;
+                    }
+                }
+            }
+            // And the same trick again for the ramp: the reference "prefers, in
+            // order: west, east, south, north", so west is tested after east and
+            // south after north, and the later test wins.
+            if (shape == kFlatNorthSouth) {
+                if (railClimbs(cell, game::FaceDirection::NegZ)) {
+                    shape = 2 + static_cast<int>(game::FaceDirection::NegZ);
+                }
+                if (railClimbs(cell, game::FaceDirection::PosZ)) {
+                    shape = 2 + static_cast<int>(game::FaceDirection::PosZ);
+                }
+            }
+            if (shape == kFlatEastWest) {
+                if (railClimbs(cell, game::FaceDirection::PosX)) {
+                    shape = 2 + static_cast<int>(game::FaceDirection::PosX);
+                }
+                if (railClimbs(cell, game::FaceDirection::NegX)) {
+                    shape = 2 + static_cast<int>(game::FaceDirection::NegX);
+                }
+            }
+            // Nothing adjacent at all: keep what it already had, which on a
+            // fresh placement is the reference's own default. **Bedrock lays an
+            // isolated rail north-south; Java lays it the way the player is
+            // facing** - a real edition difference, and Bedrock is this
+            // project's reference, so the placement branch seeds shape 0.
+            if (shape < 0) {
+                shape = game::railShape(self);
+            }
+            const game::BlockId want = game::railAt(family, shape, game::railPowered(self));
+            if (want != self) {
+                world.setBlock(cell.x, cell.y, cell.z, want);
+            }
+        };
+
+        /// Every rail that could have been reading the cell that just changed.
+        ///
+        /// **One pass reaches the fixpoint, and that is a property rather than a
+        /// hope**: adjacency asks only *whether* a cell holds a rail, never what
+        /// shape it is, so re-deriving one rail can never change another rail's
+        /// answer. Only the twelve cells that can see this one - four sides at
+        /// three heights - plus the cell itself have anything to re-derive, and
+        /// each of the thirteen is a silent no-op unless it holds a rail.
+        const auto refreshRailsAround = [&](const glm::ivec3& cell) {
+            solveRailShape(cell);
+            for (int side = 0; side < 4; ++side) {
+                const glm::ivec3 step = stepAlong(static_cast<game::FaceDirection>(side));
+                for (int rise = -1; rise <= 1; ++rise) {
+                    solveRailShape(glm::ivec3{cell.x + step.x, cell.y + rise, cell.z + step.z});
+                }
+            }
+        };
+
+        const auto hasItsSupport = [&world](game::BlockId block, int x, int y, int z) {
+            const game::FaceDirection wall = wallBehind(block);
+            if (wall != game::FaceDirection::Unknown) {
+                const glm::ivec3 step = stepAlong(wall);
+                return world.isSolid(x + step.x, y + step.y, z + step.z);
+            }
             return game::restsOnWater(block) ? game::isWaterSource(world.blockAt(x, y - 1, z))
                                              : world.isSolid(x, y - 1, z);
+        };
+
+        /// **What a cell owes its neighbours once it has become Air.** Four
+        /// rules, one owner: whatever was resting on top of it comes down, any
+        /// ladder that was hung on its side comes down, and the other half of a
+        /// door, a bed or a tall flower goes with it.
+        ///
+        /// All four existed and were correct - **in the break path only**. A
+        /// blast left doors as floating upper halves, beds as half beds, torches
+        /// and ladders hanging in mid-air, and none of the four paid their drop.
+        /// That is this project's most expensive bug shape (a rule that did not
+        /// travel), so it now lives in one place both callers reach rather than
+        /// in a copy that has to be remembered twice.
+        ///
+        /// `removed` is what *used* to be at `cell`; the caller has already
+        /// written Air there, because the door and bed halves are found from the
+        /// broken block's own facing and it must still be readable.
+        const auto settleAround = [&](const glm::ivec3& cell, game::BlockId removed) {
+            // A door, a bed and a tall flower are each two cells and one thing.
+            // `clearPairedHalf` owns which cell the other half is in, because a
+            // replacement has to ask the identical question.
+            clearPairedHalf(cell, removed);
+
+            // Whatever was resting on it comes down too, rather than being left
+            // hanging in the air.
+            const glm::ivec3 above{cell.x, cell.y + 1, cell.z};
+            const game::BlockId resting = world.blockAt(above.x, above.y, above.z);
+            if (game::needsSupportBelow(resting) &&
+                !hasItsSupport(resting, above.x, above.y, above.z)) {
+                world.setBlock(above.x, above.y, above.z, game::BlockId::Air);
+                // **Through the table, so the count comes with it.** This
+                // spawned exactly one of whatever fell, so a stack of four
+                // candles losing its floor paid a single candle and the other
+                // three were gone. Bare hands, because nothing was swung at it.
+                spillBlockDrop(above, resting, game::BreakContext{});
+                // **And whatever fell may itself be half of something.** The
+                // rule three lines above did not travel the extra cell: mining
+                // the *dirt* under a sunflower dropped the lower half and left
+                // the upper half standing, `World::setBlock` scheduled a support
+                // update on the cell just vacated, and the cascade found that
+                // orphan unsupported and **paid it a second time** - one plant,
+                // two flowers, from the very function whose own comment names
+                // this bug shape. It cannot be caught downstream: the two
+                // payments are `kFallDelay` apart, so the wash drain's
+                // `alreadyPaid` list, which is per-batch, never sees them
+                // together. Clearing the twin here is what stops the cascade
+                // ever being handed one, so nothing double-pays and the
+                // scheduled update finds Air and does nothing.
+                clearPairedHalf(above, resting);
+            }
+
+            // A ladder is held up sideways rather than from below, so it is the
+            // four neighbours that have to be checked instead of the one cell
+            // above - **and a ladder was the only one of six families ever
+            // asked**. A wall sign, a wall banner, a wall torch, a lever, a
+            // button and a cocoa pod all hang the same way and all stayed
+            // floating with no drop when their wall was mined. `wallBehind` is
+            // the single owner of which cell holds what; the walk below is the
+            // ladder rule with the family test taken out of it.
+            for (const glm::ivec3& step : {glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0},
+                                           glm::ivec3{0, 0, 1}, glm::ivec3{0, 0, -1}}) {
+                const glm::ivec3 beside = cell + step;
+                const game::BlockId hung = world.blockAt(beside.x, beside.y, beside.z);
+                const game::FaceDirection wall = wallBehind(hung);
+                // The wall it leans on is `beside + stepAlong(wall)`; the cell
+                // that just went is `beside - step`. It comes down when those
+                // are the same cell, which is exactly what the hand-written
+                // ladder test spelled out one comparison at a time.
+                if (wall == game::FaceDirection::Unknown || stepAlong(wall) != -step) {
+                    continue;
+                }
+                world.setBlock(beside.x, beside.y, beside.z, game::BlockId::Air);
+                // Same table, same reason as the cell above.
+                spillBlockDrop(beside, hung, game::BreakContext{});
+            }
+
+            // **And the fifth thing a vacated cell owes its neighbours.** Track
+            // shape is read off which cells hold rails, so a rail that goes
+            // leaves every rail that could see it holding a stale answer - a
+            // corner that no longer turns, a ramp climbing to nothing. Hung here
+            // rather than at the three removal sites for the reason the other
+            // four rules are: this is already the one owner all three reach.
+            refreshRailsAround(cell);
+            refreshRailsAround(glm::ivec3{cell.x, cell.y + 1, cell.z});
+        };
+
+        /// **Whether a block placed here would seal something living inside
+        /// it.** The placement path asked `playerOverlapsBlock` and nothing
+        /// else, so a block dropped on a sheep buried it in stone - Bedrock
+        /// refuses the placement instead, for the player and for most mobs
+        /// alike (https://minecraft.fandom.com/wiki/Solid_block). The rule
+        /// existed, was correct, and covered exactly one of the things standing
+        /// in the world.
+        ///
+        /// Scaled by the creature's own `scale`, because a baby's box is a baby's
+        /// box; a half-open interval on every axis, so a creature standing
+        /// exactly on a boundary belongs to one cell rather than to both.
+        const auto cellIsOccupied = [&](const glm::ivec3& cell) {
+            if (game::playerOverlapsBlock(player, cell)) {
+                return true;
+            }
+            const glm::vec3 low{cell};
+            const glm::vec3 high = low + glm::vec3{1.0f};
+            for (const game::Creature& creature : creatures.all()) {
+                const game::CreatureSpecies& species = game::speciesInfo(creature.kind);
+                const float half = species.halfWidth * creature.scale;
+                const float tall = species.height * creature.scale;
+                if (creature.position.x + half > low.x && creature.position.x - half < high.x &&
+                    creature.position.z + half > low.z && creature.position.z - half < high.z &&
+                    creature.position.y + tall > low.y && creature.position.y < high.y) {
+                    return true;
+                }
+            }
+            return false;
         };
 
         // A T of iron blocks with a carved pumpkin on its head becomes an iron
@@ -3050,6 +5622,21 @@ int main() {
             }
             return false;
         };
+
+        /// **Roughly every thirty seconds, and never before the loop starts.**
+        ///
+        /// Seeded from the clock here rather than at the top of `main`, so the
+        /// initial chunk load - which takes seconds and calls `setBlock` for
+        /// every water flow it settles - cannot make the very first frame try to
+        /// save a world that is still arriving.
+        constexpr auto kAutosaveInterval = std::chrono::seconds(30);
+        auto lastSaveTime = Clock::now();
+
+        /// Refilled by `FallingBlocks::update` every frame and drained on the
+        /// next line, so it holds nothing across a frame boundary. Declared out
+        /// here rather than inside the loop because allocation stays out of hot
+        /// loops - `clear()` keeps whatever capacity a collapse already paid for.
+        std::vector<game::FallingBlocks::Landed> landings;
 
         while (!window.shouldClose()) {
             window.pollEvents();
@@ -3163,19 +5750,103 @@ int main() {
                                       game::inventoryScreen::showsCatalogue(*openScreen) &&
                                       catalogue.tab == game::inventoryScreen::CatalogueTab::Search &&
                                       catalogue.searchFocused;
+            // **One owner of "the field just changed".** The blink phase is
+            // part of it, not decoration: `uiSeconds` is the phase and the
+            // caret is drawn for its first half, so an edit landing in the dark
+            // half looks like a dropped keystroke - the player presses Left
+            // again and jumps two. Zeroing the phase means every edit is seen.
+            //
+            // **The phase and not `caretVisible`**, which is derived from it a
+            // few hundred lines below and must keep exactly one writer; setting
+            // both here is the same value owned in two places, and the copy
+            // would be the one that rots. The derivation runs after this, so
+            // the caret is already lit on the frame the key landed.
+            //
+            // `contentChanged` is passed rather than assumed because the two
+            // cases genuinely differ: new text is a new result set and the list
+            // has to go back to the top, but moving the caret changes nothing
+            // about what matches, and throwing the scroll away for it would be
+            // a jump the player did not ask for.
+            const auto searchChanged = [&](bool contentChanged) {
+                if (contentChanged) {
+                    catalogue.scrollRow = 0;
+                }
+                uiSeconds = 0.0f;
+                hudDirty = true;
+            };
+            // **Every editing key, in one place, for both queues.** Before the
+            // caret existed each loop knew about Backspace and nothing else,
+            // which is precisely why holding Backspace worked and holding it
+            // was the only thing that did. A key wired into one loop and not
+            // the other is this file's most expensive shape, and with six keys
+            // instead of one it is no longer a shape you would spot by eye.
+            //
+            // Returns whether the key was an editing key, so the press loop can
+            // still swallow everything else while the field has the keyboard.
+            //
+            // **`Up`/`Down` are absent deliberately** - they scroll the
+            // catalogue, and a caret is not what a player reaches for them
+            // expecting. Selection, clipboard and word-wise motion are out of
+            // scope by the same owner's decision.
+            const auto editSearchKey = [&](const engine::Key key) {
+                const std::size_t before = catalogue.query.size();
+                switch (key) {
+                case engine::Key::Backspace:
+                    catalogue.backspaceAtCaret();
+                    break;
+                case engine::Key::Delete:
+                    catalogue.deleteAtCaret();
+                    break;
+                case engine::Key::Left:
+                    catalogue.moveCaret(-1);
+                    break;
+                case engine::Key::Right:
+                    catalogue.moveCaret(1);
+                    break;
+                case engine::Key::Home:
+                    catalogue.caretToStart();
+                    break;
+                case engine::Key::End:
+                    catalogue.caretToEnd();
+                    break;
+                default:
+                    return false;
+                }
+                searchChanged(catalogue.query.size() != before);
+                return true;
+            };
             {
                 const std::string typed = window.consumeTypedText();
                 if (typingSearch && !typed.empty()) {
                     // Capped at what the field can show; a longer query would
-                    // scroll out of the box with no way to see it.
+                    // scroll out of the box with no way to see it. The cap is
+                    // enforced here rather than in `insertAtCaret`, which is
+                    // deliberately a plain editing primitive - so a second text
+                    // field would have to state its own width, which is right.
                     constexpr std::size_t kMaxQuery = 22;
+                    bool inserted = false;
                     for (const char c : typed) {
                         if (catalogue.query.size() < kMaxQuery) {
-                            catalogue.query.push_back(c);
+                            catalogue.insertAtCaret(c);
+                            inserted = true;
                         }
                     }
-                    catalogue.scrollRow = 0;
-                    hudDirty = true;
+                    if (inserted) {
+                        searchChanged(true);
+                    }
+                }
+            }
+
+            // **Repeats, drained every frame whether or not a field is open.**
+            // `Window` keeps them in a queue of their own precisely so nothing
+            // else sees them - holding `E` must not strobe the inventory - and
+            // that queue is capped, so a leaned-on key nobody drains arrives
+            // later as a burst. Holding Backspace in the search field cleared
+            // exactly one character before this, because the press queue fires
+            // once per press by design and nothing was reading the other one.
+            for (const engine::Key key : window.consumeKeyRepeats()) {
+                if (typingSearch) {
+                    editSearchKey(key);
                 }
             }
 
@@ -3207,11 +5878,12 @@ int main() {
                     continue;
                 }
                 if (typingSearch) {
-                    if (key == engine::Key::Backspace && !catalogue.query.empty()) {
-                        catalogue.query.pop_back();
-                        catalogue.scrollRow = 0;
-                        hudDirty = true;
-                    }
+                    // The field holds the keyboard, so everything that is not
+                    // an editing key is swallowed rather than acted on - `E`
+                    // would close the screen mid-word and `Q` would throw the
+                    // cursor's stack away. Escape is already handled above,
+                    // which is the one key a text field must not eat.
+                    editSearchKey(key);
                     continue;
                 }
                 if (key == engine::Key::E) {
@@ -3231,8 +5903,16 @@ int main() {
                     // repeats while held, so it lives with the other held-key
                     // actions below.
                     if (openScreen.has_value() && !heldStack.empty()) {
-                        drops.spawn(camera.position + camera.forward() * 0.5f, heldStack.item, heldStack.count,
-                                    camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        // **The sweep ends here too.** This key loop runs
+                        // *before* the screen block, so throwing the cursor with
+                        // a drag still armed left a sweep spreading a stack that
+                        // is now on the floor: under the snapshot rewind that
+                        // was one keypress for one free copy, and it is now the
+                        // sweep pulling its deposits back out of the slots and
+                        // onto a cursor the player has already emptied.
+                        cancelDrag();
+                        game::dropStack(drops, camera.position + camera.forward() * 0.5f, heldStack,
+                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
                         heldStack = game::ItemStack{};
                         hudDirty = true;
                     }
@@ -3403,7 +6083,7 @@ int main() {
                             // Same reset a click on a tab does: a new tab starts
                             // at the top and does not hold the keyboard.
                             catalogue.scrollRow = 0;
-                            catalogue.searchFocused = false;
+                            blurSearch();
                             hudDirty = true;
                         }
                     }
@@ -3475,6 +6155,21 @@ int main() {
                 // it there was settled at the top of the frame.
                 const float cursorX = pointerX;
                 const float cursorY = pointerY;
+                // **Every press on a screen makes the interface's own noise.**
+                // `Click` was staged, decoded and never named, so the entire
+                // inventory - slots, tabs, the recipe book, the search field -
+                // was operated in silence while the world outside had a sound
+                // for everything. One line at the top of the block rather than
+                // one per handler, because "a press landed on a screen" is a
+                // single fact and the fifteen branches below are what it did.
+                //
+                // `swallowClickUntilRelease` cannot be set here: it belongs to
+                // the click that recaptures a released cursor, which is the
+                // `else if` to this branch and so is never reached with a
+                // screen up.
+                if (!presses.empty()) {
+                    sounds.playGlobal(audio, game::SoundEvent::Click, 0.35f);
+                }
                 const int craftExtent = game::inventoryScreen::craftSize(*openScreen);
                 const bool furnaceOpen = *openScreen == game::inventoryScreen::Kind::Furnace;
                 const bool smithingOpen = *openScreen == game::inventoryScreen::Kind::SmithingTable;
@@ -3546,6 +6241,17 @@ int main() {
                     if (at.region == Region::Craft) {
                         return &craftSlots[at.index];
                     }
+                    // **A worn piece is a real stack in a real slot**, so the
+                    // ordinary pick-up, swap and shift-click all work through
+                    // it. What this deliberately does *not* carry is the rule
+                    // about which piece may go where - that is `armourSlot`'s,
+                    // and it is enforced at the one place a piece can enter,
+                    // further down. A resolver that also policed the type would
+                    // be a second owner of the same question.
+                    if (at.region == Region::Armour &&
+                        at.index < game::inventoryScreen::armourSlotCount(*openScreen)) {
+                        return &inventory.armourAt(at.index);
+                    }
                     // A furnace's output is a real slot holding real items; a
                     // crafting result is computed and cannot be written to.
                     if (at.region == Region::CraftResult && furnaceOpen) {
@@ -3616,44 +6322,103 @@ int main() {
                 const bool leftDown = window.isMouseButtonDown(engine::MouseButton::Left);
                 const bool rightDown = window.isMouseButtonDown(engine::MouseButton::Right);
 
-                // Puts every dragged slot back as it was and hands the cursor
-                // its stack back, so a distribution can be replayed over a
-                // longer list without compounding.
+                // **Takes back what the sweep deposited, and only that.** Not a
+                // snapshot: a furnace tick, a hopper pass or a drop landing in
+                // the bag may all have written these slots since, and each of
+                // them was a live duplication or a live loss while this
+                // restored a remembered stack over the top of their work. See
+                // `DragDeposit` for the three, and for why one subtraction
+                // beats three guards.
+                //
+                // `slots::merge` is the mover, so item, damage and the stack cap
+                // have their usual single owner and no field is written by hand;
+                // it reports what actually crossed, which is what is struck off
+                // the claim. Anything it could not move stays in the slot and
+                // stays claimed - items conserved either way.
                 const auto rewindDrag = [&] {
-                    for (auto& [at, before] : draggedSlots) {
-                        if (game::ItemStack* stack = stackAt(at); stack != nullptr) {
-                            *stack = before;
+                    for (DragDeposit& deposit : draggedSlots) {
+                        if (deposit.placed <= 0) {
+                            continue;
                         }
+                        game::ItemStack* stack = stackAt(deposit.at);
+                        // A slot that now holds something else entirely - or
+                        // nothing - was emptied by whoever wrote it, and they
+                        // accounted for what they took. The claim simply lapses.
+                        if (stack == nullptr || stack->empty() || stack->item != deposit.item ||
+                            stack->damage != deposit.damage) {
+                            deposit.placed = 0;
+                            continue;
+                        }
+                        deposit.placed -= game::slots::merge(
+                            heldStack, *stack, std::min(deposit.placed, stack->count));
                     }
-                    heldStack = dragOriginalCursor;
                 };
 
                 const auto applyDrag = [&] {
                     rewindDrag();
                     std::vector<game::ItemStack*> targets;
+                    // Which deposit each target belongs to: a slot whose screen
+                    // has gone resolves to nothing, so the two lists are not
+                    // index-for-index.
+                    std::vector<std::size_t> owners;
+                    std::vector<int> before;
                     targets.reserve(draggedSlots.size());
-                    for (auto& [at, before] : draggedSlots) {
-                        if (game::ItemStack* stack = stackAt(at); stack != nullptr) {
+                    owners.reserve(draggedSlots.size());
+                    before.reserve(draggedSlots.size());
+                    for (std::size_t i = 0; i < draggedSlots.size(); ++i) {
+                        if (game::ItemStack* stack = stackAt(draggedSlots[i].at); stack != nullptr) {
                             targets.push_back(stack);
+                            owners.push_back(i);
+                            before.push_back(stack->count);
                         }
                     }
+                    // Read before the call, because `distribute` empties what it
+                    // is spreading - the mutating-helper trap this whole cluster
+                    // came out of.
+                    const game::ItemStack spreading = heldStack;
                     game::slots::distribute(targets, heldStack, dragButton == DragButton::Right);
+                    // What actually landed, measured rather than assumed:
+                    // `distribute` skips a slot with no room and shares only
+                    // between the ones that have some.
+                    for (std::size_t t = 0; t < targets.size(); ++t) {
+                        DragDeposit& deposit = draggedSlots[owners[t]];
+                        deposit.placed = std::max(0, targets[t]->count - before[t]);
+                        if (deposit.placed > 0) {
+                            deposit.item = spreading.item;
+                            deposit.damage = spreading.damage;
+                        }
+                    }
                 };
 
                 if (dragButton != DragButton::None) {
                     const bool stillHeld = dragButton == DragButton::Left ? leftDown : rightDown;
 
                     if (stillHeld) {
-                        if (hit.has_value() && hit->region != Region::CraftResult) {
+                        // **The armour cells are excluded alongside the crafting
+                        // result, and for a different reason worth stating.** A
+                        // sweep spreads one stack across every slot it crosses;
+                        // an armour cell takes exactly one item and only if it
+                        // is the right piece, so a sweep that passed over the
+                        // column would either drop a helmet into the boots slot
+                        // or silently swallow part of what is on the cursor.
+                        // Refused here rather than filtered inside `applyDrag`,
+                        // so the cell never joins `draggedSlots` and the rewind
+                        // has nothing to undo.
+                        if (hit.has_value() && hit->region != Region::CraftResult &&
+                            hit->region != Region::Armour) {
                             const bool already =
-                                std::any_of(draggedSlots.begin(), draggedSlots.end(), [&](const auto& seen) {
-                                    return seen.first.region == hit->region && seen.first.index == hit->index;
+                                std::any_of(draggedSlots.begin(), draggedSlots.end(), [&](const DragDeposit& seen) {
+                                    return seen.at.region == hit->region && seen.at.index == hit->index;
                                 });
                             if (!already) {
+                                // The slot is not read here: what goes on the
+                                // list is a claim of nothing, which `applyDrag`
+                                // fills in from what the distribution actually
+                                // put there. Recorded even when the slot cannot
+                                // be resolved, so the crossed-slot count below
+                                // stays a count of slots crossed.
                                 rewindDrag();
-                                if (game::ItemStack* stack = stackAt(*hit); stack != nullptr) {
-                                    draggedSlots.emplace_back(*hit, *stack);
-                                }
+                                draggedSlots.push_back(DragDeposit{*hit});
                                 applyDrag();
                                 hudDirty = true;
                             }
@@ -3664,7 +6429,7 @@ int main() {
                         if (draggedSlots.size() < 2) {
                             rewindDrag();
                             if (!draggedSlots.empty()) {
-                                if (game::ItemStack* stack = stackAt(draggedSlots.front().first); stack != nullptr) {
+                                if (game::ItemStack* stack = stackAt(draggedSlots.front().at); stack != nullptr) {
                                     if (dragButton == DragButton::Right) {
                                         game::slots::rightClick(*stack, heldStack);
                                     } else {
@@ -3680,6 +6445,18 @@ int main() {
                 }
 
                 for (const engine::MouseButton button : presses) {
+                    // **Nothing else may touch the cursor while a sweep owns
+                    // it.** Arming happens further down this same loop, so this
+                    // only ever refuses a *second* press - which is the right
+                    // answer anyway. Throwing the cursor out of the panel,
+                    // binning it in the catalogue and taking a fresh stack from
+                    // the catalogue all assign `heldStack` behind the drag's
+                    // back, and the next `rewindDrag` pushes the sweep's
+                    // deposits onto it on top of whatever is there: the items
+                    // are on the floor **and** back on the cursor.
+                    if (dragButton != DragButton::None) {
+                        break;
+                    }
                     const bool right = button == engine::MouseButton::Right;
 
                     // Focus follows the click, and every click that is not on
@@ -3691,7 +6468,11 @@ int main() {
                             catalogue.tab == game::inventoryScreen::CatalogueTab::Search &&
                             game::inventoryScreen::insideSearchField(*openScreen, cursorX, cursorY);
                         if (onField != catalogue.searchFocused) {
-                            catalogue.searchFocused = onField;
+                            if (onField) {
+                                catalogue.searchFocused = true;
+                            } else {
+                                blurSearch();
+                            }
                             hudDirty = true;
                         }
                         if (onField) {
@@ -3706,7 +6487,7 @@ int main() {
                             // A new tab starts at the top. Keeping the offset
                             // would open a short list scrolled past its end.
                             catalogue.scrollRow = 0;
-                            catalogue.searchFocused = false;
+                            blurSearch();
                             hudDirty = true;
                             continue;
                         }
@@ -3733,6 +6514,13 @@ int main() {
                                 if (*cell < listed.size()) {
                                     const game::ItemId picked = listed[*cell];
                                     if ((window.isKeyDown(engine::Key::LeftShift) || padQuickMove) && !right) {
+                                        // **The one `add` whose return is
+                                        // rightly ignored.** The catalogue is a
+                                        // source, not a store: nothing is being
+                                        // moved out of anywhere, so a remainder
+                                        // that will not fit is simply not
+                                        // conjured. Every other discarded return
+                                        // in this file destroyed real items.
                                         inventory.add(picked, game::maxStackFor(picked));
                                     } else {
                                         // Whatever the cursor held is replaced
@@ -3772,8 +6560,9 @@ int main() {
                             // The right button parts with one; the left, all of
                             // it.
                             const int thrown = right ? 1 : heldStack.count;
-                            drops.spawn(camera.position + camera.forward() * 0.5f, heldStack.item, thrown,
-                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                            game::dropStack(drops, camera.position + camera.forward() * 0.5f,
+                                            heldStack, thrown, camera.forward() * kThrowSpeed,
+                                            kThrowPickupDelay);
                             heldStack.count -= thrown;
                             if (heldStack.count <= 0) {
                                 heldStack = game::ItemStack{};
@@ -3792,14 +6581,38 @@ int main() {
                             // terminates.
                             while (true) {
                                 const game::ItemStack batch = pendingResult(hit->index);
-                                if (batch.empty() || !inventory.hasRoomFor(batch.item, batch.count)) {
+                                // **`damage` on the test and on the add.** A
+                                // crafted stowbox or a repaired tool carries
+                                // one, and asking about the item alone counted a
+                                // box holding other contents as room that does
+                                // not exist - then laundered the result into a
+                                // fresh one when it landed.
+                                if (batch.empty() ||
+                                    !inventory.hasRoomFor(batch.item, batch.count, batch.damage)) {
                                     break;
                                 }
-                                inventory.add(batch.item, batch.count);
+                                inventory.add(batch.item, batch.count, batch.damage);
                                 spendIngredients();
                             }
                         } else if (game::ItemStack* moving = stackAt(*hit); moving != nullptr) {
-                            game::slots::quickMove(*moving, quickMoveTargets(*hit));
+                            // **Shift-clicking a piece in the bag puts it on**,
+                            // which is the reference's behaviour and the route
+                            // most players reach for before they find the four
+                            // cells at all. `equipArmour` derives the
+                            // destination from `armourSlot` and swaps, so a
+                            // second helmet trades with the one being worn
+                            // rather than being refused or destroyed.
+                            //
+                            // **Only from the grid.** Asked of a worn piece this
+                            // would put it straight back on, and taking armour
+                            // off with shift-click is exactly what the fall
+                            // through to `quickMove` below already does.
+                            const bool equipped =
+                                hit->region == Region::Grid && game::isArmour(moving->item) &&
+                                inventory.equipArmour(hit->index);
+                            if (!equipped) {
+                                game::slots::quickMove(*moving, quickMoveTargets(*hit));
+                            }
                         }
                         hudDirty = true;
                         continue;
@@ -3813,8 +6626,13 @@ int main() {
                             continue;
                         }
                         const bool intoCursor = heldStack.empty();
+                        // **`roomFor`, not `space()`.** The shift-click path
+                        // twenty lines above already compares `damage`; this
+                        // one asked about the item alone, so a crafted stowbox
+                        // holding one set of contents merged onto a cursor
+                        // holding another and one of them stopped existing.
                         const bool ontoSame =
-                            !intoCursor && heldStack.item == made.item && heldStack.space() >= made.count;
+                            !intoCursor && game::slots::roomFor(heldStack, made) >= made.count;
                         if (intoCursor || ontoSame) {
                             if (intoCursor) {
                                 heldStack = made;
@@ -3837,16 +6655,50 @@ int main() {
                     // and worse, be consumed by the next thing it finished.
                     if (furnaceOpen && hit->region == Region::CraftResult) {
                         if (!stack->empty()) {
-                            if (heldStack.empty()) {
-                                heldStack = *stack;
-                                *stack = game::ItemStack{};
-                            } else if (heldStack.item == stack->item) {
-                                const int moved = std::min(stack->count, heldStack.space());
-                                heldStack.count += moved;
-                                stack->count -= moved;
-                                if (stack->count <= 0) {
-                                    *stack = game::ItemStack{};
-                                }
+                            // **One `merge`, not a hand-rolled pair.** This was
+                            // two branches - a whole-stack assignment when the
+                            // cursor was empty and a clamped top-up when it was
+                            // not - and only the second one asked whether the
+                            // items were the same kind. `merge` is the owner of
+                            // both halves: it gives an empty cursor the output's
+                            // `damage`, it clamps to what the item actually
+                            // stacks to, and it empties the output slot when the
+                            // last one leaves.
+                            //
+                            // **The single edit that breaks this:** writing
+                            // `heldStack = *stack` back in for the empty case
+                            // skips the cap, so a furnace holding more than a
+                            // stack hands the surplus to the cursor.
+                            game::slots::merge(heldStack, *stack, stack->count);
+                            hudDirty = true;
+                        }
+                        continue;
+                    }
+
+                    // **The one slot family whose contents are decided by the
+                    // item and not by the click.** Handled here, before the
+                    // double-click gather and before a full cursor arms a
+                    // sweep, because both of those are wrong for a cell that
+                    // holds one piece of a named kind.
+                    //
+                    // `armourSlot` is the only thing consulted, and it is the
+                    // same owner `Inventory::equipArmour` and
+                    // `Inventory::armourSet` use - so a sword cannot enter the
+                    // helmet cell, and boots cannot enter the head cell either.
+                    // `ArmourSlot::None` is 4 and no cell index is 4, which is
+                    // what makes the non-armour case fall out of the same test
+                    // rather than needing an `isArmour` of its own.
+                    //
+                    // Taking a piece *out* is unconditional: the cursor is
+                    // empty, so there is nothing to refuse.
+                    if (hit->region == Region::Armour) {
+                        if (heldStack.empty() ||
+                            static_cast<std::size_t>(game::armourSlot(heldStack.item)) ==
+                                hit->index) {
+                            if (right) {
+                                game::slots::rightClick(*stack, heldStack);
+                            } else {
+                                game::slots::leftClick(*stack, heldStack);
                             }
                             hudDirty = true;
                         }
@@ -3864,9 +6716,27 @@ int main() {
                     // would otherwise be read as the start of a sweep.
                     if (!right && !heldStack.empty() && sameSlot && soonAfter) {
                         std::vector<game::ItemStack*> sources;
-                        sources.reserve(game::kInventorySlots);
+                        sources.reserve(game::kInventorySlots + 2 * game::kChestSlots);
                         for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
                             sources.push_back(&inventory.slot(i));
+                        }
+                        // **And the open container's slots.** This gathered
+                        // only from the player's own thirty-six, so
+                        // double-clicking inside a chest picked up whatever was
+                        // in your bag and left the twenty-six other stacks of
+                        // the same thing sitting in the chest in front of you -
+                        // which reads as the feature simply not working.
+                        //
+                        // Sourced from `quickMoveTargets`, which already owns
+                        // "which of a container's slots does this screen
+                        // actually show": asked from a `Grid` slot it returns
+                        // the container half, ender chest and hopper included,
+                        // so this cannot drift from shift-click's answer.
+                        if (game::inventoryScreen::isContainer(*openScreen)) {
+                            for (game::ItemStack* slot :
+                                 quickMoveTargets(game::inventoryScreen::SlotHit{Region::Grid, 0})) {
+                                sources.push_back(slot);
+                            }
                         }
                         game::slots::gather(heldStack, sources);
                         hudDirty = true;
@@ -3880,9 +6750,8 @@ int main() {
                     // from would scatter it again.
                     if (!heldStack.empty()) {
                         dragButton = right ? DragButton::Right : DragButton::Left;
-                        dragOriginalCursor = heldStack;
                         draggedSlots.clear();
-                        draggedSlots.emplace_back(*hit, *stack);
+                        draggedSlots.push_back(DragDeposit{*hit});
                         applyDrag();
                         hudDirty = true;
                         continue;
@@ -3904,7 +6773,15 @@ int main() {
             } else if (!hadCursor && clicked) {
                 window.setCursorCaptured(true);
                 swallowClickUntilRelease = true;
-            } else if (hadCursor) {
+            } else if (hadCursor && player.alive()) {
+                // **`player.alive()` is half of the same rule `playing` carries
+                // further down**, and it has to be restated here because this
+                // runs six hundred lines earlier - a corpse could open a chest
+                // and a jukebox for the whole 1.6 s of `kRespawnSeconds`, and
+                // then respawn with the screen still up. `wantInteract` is the
+                // only door into the screen-opening block, so this is the one
+                // place it needs saying.
+                //
                 // Sneaking suppresses this, which is what lets you place a block
                 // on top of a table rather than opening it.
                 wantInteract = !window.isKeyDown(engine::Key::LeftShift) &&
@@ -3990,30 +6867,23 @@ int main() {
             // place that owns it, which is the oldest shape of bug here.
             const game::hud::AirRow air =
                 game::hud::airRow(player.air / game::fluid::kAirSeconds);
+            // **And the gold hearts through theirs**, for the same reason and
+            // with the extra one that the pool is a `float`: comparing it
+            // directly would rebuild the HUD for every fractional point that
+            // changed no icon, and rounding it here rather than in
+            // `absorptionHearts` would be the bubble count again.
+            const int absorbHearts = game::hud::absorptionHearts(player.absorption);
             const bool statusMoved = player.health != lastShownHealth ||
                                      player.food != lastShownFood || air != lastShownAir ||
+                                     absorbHearts != lastShownAbsorbHearts ||
                                      (player.hurtFlash > 0.0f) != lastShownHurt;
             if (statusMoved) {
                 hudDirty = true;
                 lastShownHealth = player.health;
                 lastShownFood = player.food;
                 lastShownAir = air;
+                lastShownAbsorbHearts = absorbHearts;
                 lastShownHurt = player.hurtFlash > 0.0f;
-            }
-
-            // **The recipe book only ever grows.** Recomputed when something in
-            // the inventory moved rather than every frame, because scanning
-            // every recipe is not free and nothing else can change the answer.
-            //
-            // Creative keeps the whole catalogue: there it is a source to take
-            // from, not a book of what you have learned.
-            catalogue.restrictToKnown = !creative;
-            if (hudDirty && !creative) {
-                // The full grid, so a recipe you could only make at a table is
-                // still learned by holding its ingredients.
-                for (const game::ItemId made : game::craftableItems(inventory, game::kMaxCraftSize)) {
-                    catalogue.known.insert(made);
-                }
             }
 
             // **The recipe book only ever grows.** Recomputed when something in
@@ -4129,12 +6999,137 @@ int main() {
                 move.sprint = window.isKeyDown(engine::Key::LeftControl) || pad.sprint;
                 move.sneak = sneaking;
                 move.lookY = glm::normalize(camera.forward()).y;
-                move.invulnerable = creative;
                 move.verticalWish = (jumping ? 1.0f : 0.0f) - (sneaking ? 1.0f : 0.0f);
             }
 
+            // **What the simulation must know whoever owns the keyboard.**
+            // Everything above is gated on no screen being open, because keys
+            // belong to the panel while it is up - but neither of these is
+            // input. They are state the damage rule reads, and a blow does not
+            // stop landing because you opened your inventory. `invulnerable`
+            // was inside that guard and so lapsed for exactly as long as a
+            // creative player looked at their own inventory; `armour` would have
+            // inherited the identical bug on its first day.
+            //
+            // **`armour` is the first of the two missing call sites
+            // `Survival.hpp` names by hand**, and until now
+            // `PlayerInput::armour` had exactly one reference in the whole tree:
+            // `updateSurvival` *reading* it. So every blow was struck against
+            // `kNoArmour` and a full set of diamond reduced nothing.
+            // `CLAUDE.md` bug shape #15 - a complete feature one call site short
+            // of being reachable, and there is no warning for a field nobody
+            // writes.
+            //
+            // **No longer inert, as of 2026-08-19.** The paragraph that used to
+            // sit here said the armour slots had no hit test and that
+            // `Region::Armour` appeared only as a `case` label, so `armourSet()`
+            // could only answer `{0, 0.0f}`. `hud/InventoryScreen.cpp` now
+            // produces `SlotHit{Region::Armour, i}` from four cells measured out
+            // of the panel art, `Main.cpp` resolves it to `Inventory::armourAt`,
+            // and shift-click and right-click both equip - so this line reads a
+            // real set and the curve is no longer an identity.
+            //
+            // **If you arrived here from a sweep reporting `armourDefence` = 0
+            // in this file, that zero is right and is not the bug.** `Main.cpp`
+            // never names it: the chain is `armourSet()` here ->
+            // `Inventory.hpp`'s loop -> `armourDefence`/`armourToughness` in
+            // `Item.hpp`. **Sweep for `armourSet` instead**, which read 6 on
+            // 2026-08-19 - this line plus five `hurtPlayer` sites. Three agents
+            // have now measured the leaf name at the boundary and concluded the
+            // feature was inert; `Inventory::armourSet`'s own comment carries
+            // the long version and what would falsify it.
+            move.armour = inventory.armourSet();
+            // **The two leather flags, filled here because `Player.hpp` asks
+            // for them "the same frame, the same place and the same reasoning
+            // as `armour` directly above" - finding 9670.** Left false they
+            // mean "not wearing leather", which is why powder snow had no
+            // counterplay at all: the freezing clock, the sink physics and the
+            // boots-climb branch were all live and correct, and every one of
+            // them read a flag nothing ever wrote. The game showed the player
+            // a leather boot that did nothing.
+            //
+            // **Two flags and not one, because powder snow states two rules
+            // against two different sets** - any leather piece stops freezing,
+            // but only boots keep you on the surface. A leather cap with iron
+            // boots is immune and still falls in. `Player.cpp` ORs them for
+            // the freezing test, so the narrower one alone still buys immunity;
+            // filling both honestly is cheaper than relying on that.
+            //
+            // **Material 0 is spelled `armourMaterial(LeatherHelmet)`, not
+            // `0`.** Both sides come off the one table that owns the material
+            // rows, so a row inserted above leather cannot silently make iron
+            // count as leather - the unlinked-literal shape reconciled out of
+            // this file an hour ago in `kFallingLevel`.
+            //
+            // **`isArmour` guards the material test and is not redundant.**
+            // `armourMaterial` is `(item - LeatherHelmet) / 4`, and C++
+            // truncates a negative quotient toward zero, so any id in the three
+            // slots BELOW `LeatherHelmet` also yields 0 and would read as
+            // leather. The live UI cannot put one there - `equipArmour` derives
+            // the destination through `armourSlot` - but `loadPlayer` trusts
+            // `player.dat`, which is the same reason the death drop above is
+            // content-agnostic.
+            bool leatherWorn = false;
+            for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
+                const game::ItemStack& worn = inventory.armourAt(i);
+                if (!worn.empty() && game::isArmour(worn.item) &&
+                    game::armourMaterial(worn.item) ==
+                        game::armourMaterial(game::ItemId::LeatherHelmet)) {
+                    leatherWorn = true;
+                    break;
+                }
+            }
+            move.leatherArmour = leatherWorn;
+            // `empty()` before `.item`, the way every other reader of a worn
+            // cell in this file and in `Inventory.hpp` does it - a cleared
+            // stack is not required to forget which item it held.
+            const game::ItemStack& wornBoots = inventory.armour(game::ArmourSlot::Feet);
+            move.leatherBoots = !wornBoots.empty() && wornBoots.item == game::ItemId::LeatherBoots;
+            move.invulnerable = creative;
+
             game::updatePlayer(player, move, world, deltaSeconds);
+            // **The second of the two, and they had to land together.**
+            // `updateSurvival` banks what each worn piece owes into
+            // `player.armourWear` rather than applying it, because `world/` has
+            // no business reaching into `item/` storage - the project's own
+            // "compute the result, then apply it" rule made concrete. Nothing
+            // drained it, so it climbed forever and a set never wore out.
+            // Taking the damage reduction without the durability cost is half a
+            // rule, which is `CLAUDE.md` shape #5, so the pair is one edit.
+            //
+            // **A point is per piece rather than shared between them**, the
+            // reference's rule and the one `wearArmour` implements - this passes
+            // the banked total as the per-piece cost on purpose.
+            if (player.armourWear > 0) {
+                if (inventory.wearArmour(player.armourWear) > 0) {
+                    hudDirty = true;
+                }
+                player.armourWear = 0;
+            }
             camera.position = player.renderEyePosition();
+            /// **Where reach and targeting start, which is not where the camera
+            /// is.** `Player.hpp` says of `stepSmooth` that only the camera may
+            /// read it - reach, targeting and knockback all want the true eye -
+            /// and every raycast here read `camera.position` anyway, so for the
+            /// fifth of a second after each step up the crosshair aimed from up
+            /// to 0.6 m below the eye and picked the wrong block. Computed once
+            /// per frame so the seven call sites cannot disagree.
+            ///
+            /// **The trade-off, stated so it does not read as an oversight:**
+            /// the world is *drawn* from `camera.position`, so during that same
+            /// fifth of a second the ray and the picture disagree and the
+            /// crosshair can sit a little off what it selects. That is the
+            /// deliberate choice and it is the reference's: reach is a fixed
+            /// simulation quantity, and sourcing it from an interpolated
+            /// position makes what you can click on breathe sub-frame - the
+            /// same class of error as raising the tick rate to smooth motion.
+            /// A stable rule that is briefly a pixel out beats a rule that
+            /// changes between two frames of standing still.
+            ///
+            /// `camera.position` remains correct for what the *eye* sees - the
+            /// underwater and lava overlays below - and for everything drawn,
+            /// heard or ranged against the view.
+            const glm::vec3 reachFrom = player.eyePosition();
 
             // The ears follow the camera. Done here rather than at the top of
             // the frame so a sound started later in the same frame is placed
@@ -4163,6 +7158,34 @@ int main() {
                     if (step != game::SoundEvent::Count) {
                         sounds.play(audio, step, player.position, 0.32f);
                     }
+                }
+            } else if (player.inWater) {
+                // **A stroke is a footstep in water**, and it is paced the same
+                // way for the same reason - so swimming hard sounds like it,
+                // with no second timer and no second constant that can drift
+                // away from `kStepDistance`.
+                //
+                // **Ahead of the `!player.onGround` reset below on purpose.**
+                // That branch exists so a landing does not fire one step for the
+                // whole distance fallen, and it resets `lastStepAt` every frame
+                // you are off the ground - which is every frame you are
+                // swimming. Behind it, this could never accumulate a stroke's
+                // worth of distance and `Swim` stays silent, which is exactly
+                // how it stayed unplayed. The single edit that reintroduces
+                // that: move this branch below the reset.
+                //
+                // The fraction is our judgement, not a number of the
+                // reference's: swimming covers ground more slowly than walking,
+                // so a shorter interval keeps the *rhythm* about the same.
+                constexpr float kStrokeFraction = 0.75f;
+                const float moved = glm::distance(glm::vec2{player.position.x, player.position.z},
+                                                  glm::vec2{lastStepAt.x, lastStepAt.z});
+                // Bobbing on the spot covers no distance at all, so the stroke
+                // latch is the other half of the same question. Both reset
+                // `lastStepAt`, so the two can never double up.
+                if (moved >= kStepDistance * kStrokeFraction || (player.treading && !wasTreading)) {
+                    lastStepAt = player.position;
+                    sounds.play(audio, game::SoundEvent::Swim, player.position, 0.28f);
                 }
             } else if (!player.onGround) {
                 // Landing should not fire a step for the whole distance fallen.
@@ -4227,11 +7250,10 @@ int main() {
                         const glm::ivec3 plant{under.x, under.y + 1, under.z};
                         const game::BlockId crop = world.blockAt(plant.x, plant.y, plant.z);
                         if (game::isCropBlock(crop) || game::isStemBlock(crop)) {
-                            const game::ItemId yield = game::dropForBlock(crop);
-                            if (yield != game::ItemId::None) {
-                                drops.spawn(glm::vec3{plant} + glm::vec3{0.5f}, yield,
-                                            game::dropCountForBlock(crop));
-                            }
+                            // Through the drop table, so a trampled crop pays
+                            // what its age is worth - a ripe wheat's seeds are
+                            // a range and an unripe one is a single seed back.
+                            spillBlockDrop(plant, crop, game::BreakContext{});
                             world.setBlock(plant.x, plant.y, plant.z, game::BlockId::Air);
                         }
                         world.setBlock(under.x, under.y, under.z, game::BlockId::Dirt);
@@ -4250,10 +7272,115 @@ int main() {
             // Breaking the surface, either way. The reference plays this on
             // entry and on exit and so do we, off the same edge the underwater
             // view already watches.
+            //
+            // **A belly-flop is louder than a step off a kerb.** `SplashBig` was
+            // decoded at startup and never played; a fall that would have hurt
+            // on land is the line between the two, which is our judgement rather
+            // than a number of the reference's - it is `kSafeFallDistance`, so
+            // it moves with the rule it borrows instead of being a second
+            // constant that can drift away from it.
             if (player.inWater != wasInWater) {
-                sounds.play(audio, game::SoundEvent::Splash, player.position, 0.5f);
+                const bool hard = !wasInWater &&
+                                  lastFallDistance >= game::survival::kSafeFallDistance;
+                sounds.play(audio,
+                            hard ? game::SoundEvent::SplashBig : game::SoundEvent::Splash,
+                            player.position, hard ? 0.8f : 0.5f);
+                // **Water puts you out**, and says so. A burning player diving
+                // in was silent, which is the one moment you most want to hear.
+                if (!wasInWater && player.burningSeconds > 0.0f) {
+                    sounds.play(audio, game::SoundEvent::Fizz, player.position, 0.7f);
+                }
             }
             wasInWater = player.inWater;
+
+            // One stroke, one sound. Treading is latched across a single stroke
+            // by the fluid model, so its rising edge is the stroke itself -
+            // **read up in the footstep block**, which is the one owner of the
+            // stroke cadence, rather than sounded a second time here. Two
+            // triggers for one event is how a swimmer ended up clicking twice
+            // per bob; the latch is only *cleared* here.
+            wasTreading = player.treading;
+
+            // Two continuing conditions, both of which `Sounds` already owns the
+            // cadence and the volume for - so each is one line here and neither
+            // needs a timer of its own. Called every frame whether or not the
+            // condition holds, which is what `tickAmbient` asks for: a cue that
+            // lapses forgets its timer and sounds immediately next time.
+            //
+            // **`Water` is `global` in the cue table**, so it asks about you
+            // rather than about the scenery: it is the muffling of being under,
+            // not a river heard from the bank. That is why it reads
+            // `player.underwater` and takes no part in the scan below.
+            sounds.tickAmbient(audio, game::AmbientCue::Water, player.underwater, player.position,
+                               deltaSeconds);
+            sounds.tickAmbient(audio, game::AmbientCue::Breath,
+                               player.underwater && player.air <= 0.0f, player.position,
+                               deltaSeconds);
+
+            // The three scenery ambiences. **One scan feeds all of them**, on
+            // its own timer, and `tickAmbient` still sees a fresh answer every
+            // frame from the cache - the cue's retrigger interval and this
+            // scan's interval are separate clocks on purpose, because the first
+            // belongs to the recording's length and the second to how fast a
+            // player can walk out of earshot.
+            //
+            // Nearest rather than first found, so a wall of lava sounds from
+            // the side you are standing on. Five cells across is two either
+            // way, which is close enough that the positional mix still places
+            // it; anything wider and the sound arrives before the light does.
+            ambientScanTimer -= deltaSeconds;
+            if (ambientScanTimer <= 0.0f) {
+                constexpr float kAmbientScanSeconds = 0.25f;
+                constexpr int kAmbientReach = 2;
+                ambientScanTimer = kAmbientScanSeconds;
+                const glm::ivec3 centre{glm::floor(player.eyePosition())};
+                // Larger than any squared offset the box can produce, derived
+                // from the reach rather than written as a literal, so widening
+                // the box cannot quietly leave the sentinel inside it.
+                constexpr int kOutside = kAmbientReach * kAmbientReach * 3 + 1;
+                int bestFire = kOutside;
+                int bestLava = kOutside;
+                fireNearby = false;
+                lavaNearby = false;
+                for (int dy = -kAmbientReach; dy <= kAmbientReach; ++dy) {
+                    for (int dz = -kAmbientReach; dz <= kAmbientReach; ++dz) {
+                        for (int dx = -kAmbientReach; dx <= kAmbientReach; ++dx) {
+                            const game::BlockId id =
+                                world.blockAt(centre.x + dx, centre.y + dy, centre.z + dz);
+                            const bool fire = id == game::BlockId::Fire;
+                            const bool lava = game::isLava(id);
+                            if (!fire && !lava) {
+                                continue;
+                            }
+                            const int away = dx * dx + dy * dy + dz * dz;
+                            const glm::vec3 at = glm::vec3{centre + glm::ivec3{dx, dy, dz}} +
+                                                 glm::vec3{0.5f};
+                            // Two independent tests rather than an `else if`.
+                            // A cell cannot be both, so the chain would behave
+                            // identically - but only after the reader has
+                            // proved that, and the proof is the sort of thing
+                            // a new block id quietly invalidates.
+                            if (fire && away < bestFire) {
+                                bestFire = away;
+                                fireNearby = true;
+                                fireAt = at;
+                            }
+                            if (lava && away < bestLava) {
+                                bestLava = away;
+                                lavaNearby = true;
+                                lavaAt = at;
+                            }
+                        }
+                    }
+                }
+            }
+            sounds.tickAmbient(audio, game::AmbientCue::Fire, fireNearby, fireAt, deltaSeconds);
+            // **Both lava cues read the same fact**, because they are the same
+            // pool heard two ways - a steady seethe and the occasional burst.
+            // The cue table is what makes them different, and its intervals are
+            // the only place that difference is allowed to live.
+            sounds.tickAmbient(audio, game::AmbientCue::Lava, lavaNearby, lavaAt, deltaSeconds);
+            sounds.tickAmbient(audio, game::AmbientCue::LavaPop, lavaNearby, lavaAt, deltaSeconds);
 
             // Cave ambience: rare, unplaced, and only when the sky cannot see
             // you. It is the reference's own most effective piece of sound
@@ -4278,6 +7405,21 @@ int main() {
             // animation, which is the same shape as the trampling bug above.
             if (!player.alive() && wasAlive) {
                 game::playRumble(rumble, game::RumbleEvent::Death);
+                // **On the edge, not 1.6 s later at the respawn.** The screen
+                // was closed at the *end* of the death wait, so dying with a
+                // chest open left it up and operable for the whole of
+                // `kRespawnSeconds` - a corpse rearranging its inventory while
+                // the death rumble played. Closing here also means the drop
+                // loop below always finds an empty cursor and a settled bag,
+                // which is what its own comment already claimed.
+                //
+                // Safe to call twice: `closeScreen` is a no-op on a closed
+                // screen except for two flags and a `savePending`, and the one
+                // below is what guarantees the reconciliation even if a screen
+                // is somehow opened during the wait.
+                if (openScreen.has_value()) {
+                    closeScreen();
+                }
             }
             wasAlive = player.alive();
 
@@ -4287,34 +7429,124 @@ int main() {
                     // Everything carried is thrown down where it fell, which is
                     // the reference's rule and the only reason death costs
                     // anything at all.
+                    //
+                    // **The screen is closed first**, so the cursor stack and
+                    // the crafting grid are back in the inventory before the
+                    // loop below empties it. The other order kept them: dying
+                    // with a screen open and a stack on the cursor dropped
+                    // everything else and handed those items straight into the
+                    // freshly emptied bag. `forEachScreenStack` claims those
+                    // stacks are part of what is carried, and this is the one
+                    // place that has to agree with it.
+                    closeScreen();
                     if (!creative) {
                         for (std::size_t slot = 0; slot < inventory.size(); ++slot) {
                             game::ItemStack& stack = inventory.slot(slot);
                             if (!stack.empty()) {
-                                drops.spawn(player.position + glm::vec3{0.0f, 0.5f, 0.0f},
-                                            stack.item, stack.count);
+                                // **Whole stacks, wear and all.** Dropping
+                                // `damage` here made durability optional -
+                                // dying handed every tool back fully repaired -
+                                // and returned every stowbox empty, with its
+                                // contents stranded in `stowboxes.dat` behind a
+                                // handle nothing could ever reach again.
+                                game::dropStack(drops,
+                                                player.position + glm::vec3{0.0f, 0.5f, 0.0f},
+                                                stack);
                                 stack = game::ItemStack{};
                             }
                         }
+                        // **And what was being worn** - finding 9635. The loop
+                        // above walks `inventory.size()`, which is
+                        // `kInventorySlots` and therefore `m_slots` alone, so a
+                        // full diamond set was the one thing dying did not cost.
+                        //
+                        // **This is a seam, not a missed line, and the seam is
+                        // worth naming.** `m_armour` is deliberately a second
+                        // array outside `m_slots`, and that decision is right:
+                        // it keeps `add`, `hasRoomFor`, `count`, `consume` and
+                        // the craft and drop paths from treating a worn helmet
+                        // as loose storage. It is right for every loop that
+                        // walks the bag except this one, which is the single
+                        // loop that MUST see worn pieces - and the exception
+                        // never got written. The tell that it was an oversight:
+                        // `closeScreen()` above exists precisely so the cursor
+                        // and the crafting grid are reconciled before the bag is
+                        // emptied, and armour got no equivalent.
+                        //
+                        // **Cleared as well as dropped, in the same statement
+                        // that drops it.** A drop that does not clear is the
+                        // duplication shape this file has already paid for; the
+                        // slot loop above is written the same way for the same
+                        // reason, and the clear is not a second guard somewhere
+                        // else that could rot apart from this one.
+                        //
+                        // **Deliberately content-agnostic.** It drops whatever
+                        // sits in the cell rather than asking `isArmour` first.
+                        // Nothing in the live tree can put a non-armour stack
+                        // there - see the audit in finding 9635 - but
+                        // `loadPlayer` trusts `player.dat`, and a corrupt or
+                        // hand-edited file can. Asking `isArmour` here would
+                        // make the death drop the one place that silently keeps
+                        // a junk stack forever.
+                        for (std::size_t wornSlot = 0; wornSlot < game::kArmourSlots; ++wornSlot) {
+                            game::ItemStack& worn = inventory.armourAt(wornSlot);
+                            if (!worn.empty()) {
+                                game::dropStack(drops,
+                                                player.position + glm::vec3{0.0f, 0.5f, 0.0f},
+                                                worn);
+                                worn = game::ItemStack{};
+                            }
+                        }
                     }
-                    closeScreen();
                     // A bed that has been slept in wins over the world spawn,
-                    // and losing the bed falls back rather than stranding you.
-                    int rx = spawnX;
-                    int rz = spawnZ;
-                    if (hasRespawnPoint &&
-                        game::isBed(world.blockAt(respawnPoint.x, respawnPoint.y,
-                                                  respawnPoint.z))) {
-                        rx = respawnPoint.x;
-                        rz = respawnPoint.z;
-                    } else if (hasRespawnPoint) {
-                        hasRespawnPoint = false;
-                        engine::logInfo("Your bed was missing or blocked.");
+                    // and the reference's rule for losing it has three answers
+                    // rather than two.
+                    //
+                    // **Bedrock: the bed has to be there *and* there has to be
+                    // somewhere beside it to stand.** Either way it fails, the
+                    // point is cleared and you go to world spawn - it is not
+                    // remembered for later and there is no outward search the
+                    // way Java does one (minecraft.wiki/w/Bed; MCPE-42892).
+                    // This site printed "missing or blocked" while checking
+                    // only the first half of that sentence, which is the shape
+                    // where a rule exists in one of the two places that need
+                    // it.
+                    //
+                    // **And the third answer, which is the one that costs a
+                    // base: an unloaded chunk reads as air.** Dying further
+                    // from home than the render distance is ordinary - a cave
+                    // trip is - and `blockAt` there answers "no bed", so the
+                    // point was cleared and the player sent to spawn by the
+                    // streamer rather than by anything they did. That was
+                    // survivable only while nothing was written down; now that
+                    // the point persists, clearing it is permanent. So an
+                    // absent column is **"cannot tell", not "gone"**, guarded
+                    // by the same `columnResident` the save path already uses.
+                    glm::vec3 respawnAt{static_cast<float>(spawnX) + 0.5f,
+                                        static_cast<float>(world.groundHeight(spawnX, spawnZ)),
+                                        static_cast<float>(spawnZ) + 0.5f};
+                    if (hasRespawnPoint) {
+                        const glm::ivec3 bed = respawnPoint;
+                        if (!world.columnResident(bed.x, bed.z)) {
+                            // Nothing can be checked, so nothing is concluded.
+                            // One above the bed is where getting out of one
+                            // leaves you, and the streamer brings the ground in
+                            // underneath within a frame or two.
+                            respawnAt = glm::vec3{static_cast<float>(bed.x) + 0.5f,
+                                                  static_cast<float>(bed.y + 1),
+                                                  static_cast<float>(bed.z) + 0.5f};
+                        } else if (const std::optional<glm::vec3> beside =
+                                       game::isBed(world.blockAt(bed.x, bed.y, bed.z))
+                                           ? standingRoomBeside(bed)
+                                           : std::nullopt;
+                                   beside.has_value()) {
+                            respawnAt = *beside;
+                        } else {
+                            hasRespawnPoint = false;
+                            engine::logInfo("Your bed was missing or blocked.");
+                        }
                     }
-                    game::respawnPlayer(
-                        player, glm::vec3{static_cast<float>(rx) + 0.5f,
-                                          static_cast<float>(world.groundHeight(rx, rz)),
-                                          static_cast<float>(rz) + 0.5f});
+                    game::respawnPlayer(player, respawnAt);
                     engine::logInfo("Respawned.");
                 }
             }
@@ -4322,6 +7554,11 @@ int main() {
             // Being underwater has to be visible, not merely felt. Without this
             // the only evidence is the physics changing, which reads as gravity
             // being broken rather than as swimming.
+            //
+            // **`camera.position` on purpose, and one of the few places it is
+            // right.** This asks what the eye can *see*, not where reach starts,
+            // so it must follow the drawn camera or the overlay would appear a
+            // frame before the water does.
             {
                 const game::BlockId eyeIn =
                     world.blockAt(static_cast<int>(std::floor(camera.position.x)),
@@ -4331,7 +7568,7 @@ int main() {
                 eyeInLava = game::isLava(eyeIn);
             }
 
-            const game::RaycastHit target = game::raycast(world, camera.position, camera.forward(), kBlockReach);
+            const game::RaycastHit target = game::raycast(world, reachFrom, camera.forward(), kBlockReach);
 
             // A jukebox, which is neither a screen nor a placement. Asked
             // before the screens below because it takes the interact for
@@ -4347,8 +7584,15 @@ int main() {
                 if (loaded != jukeboxDiscs.end()) {
                     // It gives the disc back rather than swallowing it, which is
                     // the same rule the drinking path uses for the glass.
-                    drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f},
-                                loaded->second, 1, glm::vec3{0.0f});
+                    //
+                    // **Through `dropStack`, like every other drop.** A disc
+                    // carries no wear and no contents, so `damage` was not being
+                    // lost here and this is not a bug fix - it is the claim in
+                    // `ItemEntity.hpp` that "every path that parts a player from
+                    // an `ItemStack` goes through here" being made true, so the
+                    // next person copying a nearby line copies the safe one.
+                    game::dropStack(drops, glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f},
+                                    game::ItemStack{loaded->second, 1});
                     *loaded = jukeboxDiscs.back();
                     jukeboxDiscs.pop_back();
                     sounds.play(audio, game::SoundEvent::Pop,
@@ -4377,7 +7621,10 @@ int main() {
                 if (game::isFurnace(opened)) {
                     openFurnacePosition = target.block;
                     // Created on first use rather than when placed, so a furnace
-                    // nobody has touched costs nothing.
+                    // nobody has touched costs nothing. **It can also find a
+                    // record older than the block** - see the map's declaration
+                    // for the one path a chunk format bump can still strand one
+                    // down, and for the two that are now closed.
                     furnaces.try_emplace(openFurnacePosition);
                     openScreen = game::inventoryScreen::Kind::Furnace;
                 } else if (game::isChest(opened)) {
@@ -4389,8 +7636,15 @@ int main() {
                         target.block.x + target.block.z < partner->x + partner->z;
                     openChestPosition = firstIsThis ? target.block : *partner;
                     openChestPartner = partner.has_value() ? (firstIsThis ? *partner : target.block) : openChestPosition;
-                    chests.try_emplace(openChestPosition);
-                    chests.try_emplace(openChestPartner);
+                    // **Both halves, and `materialise` rather than
+                    // `try_emplace`.** A village chest is a `LootChest` id with
+                    // no entry in the map at all until it is opened; this rolls
+                    // it, turns it into a plain chest and hands back the same
+                    // reference `try_emplace` would have. Asking twice for a
+                    // single chest - both names point at the same cell - is
+                    // safe, because the second call finds a plain chest.
+                    materialise(openChestPosition);
+                    materialise(openChestPartner);
                     openScreen = partner.has_value() ? game::inventoryScreen::Kind::DoubleChest
                                                      : game::inventoryScreen::Kind::Chest;
                     sounds.play(audio, game::SoundEvent::ChestOpen,
@@ -4405,6 +7659,7 @@ int main() {
                     chests.try_emplace(openChestPosition);
                     openScreen = game::inventoryScreen::Kind::Hopper;
                 } else if (opened == game::BlockId::Stonecutter) {
+                    openBenchPosition = target.block;
                     openScreen = game::inventoryScreen::Kind::Stonecutter;
                 } else if (opened == game::BlockId::SmithingTable ||
                            opened == game::BlockId::Grindstone || opened == game::BlockId::Anvil ||
@@ -4414,8 +7669,10 @@ int main() {
                     // All of them are two inputs and a previewed result, so they
                     // share one screen and differ only in what that result is.
                     openBench = opened;
+                    openBenchPosition = target.block;
                     openScreen = game::inventoryScreen::Kind::SmithingTable;
                 } else {
+                    openBenchPosition = target.block;
                     openScreen = game::inventoryScreen::Kind::CraftingTable;
                 }
                 window.setCursorCaptured(false);
@@ -4437,6 +7694,19 @@ int main() {
                     sounds.play(audio,
                                 opening ? game::SoundEvent::DoorOpen : game::SoundEvent::DoorClose,
                                 glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                    // **The swing has to consume the click.** `wantInteract` is
+                    // edge-triggered - a just-pressed scan - and `wantPlace` is
+                    // level, so on the press frame both are true and the
+                    // placement branch below ran on the same press: opening your
+                    // own gate with a stack in hand built a block beside it.
+                    // Doors, trapdoors and beds are protected at the head of that
+                    // branch by exactly this line, and screen-opening blocks by
+                    // `openScreen`; the gate sits in a third path and reached
+                    // neither. minecraft.wiki *Block* - a block that responds to
+                    // use takes the interaction unless the player is sneaking,
+                    // and sneaking is already handled, because `wantInteract`
+                    // tests `!LeftShift`.
+                    placeTimer = kPlaceRepeatSeconds;
                 } else if (aimed == game::BlockId::Bell) {
                     // A bell has one state and one behaviour: it rings. The
                     // reference's swing is an animated model rather than a
@@ -4444,6 +7714,46 @@ int main() {
                     // sound is the whole of it.
                     sounds.play(audio, game::SoundEvent::Bell,
                                 glm::vec3{target.block} + glm::vec3{0.5f}, 1.0f);
+                    // Same defect, same line: ringing a bell with a block in
+                    // hand also built one against it.
+                    placeTimer = kPlaceRepeatSeconds;
+                } else if (game::isCampfire(aimed)) {
+                    // **Food goes on a campfire on the same press that swings a
+                    // gate, and it is a block interaction rather than a
+                    // container.** The reference has no screen here at all: one
+                    // item per use, four at a time, thirty seconds each, and no
+                    // fuel slot to fill. Sitting in this block gets the two
+                    // properties that matter for free - it is edge-triggered, so
+                    // holding the button cannot dump a stack onto the fire a
+                    // frame at a time, and it is already `!LeftShift`, so
+                    // sneaking still places a block against the side.
+                    //
+                    // **Compute, then apply.** `addToCampfire` is asked of a
+                    // copy and the map entry and the player's stack are written
+                    // only when it says yes - which is the only thing standing
+                    // between a fire with four things already on it and an item
+                    // consumed into nowhere. The `find` rather than `operator[]`
+                    // is the same care: a refused offer must not leave an empty
+                    // entry behind at that cell.
+                    const game::ItemStack& hand = inventory.slot(selectedSlot);
+                    if (!hand.empty() && game::campfireCooks(hand.item)) {
+                        const auto standing = campfires.find(target.block);
+                        game::Campfire trial = standing == campfires.end() ? game::Campfire{}
+                                                                          : standing->second;
+                        if (game::addToCampfire(trial, hand.item)) {
+                            campfires[target.block] = trial;
+                            if (!creative) {
+                                inventory.consumeOne(selectedSlot);
+                                hudDirty = true;
+                            }
+                            sounds.play(audio, game::SoundEvent::WoodClick,
+                                        glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        }
+                        // Claimed whether or not it fitted, for the same reason
+                        // the gate above claims it: the placement path runs on
+                        // this very press otherwise.
+                        placeTimer = kPlaceRepeatSeconds;
+                    }
                 }
             }
 
@@ -4460,13 +7770,26 @@ int main() {
                 !window.isMouseButtonDown(engine::MouseButton::Right)) {
                 swallowClickUntilRelease = false;
             }
-            const bool playing = hadCursor && !openScreen.has_value() && !swallowClickUntilRelease;
+            // **And death, which nothing here asked about.** `player.alive()`
+            // was read in exactly three places, none of them input: for the
+            // 1.6 s of `kRespawnSeconds` a corpse could mine, place, attack,
+            // shoot and throw its own inventory on the floor, and any of it
+            // that produced an item was then dropped again by the death loop
+            // above. The rule that "you cannot act while dead" existed in the
+            // death handler's *comment* and nowhere in code - the shape where a
+            // rule is correct in one of the two places that need it.
+            //
+            // Folded into `playing` rather than tested at each of the four
+            // consumers, so a fifth cannot be added without it.
+            const bool playing = player.alive() && hadCursor && !openScreen.has_value() &&
+                                 !swallowClickUntilRelease;
             const bool wantBreak = playing && (window.isMouseButtonDown(engine::MouseButton::Left) ||
                                                pad.down(game::PadButton::RightTrigger));
             const bool wantPlace = playing && (window.isMouseButtonDown(engine::MouseButton::Right) ||
                                                pad.down(game::PadButton::LeftTrigger));
-            const bool wantDrop = !openScreen.has_value() && (window.isKeyDown(engine::Key::Q) ||
-                                                              pad.down(game::PadButton::DpadDown));
+            const bool wantDrop = player.alive() && !openScreen.has_value() &&
+                                  (window.isKeyDown(engine::Key::Q) ||
+                                   pad.down(game::PadButton::DpadDown));
 
             if (!wantDrop) {
                 dropTimer = 0.0f;
@@ -4475,8 +7798,8 @@ int main() {
                 if (dropTimer <= 0.0f) {
                     game::ItemStack& held = inventory.slot(selectedSlot);
                     if (!held.empty()) {
-                        drops.spawn(camera.position + camera.forward() * 0.5f, held.item, 1,
-                                    camera.forward() * kThrowSpeed, kThrowPickupDelay);
+                        game::dropStack(drops, camera.position + camera.forward() * 0.5f, held, 1,
+                                        camera.forward() * kThrowSpeed, kThrowPickupDelay);
                         inventory.consumeOne(selectedSlot);
                         hudDirty = true;
                     }
@@ -4504,7 +7827,13 @@ int main() {
                         // Eye height less a tenth, the reference's own anchor
                         // and offset. Spawning at the eye itself puts the shaft
                         // through your own head at point-blank range.
-                        const glm::vec3 from = camera.position - glm::vec3{0.0f, 0.1f, 0.0f};
+                        //
+                        // **`reachFrom`, not `camera.position`.** Where a shot
+                        // starts is simulation, and the camera carries
+                        // `stepSmooth` - so an arrow loosed in the fifth of a
+                        // second after a step up left from as much as 0.6 m
+                        // below the eye it was aimed from.
+                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, 0.1f, 0.0f};
                         // Blocks per tick, which is the unit the whole
                         // projectile system is written in.
                         glm::vec3 launch =
@@ -4512,12 +7841,24 @@ int main() {
                         // The shooter's own momentum carries into the shot, but
                         // only the vertical part, and only while airborne -
                         // otherwise running along the ground would lift your aim.
-                        launch += player.velocity * (1.0f / 20.0f) *
+                        //
+                        // `tick::kSeconds` is the metres-per-second to
+                        // blocks-per-tick conversion, and it is the shared one:
+                        // this was a bare `1.0f / 20.0f` in both throw sites.
+                        launch += player.velocity * game::tick::kSeconds *
                                   glm::vec3{1.0f, player.onGround ? 0.0f : 1.0f, 1.0f};
 
                         const bool spendsArrows = !creative;
+                        // **Named as the player's, and it has to be.** An
+                        // unattributed shot exempts the *whole* roster for the
+                        // launch window - there is no id to skip, so nothing may
+                        // be hit - and at three blocks a tick that is the first
+                        // fifteen blocks of flight. Saying who fired it opens the
+                        // window on creatures immediately and closes it on the
+                        // one entity it is meant for, the thrower.
                         projectiles.spawn(game::ProjectileKind::Arrow, from, launch,
-                                          charge >= 1.0f, spendsArrows);
+                                          charge >= 1.0f, spendsArrows, game::ItemId::None,
+                                          game::Projectiles::kPlayerOwner);
                         // Pitched by the charge, so a snap shot sounds thinner
                         // than a full draw - one number doing two jobs.
                         sounds.playGlobal(audio, game::SoundEvent::Bow, 0.7f, 0.85f + charge * 0.35f);
@@ -4525,11 +7866,17 @@ int main() {
                                          game::rumbleStrength(charge, game::kMinBowCharge, 1.0f));
                         if (spendsArrows) {
                             inventory.consume(game::ItemId::Arrow, 1);
-                            game::ItemStack& bow = inventory.slot(selectedSlot);
-                            if (++bow.damage >= game::kBowDurability) {
-                                bow = game::ItemStack{};
-                            }
-                            hudDirty = true;
+                            // **A fourth copy of the wear rule, found by the
+                            // sound sweep.** It read `kBowDurability` directly
+                            // and zeroed the slot itself, so a bow snapped in
+                            // silence while every other tool now says so - the
+                            // rule existed and was correct in three places and
+                            // did not travel to the fourth. `Mining.hpp` puts
+                            // the bow in the tool table on purpose, with
+                            // `ToolKind::None` so it gains no mining speed and
+                            // no harvest tier, which is exactly what makes
+                            // `wearTool` the right owner for it.
+                            wearTool(game::ItemId::Bow, 1);
                         }
                         // Releasing must not also place a block against
                         // whatever the shot was aimed at.
@@ -4560,21 +7907,43 @@ int main() {
             // though you can see through it, and you can punch through tall
             // grass even though a creeper cannot see through it.
             const game::SweepHit swingBlocked = game::sweepBlocks(
-                world, camera.position, camera.position + camera.forward() * armsLength);
+                world, reachFrom, reachFrom + camera.forward() * armsLength);
             const float entityReach = swingBlocked.hit ? swingBlocked.distance : armsLength;
             const bool creatureInWay =
-                wantBreak && creatures.aimedAt(camera.position, camera.forward(), entityReach);
+                wantBreak && creatures.aimedAt(reachFrom, camera.forward(), entityReach);
             if (creatureInWay && swingTimer <= 0.0f) {
                 const game::ToolProperties swung = game::toolFor(inventory.slot(selectedSlot).item);
-                const int damage = swung.kind == game::ToolKind::Sword ? (swung.tier >= game::kStoneTier ? 5 : 4)
-                                                                       : 1 + swung.tier;
-                if (creatures.strike(camera.position, camera.forward(), entityReach, damage)) {
+                // **Strength and Weakness get their say here, and this is the
+                // only place they could.** `effects::meleeDamage` had zero call
+                // sites, so both potions did nothing at all while its twin
+                // `miningSpeedScale` was wired twelve lines below - built,
+                // clean and never called. Rounded rather than truncated, and
+                // floored at 1: Weakness IV would otherwise reduce a fist to a
+                // blow that lands for nothing.
+                const float base = static_cast<float>(weaponDamage(swung.kind, swung.tier));
+                const int damage = std::max(
+                    1, static_cast<int>(std::lround(game::effects::meleeDamage(player.effects, base))));
+                if (creatures.strike(reachFrom, camera.forward(), entityReach, damage)) {
                     swingTimer = kSwingSeconds;
                     player.exhaustion += game::survival::kExhaustAttack;
-                    // A bare fist deals 1 and the best tool in the game deals 6,
-                    // which is the whole range a blow of ours can land in.
+                    // **A swing costs durability**, which it did not until now:
+                    // only breaking a block ever wore anything out, so a sword
+                    // was a permanent item and the whole tool tier ladder was
+                    // free for anyone who only fought with it. Bedrock charges
+                    // a sword and a hoe one point per hit and every other tool
+                    // two (https://minecraft.wiki/w/Durability). A bare fist
+                    // has no durability and `wearTool` says so with a zero.
+                    wearTool(inventory.slot(selectedSlot).item,
+                             (swung.kind == game::ToolKind::Sword ||
+                              swung.kind == game::ToolKind::Hoe)
+                                 ? 1
+                                 : 2);
+                    // A bare fist deals 1 and the best weapon in the game deals
+                    // `kStrongestBlow`, which is read off the damage table
+                    // rather than restated here.
                     game::playRumble(rumble, game::RumbleEvent::HitCreature,
-                                     game::rumbleStrength(static_cast<float>(damage), 1.0f, 6.0f));
+                                     game::rumbleStrength(static_cast<float>(damage), 1.0f,
+                                                          static_cast<float>(kStrongestBlow)));
                 }
             }
 
@@ -4597,7 +7966,36 @@ int main() {
                 const game::BlockId aimed = world.blockAt(target.block.x, target.block.y, target.block.z);
                 const game::ItemStack& tool = inventory.slot(selectedSlot);
                 // Creative pays no cost for anything, breaking included.
-                const float seconds = creative ? 0.0f : game::breakSeconds(aimed, tool.item);
+                //
+                // **Haste and Mining Fatigue are passed *into* the formula, not
+                // applied to its result.** `effects::miningSpeedScale` carries
+                // Bedrock's own curves - `(1 + 0.2n) * 1.2^n` for haste and
+                // `0.21^n` for fatigue, neither of which is Java's - and returns
+                // exactly 1 when neither effect is running, so this is a no-op
+                // for a player with no potions.
+                //
+                // Handing it to `breakSeconds` rather than dividing afterwards
+                // matters for two reasons the reference cares about: the scale
+                // has to land **before** the round-up to whole ticks, or a
+                // hasted break can come out a tick off, and `breaksInstantly`
+                // has to see it too, or a block that haste should shatter in
+                // one tick still pays the six-tick cooldown.
+                //
+                // Guarded rather than trusted: fatigue is `0.21^n`, which
+                // underflows to zero somewhere past level 30, and a zero scale
+                // would turn a slow block into an infinite one.
+                const float miningScale =
+                    std::max(0.0001f, game::effects::miningSpeedScale(player.effects));
+                // **The middle two arguments are facts about the player, not the
+                // block.** The reference divides mining speed by five for a
+                // submerged head without Aqua Affinity and by five again for
+                // feet off the ground, so treading water above a hole is
+                // twenty-five times slower than standing in one. `underwater`
+                // is the eye alone, which is the same thing the reference asks.
+                const float seconds =
+                    creative ? 0.0f
+                             : game::breakSeconds(aimed, tool.item, player.underwater,
+                                                  player.onGround, miningScale);
 
                 breakProgress = seconds <= 0.0f ? 1.0f : breakProgress + deltaSeconds / seconds;
 
@@ -4631,11 +8029,24 @@ int main() {
                                                                     target.block.z));
                         }
                     }
-                    // Only an instant break needs holding back. A timed one is
-                    // already paced by its own progress bar, and pausing it too
-                    // would make ordinary mining stutter.
-                    breakCooldown = seconds <= 0.0f ? kBreakRepeatSeconds : 0.0f;
+                    // **The reference's six ticks between blocks, and its own
+                    // exemption.** A break that took a single tick or less -
+                    // every creative break, and every plant and torch in
+                    // survival - skips the delay and is held back only by the
+                    // one-tick floor our per-frame loop needs; everything else
+                    // pays the full 0.30 s. This was the other way round, so
+                    // mining a wall was six ticks faster per block than the
+                    // reference and stripping a hedge was four times slower.
+                    const bool instantBreak =
+                        creative || game::breaksInstantly(aimed, tool.item, player.underwater,
+                                                          player.onGround, miningScale);
+                    breakCooldown = instantBreak ? kInstantBreakSeconds : kBreakRepeatSeconds;
                     const game::BlockId broken = aimed;
+                    // What the player brought to it, in the one struct the drop
+                    // table asks about: shears on a cobweb, a shovel on snow, a
+                    // pickaxe on an amethyst cluster. **The tier gate is not in
+                    // here** - `yieldsDrop` still owns that, below.
+                    const game::BreakContext brokenBy = game::breakContextFor(tool.item);
                     // **Before the block goes**, because the pairing is derived
                     // from what is standing there and asking afterwards returns
                     // nothing.
@@ -4644,6 +8055,14 @@ int main() {
                     // Which stored contents the dropped item will carry, or 0
                     // for everything that is not a stowbox with something in it.
                     int brokenStowHandle = 0;
+                    // **Rolled before the cell is cleared**, because the table a
+                    // village chest owes lives in its block id and nowhere else:
+                    // write Air first and the marker is gone, so the chest
+                    // spills nothing and the loot is lost with it. The partner
+                    // gets the same treatment below, before *its* setBlock.
+                    if (game::isLootChest(broken)) {
+                        materialise(target.block);
+                    }
                     world.setBlock(target.block.x, target.block.y, target.block.z, game::BlockId::Air);
 
                     // A broken furnace spills what was inside it. Erasing the
@@ -4655,7 +8074,7 @@ int main() {
                             for (const game::ItemStack* stack :
                                  {&found->second.input, &found->second.fuel, &found->second.output}) {
                                 if (!stack->empty()) {
-                                    drops.spawn(centre, stack->item, stack->count);
+                                    game::dropStack(drops, centre, *stack);
                                 }
                             }
                             furnaces.erase(found);
@@ -4664,6 +8083,32 @@ int main() {
                             openFurnacePosition == target.block) {
                             closeScreen();
                         }
+                    }
+
+                    // A broken campfire drops what was cooking on it, which is
+                    // the reference's rule and needs no tool. It has no screen,
+                    // so there is nothing to close.
+                    if (game::isCampfire(broken)) {
+                        spillCampfire(target.block);
+                    }
+
+                    // And a broken jukebox ejects its disc, on the same rule
+                    // and through the same kind of single owner.
+                    if (broken == game::BlockId::Jukebox) {
+                        spillJukeboxDisc(target.block);
+                    }
+
+                    // **Every other screen this cell could be showing.** The two
+                    // branches below and above spill first and close second,
+                    // because a container's contents have to be on the floor
+                    // before the screen showing them goes away. Everything else
+                    // - the crafting table, the stonecutter, the anvil,
+                    // grindstone, brewing stand and smithing table - had no
+                    // check at all, so its grid stayed live over a block that
+                    // was now Air. `screenLooksAt` is the one owner.
+                    if (!game::isChest(broken) && !game::isHopper(broken) &&
+                        broken != game::BlockId::Lectern && screenLooksAt(target.block)) {
+                        closeScreen();
                     }
 
                     // Twenty-seven slots, same reasoning.
@@ -4683,16 +8128,13 @@ int main() {
                             } else {
                                 for (const game::ItemStack& stack : found->second.slots) {
                                     if (!stack.empty()) {
-                                        drops.spawn(centre, stack.item, stack.count,
-                                                    glm::vec3{0.0f}, 0.35f, stack.damage);
+                                        game::dropStack(drops, centre, stack);
                                     }
                                 }
                             }
                             chests.erase(found);
                         }
-                        if (openScreen.has_value() &&
-                            game::inventoryScreen::isContainer(*openScreen) &&
-                            (openChestPosition == target.block || openChestPartner == target.block)) {
+                        if (screenLooksAt(target.block)) {
                             closeScreen();
                         }
 
@@ -4704,130 +8146,64 @@ int main() {
                             const glm::ivec3 other = *brokenPartner;
                             const game::BlockId otherBlock =
                                 world.blockAt(other.x, other.y, other.z);
+                            // Same ordering rule as the cell above: roll it
+                            // while the marker is still standing there.
+                            if (game::isLootChest(otherBlock)) {
+                                materialise(other);
+                            }
                             world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
                             const auto pair = chests.find(other);
                             if (pair != chests.end()) {
                                 const glm::vec3 centre = glm::vec3{other} + glm::vec3{0.5f};
                                 for (const game::ItemStack& stack : pair->second.slots) {
                                     if (!stack.empty()) {
-                                        drops.spawn(centre, stack.item, stack.count);
+                                        game::dropStack(drops, centre, stack);
                                     }
                                 }
                                 chests.erase(pair);
                             }
-                            const game::ItemId half = game::dropForBlock(otherBlock);
-                            if (half != game::ItemId::None &&
-                                (creative || game::yieldsDrop(otherBlock, tool.item))) {
-                                drops.spawn(glm::vec3{other} + glm::vec3{0.5f}, half, 1);
+                            if (creative || game::yieldsDrop(otherBlock, tool.item)) {
+                                spillBlockDrop(other, otherBlock, brokenBy);
                             }
+                            // **The partner cell owes its neighbours exactly
+                            // what the mined cell does.** The cell the player
+                            // struck is settled below and the blast path settles
+                            // both, but this branch wrote Air over the partner
+                            // and stopped - so a torch, a plant or a rail
+                            // standing on the far half of a double chest was
+                            // left hanging over nothing, and a ladder on its
+                            // side stayed on air. A rule that did not travel.
+                            settleAround(other, otherBlock);
                         }
                     }
 
                     // Breaking yields its drop in every mode, but only if what
                     // you are holding is good enough for it. Stone mined by hand
                     // gives nothing, which is what makes a pickaxe worth making.
-                    const game::ItemId dropped = game::dropForBlock(broken);
-                    if (dropped != game::ItemId::None && (creative || game::yieldsDrop(broken, tool.item))) {
-                        drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f}, dropped,
-                                    game::dropCountForBlock(broken), glm::vec3{0.0f}, 0.35f,
-                                    brokenStowHandle);
-
-                        // Gravel gives up flint about one time in ten, the
-                        // reference's own rate and the only source of the one
-                        // ingredient an arrow cannot be made without.
-                        //
-                        // **Rolled off the block's own position, not a running
-                        // random.** Every other drop in the game is a pure
-                        // function of what was broken, and a roll that changed
-                        // between two identical actions would be the one place
-                        // that stopped being true.
-                        if (broken == game::BlockId::Gravel) {
-                            const auto mix = static_cast<unsigned>(target.block.x * 73856093 ^
-                                                                   target.block.y * 19349663 ^
-                                                                   target.block.z * 83492791);
-                            if ((mix ^ (mix >> 13)) % 10u == 0u) {
-                                drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f},
-                                            game::ItemId::Flint, 1);
-                            }
-                        }
+                    //
+                    // **The gravel roll that used to sit here has moved into the
+                    // table**, where it is two entries sharing one salt rather
+                    // than a second independent coin flip - so flint arrives
+                    // *instead of* the gravel, which is what the reference does
+                    // and what a separate 1-in-10 spawn beside a certain gravel
+                    // never did.
+                    if (creative || brokenStowHandle != 0 ||
+                        game::yieldsDrop(broken, tool.item)) {
+                        spillBlockDrop(target.block, broken, brokenBy, brokenStowHandle);
                     }
 
-                    // A door is two blocks and one thing: breaking either half
-                    // takes the other, and only one door drops because only the
-                    // lower half is a canonical item.
-                    if (game::isDoor(broken)) {
-                        const int step = game::doorIsUpper(broken) ? -1 : 1;
-                        const glm::ivec3 other{target.block.x, target.block.y + step,
-                                               target.block.z};
-                        const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
-                        if (game::isDoor(twin) &&
-                            game::doorFamily(twin) == game::doorFamily(broken)) {
-                            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
-                        }
-                    }
-                    // A bed is the same idea lying down: the other half is one
-                    // step along the facing, forward from the foot or back from
-                    // the head.
-                    if (game::isBed(broken)) {
-                        const game::FaceDirection along =
-                            game::bedIsHead(broken) ? game::oppositeDirection(game::bedFacing(broken))
-                                                    : game::bedFacing(broken);
-                        const glm::ivec3 step =
-                            along == game::FaceDirection::PosX   ? glm::ivec3{1, 0, 0}
-                            : along == game::FaceDirection::NegX ? glm::ivec3{-1, 0, 0}
-                            : along == game::FaceDirection::PosZ ? glm::ivec3{0, 0, 1}
-                                                                 : glm::ivec3{0, 0, -1};
-                        const glm::ivec3 other = target.block + step;
-                        const game::BlockId twin = world.blockAt(other.x, other.y, other.z);
-                        if (game::isBed(twin) && game::bedColour(twin) == game::bedColour(broken)) {
-                            world.setBlock(other.x, other.y, other.z, game::BlockId::Air);
-                        }
-                    }
+                    // A door twin, a bed twin, whatever was resting on top and
+                    // any ladder hung on its side - all four now live in
+                    // `settleAround`, which the blast path calls too.
+                    settleAround(target.block, broken);
 
-                    // Tools wear only on blocks that actually resist them.
-                    if (!creative && game::blockHardness(broken) > 0.0f) {                        const game::ToolProperties properties = game::toolFor(tool.item);
-                        if (properties.durability > 0) {
-                            game::ItemStack& held = inventory.slot(selectedSlot);
-                            if (++held.damage >= properties.durability) {
-                                held = game::ItemStack{};
-                            }
-                            hudDirty = true;
-                        }
-                    }
-
-                    // Whatever was resting on it comes down too, rather than
-                    // being left hanging in the air.
-                    const glm::ivec3 above{target.block.x, target.block.y + 1, target.block.z};
-                    const game::BlockId resting = world.blockAt(above.x, above.y, above.z);
-                    if (game::needsSupportBelow(resting) &&
-                        !hasSupportUnder(resting, above.x, above.y, above.z)) {
-                        world.setBlock(above.x, above.y, above.z, game::BlockId::Air);
-                        const game::ItemId shed = game::dropForBlock(resting);
-                        if (shed != game::ItemId::None) {
-                            drops.spawn(glm::vec3{above} + glm::vec3{0.5f}, shed, 1);
-                        }
-                    }
-
-                    // A ladder is held up sideways rather than from below, so
-                    // it is the four neighbours that have to be checked instead
-                    // of the one cell above.
-                    for (const glm::ivec3& step : {glm::ivec3{1, 0, 0}, glm::ivec3{-1, 0, 0},
-                                                   glm::ivec3{0, 0, 1}, glm::ivec3{0, 0, -1}}) {
-                        const glm::ivec3 beside = target.block + step;
-                        const game::BlockId hung = world.blockAt(beside.x, beside.y, beside.z);
-                        if (!game::isLadder(hung)) {
-                            continue;
-                        }
-                        const game::FaceDirection wall = game::ladderFacing(hung);
-                        const bool lostIt = (wall == game::FaceDirection::PosX && step.x < 0) ||
-                                            (wall == game::FaceDirection::NegX && step.x > 0) ||
-                                            (wall == game::FaceDirection::PosZ && step.z < 0) ||
-                                            (wall == game::FaceDirection::NegZ && step.z > 0);
-                        if (lostIt) {
-                            world.setBlock(beside.x, beside.y, beside.z, game::BlockId::Air);
-                            drops.spawn(glm::vec3{beside} + glm::vec3{0.5f},
-                                        game::dropForBlock(hung), 1);
-                        }
+                    // Tools wear on every break the reference charges for, which
+                    // is **every break that took more than a single tick** -
+                    // sharper than "the block had some hardness", because a
+                    // fast enough tool finishes a hard block inside one tick and
+                    // the reference charges nothing for that either.
+                    if (!instantBreak) {
+                        wearTool(tool.item, 1);
                     }
                 }
             }
@@ -4852,7 +8228,25 @@ int main() {
                 // healing is exactly the thing you reach for when nothing else
                 // about you is full.
                 const bool drinking = !held.empty() && game::isDrinkablePotion(held.item);
-                if (drinking || (!held.empty() && game::survival::isEdible(held.item) &&
+                // **Offering food to a campfire is not eating it, and the two
+                // are the same button.** The interaction above is edge-triggered
+                // and this is level, so without this clause the press puts one
+                // steak on the fire and the *hold* that follows quietly eats the
+                // rest of the stack - the player never let go, and never meant
+                // to eat anything at all.
+                //
+                // Suppressed whether or not the fire has room, deliberately.
+                // Nothing draws what is on a campfire yet, so "full" is
+                // invisible from where the player is standing, and eating the
+                // one porkchop you meant to cook is a far worse failure than
+                // having to look away to eat. Turn your head to eat.
+                const game::BlockId aimedAtNow =
+                    target.hit ? world.blockAt(target.block.x, target.block.y, target.block.z)
+                               : game::BlockId::Air;
+                const bool offeringToFire = !held.empty() && game::isCampfire(aimedAtNow) &&
+                                            game::campfireCooks(held.item);
+                if (drinking || (!held.empty() && !offeringToFire &&
+                                 game::survival::isEdible(held.item) &&
                                  player.food < game::survival::kMaxFood)) {
                     player.eatingSeconds += deltaSeconds;
                     // Crumbs, on a spacing rather than every frame - the same
@@ -4873,48 +8267,111 @@ int main() {
                             const game::PotionKind brew = game::potionKind(held.item);
                             // The two instant ones land once and are gone, which
                             // is why they cannot go through `apply` - it holds a
-                            // timer, and theirs would be zero.
-                            if (brew.effect == game::effects::Effect::InstantHealth) {
-                                game::healPlayer(
-                                    player, static_cast<int>(game::effects::instantAmount(
-                                                brew.effect, brew.amplifier)));
-                            } else if (brew.effect == game::effects::Effect::InstantDamage) {
-                                game::damagePlayer(
-                                    player, static_cast<int>(game::effects::instantAmount(
-                                                brew.effect, brew.amplifier)));
-                            } else if (brew.effect != game::effects::Effect::None) {
-                                player.effects.apply(brew.effect, brew.amplifier, brew.seconds);
-                            }
+                            // timer, and theirs would be zero. `grantEffect`
+                            // owns that split for all three sites that need it.
+                            grantEffect(brew.effect, brew.amplifier, brew.seconds);
                             // Only the turtle master carries a second effect,
                             // and it is the reason `PotionKind` has room for one.
-                            if (brew.second != game::effects::Effect::None) {
-                                player.effects.apply(brew.second, brew.secondAmplifier,
-                                                     brew.seconds);
-                            }
+                            grantEffect(brew.second, brew.secondAmplifier, brew.seconds);
                             if (!creative) {
                                 inventory.consumeOne(selectedSlot);
                                 // The glass survives. If there is nowhere to put
                                 // it, it goes on the floor rather than nowhere.
-                                if (inventory.add(game::ItemId::GlassBottle, 1) > 0) {
-                                    drops.spawn(camera.position + camera.forward() * 0.6f,
-                                                game::ItemId::GlassBottle, 1, glm::vec3{0.0f});
-                                }
+                                giveOrDrop(game::ItemStack{game::ItemId::GlassBottle, 1},
+                                           camera.position + camera.forward() * 0.6f);
                             }
                         } else {
-                            game::feedPlayer(player, game::survival::foodValue(held.item));
+                            // **The food's own effects, from the food's own
+                            // table.** `feedPlayer` carries hunger and
+                            // saturation and has no channel for anything else,
+                            // so this is where a golden apple's Absorption
+                            // comes from - `Absorption` was granted by nothing
+                            // in the entire game, so `absorptionPoints` was
+                            // built, correct and unreachable.
+                            //
+                            // The pool it fills lives on `Player` and is spent
+                            // in `damagePlayer`; the gold hearts that show it
+                            // are `hud::AbsorbFull`/`AbsorbHalf` on the row
+                            // above the health row, drawn from
+                            // `Player::absorption`. An earlier version of this
+                            // comment claimed that HUD row already existed. It
+                            // did not, for the whole day between the pool
+                            // landing and this line being true, and a comment
+                            // that says a thing was built is exactly what stops
+                            // the next reader looking.
+                            //
+                            // **Read off the row rather than named here.** The
+                            // two apples are not written out at this call site
+                            // on purpose: which food grants what belongs to
+                            // `foodValue`, and a `case ItemId::GoldenApple`
+                            // here would be the food table's knowledge kept
+                            // somewhere other than the food table.
+                            //
+                            // **Stops at the first `None`**, which is the
+                            // packing `Survival.hpp` documents and
+                            // `foodGrantsAreUsable()` proves - the array is
+                            // filled from the front, so a gap would mean a
+                            // silently ignored tail.
+                            const game::survival::FoodValue meal =
+                                game::survival::foodValue(held.item);
+                            game::feedPlayer(player, meal);
+                            for (const game::survival::EffectGrant& grant : meal.grants) {
+                                if (grant.effect == game::effects::Effect::None) {
+                                    break;
+                                }
+                                grantEffect(grant.effect, grant.amplifier, grant.seconds);
+                            }
                             if (!creative) {
                                 inventory.consumeOne(selectedSlot);
                             }
                         }
-                        sounds.playGlobal(audio, game::SoundEvent::Burp, 0.5f);
+                        // **You burp after a meal, not after a potion.** This
+                        // played `Burp` for both, and `Drink` - staged, decoded,
+                        // never named - is what the other half wanted.
+                        sounds.playGlobal(audio,
+                                          drinking ? game::SoundEvent::Drink
+                                                   : game::SoundEvent::Burp,
+                                          0.5f);
                         hudDirty = true;
                     } else if (player.eatingSeconds - deltaSeconds <= 0.0f) {
                         // One bite at the start rather than a chew loop, which
                         // is a whole timer for something nobody would miss.
-                        sounds.playGlobal(audio, game::SoundEvent::Eat, 0.5f);
+                        //
+                        // **The same split the finish makes.** This played `Eat`
+                        // for a potion too, so a swig of anything opened with a
+                        // mouthful of bread and closed with a gulp - the pair
+                        // has to agree or the drink is half a meal.
+                        sounds.playGlobal(audio,
+                                          drinking ? game::SoundEvent::Drink
+                                                   : game::SoundEvent::Eat,
+                                          0.5f);
                     }
                 } else {
                     player.eatingSeconds = 0.0f;
+                }
+
+                // **Right-clicking a piece of armour puts it on**, which is the
+                // route most players reach for before they ever open a screen.
+                // Shares `placeTimer` for the same reason the spawn egg below
+                // does: without a cooldown one click at 120 fps swaps the piece
+                // on and off thirty times and lands wherever the frame ends.
+                //
+                // **`equipArmour` decides everything.** It derives the
+                // destination from `armourSlot`, refuses anything that is not
+                // armour, and swaps - so the piece it displaces comes back into
+                // the same hotbar slot and a second right-click takes it off
+                // again. Nothing here spells a slot number, which is what stops
+                // this from becoming a second owner of "which piece goes
+                // where".
+                //
+                // **No `target.hit` and no reach test**, unlike everything else
+                // on this button: putting a helmet on is not an interaction
+                // with the world, and requiring you to be looking at a block to
+                // get dressed would be a rule the reference does not have.
+                if (placeTimer <= 0.0f && !held.empty() && game::isArmour(held.item) &&
+                    inventory.equipArmour(selectedSlot)) {
+                    hudDirty = true;
+                    placeTimer = kPlaceRepeatSeconds;
                 }
 
                 // A spawn egg is used rather than placed. It shares `placeTimer`
@@ -4945,7 +8402,7 @@ int main() {
                 if (placeTimer <= 0.0f && !held.empty() &&
                     held.item == game::ItemId::GlassBottle) {
                     const game::RaycastHit reached =
-                        game::raycast(world, camera.position, camera.forward(), kBlockReach, true);
+                        game::raycast(world, reachFrom, camera.forward(), kBlockReach, true);
                     // A cauldron with water in it fills one too, and does not
                     // empty itself doing so - the reference takes a level, but
                     // ours has no bottle-sized level to take.
@@ -4955,10 +8412,8 @@ int main() {
                     if (fromWater || player.underwater) {
                         if (!creative) {
                             inventory.consumeOne(selectedSlot);
-                            if (inventory.add(game::ItemId::WaterBottle, 1) > 0) {
-                                drops.spawn(camera.position + camera.forward() * 0.6f,
-                                            game::ItemId::WaterBottle, 1, glm::vec3{0.0f});
-                            }
+                            giveOrDrop(game::ItemStack{game::ItemId::WaterBottle, 1},
+                                       camera.position + camera.forward() * 0.6f);
                         }
                         sounds.play(audio, game::SoundEvent::BucketFill,
                                     glm::vec3{reached.hit ? reached.block
@@ -4980,7 +8435,7 @@ int main() {
                      held.item == game::ItemId::MilkBucket)) {
                     const bool filling = held.item == game::ItemId::Bucket;
                     const game::RaycastHit reached =
-                        game::raycast(world, camera.position, camera.forward(), kBlockReach, filling);
+                        game::raycast(world, reachFrom, camera.forward(), kBlockReach, filling);
 
                     bool used = false;
                     game::ItemId became = game::ItemId::Bucket;
@@ -4990,12 +8445,13 @@ int main() {
                         // which is the one thing it is for, and the reason it is
                         // worth carrying beside a potion of harming.
                         player.effects.clear();
+                        sounds.playGlobal(audio, game::SoundEvent::Drink, 0.5f);
                         used = true;
                     } else if (filling) {
                         // A cow first: an empty bucket aimed at one milks it,
                         // and only falls through to the world if it misses.
                         const std::size_t milked =
-                            creatures.findMilkable(camera.position, camera.forward(), kBlockReach);
+                            creatures.findMilkable(reachFrom, camera.forward(), kBlockReach);
                         if (milked != game::Creatures::kNoCreature) {
                             became = game::ItemId::MilkBucket;
                             used = true;
@@ -5023,12 +8479,46 @@ int main() {
                         // a flowing level instead would drain itself the moment
                         // the fluid update ran.
                         const bool lava = held.item == game::ItemId::LavaBucket;
+                        const game::BlockId doused =
+                            world.blockAt(reached.adjacent.x, reached.adjacent.y,
+                                          reached.adjacent.z);
+                        // **Poured is not different from flowed.** A spreading
+                        // flow spills whatever it sweeps aside (see
+                        // `takeWashedBlocks` below); a bucket emptied into the
+                        // same cell wrote straight over it, and `reached.adjacent`
+                        // is `cell + normal`, which for a ray that skimmed over a
+                        // rail, a carpet, a redstone line, tripwire or a snow
+                        // layer and struck the block beyond points **back into**
+                        // the cell holding it. So the one gesture that names a
+                        // cell by hand was the one that deleted its occupant.
+                        //
+                        // The context is the wash path's, for the wash path's
+                        // reason: minecraft.wiki *Cobweb* - "drops one piece of
+                        // string if broken with a non-Silk Touch sword, **if
+                        // water touches or flows over it** ... It drops nothing
+                        // when broken using anything else, or if lava flows over
+                        // it". Water meets that condition and lava does not, so
+                        // water pours a sword-shaped break and lava pours a
+                        // bare-handed one - which is the *whole* difference,
+                        // because the cobweb rows are the only ones that read it.
+                        spillReplaced(reached.adjacent,
+                                      lava ? game::BreakContext{}
+                                           : game::BreakContext{.tool = game::ToolKind::Sword});
                         world.setBlock(reached.adjacent.x, reached.adjacent.y, reached.adjacent.z,
                                        lava ? game::BlockId::Lava0 : game::BlockId::Water0);
                         sounds.play(audio,
                                     lava ? game::SoundEvent::BucketEmptyLava
                                          : game::SoundEvent::BucketEmpty,
                                     glm::vec3{reached.adjacent} + glm::vec3{0.5f}, 0.8f);
+                        // **One of the two met the other**, which is the whole
+                        // of what `Fizz` is for and why it was staged. Asked of
+                        // what *was* there, because the cell has already been
+                        // written by the time anything else could look.
+                        if ((lava && game::isWater(doused)) ||
+                            (!lava && game::isLava(doused))) {
+                            sounds.play(audio, game::SoundEvent::Fizz,
+                                        glm::vec3{reached.adjacent} + glm::vec3{0.5f}, 0.9f);
+                        }
                         used = true;
                     }
 
@@ -5039,9 +8529,13 @@ int main() {
                             game::ItemStack& slot = inventory.slot(selectedSlot);
                             if (slot.count > 1) {
                                 // A stack of empties gives back one full bucket,
-                                // so the swap has to go somewhere else.
+                                // so the swap has to go somewhere else - and if
+                                // there is nowhere, on the floor rather than
+                                // nowhere. Discarding `add`'s return here poured
+                                // a lake and destroyed the bucket that did it.
                                 --slot.count;
-                                inventory.add(became, 1);
+                                giveOrDrop(game::ItemStack{became, 1},
+                                           camera.position + camera.forward() * 0.5f);
                             } else {
                                 slot = game::ItemStack{became, 1};
                             }
@@ -5081,8 +8575,16 @@ int main() {
                         const game::BlockId inCell =
                             world.blockAt(lightCell.x, lightCell.y, lightCell.z);
                         if (!game::playerOverlapsBlock(player, lightCell) &&
-                            (inCell == game::BlockId::Air || game::isWashedAway(inCell)) &&
+                            cellIsFree(inCell) &&
                             world.fireCanSurvive(lightCell.x, lightCell.y, lightCell.z)) {
+                            // **`cellIsFree` says the cell may be built into, not
+                            // that it is empty.** Tall grass, a fern, a dead
+                            // bush and a one-deep snow layer all pass it and all
+                            // owe something - seeds, a stick, a snowball - so
+                            // striking a fire in a snow layer used to delete the
+                            // snowball. Same rule as a placement: a write into
+                            // an occupied cell is a break.
+                            spillReplaced(lightCell);
                             world.setBlock(lightCell.x, lightCell.y, lightCell.z,
                                            game::BlockId::Fire);
                             sounds.play(audio, game::SoundEvent::Ignite,
@@ -5120,7 +8622,11 @@ int main() {
                         game::ItemStack& slot = inventory.slot(selectedSlot);
                         if (slot.count > 1) {
                             --slot.count;
-                            inventory.add(became, 1);
+                            // The remainder goes on the floor rather than
+                            // nowhere: this is the same discarded `add` return
+                            // the bucket path above carried.
+                            giveOrDrop(game::ItemStack{became, 1},
+                                       glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f});
                         } else {
                             slot = game::ItemStack{became, 1};
                         }
@@ -5179,7 +8685,19 @@ int main() {
                         placeTimer = kPlaceRepeatSeconds;
                     } else if (hasBook) {
                         game::ItemStack& shelf = shelved->second.slots[0];
-                        inventory.add(shelf.item, shelf.count);
+                        // Whole stack, `damage` and all - the same rule the
+                        // screen give-back keeps. **And the remainder goes on
+                        // the floor rather than nowhere**: `add` returns what
+                        // did not fit, and discarding that return deleted the
+                        // book outright when the inventory was full. This was
+                        // the last path that parted a player from an
+                        // `ItemStack` without going through `dropStack`.
+                        const int left = inventory.add(shelf.item, shelf.count, shelf.damage);
+                        if (left > 0) {
+                            game::dropStack(drops,
+                                            glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f},
+                                            shelf, left);
+                        }
                         shelf = game::ItemStack{};
                         sounds.play(audio, game::SoundEvent::WoodClick,
                                     glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
@@ -5199,8 +8717,11 @@ int main() {
                     const int level = game::composterLevel(tub);
                     if (level >= game::farming::kComposterReady) {
                         // Level eight is *ready*, not merely full: taking from
-                        // it yields exactly one bone meal and empties it.
-                        inventory.add(game::ItemId::BoneMeal, 1);
+                        // it yields exactly one bone meal and empties it. On
+                        // the floor rather than nowhere when the bag is full -
+                        // this used to discard `add`'s return and destroy it.
+                        giveOrDrop(game::ItemStack{game::ItemId::BoneMeal, 1},
+                                   glm::vec3{target.block} + glm::vec3{0.5f, 1.1f, 0.5f});
                         world.setBlock(target.block.x, target.block.y, target.block.z,
                                        game::composterAt(0));
                         sounds.play(audio, game::SoundEvent::DigGrass,
@@ -5234,44 +8755,24 @@ int main() {
                     bool consumed = false;
 
                     // Working soil wears a tool exactly as breaking a block
-                    // does, so this is the break path's own rule rather than a
-                    // second copy of it that could drift.
-                    const auto wearHeldTool = [&] {
-                        if (creative) {
-                            return;
-                        }
-                        const game::ToolProperties properties = game::toolFor(used);
-                        if (properties.durability <= 0) {
-                            return;
-                        }
-                        game::ItemStack& slot = inventory.slot(selectedSlot);
-                        if (++slot.damage >= properties.durability) {
-                            slot = game::ItemStack{};
-                        }
-                        hudDirty = true;
-                    };
+                    // does. This *said* it was the break path's own rule and
+                    // was in fact a second copy of it, six lines long, missing
+                    // the snap sound - so it now forwards to the one owner and
+                    // stays only as the shorthand its four callers already use.
+                    const auto wearHeldTool = [&] { wearTool(used, 1); };
 
-                    if (used == game::ItemId::GlassBottle && target.hit) {
-                        // A bottle fills from any water, source or flowing -
-                        // unlike a bucket, which needs a source.
-                        const game::RaycastHit wet = game::raycast(
-                            world, camera.position, camera.forward(), kBlockReach, true);
-                        if (wet.hit &&
-                            game::isWater(world.blockAt(wet.block.x, wet.block.y, wet.block.z))) {
-                            if (!creative) {
-                                game::ItemStack& slot = inventory.slot(selectedSlot);
-                                if (slot.count > 1) {
-                                    --slot.count;
-                                    inventory.add(game::ItemId::WaterBottle, 1);
-                                } else {
-                                    slot = game::ItemStack{game::ItemId::WaterBottle, 1};
-                                }
-                                hudDirty = true;
-                            }
-                            placeTimer = kPlaceRepeatSeconds;
-                        }
-                    } else if ((used == game::ItemId::VoidPearl && pearlCooldown <= 0.0f) ||
-                               used == game::ItemId::Egg || game::isThrownPotion(used)) {
+                    // **A second glass-bottle fill used to stand here** and it
+                    // disagreed with the one above in three ways: it took any
+                    // water rather than a source, it made no sound, and it
+                    // discarded `add`'s return so a full bag destroyed the
+                    // bottle. It was reachable, too - the branch above declines
+                    // flowing water, which is exactly what left this one to
+                    // answer. The reference fills a bottle from a **water
+                    // source block or a water-filled cauldron only**
+                    // (https://minecraft.wiki/w/Water_bottle), so the branch
+                    // above is both the correct rule and the only one now.
+                    if ((used == game::ItemId::VoidPearl && pearlCooldown <= 0.0f) ||
+                        used == game::ItemId::Egg || game::isThrownPotion(used)) {
                         // A thrown entity that arcs, rather than a look-ray
                         // that dropped you where you were already aiming. Same
                         // anchor as the bow: spawning at the eye itself puts it
@@ -5281,17 +8782,39 @@ int main() {
                             : game::isSplashPotion(used)       ? game::ProjectileKind::SplashPotion
                             : game::isLingeringPotion(used)    ? game::ProjectileKind::LingeringPotion
                                                                : game::ProjectileKind::Pearl;
-                        const glm::vec3 from = camera.position - glm::vec3{0.0f, 0.1f, 0.0f};
-                        glm::vec3 launch = camera.forward() * game::projectileInfo(kind).power;
+                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, 0.1f, 0.0f};
+                        // A potion is lobbed, not thrown flat: `splash_potion.json`
+                        // and `lingering_potion.json` publish `angle_offset: -20.0`
+                        // while `egg.json` and `ender_pearl.json` publish `0.0`, so
+                        // the lift is exactly the `isThrownPotion` pair. Measured
+                        // from an eye at 1.52 with a level aim, a throw carried 4.04
+                        // blocks before and 5.54 after. See `liftedThrowAim` for the
+                        // source and for the rotation rule that was rejected.
+                        //
+                        // **Before the momentum term below, deliberately** - the lift
+                        // belongs to the aim. The bow's launch is built the same way:
+                        // aim times power first, the shooter's momentum after it.
+                        const glm::vec3 aim = game::isThrownPotion(used)
+                                                  ? liftedThrowAim(camera.forward(), -20.0f)
+                                                  : camera.forward();
+                        glm::vec3 launch = aim * game::projectileInfo(kind).power;
                         // Blocks per tick, and only the vertical part while
                         // airborne - the same rule the bow uses, for the same
                         // reason: running along the ground must not lift a throw.
-                        launch += player.velocity * (1.0f / 20.0f) *
+                        launch += player.velocity * game::tick::kSeconds *
                                   glm::vec3{1.0f, player.onGround ? 0.0f : 1.0f, 1.0f};
                         // The brew rides on the shot, because forty-one of them
-                        // share two projectile kinds.
+                        // share two projectile kinds. So does the owner: none of
+                        // these four carries impact damage today, so none of
+                        // them reaches the creature test at all - but they leave
+                        // the player's eye exactly as the arrow does, and an
+                        // unnamed owner is what exempts the *whole* roster for
+                        // the launch window rather than only the thrower. Naming
+                        // it costs nothing now and is already right the day one
+                        // of them is given a damage figure.
                         projectiles.spawn(kind, from, launch, false, false,
-                                          game::isThrownPotion(used) ? used : game::ItemId::None);
+                                          game::isThrownPotion(used) ? used : game::ItemId::None,
+                                          game::Projectiles::kPlayerOwner);
                         if (kind == game::ProjectileKind::Pearl) {
                             pearlCooldown = kPearlCooldownSeconds;
                         }
@@ -5307,23 +8830,115 @@ int main() {
                     } else if (game::toolFor(used).kind == game::ToolKind::Axe && target.hit) {
                         const game::BlockId bark =
                             world.blockAt(target.block.x, target.block.y, target.block.z);
-                        const game::BlockId stripped = game::strippedFor(bark);
-                        if (stripped != bark) {
-                            world.setBlock(target.block.x, target.block.y, target.block.z, stripped);
+                        /// **An axe works a block three ways and only one of
+                        /// them was here.** Stripping was wired up; the other
+                        /// two are what makes copper weathering reversible, and
+                        /// without them `Copper.hpp` shipped a `scraped()` and
+                        /// an `unwaxedForm()` that were written, asserted and
+                        /// called by nothing at all - so oxidation was one-way
+                        /// and a waxed block could never be unwaxed. Wiring a
+                        /// table up is not a detail: a feature one call site
+                        /// short of reachable builds clean, validates clean and
+                        /// does nothing.
+                        ///
+                        /// **Wax first, then a layer**, which is the reference's
+                        /// own wording: an axe "removes the wax if it has any,
+                        /// or otherwise removes a level of oxidization"
+                        /// (https://minecraft.wiki/w/Copper_Axe). Removing wax
+                        /// leaves the stage alone, so a waxed weathered block
+                        /// becomes a bare weathered block rather than jumping a
+                        /// stage. The two are exclusive anyway - `scraped`
+                        /// answers `Air` for anything waxed - so the order is
+                        /// the reference's rule stated rather than relied on.
+                        ///
+                        /// One durability per action, exactly as stripping
+                        /// costs one, and the same for every axe tier.
+                        const auto workWithAxe = [&](game::BlockId into) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z, into);
+                            // **The one world-working branch in this chain that
+                            // made no sound at all**, which reads as an input
+                            // that half-registered - the hoe, the shovel and the
+                            // planting branches each play one right beside their
+                            // own `setBlock`. Bedrock's strip action is the wood
+                            // use sound
+                            // (https://minecraft.wiki/w/Template:Sound_table/Block/Wood/BE),
+                            // and this asks the material table for it rather
+                            // than naming a recording, so a stripped log that
+                            // ever changes material takes its sound with it -
+                            // and copper, which has no scrape recording here,
+                            // gets its own material's answer for free.
+                            const game::SoundEvent worked =
+                                game::digSoundFor(game::soundMaterialFor(into));
+                            if (worked != game::SoundEvent::Count) {
+                                sounds.play(audio, worked,
+                                            glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                            }
+                            // **Working a block wears the axe.** Stripping was
+                            // the one world-working branch in this chain that
+                            // did not - the hoe, the shovel and the shears all
+                            // do - so an axe used only for stripping never wore
+                            // out at all.
+                            wearHeldTool();
                             placeTimer = kPlaceRepeatSeconds;
+                        };
+                        if (const game::BlockId stripped = game::strippedFor(bark);
+                            stripped != bark) {
+                            workWithAxe(stripped);
+                        } else if (const game::BlockId unwaxed = game::copper::unwaxedForm(bark);
+                                   unwaxed != game::BlockId::Air) {
+                            workWithAxe(unwaxed);
+                        } else if (const game::BlockId scrapedBack = game::copper::scraped(bark);
+                                   scrapedBack != game::BlockId::Air) {
+                            workWithAxe(scrapedBack);
+                        }
+                    } else if (used == game::ItemId::Honeycomb && target.hit) {
+                        // The other half of the same feature, and the only thing
+                        // honeycomb does to a block. `waxedForm` answers `Air`
+                        // for anything already waxed and for every copper shape
+                        // whose waxed id this project does not have yet - the
+                        // bulbs, the cut stairs and slabs - so a player waxing
+                        // one of those gets nothing rather than a wrong block,
+                        // and keeps the honeycomb.
+                        const game::BlockId bare =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        if (const game::BlockId waxed = game::copper::waxedForm(bare);
+                            waxed != game::BlockId::Air) {
+                            world.setBlock(target.block.x, target.block.y, target.block.z, waxed);
+                            const game::SoundEvent waxOn =
+                                game::digSoundFor(game::soundMaterialFor(waxed));
+                            if (waxOn != game::SoundEvent::Count) {
+                                sounds.play(audio, waxOn,
+                                            glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
+                            }
+                            // The honeycomb goes, and no tool wears: it is not
+                            // one. `consumed` is the chain's own owner of both
+                            // halves of that, creative included.
+                            consumed = true;
                         }
                     } else if (game::toolFor(used).kind == game::ToolKind::Hoe && target.hit) {
                         // Tilling. Only the **top** face may be worked and only
                         // with air above it, which is the reference's rule and
                         // the reason you cannot hoe the underside of an
                         // overhang into a field.
+                        //
+                        // **Air, and nothing else, which is what the line above
+                        // has always claimed.** This used to also accept
+                        // anything `isWashedAway` - and it is the one of these
+                        // sites where neither that predicate nor
+                        // `isReplaceable` is the right answer, because nothing
+                        // is being *placed* here. The cell above is not
+                        // consumed, so whatever stands in it is left hovering
+                        // over the new farmland: before today that was a torch
+                        // or a tuft of grass, after the widening it was a rail
+                        // line. Refusing is both the reference's behaviour and
+                        // the only one with no wrong-looking result - break the
+                        // grass first, exactly as you would there.
                         const game::BlockId soil =
                             world.blockAt(target.block.x, target.block.y, target.block.z);
                         const game::BlockId tilled = game::farming::tilledFrom(soil);
                         const game::BlockId above = world.blockAt(
                             target.block.x, target.block.y + 1, target.block.z);
-                        if (tilled != soil && (above == game::BlockId::Air ||
-                                               game::isWashedAway(above))) {
+                        if (tilled != soil && above == game::BlockId::Air) {
                             world.setBlock(target.block.x, target.block.y, target.block.z, tilled);
                             sounds.play(audio, game::SoundEvent::DigGravel,
                                         glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
@@ -5331,13 +8946,15 @@ int main() {
                             placeTimer = kPlaceRepeatSeconds;
                         }
                     } else if (game::toolFor(used).kind == game::ToolKind::Shovel && target.hit) {
+                        // The same rule as the hoe above, and the same reason:
+                        // the path replaces the *soil*, not the cell over it, so
+                        // anything standing there would be left hovering.
                         const game::BlockId soil =
                             world.blockAt(target.block.x, target.block.y, target.block.z);
                         const game::BlockId path = game::farming::pathFrom(soil);
                         const game::BlockId above = world.blockAt(
                             target.block.x, target.block.y + 1, target.block.z);
-                        if (path != soil && (above == game::BlockId::Air ||
-                                             game::isWashedAway(above))) {
+                        if (path != soil && above == game::BlockId::Air) {
                             world.setBlock(target.block.x, target.block.y, target.block.z, path);
                             sounds.play(audio, game::SoundEvent::DigGravel,
                                         glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
@@ -5352,8 +8969,13 @@ int main() {
                             world.blockAt(target.block.x, target.block.y, target.block.z);
                         const glm::ivec3 cell = target.block + glm::ivec3{0, 1, 0};
                         const game::BlockId inCell = world.blockAt(cell.x, cell.y, cell.z);
-                        if (game::farming::canSowOn(used, ground) &&
-                            (inCell == game::BlockId::Air || game::isWashedAway(inCell))) {
+                        if (game::farming::canSowOn(used, ground) && cellIsFree(inCell)) {
+                            // Sowing over ground cover is a break too - the same
+                            // three lines the fire branch above needed, and for
+                            // the same reason: `cellIsFree` admits tall grass, a
+                            // fern, a dead bush and one-deep snow, every one of
+                            // which owes an item.
+                            spillReplaced(cell);
                             world.setBlock(cell.x, cell.y, cell.z,
                                            game::farming::cropForSeed(used));
                             sounds.play(audio, game::SoundEvent::DigGrass,
@@ -5365,8 +8987,8 @@ int main() {
                             world.blockAt(target.block.x, target.block.y, target.block.z);
                         const glm::ivec3 cell = target.block + glm::ivec3{0, 1, 0};
                         const game::BlockId inCell = world.blockAt(cell.x, cell.y, cell.z);
-                        if (game::farming::canSowOn(used, ground) &&
-                            (inCell == game::BlockId::Air || game::isWashedAway(inCell))) {
+                        if (game::farming::canSowOn(used, ground) && cellIsFree(inCell)) {
+                            spillReplaced(cell);
                             world.setBlock(cell.x, cell.y, cell.z, game::BlockId::NetherWart0);
                             sounds.play(audio, game::SoundEvent::DigGrass,
                                         glm::vec3{cell} + glm::vec3{0.5f}, 0.6f);
@@ -5392,8 +9014,149 @@ int main() {
                                        static_cast<game::BlockId>(
                                            static_cast<int>(game::BlockId::CarvedPumpkinFirst) +
                                            static_cast<int>(facing)));
-                        drops.spawn(glm::vec3{target.block} + glm::vec3{0.5f, 1.0f, 0.5f},
-                                    game::ItemId::PumpkinSeeds, 1);
+                        // **One seed, not four.** Bedrock yields a single
+                        // pumpkin seed from a carve; four is Java's number
+                        // (https://minecraft.wiki/w/Pumpkin_Seeds), and the
+                        // reference for this project is Bedrock. Do not
+                        // "correct" this to 4.
+                        //
+                        // Through `dropStack` rather than `drops.spawn`, which
+                        // is what it was: `spawn` takes `damage` last and
+                        // defaulted, and `ItemEntity.hpp` says in as many words
+                        // to prefer `dropStack` for anything that is a stack.
+                        // A seed carries no wear so nothing was lost here - but
+                        // this is the branch the honeycomb one below was copied
+                        // from, and a template that quietly drops `damage` is
+                        // how the other eleven sites happened.
+                        game::dropStack(drops, glm::vec3{target.block} + glm::vec3{0.5f, 1.0f, 0.5f},
+                                        game::ItemStack{game::ItemId::PumpkinSeeds, 1});
+                        sounds.play(audio, game::SoundEvent::DigGrass,
+                                    glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
+                        wearHeldTool();
+                        placeTimer = kPlaceRepeatSeconds;
+                    } else if (target.hit && used == game::ItemId::Shears &&
+                               game::beehiveHasHoney(world.blockAt(target.block.x, target.block.y,
+                                                                   target.block.z))) {
+                        // **The only source of honeycomb in the game**, and
+                        // without it twenty-eight recipes downstream of it were
+                        // unreachable - the item existed, the recipes existed,
+                        // and nothing could ever put one in your hand.
+                        //
+                        // **Three, every time**, not a roll: Bedrock's shear of
+                        // a full hive or nest yields exactly 3
+                        // (https://minecraft.wiki/w/Honeycomb).
+                        const game::BlockId hive =
+                            world.blockAt(target.block.x, target.block.y, target.block.z);
+                        // The hive empties and **keeps two things about
+                        // itself, not one**: which way it faces, and whether it
+                        // was found or made.
+                        //
+                        // The facing half was always here - assigning a bare
+                        // `BlockId::Beehive` would spin every sheared hive
+                        // round to face north. **The kind half was missing
+                        // until 2026-08-19 and is finding 9618**: this read
+                        // `beehiveAt(beehiveFacing(hive), false)`, and a bare
+                        // `FaceDirection` carries no record of which half of
+                        // the family it came from, so shearing a natural nest
+                        // rebuilt it out of the crafted run. Same facing, same
+                        // look at a glance, but `isBeeNest` was now false, so
+                        // it dropped a Beehive item when mined instead of
+                        // nothing and the world had quietly lost the fact that
+                        // it was found rather than built.
+                        //
+                        // `beeHomeAtLevel` is the one owner of that choice, and
+                        // `Block.hpp` keeps the old call beside it as
+                        // `beeHomeAtLevelForgettingKind` under a `static_assert`
+                        // that **rejects** it - so the codebase already knew
+                        // this was wrong before anyone sheared a nest.
+                        //
+                        // **Crafted hives are bit-identical across this change**
+                        // - `beeHomeAtLevel(hive, 0)` on a non-nest is exactly
+                        // `beehiveAtLevel(beehiveFacing(hive), 0)`, which is
+                        // what `beehiveAt(..., false)` expanded to. Only the
+                        // nest arm moves, which is what makes it safe.
+                        world.setBlock(target.block.x, target.block.y, target.block.z,
+                                       game::beeHomeAtLevel(hive, 0));
+                        game::dropStack(drops, glm::vec3{target.block} + glm::vec3{0.5f, 1.0f, 0.5f},
+                                        game::ItemStack{game::ItemId::Honeycomb, 3});
+                        // **And now the bees answer for it**, which is the whole
+                        // reason a honey farm is built around a campfire rather
+                        // than being a hole in the ground with a hive in it.
+                        //
+                        // Bedrock's rule, quoted rather than remembered:
+                        // harvesting angers them "unless there is a fire
+                        // directly beneath it or a lit campfire within five
+                        // blocks below, and the smoke is not obstructed"
+                        // (https://minecraft.wiki/w/Beehive). **Bedrock is the
+                        // strict reading of that last clause** - Java lets smoke
+                        // through one solid block and through a carpet, Bedrock
+                        // counts a carpet as an obstruction - so the column has
+                        // to be genuinely empty, and a hive sitting flat on the
+                        // ground never qualifies. That is not us being harsh: it
+                        // is why the reference's own advice is to sink the
+                        // campfire into a hole beneath the hive.
+                        //
+                        // **Every campfire in this game is lit**, so the "lit"
+                        // half is free rather than skipped - there is one
+                        // `BlockId::Campfire`, it returns `kMaxLight`, and
+                        // nothing can put one out. If an unlit state is ever
+                        // added, this is a caller that has to hear about it.
+                        constexpr int kCampfireSmokeReach = 5;
+                        const auto smokeReachesHive = [&] {
+                            for (int drop = 1; drop <= kCampfireSmokeReach; ++drop) {
+                                const game::BlockId under = world.blockAt(
+                                    target.block.x, target.block.y - drop, target.block.z);
+                                if (under == game::BlockId::Campfire ||
+                                    under == game::BlockId::SoulCampfire) {
+                                    return true;
+                                }
+                                // Fire counts **only directly beneath**, which is
+                                // the reference's wording and not a shortcut; it
+                                // is tested before the obstruction rule because
+                                // fire is not air and would otherwise stop the
+                                // scan one block short of saying yes.
+                                if (drop == 1 && under == game::BlockId::Fire) {
+                                    return true;
+                                }
+                                if (under != game::BlockId::Air) {
+                                    return false;
+                                }
+                            }
+                            return false;
+                        };
+                        if (!smokeReachesHive()) {
+                            // **The radius is the bee's own `alertRange`, read
+                            // off the species row rather than typed here.** That
+                            // field's comment is "how far striking one rouses its
+                            // own kind", which is this exact question, and the
+                            // bee's 20 is generous on purpose. Naming a distance
+                            // at this call site would make it a second owner of a
+                            // number the table already holds - and the two would
+                            // then be free to disagree, which is how a rule ends
+                            // up correct in only one of the places that need it.
+                            //
+                            // The reference angers the bees *inside* the hive,
+                            // and a hive here stores a facing and a honey flag
+                            // and no occupants at all, so "the bees around it" is
+                            // the nearest thing that can be asked. `threatId`
+                            // defaults to the player, which is who sheared it.
+                            creatures.provokeNear(
+                                glm::vec3{target.block} + glm::vec3{0.5f},
+                                game::speciesInfo(game::CreatureKind::Bee).alertRange,
+                                game::CreatureKind::Bee);
+                        }
+                        // **Breaking a hive still angers nobody**, and that one
+                        // stays a gap rather than becoming a second copy of the
+                        // rule above: the reference spares you only with Silk
+                        // Touch, there are no enchantments in this tree, so the
+                        // honest choice is either "every hive you mine stings
+                        // you" or nothing. It belongs with enchantments.
+
+                        // No shear recording exists, and inventing a
+                        // `SoundEvent` belongs to `Sounds.hpp`'s owner. The
+                        // carve above uses `DigGrass` for the same tool on the
+                        // same kind of material, so this matches it rather than
+                        // being silent.
                         sounds.play(audio, game::SoundEvent::DigGrass,
                                     glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
                         wearHeldTool();
@@ -5463,6 +9226,108 @@ int main() {
                         sounds.play(audio, game::SoundEvent::DigCloth,
                                     glm::vec3{target.block} + glm::vec3{0.5f}, 0.7f);
                         placeTimer = kPlaceRepeatSeconds;
+                    } else if (game::isLever(hit) || game::isButton(hit) ||
+                               game::isRepeater(hit) || game::isComparator(hit) ||
+                               game::isDaylightDetector(hit) || game::isNoteBlock(hit)) {
+                        // ---- The hand toggles. ----
+                        //
+                        // `DECISIONS.md`, *No redstone signal engine*: the
+                        // forty-one components place, break, craft, drop, get
+                        // measured against their own reference models **and
+                        // toggle by hand**. That last clause was the one thing
+                        // never built - every construction site in the placement
+                        // branch above passes the off state and nothing ever
+                        // wrote the other one, so a lever could be put down and
+                        // never thrown. Worse than inert: with a block in hand
+                        // the click fell through to the placement branch and
+                        // built a cobblestone against your own lever.
+                        //
+                        // **None of these carries a signal anywhere**, and that
+                        // is the decision rather than a gap. What a component
+                        // owes by hand is its own state and its own sound, and
+                        // that is the whole of what is here.
+                        //
+                        // Beside the door, the trapdoor and the bed because they
+                        // are the same gesture on the same timer - the comment
+                        // at the head of this block is the reason, and it did
+                        // not travel any further than those three.
+                        const glm::vec3 centre = glm::vec3{target.block} + glm::vec3{0.5f};
+                        if (game::isLever(hit)) {
+                            // https://minecraft.wiki/w/Lever - a lever flips and
+                            // stays where it was put.
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::leverAt(game::leverMount(hit),
+                                                         !game::leverOn(hit)));
+                            sounds.play(audio, game::SoundEvent::Click, centre, 0.6f);
+                        } else if (game::isButton(hit)) {
+                            // A button springs back on its own, which is why it
+                            // is the one toggle that has to be remembered.
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::buttonAt(game::buttonFamily(hit),
+                                                          game::buttonMount(hit), true));
+                            // **Refresh the entry rather than adding a second
+                            // one.** Two entries for one cell means the older
+                            // one expires first and pops a button that was just
+                            // pressed, so re-pressing shortened the hold instead
+                            // of renewing it.
+                            const float holdSeconds = buttonHeldSeconds(game::buttonFamily(hit));
+                            const auto pressed =
+                                std::find_if(heldButtons.begin(), heldButtons.end(),
+                                             [&](const std::pair<glm::ivec3, float>& entry) {
+                                                 return entry.first == target.block;
+                                             });
+                            if (pressed != heldButtons.end()) {
+                                pressed->second = holdSeconds;
+                            } else {
+                                heldButtons.emplace_back(target.block, holdSeconds);
+                            }
+                            sounds.play(audio, game::SoundEvent::WoodClick, centre, 0.6f);
+                        } else if (game::isRepeater(hit)) {
+                            // Four steps, wrapping - one to four ticks of delay
+                            // (https://minecraft.wiki/w/Redstone_Repeater).
+                            // `repeaterDelay` hands back what the block shows,
+                            // so the wrap is on that and not on the stored value.
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::repeaterAt(game::repeaterFacing(hit),
+                                                            game::repeaterDelay(hit) % 4 + 1,
+                                                            game::repeaterPowered(hit),
+                                                            game::repeaterLocked(hit)));
+                            sounds.play(audio, game::SoundEvent::WoodClick, centre, 0.5f);
+                        } else if (game::isComparator(hit)) {
+                            // Compare against subtract
+                            // (https://minecraft.wiki/w/Redstone_Comparator).
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::comparatorAt(game::comparatorFacing(hit),
+                                                              game::comparatorPowered(hit),
+                                                              !game::comparatorSubtracts(hit)));
+                            sounds.play(audio, game::SoundEvent::WoodClick, centre, 0.5f);
+                        } else if (game::isDaylightDetector(hit)) {
+                            // Day against night
+                            // (https://minecraft.wiki/w/Daylight_Detector). The
+                            // signal it is showing is left alone - inverting is
+                            // a change of question, and whatever reads the sky
+                            // answers it again on its own.
+                            world.setBlock(
+                                target.block.x, target.block.y, target.block.z,
+                                game::daylightDetectorAt(game::daylightDetectorSignal(hit),
+                                                         !game::daylightDetectorInverted(hit)));
+                            sounds.play(audio, game::SoundEvent::WoodClick, centre, 0.5f);
+                        } else {
+                            // One semitone up and it sounds, wrapping after
+                            // twenty-five (https://minecraft.wiki/w/Note_Block).
+                            // The pitch is the reference's own formula - two to
+                            // the semitone over twelve, centred on the middle of
+                            // the range - rather than a ramp picked to sound
+                            // about right, so the two octaves land on real
+                            // intervals.
+                            const int tuned = game::noteBlockPitch(hit) + 1;
+                            world.setBlock(target.block.x, target.block.y, target.block.z,
+                                           game::noteBlockAt(tuned));
+                            const int semitone = game::noteBlockPitch(game::noteBlockAt(tuned));
+                            sounds.play(audio, game::SoundEvent::Orb, centre, 0.8f,
+                                        std::pow(2.0f, static_cast<float>(semitone - 12) / 12.0f));
+                        }
+                        placeTimer = kPlaceRepeatSeconds;
                     }
                 }
 
@@ -5495,7 +9360,7 @@ int main() {
                 // and it lands in the cell above rather than in it.
                 const bool floating = canPlace && game::restsOnWater(game::blockForItem(held.item));
                 const game::RaycastHit placeTarget =
-                    floating ? game::raycast(world, camera.position, camera.forward(), kBlockReach, true)
+                    floating ? game::raycast(world, reachFrom, camera.forward(), kBlockReach, true)
                              : target;
                 const game::BlockId aimedAt =
                     placeTarget.hit ? world.blockAt(placeTarget.block.x, placeTarget.block.y,
@@ -5508,8 +9373,7 @@ int main() {
                     floating && game::isWater(aimedAt)
                         ? placeTarget.block + glm::ivec3{0, 1, 0}
                         : (game::isReplaceable(aimedAt) ? placeTarget.block : placeTarget.adjacent);
-                if (placeTimer <= 0.0f && canPlace && placeTarget.hit &&
-                    !game::playerOverlapsBlock(player, placeCell)) {
+                if (placeTimer <= 0.0f && canPlace && placeTarget.hit && !cellIsOccupied(placeCell)) {
                     game::BlockId placing = game::blockForItem(held.item);
                     glm::ivec3 where = placeCell;
 
@@ -5520,10 +9384,16 @@ int main() {
                     // as separate halves they stack as slab, gap, slab, which is
                     // never what anyone is trying to build. **Both halves have
                     // to be the same material**, or a spruce slab dropped on a
-                    // stone one silently produced a block of stone.
+                    // stone one silently produced a block of stone - **and the
+                    // material has to survive the round trip**, which is what
+                    // `slabMergeReturnsItsMaterial` is for: a stone pair merged
+                    // to `Stone` and mined back as one cobblestone, so those two
+                    // ids of the hundred and ten decline the merge rather than
+                    // eating the slabs.
                     const bool completesSlab =
                         game::isSlab(placing) && game::isSlab(aimedAt) &&
                         game::slabFamily(placing) == game::slabFamily(aimedAt) &&
+                        slabMergeReturnsItsMaterial(game::slabFamily(placing)) &&
                         (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
 
                     if (completesSlab) {
@@ -5604,10 +9474,31 @@ int main() {
                         } else if (game::isDispenserLike(placing)) {
                             placing = game::dispenserAt(aimedFacing, game::isDropper(placing));
                         } else if (game::isLightningRod(placing)) {
+                            // **A rod points AWAY from whatever holds it** -
+                            // finding 775. These two arms were inverted, so a
+                            // rod set on the ground pointed down into the floor
+                            // and one under a ceiling pointed up into it.
+                            //
+                            // The sign is not guessable and is worth stating
+                            // once: `into.y > 0` means the clicked block is
+                            // ABOVE the new cell, i.e. this is stuck to a
+                            // CEILING. Three things in this same block agree -
+                            // `into`'s own comment above ("down for a floor, up
+                            // for a ceiling"), the redstone torch, which refuses
+                            // that case because "a ceiling gives it nothing to
+                            // hold on to", and the lever, whose enumerators on
+                            // that arm are literally named `LeverCeiling*`.
+                            // So a ceiling hangs the rod DOWN and a floor stands
+                            // it UP.
+                            //
+                            // The horizontal arm was always right and is
+                            // untouched: `wall` is read off `into` and therefore
+                            // points AT the support, so `oppositeDirection`
+                            // already points away from it.
                             placing = game::lightningRodAt(
-                                into.y > 0 ? game::Facing6Up
+                                into.y > 0 ? game::Facing6Down
                                 : into.y < 0
-                                    ? game::Facing6Down
+                                    ? game::Facing6Up
                                     : game::directionAsFacing6(game::oppositeDirection(wall)),
                                 false);
                         } else if (game::isTripwireHook(placing)) {
@@ -5616,12 +9507,24 @@ int main() {
                                           : game::tripwireHookAt(
                                                 game::oppositeDirection(wall), false, false);
                         } else if (game::isRail(placing)) {
-                            // Flat, running the way the player is facing. The
-                            // reference derives the shape from its neighbours
-                            // and re-derives it whenever one changes; ours is a
-                            // named divergence and lays straight track.
-                            const bool alongX = std::abs(aim.x) > std::abs(aim.z);
-                            placing = game::railAt(game::railFamily(placing), alongX ? 1 : 0, false);
+                            // **Seeded flat north-south and then solved**, which
+                            // is the reference's rule in both halves.
+                            //
+                            // The seed is the edition difference and it was
+                            // backwards: an isolated rail is laid north-south in
+                            // Bedrock and *the way the player is facing* in Java
+                            // (https://minecraft.wiki/w/Rail), and Bedrock is
+                            // this project's reference. Facing decided the whole
+                            // shape here, which is why the divergence comment
+                            // this replaces was true - the shape was never
+                            // derived at all, so twenty of the thirty rail ids
+                            // could not be built.
+                            //
+                            // `solveRailShape` keeps this seed only when nothing
+                            // is adjacent; every other case is derived from the
+                            // neighbours after the write, by `refreshRailsAround`
+                            // below.
+                            placing = game::railAt(game::railFamily(placing), 0, false);
                         }
                     } else if (game::isSignLike(placing)) {
                         // A sign clicked onto a wall hangs off it and shows its
@@ -5680,7 +9583,14 @@ int main() {
                             game::facingToward(camera.forward().x, camera.forward().z);
                         const glm::ivec3 upper = placeCell + glm::ivec3{0, 1, 0};
                         const game::BlockId above = world.blockAt(upper.x, upper.y, upper.z);
-                        if (!game::isReplaceable(above)) {
+                        // **The second cell is asked the same two questions the
+                        // first one was.** It was only ever asked whether it was
+                        // replaceable, so a door hung while you stood in the cell
+                        // above put its upper half through your head - and the
+                        // guard on `placeCell` that would have caught it is one
+                        // line up, which is exactly the shape that keeps costing
+                        // this project time.
+                        if (!game::isReplaceable(above) || cellIsOccupied(upper)) {
                             placing = game::BlockId::Air;
                         } else {
                             const game::FaceDirection hingeSide = game::quarterTurn(front);
@@ -5694,6 +9604,11 @@ int main() {
                             const bool hingeRight = !game::isReplaceable(beside);
                             const int family = game::doorFamily(placing);
                             placing = game::doorAt(family, front, hingeRight, false, false);
+                            // The second cell is replaced too, and a replacement
+                            // is a break wherever it happens - a door hung over
+                            // a candle stack or a wheat crop deleted it exactly
+                            // as the cell below did.
+                            spillReplaced(upper);
                             world.setBlock(upper.x, upper.y, upper.z,
                                            game::doorAt(family, front, hingeRight, false, true));
                         }
@@ -5732,25 +9647,147 @@ int main() {
                         const glm::ivec3 headCell = placeCell + step;
                         const game::BlockId atHead =
                             world.blockAt(headCell.x, headCell.y, headCell.z);
+                        // **Both halves need a floor, and only the head was
+                        // ever asked.** The foot is the cell you actually
+                        // clicked, so it is the one most likely to be put over
+                        // nothing: standing at a cliff edge facing inland placed
+                        // a bed with its foot hanging in the air, and nothing
+                        // afterwards could ever notice, because
+                        // `needsSupportBelow` answers false for a bed and so the
+                        // generic support gate below never runs on one. The
+                        // reference refuses that placement - a bed wants a full
+                        // solid block under each half - and this is a rule that
+                        // was written once, correctly, and did not travel to the
+                        // second cell that needs it.
+                        //
+                        // Support is asked *here* for the same reason the tall
+                        // flower below asks it here: this branch writes the
+                        // second cell itself, so a bed refused later would
+                        // already have left half of itself in the world.
                         const game::BlockId underHead =
                             world.blockAt(headCell.x, headCell.y - 1, headCell.z);
-                        if (!game::isReplaceable(atHead) || !game::isSolid(underHead)) {
+                        const game::BlockId underFoot =
+                            world.blockAt(placeCell.x, placeCell.y - 1, placeCell.z);
+                        if (!game::isReplaceable(atHead) || !game::isSolid(underHead) ||
+                            !game::isSolid(underFoot) || cellIsOccupied(headCell)) {
                             placing = game::BlockId::Air;
                         } else {
                             const int colour = game::bedColour(placing);
                             placing = game::bedAt(colour, away, false);
+                            // Same rule as the door's upper half: the head cell
+                            // passed `isReplaceable` and nothing asked what that
+                            // let it write over.
+                            spillReplaced(headCell);
                             world.setBlock(headCell.x, headCell.y, headCell.z,
                                            game::bedAt(colour, away, true));
+                        }
+                    } else if (game::isTallFlower(placing)) {
+                        // **A tall flower is two cells and only one was ever
+                        // written**, so all four rendered as headless stumps and
+                        // the eight upper ids were unreachable in a live world.
+                        // https://minecraft.wiki/w/Lilac - breaking either half
+                        // destroys the whole plant and drops exactly one item,
+                        // which is why the write here and the twin-clear in
+                        // `clearPairedHalf` had to land together: writing the
+                        // top without the paired break would have paid a whole
+                        // flower per half, because both ids drop one.
+                        //
+                        // The support test is asked *here* rather than being
+                        // left to the gate below, because that gate runs after
+                        // this branch has already written the second cell - a
+                        // flower refused for want of a floor would have left its
+                        // own top half floating. A door and a bed never reach
+                        // that gate (`needsSupportBelow` is Cross, Flat or a
+                        // torch and neither of them is any of those), so this is
+                        // the only two-cell branch that has to ask.
+                        const game::BlockId lower =
+                            game::isTallFlowerUpper(placing)
+                                ? static_cast<game::BlockId>(static_cast<int>(placing) - 1)
+                                : placing;
+                        const glm::ivec3 upper = placeCell + glm::ivec3{0, 1, 0};
+                        const game::BlockId above = world.blockAt(upper.x, upper.y, upper.z);
+                        if (!game::isReplaceable(above) || cellIsOccupied(upper) ||
+                            !hasItsSupport(lower, placeCell.x, placeCell.y, placeCell.z)) {
+                            placing = game::BlockId::Air;
+                        } else {
+                            placing = lower;
+                            // Same rule as the door's upper half: the cell above
+                            // passed `isReplaceable` and nothing asked what that
+                            // let it write over.
+                            spillReplaced(upper);
+                            world.setBlock(
+                                upper.x, upper.y, upper.z,
+                                static_cast<game::BlockId>(static_cast<int>(lower) + 1));
                         }
                     } else if (game::isBeehive(placing)) {
                         // Same rule again: a hive has one entrance, and the bees
                         // that will use it need to know which side it is on.
+                        //
+                        // **Through `facingToward` rather than written out
+                        // here** - finding 156. `Block.hpp` says in as many
+                        // words that this expression "was written out at four
+                        // separate placement sites... which is exactly the
+                        // shape of bug this project keeps paying for. One
+                        // owner", and then this site went on being a fifth
+                        // copy of it. Substituted term for term: the helper's
+                        // `ax > az` with its hand-rolled absolute values is
+                        // this line's `std::abs(aim.x) > std::abs(aim.z)`, and
+                        // both take the z branch on a tie.
                         const glm::vec3 aim = camera.forward();
-                        const game::FaceDirection front =
-                            std::abs(aim.x) > std::abs(aim.z)
-                                ? (aim.x > 0.0f ? game::FaceDirection::NegX : game::FaceDirection::PosX)
-                                : (aim.z > 0.0f ? game::FaceDirection::NegZ : game::FaceDirection::PosZ);
-                        placing = game::beehiveAt(front, game::beehiveHasHoney(placing));
+                        const game::FaceDirection front = game::facingToward(aim.x, aim.z);
+                        // **Not `beeHomeAtLevel(placing, ...)`, and this is the
+                        // one place that helper must not be used.** It reads
+                        // the facing off the block handed to it, and the whole
+                        // point of this branch is that a *placed* home faces
+                        // the camera rather than wherever the item's canonical
+                        // id happened to point. Finding 9618 proposes the
+                        // one-token swap here that it correctly proposes at the
+                        // shear site above; taking it would fix a nest path
+                        // that cannot currently be reached - `Item.hpp` returns
+                        // `ItemId::None` for a nest, so one can never be held -
+                        // at the cost of breaking the facing of every hive a
+                        // player actually places. That is the "fixed one arm
+                        // and broke the working one" shape, so the kind is
+                        // carried by hand here and the facing comes from
+                        // `front`. Filed for `Block.hpp`'s owner as a request
+                        // for a facing-taking overload, so this rule stops
+                        // being written in two places.
+                        //
+                        // The level is carried rather than
+                        // `beehiveHasHoney`'d: that predicate collapses six
+                        // honey levels to a bool, so a partially filled home
+                        // rounded down to empty on the way through.
+                        const int carriedHoney = game::beehiveHoneyLevel(placing);
+                        placing = game::isBeeNest(placing)
+                                      ? game::beeNestAtLevel(front, carriedHoney)
+                                      : game::beehiveAtLevel(front, carriedHoney);
+                    } else if (game::isCarvedPumpkin(placing) || game::isJackOLantern(placing)) {
+                        // **The carved face looks back at whoever put it down**
+                        // - finding 248. There was no branch here at all, so
+                        // `blockForItem` handed back facing index 0 every time
+                        // and three of each family's four ids were unreachable
+                        // by placement: every pumpkin in a build stared the same
+                        // way whatever the player did.
+                        //
+                        // The reference states it twice over - "when placed, a
+                        // carved pumpkin automatically faces the player", and
+                        // the facing state is "the opposite from the direction
+                        // the player faces while placing"
+                        // (https://minecraft.wiki/w/Carved_Pumpkin). Those are
+                        // the same sentence: the face points back down the
+                        // player's line of sight, which is exactly what
+                        // `facingToward` returns and why it is NOT wrapped in
+                        // `oppositeDirection` the way the repeater above is.
+                        //
+                        // The carving path elsewhere in this file already did
+                        // this correctly; it was only placement that was
+                        // missing, so this is a new branch rather than a
+                        // corrected one.
+                        const game::FaceDirection pumpkinFace =
+                            game::facingToward(camera.forward().x, camera.forward().z);
+                        placing = game::isJackOLantern(placing)
+                                      ? game::jackOLanternAt(pumpkinFace)
+                                      : game::carvedPumpkinAt(pumpkinFace);
                     } else if (game::isLadder(placing) || game::isVine(placing) ||
                                game::isCocoa(placing)) {
                         // **These three take their facing from the wall they
@@ -5796,10 +9833,59 @@ int main() {
                     if (placing == game::BlockId::Air) {
                         placeTimer = kPlaceRepeatSeconds;
                     } else if (game::needsSupportBelow(placing) &&
-                               !hasSupportUnder(placing, where.x, where.y, where.z)) {
+                               !hasItsSupport(placing, where.x, where.y, where.z)) {
                         placeTimer = kPlaceRepeatSeconds;
                     } else {
+                        // **Whatever was standing here is being broken, so it
+                        // drops.** Last thing before the write, so every branch
+                        // above that redirected `where` - the slab, the lily
+                        // pad, the plant a placement lands *in* - is already
+                        // settled and there is one place to get this right.
+                        //
+                        // `completesSlab` is the one exemption and it is a merge
+                        // rather than a break: the half already in the cell
+                        // becomes part of the block that replaces it, so
+                        // spilling it would hand back a slab that was never
+                        // destroyed.
+                        if (!completesSlab) {
+                            spillReplaced(where);
+                        }
                         world.setBlock(where.x, where.y, where.z, placing);
+                        // **The other half of deriving track shape.** The rail
+                        // just laid takes its shape from its neighbours and they
+                        // take theirs from it - an existing straight run turns
+                        // into a corner, or into a ramp, the moment one is put
+                        // beside it, which is the reference's behaviour and the
+                        // reason a corner can be built at all. Silent for the
+                        // three thousand ids that are not rails.
+                        refreshRailsAround(where);
+                        // **Nothing may inherit a stale block entity.**
+                        // `chests` and `furnaces` are keyed by position and
+                        // versioned separately from the chunk format, so an
+                        // entry can outlive the block it belonged to - a format
+                        // bump regenerates the chunk, the container block is
+                        // gone, and the twenty-seven slots are still sitting in
+                        // the map at that exact cell. Building a new chest there
+                        // handed them to you for free, which is a duplication
+                        // exploit reached by ordinary play.
+                        //
+                        // Cleared for **every** placement rather than only for
+                        // containers, because the cell can only hold one thing
+                        // and whatever was recorded for it is now wrong however
+                        // it got there. The stowbox restore below runs after
+                        // this on purpose: it is putting the right contents in.
+                        chests.erase(where);
+                        furnaces.erase(where);
+                        campfires.erase(where);
+                        // **The fourth map keyed by cell, and the one that owes
+                        // an item rather than merely being stale.** A disc in
+                        // this list was taken out of the player's bag, so
+                        // deleting the entry the way the three above are deleted
+                        // would destroy it. Reachable only when a jukebox has
+                        // gone without the break or blast path - a chunk-format
+                        // bump regenerating the column - so there is nothing
+                        // still in the world for the ejected disc to duplicate.
+                        spillJukeboxDisc(where);
                         // The one construction in the game: a T of iron blocks
                         // with a carved pumpkin on top becomes an iron golem.
                         // **Hung off the placement of the pumpkin**, because
@@ -5835,6 +9921,41 @@ int main() {
                 }
             }
 
+            // Buttons let go on their own, which is the whole of what makes a
+            // button different from a lever. Swept here rather than inside the
+            // input block because a press outlives the click that made it, and
+            // beside the streaming update because that is where the frame's
+            // other world writes already are.
+            //
+            // **Whatever is standing there now is what gets released**, not what
+            // was pressed: mine a pressed button and the entry finds Air, drops
+            // its claim and writes nothing, so a button can never be resurrected
+            // over the top of something else.
+            for (std::pair<glm::ivec3, float>& pressed : heldButtons) {
+                pressed.second -= deltaSeconds;
+            }
+            heldButtons.erase(
+                std::remove_if(heldButtons.begin(), heldButtons.end(),
+                               [&](const std::pair<glm::ivec3, float>& pressed) {
+                                   const glm::ivec3 at = pressed.first;
+                                   const game::BlockId now = world.blockAt(at.x, at.y, at.z);
+                                   const bool stillDown =
+                                       game::isButton(now) && game::buttonPressed(now);
+                                   if (pressed.second > 0.0f && stillDown) {
+                                       return false;
+                                   }
+                                   if (stillDown) {
+                                       world.setBlock(at.x, at.y, at.z,
+                                                      game::buttonAt(game::buttonFamily(now),
+                                                                     game::buttonMount(now),
+                                                                     false));
+                                       sounds.play(audio, game::SoundEvent::WoodClick,
+                                                   glm::vec3{at} + glm::vec3{0.5f}, 0.5f);
+                                   }
+                                   return true;
+                               }),
+                heldButtons.end());
+
             // Streaming runs after edits so a broken block is re-meshed in the
             // same frame it changed, and shares the same budget.
             applyUpdates(world.update(player.position, kStreamingBudgetSeconds));
@@ -5851,7 +9972,17 @@ int main() {
                 // reference's behaviour in one number: it cooks in five seconds
                 // instead of ten and burns its fuel twice as fast, so the items
                 // per lump of charcoal are unchanged.
-                const bool lit = game::tickFurnace(furnace, deltaSeconds * game::cookSpeed(present));
+                // **`present`, not the default.** `cooker` decides what the
+                // thing will accept - a smoker takes food, a blast furnace ore
+                // and metal - and it is defaulted to a plain `Furnace`, so
+                // omitting it compiles perfectly and quietly turns the whole
+                // restriction off, leaving all three cookers identical. The
+                // world id is the right answer because `cookerAccepts` asks
+                // `isSmoker`/`isBlastFurnace`, which are family predicates and
+                // so already cover the lit and directional variants - the same
+                // reason `cookSpeed(present)` on this very line works.
+                const bool lit =
+                    game::tickFurnace(furnace, deltaSeconds * game::cookSpeed(present), present);
                 // Lighting one must not turn it round or change what kind it is:
                 // all three live in the id, so they are recombined rather than
                 // one being overwritten with a default.
@@ -5860,6 +9991,45 @@ int main() {
                 if (present != wanted) {
                     world.setBlock(position.x, position.y, position.z, wanted);
                 }
+            }
+
+            // Campfires cook too, and on their own arrangement entirely: four
+            // items at once, thirty seconds each, no fuel, and the finished food
+            // pops off onto the floor rather than into a slot nobody can open.
+            //
+            // **Gated on the column being resident, which the furnace loop above
+            // is not.** A furnace that finishes in an unloaded column merely
+            // moves an item between two slots it already owns; a campfire spawns
+            // an entity, and an entity spawned into a column that is not there
+            // falls through the world exactly as the player used to. The
+            // asymmetry is deliberate and is filed rather than smoothed over -
+            // the furnace's tick has other reasons to be watched.
+            for (auto& [position, campfire] : campfires) {
+                if (campfire.idle()) {
+                    continue;
+                }
+                if (!game::isCampfire(world.blockAt(position.x, position.y, position.z))) {
+                    continue;
+                }
+                if (!world.columnResident(position.x, position.z)) {
+                    continue;
+                }
+                // **No `cookSpeed` here, and that is not an oversight.** There is
+                // exactly one speed multiplier in this game and it lives on the
+                // furnace call above; a campfire's thirty seconds is a published
+                // number in its own right, `kCampfireCookSeconds` asserts it
+                // against the furnace's ten, and multiplying it by anything
+                // would make the assert a lie about what the player experiences.
+                const game::CampfireDone finished = game::tickCampfire(campfire, deltaSeconds);
+                if (finished.count == 0) {
+                    continue;
+                }
+                const glm::vec3 above = glm::vec3{position} + glm::vec3{0.5f, 1.05f, 0.5f};
+                for (int i = 0; i < finished.count; ++i) {
+                    game::dropStack(drops, above, finished.stacks[static_cast<std::size_t>(i)],
+                                    glm::vec3{0.0f, 1.6f, 0.0f});
+                }
+                sounds.play(audio, game::SoundEvent::Pop, above, 0.5f);
             }
 
             // Hoppers move one item every eight game ticks, which is the
@@ -5894,15 +10064,63 @@ int main() {
                     // along in whichever order the map happened to be in.
                     const game::BlockId ahead = world.blockAt(pours.x, pours.y, pours.z);
                     if (game::isChest(ahead) || game::isHopper(ahead)) {
-                        moveOneItem(chests[cell], containerSlots(self), chests[pours],
-                                    containerSlots(ahead));
+                        // **`materialise`, not `chests[...]`.** Reaching into
+                        // the map alone hands back an empty chest for an
+                        // unrolled village one, so a hopper under it would sit
+                        // there pulling nothing out of a chest that has never
+                        // rolled - and the marker would stay standing forever.
+                        moveOneItem(materialise(cell).slots.data(), containerSlots(self),
+                                    materialise(pours).slots.data(), containerSlots(ahead));
+                    } else if (game::isFurnace(ahead)) {
+                        // **Which slot depends on which way this hopper points,
+                        // and the two are not interchangeable.** Bedrock feeds
+                        // the input from above and the fuel from the side, so a
+                        // downward hopper - the one whose spout reads `Unknown`
+                        // - is the "from above" case and every side spout is the
+                        // fuel case. Getting this backwards is not a cosmetic
+                        // difference: a fuel slot fed raw iron cannot be emptied
+                        // without breaking the furnace.
+                        game::Furnace& furnace = furnaces[pours];
+                        if (spout == game::FaceDirection::Unknown) {
+                            // The input slot takes anything, exactly as the
+                            // reference's does - a furnace holding something it
+                            // cannot smelt is the player's problem to notice,
+                            // and filtering here would silently strand items in
+                            // the hopper instead.
+                            moveOneItem(materialise(cell).slots.data(), containerSlots(self),
+                                        &furnace.input, 1);
+                        } else {
+                            moveOneItem(materialise(cell).slots.data(), containerSlots(self),
+                                        &furnace.fuel, 1, +[](game::ItemId id) {
+                                            return game::fuelBurnSeconds(id) > 0.0f;
+                                        });
+                        }
                     }
 
                     const glm::ivec3 over = cell + glm::ivec3{0, 1, 0};
                     const game::BlockId above = world.blockAt(over.x, over.y, over.z);
                     if (game::isChest(above) || game::isHopper(above)) {
-                        moveOneItem(chests[over], containerSlots(above), chests[cell],
-                                    containerSlots(self));
+                        moveOneItem(materialise(over).slots.data(), containerSlots(above),
+                                    materialise(cell).slots.data(), containerSlots(self));
+                    } else if (game::isFurnace(above)) {
+                        // A hopper under a furnace pulls the output - and then
+                        // **the empty bucket a lava bucket leaves sitting in the
+                        // fuel slot**, which is the reference's rule and is the
+                        // only way that bucket comes back at all without a
+                        // player standing there to take it. `fuelBurnSeconds` is
+                        // the same one owner the side push above asks, so "not
+                        // fuel" here and "is fuel" there can never drift into a
+                        // pair that pushes a bucket in and pulls it straight
+                        // back out again.
+                        game::Furnace& furnace = furnaces[over];
+                        game::Chest& into = materialise(cell);
+                        if (!moveOneItem(&furnace.output, 1, into.slots.data(),
+                                         containerSlots(self))) {
+                            moveOneItem(&furnace.fuel, 1, into.slots.data(), containerSlots(self),
+                                        +[](game::ItemId id) {
+                                            return game::fuelBurnSeconds(id) <= 0.0f;
+                                        });
+                        }
                     }
                 }
             }
@@ -5910,10 +10128,96 @@ int main() {
             // Anything a spreading flow swept aside - or a falling block landed
             // on - drops, the same way a plant left hanging by mining below it
             // does.
+            //
+            // **This channel carries five different events, not one - and the
+            // producer now says which.** `World::Removal` names them: a genuine
+            // `Flow` sweep, a `Support` loss, leaf `Decay`, sugar cane
+            // `Uprooted` by losing its water, and `Copy`, which is bone meal on
+            // a two-block flower and **removes nothing at all**.
+            //
+            // This comment named three of the five and cited each by a line
+            // number into a file this one does not own; all three numbers had
+            // rotted, and two whole producers had arrived since. It also carried
+            // a note reporting to the `World.cpp` owner that the context
+            // belonged on `WashedBlock` - **which has since landed**, as the
+            // `cause` field read below, so the note outlived the request. Both
+            // are the reason this file's cross-references are symbolic now.
+            //
+            // `alreadyPaid` is the other half of a two-cell plant that a twin
+            // clear has already taken. Two ticks can drain in one frame, so a
+            // flow can record *both* halves of a sunflower in the same batch -
+            // and `washed.block` is the id as it stood when the water arrived,
+            // so re-reading the world cannot tell the second entry it is already
+            // paid for. Empty in every frame that washes nothing paired, which
+            // is almost all of them.
+            std::vector<glm::ivec3> alreadyPaid;
             for (const game::World::WashedBlock& washed : world.takeWashedBlocks()) {
-                const game::ItemId shed = game::dropForBlock(washed.block);
-                if (shed != game::ItemId::None) {
-                    drops.spawn(glm::vec3{washed.position} + glm::vec3{0.5f}, shed, 1);
+                if (std::find(alreadyPaid.begin(), alreadyPaid.end(), washed.position) !=
+                    alreadyPaid.end()) {
+                    continue;
+                }
+                // The table rather than a single item: a washed-away stack of
+                // candles is four candles, and a washed-away clay bank is four
+                // clay.
+                //
+                // **A sword-shaped context, and only here.** Water is one of the
+                // reference's qualifying conditions in its own right
+                // (minecraft.wiki, *Cobweb*: "A cobweb drops one piece of string
+                // if broken with a non-Silk Touch sword, **if water touches or
+                // flows over it**, or a piston pushes it ... It drops nothing
+                // when broken using anything else, or if lava flows over it"),
+                // and a swept web was handing back nothing at all. `Sword` is
+                // how this table is told that condition is met: the cobweb rows
+                // are the only ones that read it, so every other plant a flow
+                // sweeps aside answers exactly as it did - seeds rather than the
+                // plant, which is what bare hands would have got.
+                //
+                // The lava half of that sentence needs no code: `World` never
+                // records a lava-swept block as washed, it simply destroys it.
+                //
+                // **`Flow` alone earns it, and the event says so.** The sword
+                // was handed to all five producers because when it was written
+                // there was only one, and the qualifying condition the reference
+                // states is *water touching the web* - not "arrived on this
+                // queue". `World::Removal::Flow` is the only one water is
+                // involved in, which is the producer's own wording. Nothing
+                // reachable today changes answer, because the cobweb is the only
+                // row in the table that reads `ToolKind::Sword` and the other
+                // four producers are leaves, sugar cane, bone-mealed flowers and
+                // blocks that lost their footing - but a cobweb that ever loses
+                // its support would have paid string for it, and that is the
+                // trap rather than the bug.
+                spillBlockDrop(washed.position, washed.block,
+                               washed.cause == game::World::Removal::Flow
+                                   ? game::BreakContext{.tool = game::ToolKind::Sword}
+                                   : game::BreakContext{});
+                // **A two-cell plant is one plant however it is broken, and this
+                // was the one path never told.** A flow arrives one cell at a
+                // time, so it is the only path that can reach either half on its
+                // own - wash the top of a sunflower for one flower, the water
+                // falls into the bottom, and there is a second flower out of a
+                // plant that cost one. `settleAround` and `spillReplaced` both
+                // clear the twin; this did not.
+                //
+                // **Every cause but `Copy`**, because bone meal reports on this
+                // same channel without removing anything: a copied flower is
+                // still standing and clearing its twin would delete half the
+                // plant the player just fed.
+                //
+                // This asked the *world* instead - "is the cell empty or a
+                // fluid now?" - which is the same answer for every case that can
+                // happen today and is not the same question. `World.hpp` says so
+                // in as many words beside `Removal::Copy`: re-reading the cell
+                // is "true today and stops being true the moment anything else
+                // writes there first". The producer knows what it did; asking it
+                // costs one comparison and cannot be raced. That is the whole
+                // reason `Removal` was added, and this was the reader it was
+                // added for.
+                if (washed.cause != game::World::Removal::Copy) {
+                    if (const std::optional<glm::ivec3> twin =
+                            clearPairedHalf(washed.position, washed.block)) {
+                        alreadyPaid.push_back(*twin);
+                    }
                 }
             }
 
@@ -5921,6 +10225,27 @@ int main() {
             // the entities put themselves back when they land.
             for (const game::World::WashedBlock& detached : world.takeDetachedBlocks()) {
                 fallingBlocks.spawn(detached.position, detached.block);
+            }
+
+            // Where water put something out: lava setting, or a fire dying.
+            //
+            // **Drained unconditionally, beside its three siblings, and that
+            // matters more here than it does for them.** This is the one channel
+            // that is *capped* - past `kMaxPendingFizzes` the producer drops
+            // events rather than queueing them - so an undrained frame is not
+            // merely late, it is lossy, and a drain that never runs turns
+            // `recordFizz` into a permanent no-op for the rest of the session
+            // once the buffer stays full. A condition in front of this loop would
+            // do exactly that.
+            //
+            // `became` is deliberately not read: there is one `Fizz` recording,
+            // so there is nothing yet to choose between. It is the field to reach
+            // for the day obsidian setting is meant to sound unlike a fire going
+            // out - which is why the event carries it rather than making a reader
+            // re-query a world that has moved on.
+            for (const game::World::FizzEvent& fizz : world.takeFizzes()) {
+                sounds.play(audio, game::SoundEvent::Fizz,
+                            glm::vec3{fizz.position} + glm::vec3{0.5f}, 0.9f);
             }
 
             // What the population had to say for itself this tick.
@@ -5933,9 +10258,13 @@ int main() {
             }
 
             // Meat from anything that was killed, on the same path as every
-            // other drop.
+            // other drop - **`dropStack`, not `spawn`**. It is the one helper
+            // that carries a stack's `damage`, so the day a creature drops the
+            // sword it was holding, that sword arrives worn rather than repaired
+            // and a stowbox arrives with its contents rather than empty.
             for (const game::Creatures::Loot& loot : creatures.takeLoot()) {
-                drops.spawn(loot.position + glm::vec3{0.0f, 0.4f, 0.0f}, loot.item, loot.count);
+                game::dropStack(drops, loot.position + glm::vec3{0.0f, 0.4f, 0.0f},
+                                game::ItemStack{loot.item, loot.count});
             }
 
             // What a grazing animal just ate. The reference's
@@ -5949,6 +10278,49 @@ int main() {
                 } else if (world.blockAt(cell.x, cell.y - 1, cell.z) == game::BlockId::Grass) {
                     world.setBlock(cell.x, cell.y - 1, cell.z, game::BlockId::Dirt);
                 }
+            }
+
+            // **What a bee brought home**, and the last rung of finding 216:
+            // the producer has existed and had zero callers, so pollination ran
+            // every tick and no hive ever filled. Honeycomb was unobtainable,
+            // and with it the four waxed-copper stages, the honeycomb block and
+            // the candle recipe.
+            //
+            // Handed over on the same arrangement as grazing directly above,
+            // and for the same reason: `Creatures` is given a `const World&` in
+            // every entry point by design, so only the main thread writes.
+            //
+            // **Four things here are load-bearing and none of them look it.**
+            //
+            // 1. *The list is never de-duplicated.* A repeated cell is the
+            //    reference's 1% double-honey roll, rolled bee-side because that
+            //    is where the random stream lives - a `std::unique` or a set
+            //    would silently delete that rule, and would also merge two bees
+            //    arriving in the same tick into one delivery.
+            // 2. *The id is read back from the world every pass*, so two
+            //    deliveries to one hive in one frame see each other's write.
+            // 3. *`beeHomeAtLevel`, never `beehiveAtLevel(beehiveFacing(...))`.*
+            //    The second reads perfectly and rebuilds every natural nest as a
+            //    crafted hive; `Block.hpp` keeps it as a named control under a
+            //    `static_assert` that rejects it. Same trap as the shear site.
+            // 4. *Full hives are skipped rather than clamped.* `beeHomeAtLevel`
+            //    clamps anyway, but writing an unchanged id would still dirty
+            //    the chunk and pay for a remesh every time a bee came home to a
+            //    hive nobody had sheared.
+            //
+            // And the drain is unconditional, exactly as `takeGrazed` is: the
+            // queue is `std::exchange`d, so a frame that skipped it would drop
+            // deliveries rather than defer them.
+            for (const glm::ivec3& cell : creatures.takePollinated()) {
+                const game::BlockId home = world.blockAt(cell.x, cell.y, cell.z);
+                if (!game::isBeehive(home)) {
+                    continue;  // mined, burnt or blown up while the bee was out
+                }
+                const int level = game::beehiveHoneyLevel(home);
+                if (level >= game::kBeehiveFullHoney) {
+                    continue;  // already full; the reference drops the delivery too
+                }
+                world.setBlock(cell.x, cell.y, cell.z, game::beeHomeAtLevel(home, level + 1));
             }
 
             // An archer's arrows and a witch's bottles, on the same handover:
@@ -5965,19 +10337,236 @@ int main() {
                     shot.kind == game::Creatures::LaunchKind::SplashPotion
                         ? game::ProjectileKind::SplashPotion
                         : game::ProjectileKind::Arrow;
-                projectiles.spawn(kind, shot.origin, shot.velocity, false, false, shot.payload);
+                projectiles.spawn(kind, shot.origin, shot.velocity, false, false, shot.payload,
+                                  shot.fromId);
             }
-            for (const game::FallingBlocks::Crushed& hit : fallingBlocks.update(world, deltaSeconds)) {
-                const game::ItemId shed = game::dropForBlock(hit.block);
-                if (shed != game::ItemId::None) {
-                    drops.spawn(glm::vec3{hit.position} + glm::vec3{0.5f}, shed, 1);
+            landings.clear();
+            for (const game::FallingBlocks::Crushed& hit :
+                 fallingBlocks.update(world, deltaSeconds, &landings)) {
+                // **One channel, two questions, and `hit.block` says which.**
+                // `applyFallingLanding` reports either the *occupant* a landing
+                // displaced or the *faller itself* when it broke, and never both
+                // for one landing - so whichever arm sent it, `hit.block` is
+                // exactly the one thing that owes an item. That is what makes
+                // the count conserved rather than a coincidence.
+                //
+                // **What it does not say is which arm, and the two owe different
+                // items.** That is `payForCrushed`'s question, shared with the
+                // settle-on-shutdown drain because both of them were getting it
+                // wrong in the same way: a comment right here used to claim "the
+                // gravel that pops this way drops gravel, never flint, because
+                // nothing was swung at it", and a probe measured 9,942 flint in
+                // 100,000. The claim was the intent and the code was the mining
+                // table. Finding 888.
+                //
+                // **The torch trick is live, and it is the second arm.** On
+                // Bedrock a faller coming to rest in a cell it may not replace
+                // breaks and drops itself while the occupant stands
+                // (https://minecraft.wiki/w/Sand) - put a torch under a sand
+                // column and the whole column pops into items. Coming to rest on
+                // a slab, soul sand, farmland or a dirt path is the same arm
+                // reached from the support side.
+                //
+                // Findings 618 and 286, and they are closed in
+                // `FallingBlock.hpp` - `landsAsABlock` is the predicate and the
+                // `static_assert`s under it are the proof. The note that stood
+                // here calling that work outstanding, and warning that this loop
+                // paid the occupant unconditionally, was true when it was
+                // written and stopped being true without anything touching this
+                // line.
+                payForCrushed(hit);
+            }
+
+            // **An anvil hurts whatever it lands on, and nothing was passing
+            // `landings`, so it hurt nothing at all.** `update` fills that
+            // vector only when it is given somewhere to put it, which made the
+            // entire landing-damage path unreachable - twenty cells of anvil
+            // onto a player's head did exactly nothing. This is the missing
+            // call site, not a new feature: the ladder, the cap and the free
+            // first cell all already existed in `anvilLandingDamage`, checked
+            // against https://minecraft.wiki/w/Anvil#Falling_anvils at eight
+            // heights.
+            //
+            // **No second "is this an anvil" test here on purpose.**
+            // `anvilLandingDamage` answers 0 for every other block, which is how
+            // falling gravel stays harmless without a caller having to remember
+            // that it should - and how the two damaged anvil states stay
+            // dangerous without anyone having to list them.
+            //
+            // **The helmet reduction is deliberately absent, and that is now a
+            // decision rather than a deferral.** The reference is widely said to
+            // take a quarter off an anvil's damage for a worn helmet and charge
+            // that helmet double durability for it, and the two are one rule -
+            // taking the quarter without the wear is the half-a-rule shape
+            // `CLAUDE.md` records as #5. Armour's owner took the question on
+            // 2026-08-19 and answered **neither half**, which `Survival.hpp`
+            // sources at length: minecraft.wiki's *Anvil* and *Damage* pages
+            // contradict each other on it, both cite one Java-only talk-page
+            // archive (MC- tickets, decompiled Java, the `damages_helmet` tag
+            // that does not exist in Bedrock), the Java code that archive quotes
+            // applies the 0.75 *after* the damage has been dealt, and there is
+            // no MCPE ticket, no Bedrock changelog entry and nothing in
+            // `Mojang/bedrock-samples`. A falling anvil is armour-reducible by
+            // the ordinary rule and that is all it gets.
+            //
+            // **A correction to what this comment used to say, because it was
+            // the dangerous kind of wrong - confident, in the house voice, and
+            // arguing for an edit.** It claimed `armourDefence` "has no callers
+            // anywhere in the tree", which a reader could reasonably have acted
+            // on by deleting it. As of 2026-08-19 that is false: it is called
+            // from `Inventory.hpp`'s `armourSet()` and from `survival::`'s own
+            // set arithmetic. The note was written with a `name(` search, and
+            // this codebase puts plenty of live names where that search cannot
+            // see them - a bare-name second pass is what found the callers.
+            //
+            // **What was actually true, and is no longer:** ordinary damage
+            // ignored armour, because nothing assigned `PlayerInput::armour` and
+            // `Main.cpp`'s `hurtPlayer` reached `damagePlayer`'s defaulted
+            // `kNoArmour` on every combat path. Both are wired now, and
+            // `hurtPlayer` has lost its default so the compiler names any site
+            // that forgets.
+            //
+            // **The player and every creature in the same cube.**
+            // `Creatures::hurtInBox` landed, and the seam this comment used to
+            // describe was never real - damaging a creature touches the roster
+            // alone, so the `const World&` it is handed is beside the point.
+            if (!landings.empty()) {
+                constexpr float kHalfWidth = game::player_constants::kWidth * 0.5f;
+                const glm::vec3 low = player.position - glm::vec3{kHalfWidth, 0.0f, kHalfWidth};
+                const glm::vec3 high =
+                    player.position + glm::vec3{kHalfWidth, player.height(), kHalfWidth};
+                for (const game::FallingBlocks::Landed& landing : landings) {
+                    const int damage = game::anvilLandingDamage(landing.block, landing.fellCells);
+                    if (damage <= 0) {
+                        continue;
+                    }
+                    const glm::vec3 cellLow{landing.cell};
+                    const glm::vec3 cellHigh = cellLow + glm::vec3{1.0f};
+                    if (low.x < cellHigh.x && high.x > cellLow.x && low.y < cellHigh.y &&
+                        high.y > cellLow.y && low.z < cellHigh.z && high.z > cellLow.z) {
+                        // `hurtPlayer` owns creative immunity and `damagePlayer`
+                        // under it owns the half-second window, so a collapsing
+                        // stack of anvils lands as one hit rather than as ten.
+                        //
+                        // **Reduced by the ordinary rule and by nothing else.**
+                        // The reference is widely said to give a helmet an
+                        // extra 25% off a falling anvil at double durability;
+                        // `Survival.hpp` went looking for that and found
+                        // minecraft.wiki contradicting itself, both sides
+                        // citing one Java-only talk-page archive, the Java code
+                        // that archive quotes applying the multiplier *after*
+                        // the damage is dealt, and nothing at all in
+                        // `Mojang/bedrock-samples`. **Neither half is taken** -
+                        // splitting them would be bug shape #5, and taking both
+                        // on that evidence would be inventing a Bedrock number.
+                        hurtPlayer(damage, inventory.armourSet());
+                    }
+                    // **The same box, on purpose.** A blow that flattens you and
+                    // spares the pig standing beside you is worse than one that
+                    // misses both, which is the rule `applyLightning` already
+                    // states in its own comment. The two overlap tests were
+                    // transcribed and compared over four million random boxes
+                    // with no disagreement, including 593,948 exact
+                    // face-touching cases - the only boundary where they could
+                    // differ.
+                    //
+                    // **Still the caller's damage ladder.** `anvilLandingDamage`
+                    // stays the sole owner and answers 0 for everything else, so
+                    // gravel is harmless here without `hurtInBox` having to know
+                    // that gravel exists.
+                    //
+                    // **A recorded divergence rather than a silent one:** the
+                    // reference hurts what a falling block passes *through*, not
+                    // only what is standing where it lands. Our player path does
+                    // not do that either, and doing it for creatures alone would
+                    // manufacture exactly the asymmetry the first paragraph
+                    // rejects. Faithful swept damage wants a per-tick overlap
+                    // inside `FallingBlocks::update`, which is not this file.
+                    creatures.hurtInBox(cellLow, cellHigh, damage,
+                                        game::DeathCause::CrushedByBlock);
                 }
             }
 
             // Dropped items live entirely on the main thread: there are a
             // handful of them and they touch the world only to read it.
             drops.update(world, player.position, deltaSeconds);
-            projectiles.update(world, creatures, deltaSeconds);
+            // **The projectile system cannot see the player, so it asks.** The
+            // player is not in the creature roster, which is exactly why four
+            // archer species have been shooting straight through you since they
+            // arrived: `Projectiles::update` tested the roster and nothing else.
+            // This lambda answers one geometric question - how far along the
+            // remaining segment the player's own box is entered - and applies
+            // nothing, so damage, the half-second immunity window and creative
+            // immunity all stay where they already live.
+            const auto playerReach = [&player](const glm::vec3& from, const glm::vec3& direction,
+                                               float reach) {
+                const float halfWidth = game::player_constants::kWidth * 0.5f;
+                const float height = player.sneaking ? game::player_constants::kSneakHeight
+                                                     : game::player_constants::kHeight;
+                // `position` is the feet, which is why the box starts there
+                // rather than being centred on it.
+                const glm::vec3 boxMin{player.position.x - halfWidth, player.position.y,
+                                       player.position.z - halfWidth};
+                const glm::vec3 boxMax{player.position.x + halfWidth, player.position.y + height,
+                                       player.position.z + halfWidth};
+                return game::segmentEntersBox(from, direction, reach, boxMin, boxMax);
+            };
+            projectiles.update(world, creatures, deltaSeconds, playerReach);
+            for (const game::Projectiles::PlayerHit& hit : projectiles.takePlayerHits()) {
+                // Creative takes the hit and not the damage, which is the rule
+                // every other source of harm here already follows - and now
+                // actually does, because `hurtPlayer` owns the gate rather than
+                // four of the seven call sites restating it.
+                //
+                // **No knockback**, deliberately: `PlayerHit::direction` carries
+                // the heading for whoever wants it, but this project has no
+                // sourced number for an arrow's push and inventing one is
+                // forbidden. Damage and the immunity window are the whole of it
+                // until a real figure exists.
+                //
+                // **Reduced by armour** - `Survival.hpp`'s "reduced" list names
+                // projectiles, and this was one of the five combat paths that
+                // reached `damagePlayer`'s defaulted `kNoArmour`.
+                hurtPlayer(hit.damage, inventory.armourSet());
+                // **The thud of being hit by a shot**, which is a different
+                // event from the damage that follows it - `Hurt` fires off the
+                // health edge above and says nothing about *what* struck you.
+                // `BowHit` was staged, decoded and never named, so the one
+                // ranged attack in the game landed in silence. Unplaced,
+                // because it happened to you rather than near you.
+                sounds.playGlobal(audio, game::SoundEvent::BowHit, 0.8f);
+                game::playRumble(rumble, game::RumbleEvent::Hurt,
+                                 game::rumbleStrength(static_cast<float>(hit.damage), 1.0f, 10.0f));
+            }
+
+            // **Drained unconditionally**, like its two siblings: nothing in
+            // this queue expires on its own, so a frame that skipped it would
+            // leave the vector growing for the life of the session.
+            //
+            // The damage is already done - `Projectiles` called
+            // `Creatures::strike` and this is only the notification - so the
+            // whole of what happens here is the noise, which is the half of
+            // ranged combat that was missing. A shot that connected sounded
+            // exactly like a shot that sailed past.
+            //
+            // **The sound is placed rather than global**, because unlike a hit
+            // on the player this happened over there. `position` is the near
+            // end of the segment the strike was found in rather than the
+            // impact point, and `reach` is exactly the error bound on that -
+            // the midpoint halves it, and at one tick of arrow flight the worst
+            // case is a metre or so, well inside what a placed sound resolves.
+            //
+            // **`BowHit` unconditionally is right only while the arrow is the
+            // one kind that can strike**, which it is: `Projectile.cpp` gates
+            // the whole entity test on `damagePerSpeed > 0`, and the arrow is
+            // the only species with a non-zero one. Give a second kind damage
+            // and this needs to pick its sound off `strike.kind`, the way the
+            // landings loop below already does.
+            for (const game::Projectiles::CreatureStrike& strike :
+                 projectiles.takeCreatureStrikes()) {
+                sounds.play(audio, game::SoundEvent::BowHit,
+                            strike.position + strike.direction * (strike.reach * 0.5f), 0.8f);
+            }
 
             // A shot that reports where it stopped. **What to do about it lives
             // here**, not in the projectile system, which reads the world and
@@ -5990,24 +10579,9 @@ int main() {
             // linearly to nothing four blocks out, and a cloud applies a
             // quarter of the duration once a second.
             const auto applyBrew = [&](game::ItemId potion, float scale) {
-                if (scale <= 0.0f) {
-                    return;
-                }
                 const game::PotionKind brew = game::potionKind(potion);
-                if (brew.effect == game::effects::Effect::InstantHealth) {
-                    game::healPlayer(player, static_cast<int>(game::effects::instantAmount(
-                                                 brew.effect, brew.amplifier) *
-                                                 scale));
-                } else if (brew.effect == game::effects::Effect::InstantDamage) {
-                    game::damagePlayer(player, static_cast<int>(game::effects::instantAmount(
-                                                   brew.effect, brew.amplifier) *
-                                                   scale));
-                } else if (brew.effect != game::effects::Effect::None) {
-                    player.effects.apply(brew.effect, brew.amplifier, brew.seconds * scale);
-                }
-                if (brew.second != game::effects::Effect::None) {
-                    player.effects.apply(brew.second, brew.secondAmplifier, brew.seconds * scale);
-                }
+                grantEffect(brew.effect, brew.amplifier, brew.seconds, scale);
+                grantEffect(brew.second, brew.secondAmplifier, brew.seconds, scale);
             };
 
             // Clouds, ticked before the landings that make them so a cloud born
@@ -6084,8 +10658,17 @@ int main() {
                 }
 
                 if (landing.kind == game::ProjectileKind::Egg) {
-                    // `egg.json`'s own odds: one throw in eight leaves a chick,
-                    // and one of those in four leaves four instead.
+                    // `egg.json` publishes these as absolute odds rather than
+                    // nested ones: `first_spawn_chance: 8` with
+                    // `first_spawn_count: 1`, `second_spawn_chance: 32` with
+                    // `second_spawn_count: 4`. Both tests read the same roll, so
+                    // the second is one throw in thirty-two overall rather than
+                    // one in four of the survivors - phrasing it as a quarter
+                    // invites `% 4u`, which is true of every multiple of eight
+                    // and would hatch four birds every single time.
+                    // Source: Mojang's own published Bedrock behaviour packs
+                    // (`Mojang/bedrock-samples`, `behavior_pack/entities/`),
+                    // fetched and checked field by field rather than recalled.
                     blastRandom ^= blastRandom << 13;
                     blastRandom ^= blastRandom >> 17;
                     blastRandom ^= blastRandom << 5;
@@ -6134,9 +10717,16 @@ int main() {
                 }
             }
             for (const game::Projectiles::Collectable& ready : projectiles.collectable(player.position)) {
-                if (inventory.add(ready.item, ready.count) != 0) {
+                // **Asked before taking, not after.** `Projectiles` has only
+                // `remove`, never a partial `reduce`, so `add`ing first and
+                // testing the return put whatever fitted into the bag and left
+                // the whole arrow standing in the world - `add` takes what it
+                // can and returns the rest. `collectable`'s own contract says
+                // the caller decides whether there is room; this is the caller.
+                if (!inventory.hasRoomFor(ready.item, ready.count)) {
                     continue; // No room for this one; the next may still fit.
                 }
+                inventory.add(ready.item, ready.count);
                 projectiles.remove(ready.index);
                 sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
                 hudDirty = true;
@@ -6237,8 +10827,10 @@ int main() {
             // Creatures move and decide, then a fresh mesh is built for them the
             // same way, and for the same reason. The showcase holds them still,
             // because a model being reviewed should not walk out of frame.
+            //
+            // **`<= 0`, matching the other three sites** - see the restore.
             const bool night = game::sky::sunDirection(timeOfDay).y < -0.05f;
-            if (settings.creatureShowcase == 0) {
+            if (settings.creatureShowcase <= 0) {
                 std::vector<game::CreatureExplosion> blasts;
                 const game::CreatureAttack blow =
                     creatures.update(world, player.position, deltaSeconds, night, player.sneaking,
@@ -6248,9 +10840,12 @@ int main() {
                     // because there was nothing to apply it to. `damagePlayer`
                     // owns the half-second invulnerability window, so a pack
                     // standing on you still only lands twice a second.
-                    if (!creative) {
-                        game::damagePlayer(player, blow.damage);
-                    }
+                    //
+                    // **The blow armour exists for.** A creature's melee is
+                    // `entity_attack` in Bedrock's own cause enum and is
+                    // reduced; this is the site a playtester will judge the
+                    // whole feature by.
+                    hurtPlayer(blow.damage, inventory.armourSet());
                     player.velocity += blow.push;
                     player.onGround = false;
                     // **Outside the creative gate on purpose.** Being hit and
@@ -6274,21 +10869,113 @@ int main() {
                 // Charges that finished their fuse join the creature blasts, so
                 // the whole destroy-spill-drop path below is shared rather than
                 // written twice. Power 4 is the reference's TNT.
+                //
+                // **Where the two kinds part company, recorded before they are
+                // mixed.** A charge drops everything it breaks and a creeper
+                // drops one block in `power`, so the roll below has to know
+                // which it is - and `CreatureExplosion` is `{ centre, power }`
+                // with no room to say. `Explosion.hpp` states the rule and
+                // spells out this exact blocker; the answer is that it is not a
+                // blocker from here, because this file owns the vector and owns
+                // the order. Everything the creature system produced above is a
+                // creeper, and the only `push_back` in the function is the one
+                // immediately below, so the boundary index is the whole answer.
+                //
+                // **What would make this false**, since an index is a fragile
+                // thing to lean on: a second producer appending to `blasts`
+                // after this line, or `creatures.update` being moved below it.
+                // Both are visible in one grep for `blasts` - there are five
+                // mentions in the file and this comment names all of them.
+                const std::size_t creeperBlasts = blasts.size();
                 for (const glm::ivec3& cell : world.takeDetonations()) {
                     blasts.push_back({glm::vec3{cell} + glm::vec3{0.5f}, kTntPower});
                 }
 
-                for (const game::CreatureExplosion& blast : blasts) {
+                for (std::size_t blastIndex = 0; blastIndex < blasts.size(); ++blastIndex) {
+                    const game::CreatureExplosion& blast = blasts[blastIndex];
+                    const bool fromTnt = blastIndex >= creeperBlasts;
                     // Applied here rather than inside the creature system, which
                     // reads the world and never writes it.
-                    blastRandom ^= blastRandom << 13;                    blastRandom ^= blastRandom >> 17;
+                    blastRandom ^= blastRandom << 13;
+                    blastRandom ^= blastRandom >> 17;
                     blastRandom ^= blastRandom << 5;
                     const std::vector<glm::ivec3> destroyed =
                         game::explosionBlocks(world, blast.centre, blast.power, blastRandom);
                     int dropped = 0;
                     for (const glm::ivec3& cell : destroyed) {
                         const game::BlockId removed = world.blockAt(cell.x, cell.y, cell.z);
+                        // **A charge in a blast is lit, not destroyed** - the
+                        // chain reaction, which is most of what TNT is for. It
+                        // was being cleared to Air and spilled as an item, so a
+                        // stack of charges was disarmed by the first one going
+                        // off and handed back to you
+                        // (https://minecraft.wiki/w/TNT).
+                        //
+                        // **`isTntBlock`, not `== Tnt`**, because a lit charge
+                        // spends half its fuse showing the plain `Tnt` face:
+                        // `World::updateTnt` blinks the id back and forth, so
+                        // the two states are not "unlit" and "lit" and naming
+                        // one of them is the trap that predicate exists for.
+                        //
+                        // **The short fuse, drawn per charge.** The reference
+                        // gives a charge set off by another blast a random
+                        // 10-30 ticks against the 80 a hand-lit one gets
+                        // (https://minecraft.wiki/w/TNT), which is what makes a
+                        // stack go up as one cascade rather than a slow ripple.
+                        // The range and the tick conversion both live at
+                        // `World::blastFuse`, which is why it is called rather
+                        // than a number being written here - and it is called
+                        // **inside the loop**, because it advances the world's
+                        // PRNG and one draw shared across the pile would give
+                        // every charge the same fuse, which is the simultaneity
+                        // the randomisation exists to break.
+                        //
+                        // **Every charge in the blast is primed, lit or not**,
+                        // and that is the fix rather than an oversight. There is
+                        // no way to ask a cell whether it is already counting
+                        // down - `m_tntFuses` is private and the block id is the
+                        // blink, not the state - so gating this on the id meant
+                        // an already-lit charge kept its four-second fuse or was
+                        // shortened to one *depending on which face it happened
+                        // to be showing that instant*. A coin flip on a
+                        // rendering phase, deciding a gameplay number. Calling
+                        // unconditionally is safe because `primeTnt` shortens or
+                        // does nothing, never restarts and never queues a second
+                        // countdown - so the re-prime rule has exactly one owner,
+                        // and it is not this call site.
+                        //
+                        // The cost is that a charge already lit can play a second
+                        // `Fuse`. That is the right side of the trade: the only
+                        // way to suppress it is the same unreliable id read, and
+                        // a duplicate cue under an explosion is cheaper than a
+                        // fuse length decided by a blink.
+                        if (game::isTntBlock(removed)) {
+                            // Drawn into a local first: two non-`const` calls on
+                            // `world` in one expression is well defined but reads
+                            // as if it might not be, and this line is already
+                            // carrying enough.
+                            const auto fuse = world.blastFuse();
+                            world.setBlock(cell.x, cell.y, cell.z, game::BlockId::TntPrimed);
+                            world.primeTnt(cell, fuse);
+                            sounds.play(audio, game::SoundEvent::Fuse,
+                                        glm::vec3{cell} + glm::vec3{0.5f}, 0.9f);
+                            continue;
+                        }
+                        // **Rolled before the cell is cleared.** A village chest
+                        // caught in a blast owes its table to its block id, and
+                        // Air remembers nothing - so this has to happen above
+                        // the `setBlock`, not with the spill below it, or the
+                        // chest bursts empty.
+                        if (game::isLootChest(removed)) {
+                            materialise(cell);
+                        }
                         world.setBlock(cell.x, cell.y, cell.z, game::BlockId::Air);
+                        // Which stored contents the item this cell drops will
+                        // carry, or 0 for everything that is not a stowbox with
+                        // something in it. The break path's own `brokenStowHandle`,
+                        // because a blast destroys a container exactly as
+                        // thoroughly as a pickaxe does.
+                        int blastStowHandle = 0;
 
                         // A furnace caught in the blast still spills what was
                         // inside it, exactly as breaking one does.
@@ -6300,19 +10987,46 @@ int main() {
                                                                      &found->second.fuel,
                                                                      &found->second.output}) {
                                     if (!stack->empty()) {
-                                        drops.spawn(centre, stack->item, stack->count);
+                                        game::dropStack(drops, centre, *stack);
                                     }
                                 }
                                 furnaces.erase(found);
                             }
                         }
-                        if (game::isChest(removed)) {
+                        // And a campfire caught in one, on the same rule and
+                        // through the same single owner the break path calls.
+                        if (game::isCampfire(removed)) {
+                            spillCampfire(cell);
+                        }
+                        // And a jukebox, for the same reason and out of the
+                        // same owner - a blast is the other half of every rule
+                        // the break path has.
+                        if (removed == game::BlockId::Jukebox) {
+                            spillJukeboxDisc(cell);
+                        }
+                        // **All three, matching the break path.** This asked
+                        // only `isChest`, so a blown-up hopper or lectern lost
+                        // its contents outright *and* left its entry standing in
+                        // `chests` keyed at that cell - so the next container
+                        // built on that exact block inherited them.
+                        if (game::isChest(removed) || game::isHopper(removed) ||
+                            removed == game::BlockId::Lectern) {
                             const auto found = chests.find(cell);
                             if (found != chests.end()) {
                                 const glm::vec3 centre = glm::vec3{cell} + glm::vec3{0.5f};
-                                for (const game::ItemStack& stack : found->second.slots) {
-                                    if (!stack.empty()) {
-                                        drops.spawn(centre, stack.item, stack.count);
+                                // A stowbox keeps its contents through a blast,
+                                // as the reference's does - they move onto the
+                                // item rather than falling out.
+                                if (game::isStowbox(removed)) {
+                                    if (!found->second.empty()) {
+                                        blastStowHandle = nextStowHandle++;
+                                        stowed.emplace(blastStowHandle, found->second);
+                                    }
+                                } else {
+                                    for (const game::ItemStack& stack : found->second.slots) {
+                                        if (!stack.empty()) {
+                                            game::dropStack(drops, centre, stack);
+                                        }
                                     }
                                 }
                                 chests.erase(found);
@@ -6321,28 +11035,125 @@ int main() {
 
                         // Whatever was blown up has already spilled its contents
                         // as drops, so a screen still open on it is showing a
-                        // copy the player could take a second time.
-                        if (openScreen.has_value() &&
-                            ((*openScreen == game::inventoryScreen::Kind::Furnace && openFurnacePosition == cell) ||
-                             ((*openScreen == game::inventoryScreen::Kind::Chest ||
-                               *openScreen == game::inventoryScreen::Kind::DoubleChest) &&
-                              (openChestPosition == cell || openChestPartner == cell)))) {
+                        // copy the player could take a second time. **Every
+                        // screen kind, through the one owner** - this asked only
+                        // about a furnace and a container, so a blast that took
+                        // the crafting table out from under you left its grid up
+                        // and working.
+                        if (screenLooksAt(cell)) {
                             closeScreen();
                         }
 
-                        // One block in `power` survives as an item, which is the
-                        // reference's rule and the reason a blast is a net loss
-                        // rather than a mining technique.
-                        const game::ItemId drop = game::dropForBlock(removed);
+                        // **How much of what a blast breaks comes back, and it
+                        // is not one rule but three.** A creeper leaves one
+                        // block in `power`, which is what makes it a net loss
+                        // rather than a mining technique; a charge drops
+                        // everything it breaks; and a dragon egg, a beacon and
+                        // a conduit always survive whatever set them off.
+                        //
+                        // All three live in `blast::explosionDropChance`, in
+                        // `Explosion.hpp`, next to the four `static_assert`s
+                        // that pin them. This site used to multiply the roll by
+                        // the blast power and test that against one, which is
+                        // the creeper's rule applied to all three cases - so a
+                        // charge returned a quarter of what it broke and a
+                        // dragon egg was destroyed outright two times in three.
+                        // Measured over two million rolls against the real
+                        // header: a 26-block charge yielded 6.5 and now yields
+                        // 26, while the creeper at 0.3340 and the charged
+                        // creeper at 0.1665 are bit-identical either side of
+                        // the change, which is the half of this that had to not
+                        // move.
+                        //
+                        // **The old expression is described above and not
+                        // quoted, deliberately.** `Explosion.hpp` tells a later
+                        // reader they can confirm this adoption in one grep, by
+                        // that expression having left this file. Spelling it
+                        // out here - which the first draft of this comment did
+                        // - keeps the string alive and turns their check into a
+                        // false negative. Do not helpfully paste it back in.
                         blastRandom ^= blastRandom << 13;
                         blastRandom ^= blastRandom >> 17;
                         blastRandom ^= blastRandom << 5;
                         const float roll = static_cast<float>(blastRandom & 0xFFFFFFu) /
                                            static_cast<float>(0x1000000u);
-                        if (drop != game::ItemId::None && roll * blast.power < 1.0f) {
-                            drops.spawn(glm::vec3{cell} + glm::vec3{0.5f}, drop, 1);
-                            ++dropped;
+                        // **A loaded stowbox is exempt from the roll**, and the
+                        // roll is still drawn so the blast's random stream does
+                        // not depend on what it hit. Its contents live behind a
+                        // handle that exists only on the item, so losing the item
+                        // to the roll would strand them in `stowboxes.dat` with
+                        // nothing left that could ever open them - the same leak
+                        // the death drop had. **The break path guards the same
+                        // way now**; it allocated the handle unconditionally and
+                        // then let `yieldsDrop` decide whether anything would ever
+                        // carry it.
+                        if (blastStowHandle != 0 ||
+                            roll < game::blast::explosionDropChance(removed, blast.power,
+                                                                    fromTnt)) {
+                            // **A blast drops what the block's own loot table
+                            // gives with NO tool in hand, and skips the harvest
+                            // gate a player would face.** `Pickaxe` is how that
+                            // is spelled here, and the previous wording of this
+                            // comment - "as an unenchanted diamond tool would" -
+                            // was wrong in a way that argues for a breaking
+                            // edit, which is the most expensive kind
+                            // (CLAUDE.md bug shape #16). Finding 2029 measured
+                            // the consequence: 10 of 3314 ids cannot be
+                            // harvested by a diamond pickaxe, and 9 of them are
+                            // snow, which no part of the old reasoning
+                            // described.
+                            //
+                            // **THREE REFERENCE FACTS PIN THIS, AND ONLY ONE
+                            // MODEL SATISFIES ALL THREE:**
+                            //   exploded stone   -> cobblestone
+                            //   exploded cobweb  -> nothing
+                            //   exploded snow    -> nothing
+                            // "Explosions harvest with the correct tool" gives
+                            // cobweb its string and fails fact 2. "Explosions
+                            // harvest with an empty hand, gate and all" gives
+                            // stone nothing and fails fact 1. Only "the loot
+                            // table with no tool, harvest gate skipped" gives
+                            // all three, because stone's table names no tool
+                            // while cobweb's requires shears and snow's a
+                            // shovel.
+                            //
+                            // **So the code below is right and it is the
+                            // comment that was broken.** Hardcoding `Pickaxe`
+                            // reproduces all three: stone passes, cobweb fails,
+                            // snow fails.
+                            //
+                            // **DO NOT "fix" this to `miningRow(removed).tool`.**
+                            // Finding 2029 proposes exactly that, and it is the
+                            // trap: asking each block for its own required kind
+                            // hands a cobweb its shears and starts dropping
+                            // string from every exploded web, breaking fact 2 to
+                            // repair a snow case that was never broken. It would
+                            // also pass any "does exploded snow drop now?" check
+                            // written to test it. The 9 snow ids are correct as
+                            // they stand.
+                            //
+                            // Unsettled and honestly so: `Mojang/bedrock-samples`
+                            // publishes no `blocks/` and no `loot_tables/blocks/`
+                            // (checked against a 404 control - entity loot
+                            // tables are present, so the absence is real), so
+                            // block behaviour is engine-side and unpublished.
+                            // The three facts above are the evidence; if one of
+                            // them is ever shown wrong on Bedrock, re-derive
+                            // from the set rather than from this line.
+                            const game::BreakContext blasted{game::ToolKind::Pickaxe,
+                                                             game::kDiamondTier, false, 0, true};
+                            dropped += spillBlockDrop(cell, removed, blasted, blastStowHandle) > 0
+                                           ? 1
+                                           : 0;
                         }
+
+                        // **The same four cleanups a pickaxe pays.** A blast
+                        // left floating door tops, half beds and ladders hanging
+                        // on nothing, because every one of those rules lived in
+                        // the break path and nowhere else. Called after the
+                        // spill so a neighbour that comes down is not competing
+                        // with this cell's own roll.
+                        settleAround(cell, removed);
                     }
 
                     constexpr float kHalfWidth = game::player_constants::kWidth * 0.5f;
@@ -6350,23 +11161,44 @@ int main() {
                         player.position - glm::vec3{kHalfWidth, 0.0f, kHalfWidth},
                         player.position + glm::vec3{kHalfWidth, game::player_constants::kHeight,
                                                     kHalfWidth}};
-                    const float exposure = game::explosionExposure(world, blast.centre, body);
-                    const float impact =
-                        game::explosionImpact(blast.centre, blast.power, player.position, exposure);
-                    if (impact > strongestBlast) {
-                        // Aimed at the eyes rather than the feet, which is what
-                        // gives a close blast its upward throw for free.
-                        const glm::vec3 away = player.eyePosition() - blast.centre;
-                        const float reach = glm::length(away);
-                        if (reach > 0.001f) {
-                            // Blocks per tick in the reference; ours is per
-                            // second, so twenty times over. Only the strongest
-                            // blast of the frame throws you - several each
-                            // adding their own is the accumulator bug that once
-                            // launched the player clear off the map.
-                            strongestBlast = impact;
-                            blastPush = away / reach * impact * kBlastKnockback;
-                            blastDamage = game::explosionDamage(blast.power, impact);
+                    // **The cheap question first, and from the one place that
+                    // owns it.** `explosionExposure` is about thirty-six DDA
+                    // ray walks and it was being paid for every blast at any
+                    // distance, only for `explosionImpact` to return zero.
+                    // `withinBlast` is the `2 x power` reach `explosionImpact`
+                    // already applies internally, exported precisely so the
+                    // pre-filter and the real test cannot disagree - the open
+                    // -coded radius test that used to be the alternative here
+                    // is the second copy that eventually drifts.
+                    //
+                    // Both stay declared out here because the log line at the
+                    // foot of this loop reads them, and zero is the honest
+                    // answer for a blast that could not reach: it is what
+                    // `explosionImpact` returns past that radius anyway, so the
+                    // guard skips the rays rather than changing the result.
+                    float exposure = 0.0f;
+                    float impact = 0.0f;
+                    if (game::withinBlast(blast.centre, blast.power, player.position)) {
+                        exposure = game::explosionExposure(world, blast.centre, body);
+                        impact = game::explosionImpact(blast.centre, blast.power, player.position,
+                                                       exposure);
+                        if (impact > strongestBlast) {
+                            // Aimed at the eyes rather than the feet, which is
+                            // what gives a close blast its upward throw for
+                            // free.
+                            const glm::vec3 away = player.eyePosition() - blast.centre;
+                            const float reach = glm::length(away);
+                            if (reach > 0.001f) {
+                                // Blocks per tick in the reference; ours is per
+                                // second, so twenty times over. Only the
+                                // strongest blast of the frame throws you -
+                                // several each adding their own is the
+                                // accumulator bug that once launched the player
+                                // clear off the map.
+                                strongestBlast = impact;
+                                blastPush = away / reach * impact * kBlastKnockback;
+                                blastDamage = game::explosionDamage(blast.power, impact);
+                            }
                         }
                     }
 
@@ -6413,9 +11245,12 @@ int main() {
                     // throw does, rather than summing: several charges going off
                     // together should hit as hard as the worst of them, not as
                     // hard as all of them added up.
-                    if (!creative) {
-                        game::damagePlayer(player, blastDamage);
-                    }
+                    //
+                    // **Reduced by armour**, which is `Survival.hpp`'s list
+                    // again - an explosion is `entity_explosion`/`block_explosion`
+                    // in Bedrock's cause enum and both are ordinary
+                    // armour-reducible damage.
+                    hurtPlayer(blastDamage, inventory.armourSet());
                     player.velocity += blastPush;
                     player.onGround = false;
                 }
@@ -6551,11 +11386,6 @@ int main() {
             }
             timeOfDay -= std::floor(timeOfDay);
 
-            // Wrapped against the field's own period so a long session cannot
-            // lose the fraction the noise is sampled at.
-            cloudDrift = std::fmod(cloudDrift + deltaSeconds * kCloudDriftPerSecond, 100000.0f);
-            renderer.setCloudDrift(cloudDrift);
-
             waveSeconds = std::fmod(waveSeconds + deltaSeconds, 100000.0f);
             renderer.setWaterTime(waveSeconds);
 
@@ -6586,8 +11416,45 @@ int main() {
             // left running.
             const float gust = std::max(0.0f, std::sin(windClock * 0.19f)) *
                                std::max(0.0f, std::sin(windClock * 0.11f + 1.7f));
-            const float weatherWind = rainAmount * 4.0f + thunderAmount * 5.0f;
+            // **`Weather` owns the wind; this file owns what each visual does
+            // with it.** That split is the fix for a real defect rather than a
+            // tidy-up: this line used to read `rain * 4 + thunder * 5`, a second
+            // wind model living next to the one in `Weather.cpp`, and
+            // `Weather.hpp` says so above `windSpeed()` - *"the defect is two
+            // independent wind models, not an absent one, and the visible cost
+            // is that they can disagree."*
+            //
+            // The cost was not hypothetical. Measured over a forced storm and a
+            // forced calm, 14,398 frames against the real `Weather.cpp`: the
+            // owner's wind swings 1.0 to 12.0 while the cloud deck's rate had
+            // **exactly zero variance**, so the correlation between the deck and
+            // the slant was not merely poor, it was *undefined* - the deck could
+            // not agree or disagree with the wind because it never read it. Both
+            // now derive from the one number: exactly 1.000000 below the deck's
+            // cap, and 0.916 taken across the whole run including the frames
+            // where the cap is saturating, which is the honest figure.
+            //
+            // Subtracting the calm baseline rather than reading the multiplier
+            // raw is what preserves the gust model's whole point: `windSpeed()`
+            // rests at exactly 1.0 in a calm, so this rests at exactly 0.0 and a
+            // clear day still stands completely still until a gust crosses it.
+            // Every clear-weather number here is bit-identical to what it was.
+            const float weatherWind = std::max(0.0f, weather.windSpeed() - kCalmWindSpeed);
             const float windStrength = weatherWind + gust * (2.0f + weatherWind * 0.5f);
+
+            // The deck reads the same wind, with its own gain and its own cap -
+            // which is exactly what the slant, the bend and the particle push
+            // below already do. It sits here rather than up beside the sun so
+            // that it is downstream of `weather.update()`; run before it, it
+            // would drift on last frame's wind.
+            //
+            // Wrapped against the field's own period so a long session cannot
+            // lose the fraction the noise is sampled at.
+            cloudDrift = std::fmod(cloudDrift +
+                                       deltaSeconds * kCloudDriftPerSecond *
+                                           std::min(weather.windSpeed(), kMaxDeckWindFactor),
+                                   100000.0f);
+            renderer.setCloudDrift(cloudDrift);
 
             {
                 // A bolt only exists for a few tenths of a second, so this is
@@ -6609,12 +11476,26 @@ int main() {
                         const float away = glm::distance(camera.position, bolt.position);
                         thunderQueue.push_back({away / 343.0f, away});
                         // The reference's five points over a 6x12x6 box centred
-                        // on the strike.
-                        if (std::abs(camera.position.x - bolt.position.x) <= 3.0f &&
-                            std::abs(camera.position.z - bolt.position.z) <= 3.0f &&
-                            camera.position.y > bolt.position.y - 3.0f &&
-                            camera.position.y < bolt.position.y + 9.0f) {
-                            game::damagePlayer(player, 5);
+                        // on the strike. **Through `hurtPlayer`**, which owns
+                        // the creative gate - this was the one damage source in
+                        // the file that let a creative player be killed by the
+                        // weather.
+                        //
+                        // **Measured from the simulation eye, not the drawn
+                        // one.** Whether a bolt hurts you is simulation, and
+                        // `camera.position` carries `stepSmooth`: on the exact
+                        // frame you step up a block at the edge of the box, the
+                        // interpolation was deciding five points of damage.
+                        const glm::vec3 struck = player.eyePosition();
+                        if (std::abs(struck.x - bolt.position.x) <= 3.0f &&
+                            std::abs(struck.z - bolt.position.z) <= 3.0f &&
+                            struck.y > bolt.position.y - 3.0f &&
+                            struck.y < bolt.position.y + 9.0f) {
+                            // **Reduced by armour.** `Survival.hpp`'s list names
+                            // lightning among the reduced sources; Bedrock's
+                            // cause enum spells it `lightning`, an ordinary
+                            // cause with no bypass.
+                            hurtPlayer(5, inventory.armourSet());
                         }
 
                         // What it does to everything that is not the player. A
@@ -6664,9 +11545,61 @@ int main() {
                 const auto kind = game::weather::precipitationFor(biome, surface);
                 const bool falls = kind != game::weather::Precipitation::None && rainAmount > 0.01f;
                 const float level = falls ? rainAmount : 0.0f;
-                // One bit, for the fire update: anything under an open sky goes
-                // out while this holds.
-                world.setPrecipitating(falls && rainAmount > 0.2f);
+                // **The wet bit is rain only - and `falls` above deliberately
+                // stays wider than it.** This drives two rules in `World.cpp`,
+                // both of which mean water: farmland hydration at `isHydrated`
+                // and the open-sky fire quench in `updateFire`. `Weather.hpp`
+                // carries the cross-read above the `Precipitation` enum -
+                // [[Rain]] and [[Farmland]] give the wet effects to rain, and
+                // [[Snowfall]] draws the contrast outright, *"Unlike with rain,
+                // any entities that are on fire are not extinguished on contact
+                // with snow."* Asking `!= None` here opted every snowy biome
+                // into the wet rules, so a snowstorm put out open fires and
+                // watered fields.
+                //
+                // **Wider than "the snowy biomes", measured against the real
+                // `precipitationFor` and the real biome table:** 23 of the 30
+                // biomes snow at some altitude. Nine never rain at all, so they
+                // were wrongly wet always; the other fourteen are temperate with
+                // a snow line - the first of them turns over at y=108, which is
+                // ordinary hill country rather than a corner case. Of 6,030
+                // sampled biome-altitude columns, 3,122 were wet before and are
+                // dry now, 2,305 rain columns are untouched, and **none became
+                // wet that was not** - the gate only ever removes wetness.
+                //
+                // **The tempting one-token version of this fix is wrong:**
+                // narrowing `falls` instead would take `level` and the mesh
+                // rebuild below with it and stop snow rendering at all. `falls`
+                // is "is anything coming down", which is a question about
+                // particles; this is "is it wet", which is a question about
+                // gameplay. They are different questions and only the second
+                // one is rain-only.
+                //
+                // **`kFallingLevel`, not a literal 0.2 - finding 9686.**
+                // `Weather.hpp` asked for this reconciliation in the comment
+                // above the constant, and named this expression specifically:
+                // "`Main.cpp` holds an unlinked copy of this same 0.2 ... when
+                // it is reconciled, this is the one that should survive,
+                // because it sits beside the ramp rate that gives it its
+                // meaning." That is the right call and this is that edit.
+                //
+                // **It named one copy and there were three**, which is the more
+                // useful half of the finding: this site, the freeze/settle gate
+                // and the rain-splash emitter all asked the same question with
+                // the same literal, and one of the three was added tonight by
+                // the ice work. Reconciling only the site the finding named
+                // would have left two literals behind while making the fact
+                // *look* like it had one owner - strictly worse than leaving
+                // all three, because the next reader would trust the name.
+                //
+                // The nearby `rainAmount > 0.01f` on `falls` is deliberately
+                // NOT this constant. It asks "is anything coming down at all",
+                // which drives particles and the mesh; this asks "is it coming
+                // down hard enough to count", which drives gameplay. Same
+                // variable, different questions, and only the second is
+                // `kFallingLevel`.
+                world.setPrecipitating(falls && rainAmount > game::weather::kFallingLevel &&
+                                       kind == game::weather::Precipitation::Rain);
 
                 // Rebuilt on a column change or a material change in strength.
                 // Every rebuild retires a buffer, so "every frame" is not free.
@@ -6695,8 +11628,24 @@ int main() {
                 // because each one that lands calls `setBlock` and that costs a
                 // remesh.
                 settleTimer -= deltaSeconds;
-                if (settleTimer <= 0.0f && rainAmount > 0.2f) {
+                if (settleTimer <= 0.0f) {
                     settleTimer = 0.08f;
+                    // **Only snow ACCUMULATION needs falling weather. Freezing
+                    // and melting do not** - and gating all three on
+                    // `rainAmount` is why a clear cold night never froze a
+                    // single lake. The reference freezes water whenever the
+                    // column is cold, sky-lit and dark enough; precipitation is
+                    // not one of its conditions. So the pass runs on its own
+                    // timer now and each of the three rules states its own
+                    // weather requirement, rather than one gate quietly
+                    // speaking for all of them.
+                    //
+                    // **`rainAmount` itself is untouched**, deliberately: it is
+                    // `weather.rainLevel()`, the intensity of whatever is
+                    // falling, and whether that falls as snow or as rain is
+                    // `precipitationFor`'s answer below rather than this
+                    // value's. Nothing here re-widens it.
+                    const bool precipitating = rainAmount > game::weather::kFallingLevel;
                     const float angle = static_cast<float>(std::rand()) / RAND_MAX * 6.2831853f;
                     const float away =
                         std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 26.0f;
@@ -6709,8 +11658,16 @@ int main() {
                     // the middle of a view and settling by the column you happen
                     // to stand in would put snow on the warm side of it.
                     const auto here = game::sampleBiome(kWorldSeed, sx, sz).dominant;
+                    // **The five-argument form, because this one writes blocks.**
+                    // The two-argument form runs a clean contour with no jitter;
+                    // `freezesAt` - which is what the generator and the lightning
+                    // both ask - carries a +/-2.24-block wobble, so inside that
+                    // band the jitter-free answer says snow on columns the
+                    // generator deliberately left bare and says nothing on the
+                    // ones it snow-capped. These `setBlock`s persist, so the
+                    // disagreement is permanent.
                     const auto falling = game::weather::precipitationFor(
-                        here, std::max(top, 0));
+                        here, std::max(top, 0), kWorldSeed, sx, sz);
                     if (top >= 0 && falling == game::weather::Precipitation::Snow) {
                         const game::BlockId standing = world.blockAt(sx, top, sz);
                         const game::BlockId above = world.blockAt(sx, top + 1, sz);
@@ -6721,8 +11678,13 @@ int main() {
                         // A torch keeps its own patch clear, which is the
                         // reference's rule and the only thing that stops a
                         // sheltered doorway filling in.
-                        const bool warmed = world.blockLightAt(sx, top + 1, sz) >= 12;
-                        if (open && !warmed) {
+                        // **Nine or lower, so the block is at 10 - ours said
+                        // 12.** The reference accumulates snow only where the
+                        // block light level is 9 or less, so two extra levels
+                        // of torchlight were letting snow creep closer to a
+                        // flame than it ever should.
+                        const bool warmed = world.blockLightAt(sx, top + 1, sz) >= 10;
+                        if (precipitating && open && !warmed) {
                             if (game::isSnowLayer(standing)) {
                                 const int deeper = game::snowLayerDepth(standing) + 1;
                                 world.setBlock(sx, top, sz, game::snowLayerAt(deeper));
@@ -6740,14 +11702,76 @@ int main() {
                             if (!game::isWater(cell)) {
                                 break;
                             }
+                            // **Below 10, and at least one horizontal neighbour
+                            // that is not water.** That last clause is the one
+                            // that was missing entirely, and it is what makes a
+                            // lake freeze inward from its banks instead of
+                            // skinning over all at once - the middle of an
+                            // ocean has water on all four sides and never
+                            // freezes at all. Kept last in the conjunction so
+                            // the four extra `blockAt` reads are only paid by a
+                            // cell that has already passed the cheap tests.
                             if (world.blockAt(sx, y + 1, sz) == game::BlockId::Air &&
                                 game::isWaterSource(cell) &&
                                 world.skyLightAt(sx, y + 1, sz) >= game::kMaxLight &&
-                                world.blockLightAt(sx, y, sz) < 12) {
+                                world.blockLightAt(sx, y, sz) < 10 &&
+                                (!game::isWater(world.blockAt(sx + 1, y, sz)) ||
+                                 !game::isWater(world.blockAt(sx - 1, y, sz)) ||
+                                 !game::isWater(world.blockAt(sx, y, sz + 1)) ||
+                                 !game::isWater(world.blockAt(sx, y, sz - 1)))) {
                                 // A source only. Freezing a flowing cell is
                                 // undone by the next fluid tick, which would
                                 // leave the shoreline flickering.
                                 world.setBlock(sx, y, sz, game::BlockId::Ice);
+                            }
+                        }
+                    }
+
+                    // **Ice melts by BLOCK light alone, and sky light is
+                    // ignored on purpose** - that is the reference's rule
+                    // rather than a simplification. So ice under an open sky
+                    // survives noon indefinitely, while one torch set beside a
+                    // frozen lake opens a hole in it. That asymmetry is the
+                    // whole character of the mechanic, and it is why melting
+                    // cannot be folded into the freeze test above, which
+                    // requires *full* sky light.
+                    //
+                    // **Outside the `falling == Snow` test, deliberately.**
+                    // That test asks "is this column cold enough to freeze",
+                    // which is the wrong question here twice over: a block of
+                    // ice carried to a desert and placed must melt, and a cold
+                    // biome does not protect ice from a torch either.
+                    //
+                    // Scanned over a short window rather than at `top` alone,
+                    // because ice is solid once it forms - `highestSolid` then
+                    // reports the ice itself, and a snow layer settling on top
+                    // of it moves the answer again.
+                    if (top >= 0) {
+                        for (int y = std::max(top - 3, 0); y <= top + 3; ++y) {
+                            if (world.blockAt(sx, y, sz) != game::BlockId::Ice) {
+                                continue;
+                            }
+                            // "Higher than 11 immediately next to it on any
+                            // side", so the six neighbours - the ice cell's own
+                            // level is not what the rule asks for.
+                            int lit = static_cast<int>(world.blockLightAt(sx + 1, y, sz));
+                            lit = std::max(
+                                lit, static_cast<int>(world.blockLightAt(sx - 1, y, sz)));
+                            lit = std::max(
+                                lit, static_cast<int>(world.blockLightAt(sx, y, sz + 1)));
+                            lit = std::max(
+                                lit, static_cast<int>(world.blockLightAt(sx, y, sz - 1)));
+                            lit = std::max(
+                                lit, static_cast<int>(world.blockLightAt(sx, y + 1, sz)));
+                            lit = std::max(
+                                lit, static_cast<int>(world.blockLightAt(sx, y - 1, sz)));
+                            if (lit > 11) {
+                                // Back to a *source*, which is what froze in the
+                                // first place. Writing a flowing level would be
+                                // corrected by the next fluid tick anyway and
+                                // would flicker the shoreline for a frame on the
+                                // way.
+                                world.setBlock(sx, y, sz, game::BlockId::Water0);
                             }
                         }
                     }
@@ -6802,8 +11826,8 @@ int main() {
                 // everywhere, because a splash is only legible within a few
                 // metres and the rest would be spent on sub-pixel specks.
                 splashTimer -= deltaSeconds;
-                if (rainAmount > 0.2f && precipitationKind == game::weather::Precipitation::Rain &&
-                    splashTimer <= 0.0f) {
+                if (rainAmount > game::weather::kFallingLevel &&
+                    precipitationKind == game::weather::Precipitation::Rain && splashTimer <= 0.0f) {
                     splashTimer = 0.06f;
                     for (int i = 0; i < 4; ++i) {
                         const float angle = static_cast<float>(std::rand()) / RAND_MAX * 6.2831853f;
@@ -6863,7 +11887,29 @@ int main() {
             // a diffuser rather than simply a darker sun.
             const float overcast = 1.0f - 0.24f * rainAmount - 0.26f * thunderAmount;
             const float ambient = light.ambient * (1.0f - 0.18f * rainAmount) + flash * 0.55f;
-            renderer.setSunLighting(ambient, light.strength * overcast, game::sky::kAmbientFloor);
+            // **Night Vision, which had no reader anywhere.** Two
+            // brewing rows make it, its icon and timer are displayed,
+            // and drinking it changed nothing whatever about what you
+            // could see - a finished-looking feature from every angle
+            // except the one that matters.
+            //
+            // It lifts the **floor**, not the sun: the reference's
+            // night vision makes unlit ground read as though it were
+            // lit, and `ambientFloor` is exactly "what a surface no
+            // light reaches receives".
+            //
+            // **The bright value is read off the day's own curve rather
+            // than typed here.** A literal at this call site would be a
+            // second owner of how bright daylight is, and would sit
+            // where it was set while `sky::lighting` moved underneath
+            // it - the derived-somewhere-other-than-the-owning-table
+            // shape. `0.25f` is noon: `sunDirection` turns one full
+            // circle across `timeOfDay`, so a quarter round is overhead.
+            const float ambientFloor =
+                player.effects.level(game::effects::Effect::NightVision) > 0
+                    ? game::sky::lighting(0.25f).ambient
+                    : game::sky::kAmbientFloor;
+            renderer.setSunLighting(ambient, light.strength * overcast, ambientFloor);
             renderer.setSkyTransform(game::sky::skyTransform(camera.position, sunDirection,
                                                              game::sky::kSunSize, skyDistance),
                                      0);
@@ -7027,79 +12073,53 @@ int main() {
                 lastReportTime = now;
             }
 
+            // The whole session, written down. On a timer because a crash, a
+            // lost device or a pulled power cable is not a polite shutdown, and
+            // on the flag as well because a screen just closed on a container
+            // whose contents changed. Last thing in the frame, after everything
+            // that could have moved an item has already run.
+            if ((savePending && !saveFailing) || now - lastSaveTime >= kAutosaveInterval) {
+                // **The dirty flag now survives a failed write.** Clearing it
+                // regardless was the same shape as the `saveIfModified` bug: the
+                // world is marked clean, the next autosave sees nothing to do,
+                // and the only copy of a rolled loot chest is the one that just
+                // failed to write.
+                //
+                // `saveFailing` exists so that keeping it dirty does not become a
+                // retry every single frame on a disk that is full or a directory
+                // that has gone away - which would bury the writer's own error
+                // in thousands of copies of itself. A failure hands the retry to
+                // the timer instead, so it comes round once per autosave
+                // interval, which is the right cadence for something a player
+                // may be fixing in another window.
+                const bool complete = saveEverything();
+                savePending = !complete;
+                saveFailing = !complete;
+                lastSaveTime = now;
+            }
+
             frameLimiter.waitForNextFrame();
         }
 
         engine::logInfo("Window closed. Saving world.");
-        world.saveAll();
-        {
-            game::SavedPlayer saved{player.position,   camera.yaw,        camera.pitch,
-                                    player.health,     player.food,       player.saturation,
-                                    player.exhaustion};
-            for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
-                saved.inventory[i] = inventory.slot(i);
-            }
-            saved.selectedSlot = static_cast<std::int32_t>(selectedSlot);
-            world.store().savePlayer(saved);
+        // **Before the save, not after**, and this is the ordinary shutdown's
+        // half of what `SaveOnUnwind` does on the crash path: the landing is a
+        // `setBlock`, and `saveEverything`'s first write is `world.saveAll()`.
+        settleFallersBeforeFinalSave();
+        // **`worldSaved` is set either way, and that is deliberate.** It only
+        // tells `SaveOnUnwind` that the ordinary path already ran; leaving it
+        // false would send the emergency save at the same tables that just
+        // failed, and its "unwinding without a save" line would be untrue.
+        if (!saveEverything()) {
+            engine::logError("The shutdown save did not write everything - see the line above.");
         }
-
-        // Empty ones are dropped rather than written: a furnace nobody has used
-        // is indistinguishable from one that has never been opened.
-        std::vector<game::PlacedFurnace> savedFurnaces;
-        savedFurnaces.reserve(furnaces.size());
-        for (const auto& [position, furnace] : furnaces) {
-            if (!furnace.idle()) {
-                savedFurnaces.push_back(game::PlacedFurnace{position, furnace});
-            }
-        }
-        world.store().saveFurnaces(savedFurnaces);
-
-        std::vector<game::PlacedChest> savedChests;
-        savedChests.reserve(chests.size());
-        for (const auto& [position, chest] : chests) {
-            if (!chest.empty()) {
-                savedChests.push_back(game::PlacedChest{position, chest});
-            }
-        }
-        world.store().saveChests(savedChests);
-
-        std::vector<game::StowedBox> savedStowboxes;
-        savedStowboxes.reserve(stowed.size());
-        for (const auto& [handle, contents] : stowed) {
-            if (!contents.empty()) {
-                savedStowboxes.push_back(game::StowedBox{handle, contents});
-            }
-        }
-        world.store().saveStowboxes(savedStowboxes);
-
-        // And it must not write one back either. The showcase population is
-        // three copies of whatever was being looked at; saving that would
-        // replace the world's animals with it.
-        std::vector<game::SavedCreature> savedCreatures;
-        if (settings.creatureShowcase == 0) {
-            savedCreatures.reserve(creatures.all().size());
-            for (const game::Creature& creature : creatures.all()) {
-                // Something caught part-way through falling over is already
-                // gone; the body is only still there so the fall can finish.
-                // Writing it out would reload a corpse that dies again on sight.
-                if (creature.health <= 0) {
-                    continue;
-                }
-                savedCreatures.push_back(game::SavedCreature{static_cast<std::uint8_t>(creature.kind),
-                                                             creature.position.x, creature.position.y,
-                                                             creature.position.z, creature.yaw,
-                                                             creature.health, creature.scale,
-                                                             static_cast<std::uint8_t>(creature.charged ? 1 : 0),
-                                                             static_cast<std::uint8_t>(creature.playerBuilt ? 1 : 0),
-                                                             creature.profession});
-            }
-            world.store().saveCreatures(savedCreatures);
-        }
-
-        engine::logInfo("Saved " + std::to_string(world.savedChunkCount()) + " modified chunks, " +
-                        std::to_string(savedFurnaces.size()) + " furnaces and " +
-                        std::to_string(savedCreatures.size()) + " creatures. Shutting down.");
+        worldSaved = true;
+        engine::logInfo("Shutting down.");
     } catch (const std::exception& error) {
+        // **No save here on purpose.** Unwinding has already destroyed `world`,
+        // the player and every container by the time this runs, so a save
+        // written at this point would be reading freed memory. `SaveOnUnwind`,
+        // declared beside them, has already done it while they were alive.
         engine::logError(std::string("Fatal: ") + error.what());
         return EXIT_FAILURE;
     }

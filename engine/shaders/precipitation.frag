@@ -127,9 +127,22 @@ void main() {
 
     // Softened where a streak meets the ground, or the curtain ends in a hard
     // line across every hillside. The scene copy's alpha is that distance.
+    //
+    // **Both sides of the subtraction must be the same kind of distance.** The
+    // copy's alpha is `length(worldPosition - eye)` - radial, written by
+    // `deferred.frag` - while `fragViewDepth` is `gl_Position.w`, the distance
+    // along the view axis, and the two differ by `1/cos` of the angle off the
+    // centre of the screen: about 1.74 at the corners at a 70 degree field of
+    // view. Subtracting one from the other therefore cleared the clamp's
+    // ceiling of 1.0 for any surface more than about 1.4 m off-centre, so the
+    // fade only ever worked in a narrow cone around the middle of the screen
+    // and the hard line this exists to prevent was visible everywhere else -
+    // appearing and disappearing on the same hillside as the camera turned.
+    // The precipitation mesh is drawn with a plain `viewProjection`, so
+    // `fragWorldPosition` really is world space here.
     vec2 screenUv = gl_FragCoord.xy / vec2(textureSize(sceneCopy, 0));
     float behind = texture(sceneCopy, screenUv).a;
-    alpha *= clamp(behind - fragViewDepth, 0.0, 1.0);
+    alpha *= clamp(behind - length(fragWorldPosition - frame.eye.xyz), 0.0, 1.0);
 
     outColor = vec4(tint * lighting, alpha);
 }

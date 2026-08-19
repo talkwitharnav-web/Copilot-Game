@@ -14,6 +14,45 @@ struct RaycastHit {
     /// The empty cell the ray was in immediately before, which is where a newly
     /// placed block goes.
     glm::ivec3 adjacent{0};
+
+    // --- The three below are `SweepHit`'s three, deliberately spelled the same
+    // --- way and meaning the same thing, so the two results read alike.
+    //
+    // **They were being computed and thrown away.** `hitsBlockGeometry` has
+    // always returned the entry parameter and the face crossed - `sweepBlocks`
+    // keeps both and `raycast` kept neither, deriving `adjacent` from the normal
+    // and dropping the rest on the floor. Nothing new is calculated for these.
+
+    /// The face crossed to get in, as a unit step out of the block: `{0,1,0}`
+    /// for the top, `{-1,0,0}` for the west side.
+    ///
+    /// **`adjacent` is `block + normal` and that is not a coincidence** - it is
+    /// how `adjacent` has always been computed. What this adds is the ability to
+    /// tell *which* face without subtracting two cells, which is what a caller
+    /// wants when the answer depends on the face rather than on the cell: the
+    /// half a slab is placed in, which way a stair or a torch or a chest turns.
+    ///
+    /// **Zero when the ray began inside the thing it hit**, and zero when
+    /// `stopAtFluid` stopped on a source the ray started inside. That is honest
+    /// rather than a sentinel - there is no face to have crossed - and a caller
+    /// that must have a direction should fall back on the view vector.
+    glm::ivec3 normal{0};
+    /// Where on the ray it landed, in world space, and how far along it that
+    /// was in metres from the origin.
+    ///
+    /// **The point is what a top slab and an upside-down stair need**, and
+    /// neither works without it: which half of a cell was struck is a question
+    /// about the hit position's fractional Y, and knowing only the cell and the
+    /// face cannot answer it - a ray hitting the *side* of a cell crosses the
+    /// same face whether it lands in the top half or the bottom.
+    ///
+    /// **The distance is the parameter along the normalised direction**, so it
+    /// is in the same units as the `maxDistance` argument and is directly
+    /// comparable between two hits. For a `stopAtFluid` stop it is where the ray
+    /// entered the fluid *cell*, not where it met a surface - fluids have no
+    /// selection geometry to meet, which is the whole reason that branch exists.
+    glm::vec3 point{0.0f};
+    float distance = 0.0f;
 };
 
 /// Walks the ray cell by cell and returns the first solid block within range.

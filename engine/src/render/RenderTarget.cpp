@@ -20,8 +20,20 @@ std::uint32_t RenderTarget::mipCountFor(VkExtent2D extent, std::uint32_t limit) 
 }
 
 RenderTarget::RenderTarget(const VulkanContext& context, VkExtent2D extent, VkFormat format,
-                           VkImageUsageFlags usage, std::uint32_t mipLevels)
+                          VkImageUsageFlags usage, std::uint32_t mipLevels)
     : m_context(context), m_extent{std::max(1u, extent.width), std::max(1u, extent.height)}, m_format(format) {
+    // See `DepthImage`: a constructor that throws gets no destructor, and there
+    // are seven of these rebuilt on every resize and render-scale change.
+    try {
+        createResources(usage, mipLevels);
+    } catch (...) {
+        destroy();
+        throw;
+    }
+}
+
+void RenderTarget::createResources(VkImageUsageFlags usage, std::uint32_t mipLevels) {
+    const VulkanContext& context = m_context;
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -46,8 +58,6 @@ RenderTarget::RenderTarget(const VulkanContext& context, VkExtent2D extent, VkFo
         findMemoryType(context.physicalDevice(), requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     if (allocateDeviceMemory(context.device(), allocInfo, &m_memory) != VK_SUCCESS) {
-        vkDestroyImage(context.device(), m_image, nullptr);
-        m_image = VK_NULL_HANDLE;
         throw std::runtime_error("vkAllocateMemory failed for a render target");
     }
     vkCheck(vkBindImageMemory(context.device(), m_image, m_memory, 0), "vkBindImageMemory");
@@ -67,16 +77,21 @@ RenderTarget::RenderTarget(const VulkanContext& context, VkExtent2D extent, VkFo
     }
 }
 
-RenderTarget::~RenderTarget() {
+RenderTarget::~RenderTarget() { destroy(); }
+
+void RenderTarget::destroy() noexcept {
     for (VkImageView view : m_views) {
         if (view != VK_NULL_HANDLE) {
             vkDestroyImageView(m_context.device(), view, nullptr);
         }
     }
+    m_views.clear();
     if (m_image != VK_NULL_HANDLE) {
         vkDestroyImage(m_context.device(), m_image, nullptr);
+        m_image = VK_NULL_HANDLE;
     }
     freeDeviceMemory(m_context.device(), m_memory);
+    m_memory = VK_NULL_HANDLE;
 }
 
 VkExtent2D RenderTarget::mipExtent(std::uint32_t level) const {

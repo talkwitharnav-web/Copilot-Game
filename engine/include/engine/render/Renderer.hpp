@@ -41,6 +41,21 @@ struct ClearColor {
 using MeshHandle = std::uint32_t;
 inline constexpr MeshHandle kInvalidMesh = ~MeshHandle{0};
 
+/// One contiguous run of a mesh's index buffer.
+///
+/// **Deliberately not the mesher's `IndexRange`, and this is not a duplicated
+/// table.** `engine/` may not name a game type, and the only thing the renderer
+/// needs from the mesher's seven-way split is where the direction-less shape
+/// pass begins - no copy of the six face normals, which is the copy that would
+/// actually be dangerous. `count == 0` means "there is none", which is the
+/// common case, and the draw is then skipped rather than issued empty.
+struct MeshIndexRange {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+
+    bool empty() const { return count == 0; }
+};
+
 /// What the last completed frame cost. GPU time is measured on the device with
 /// timestamp queries, so it reports actual work rather than how long the CPU
 /// waited.
@@ -57,6 +72,10 @@ struct RenderStats {
     /// sharing blocks costs.
     std::uint32_t pooledMegabytesUsed = 0;
     std::uint32_t pooledMegabytesHeld = 0;
+    /// Staging submissions made since startup. Rising by more than one or two
+    /// per frame means the upload arena is too small and every mesh is paying
+    /// for its own submit.
+    std::uint32_t uploadSubmissions = 0;
 };
 
 /// Drives one frame of GPU work: acquire an image, record commands, submit, present.
@@ -81,10 +100,18 @@ public:
     /// `translucent` geometry is drawn in a second pass, after every opaque mesh
     /// in the scene. Blending is order-dependent, so it cannot simply sit in the
     /// same buffer and be drawn whenever its chunk comes up.
-    MeshHandle addMesh(const MeshData& mesh, bool translucent = false);
+    ///
+    /// `shapedTail` is the mesher's shape-pass range: whole non-cube blocks
+    /// that belong to no face direction and are appended after everything that
+    /// does. Stained panes are the only thing in it today, and they are drawn
+    /// **after** the rest of the mesh because a pane is far more often in front
+    /// of water than inside it. Defaulted, so a caller that has no such split
+    /// keeps working and simply draws the buffer in one go.
+    MeshHandle addMesh(const MeshData& mesh, bool translucent = false,
+                       const MeshIndexRange& shapedTail = {});
 
     /// Replaces a mesh's contents, keeping its handle.
-    void updateMesh(MeshHandle handle, const MeshData& mesh);
+    void updateMesh(MeshHandle handle, const MeshData& mesh, const MeshIndexRange& shapedTail = {});
 
     /// Releases a mesh and frees its slot for reuse.
     void removeMesh(MeshHandle handle);
@@ -138,8 +165,12 @@ public:
     /// both. Not a list: a third celestial body is not coming.
     static constexpr std::size_t kSkySlots = 2;
     void setSkyMesh(const MeshData& mesh, std::size_t slot = 0);
+    /// Clamped exactly as `setSkyMesh` is. `m_skyTransforms` is followed in the
+    /// class by the sun direction and the whole lighting state, so an
+    /// out-of-range slot would quietly rewrite those rather than crash - the
+    /// bug would present as "the sun went sideways", with nothing pointing here.
     void setSkyTransform(const glm::mat4& transform, std::size_t slot = 0) {
-        m_skyTransforms[slot] = transform;
+        m_skyTransforms[slot < kSkySlots ? slot : 0] = transform;
     }
 
     /// Direction *toward* the sun. Drives the directional term on world
@@ -171,6 +202,26 @@ public:
     /// 0 leaves the sky and the sun alone — they are drawn unlit through this
     /// same pipeline, and fogging them would dissolve the sun into the sky.
     void setFog(const glm::vec3& colour, float distance, float startFraction = 0.0f);
+
+    /// **The readback getters in this settings block have no caller as of
+    /// 2026-08-19, and that is the shape of the design rather than an
+    /// oversight.** The game owns each of these settings in its own struct,
+    /// pushes it in here, and reads its own copy back - `DebugOverlay` displays
+    /// `settings.toneMapper`, never `toneMapper()`. Eight are unreached today:
+    /// `toneMapper`, `exposure`, `bloomEnabled`, `bloomStrength`,
+    /// `shadowQuality`, `handheldLight`, `cloudQuality` and `renderScale`. The
+    /// setters are all live, so the settings themselves work - each one reaches
+    /// the field the renderer actually branches on.
+    ///
+    /// **What these getters are not is a second source of truth.** Several
+    /// setters clamp - `setShadowQuality` to [0, 3] and `setClouds` to [0, 2],
+    /// both measured - so a value read back here can legitimately differ from
+    /// the one the game holds, and a screen displaying the renderer's copy would
+    /// show a number that is not in `settings.cfg`. Read the setting from
+    /// wherever the game stores it, which is what the debug overlay already
+    /// does. Kept rather than deleted because a Video screen is a natural
+    /// caller; falsified by any of them gaining one, which would date this count
+    /// without touching the clamp warning.
 
     /// Which curve squashes the high dynamic range image back into something a
     /// monitor can show. Purely a matter of taste, which is why it is a setting.
@@ -213,10 +264,15 @@ public:
     float handheldLight() const { return m_handheldLight; }
 
     /// The cloud deck. `quality` is 0 off, 1 fast, 2 fancy - which is how many
-    /// steps each ray takes. `coverage` runs 0 to 1 and is how much of the sky
-    /// is cloud. `shadowStrength` is how far a cloud darkens the ground under
-    /// it, which is the cheapest part of the whole effect and most of what
-    /// makes it read.
+    /// steps each ray takes. `coverage` runs 0 to 1 and is *approximately* the
+    /// fraction of sky that is cloud - measured over 360,000 cells, 0.28 gives
+    /// 27.94%, 0.36 gives 35.31%, 0.50 gives 49.37%, so it tracks closely
+    /// through the useful range. **It does not reach 1.0**: 9.47% of cells sit
+    /// on the field's clamp floor and can never be cloud, so coverage 1.0 tops
+    /// out at 90.53% and a fully overcast sky is not available. See
+    /// `cloudCoverage` in `clouds.glsl` for why that is deliberate.
+    /// `shadowStrength` is how far a cloud darkens the ground under it, which
+    /// is the cheapest part of the whole effect and most of what makes it read.
     void setClouds(int quality, float coverage, float shadowStrength);
     int cloudQuality() const { return m_cloudQuality; }
     static constexpr int kCloudQualityCount = 3;
@@ -379,6 +435,26 @@ public:
     /// property of the artwork, so measuring them off whatever actually loaded
     /// is the only way they can have one owner - a written-down table goes
     /// stale the moment the atlas is swapped for the reference's.
+    ///
+    /// **`fontHeight` had no caller as of 2026-08-19 while its two siblings each
+    /// had one**, and that asymmetry is worth a look rather than a deletion: the
+    /// only measuring loop guards on `fontWidth` alone and then indexes rows, so
+    /// an atlas shorter than its glyph grid is not caught. It cannot corrupt
+    /// anything - `alphaAt` bounds-checks all three coordinates and returns 0
+    /// outside - so the failure is a glyph measured as blank, not a crash. The
+    /// accessor is the missing half of that guard, which is why it stays.
+    ///
+    /// **The caller belongs in `game/src/Main.cpp`**, in the advance-measuring
+    /// loop that opens `if (renderer.fontWidth() >= cell * columns)` and then
+    /// indexes two dimensions with `fontAlphaAt(cellX + x, cellY + y)`. Adding
+    /// the matching `fontHeight() >= cell * rows` clause is the whole fix.
+    /// Both snippets are quoted rather than located by line on purpose - that
+    /// file is edited constantly and a line number would be wrong by morning,
+    /// where the text is greppable for as long as the loop exists.
+    ///
+    /// Re-verified 2026-08-19 by a bare-name search over `engine/` and
+    /// `game/src`: three hits, all inside `engine/` - this declaration, the
+    /// definition, and this comment. Falsified by a hit in `game/`.
     std::uint32_t fontWidth() const;
     std::uint32_t fontHeight() const;
     std::uint8_t fontAlphaAt(std::uint32_t x, std::uint32_t y) const;
@@ -428,6 +504,10 @@ private:
         /// Drawn in the second pass. Blending depends on draw order, so these
         /// cannot be interleaved with opaque geometry.
         bool translucent = false;
+        /// The shape-pass tail of `indexBuffer`, drawn after the rest. Empty
+        /// for every mesh whose caller supplied no split, which is every mesh
+        /// that is not a chunk.
+        MeshIndexRange shapedTail{};
     };
 
     /// Allocates and fills a slot's buffers. Any previous contents are retired
@@ -495,6 +575,19 @@ private:
     /// with each pixel's distance from the eye in its alpha. Water reflects the
     /// world out of this.
     static constexpr std::uint32_t kSceneCopyBinding = kMaterialBinding + 1;
+    /// The sun's cascaded shadow map. **The same image the deferred set carries
+    /// at its own binding 5**, bound twice because the forward pass is handed
+    /// the world set and cannot reach the other one - and without it every
+    /// surface only the forward pass can draw, water above all, was lit as
+    /// though nothing stood between it and the sun.
+    ///
+    /// This set is bound during the shadow pass too, while the shadow map is
+    /// that pass's depth attachment. Legal only because `shadow.frag` never
+    /// declares this binding, since every image-layout rule is gated on the
+    /// descriptor being accessed - proved on this machine with the validation
+    /// layer and a control that does sample it. **Do not declare binding 7 in
+    /// any shader that runs during the shadow pass.**
+    static constexpr std::uint32_t kSunShadowBinding = kSceneCopyBinding + 1;
 
     /// Sixteen bits per channel with a sign bit. R11G11B10 would halve the
     /// bandwidth but has no sign, an uneven mantissa that discolours smooth
@@ -610,6 +703,16 @@ private:
     /// Clamped to the edge texel, which is what stops an upsample brightening
     /// the frame's outer rim.
     VkSampler m_edgeSampler = VK_NULL_HANDLE;
+    /// The same clamping as `m_edgeSampler` but **nearest**, and it exists for
+    /// the depth buffer alone. The contact-shadow taps in `deferred.frag` land
+    /// at arbitrary sub-texel offsets, so linear filtering is genuinely active
+    /// on them - and a tap straddling a silhouette returns a blend of two
+    /// non-linear depths, which unprojects to a point on neither surface and
+    /// draws a fringe of contact shadow through a hole. It also removes an
+    /// unchecked dependency: `VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT`
+    /// is not mandatory for `D32_SFLOAT` and `DepthImage::chooseFormat` only
+    /// ever asked for the depth-attachment feature.
+    VkSampler m_pointSampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_postSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_toneMapSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_postPool = VK_NULL_HANDLE;
@@ -618,9 +721,11 @@ private:
     /// One per mip, reading that mip to blend into the finer one below it.
     std::vector<VkDescriptorSet> m_bloomUpSets;
     VkDescriptorSet m_toneMapSet = VK_NULL_HANDLE;
-    /// The deferred pass needs the three G-buffer images, depth, and the frame's
-    /// own uniform block - so there is one per frame in flight even though only
-    /// the last of the five differs between them.
+    /// The deferred pass needs the three G-buffer images, depth, the frame's own
+    /// uniform block and the sun's shadow map - six bindings, built in
+    /// `createPostSamplers` and declared in `deferred.frag`. There is one set
+    /// per frame in flight because the frame uniform buffer differs between
+    /// them; every other binding names the same resource in all of them.
     VkDescriptorSetLayout m_deferredSetLayout = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> m_deferredSets;
 
@@ -665,6 +770,12 @@ private:
     };
     std::vector<RetiredMesh> m_retired;
     std::uint64_t m_frameIndex = 0;
+    /// Whether the previous `drawFrame` found the window minimized. The
+    /// transition *into* that state is where the device is waited out once, so
+    /// no drawing is left in flight. Uploads keep being recorded the whole time
+    /// the window is away, so those are drained on every minimized iteration
+    /// rather than once - see `drawFrame`.
+    bool m_wasMinimized = false;
     float m_verticalFovDegrees = 70.0f;
     float m_farPlane = 500.0f;
 
@@ -696,6 +807,10 @@ private:
     // Counted while recording, which is const, so they are mutable.
     mutable std::uint32_t m_frameDrawCalls = 0;
     mutable std::uint32_t m_frameTriangles = 0;
+    /// This frame's visible translucent slots as `{distance squared, slot}`,
+    /// sorted farthest first. A member so the sort scratch is not reallocated
+    /// every frame, and `mutable` for the same reason as the counters above.
+    mutable std::vector<std::pair<float, std::uint32_t>> m_translucentOrder;
 
     /// Reused by the screen-mesh painter's sort so it allocates nothing after
     /// the first HUD rebuild.

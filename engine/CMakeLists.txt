@@ -1,4 +1,4 @@
-﻿add_library(engine STATIC
+add_library(engine STATIC
     src/audio/AudioEngine.cpp
     src/audio/StbVorbis.cpp
     src/core/FrameLimiter.cpp

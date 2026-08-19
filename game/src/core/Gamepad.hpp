@@ -31,6 +31,20 @@ enum class InputMode : std::uint8_t {
     Count,
 };
 
+/// **The two counts are the same fact written down twice, in two files.**
+/// `Settings::kInputModeCount` is the only bound on `input_mode` in the config
+/// file, and `Main.cpp` uses it again to clamp the cast into this enum and once
+/// more as the modulus that the F key cycles through. So a fourth mode added
+/// here and not there would be unreachable from the config file *and* from the
+/// key that switches modes - a complete feature one constant short of existing,
+/// with nothing to say so: an unreachable enumerator warns at no level, and
+/// C4062 is off at `/W4` anyway.
+///
+/// This header already includes `Settings.hpp`, so the check costs nothing.
+static_assert(Settings::kInputModeCount == static_cast<unsigned>(InputMode::Count),
+              "InputMode gained or lost a mode - Settings::kInputModeCount bounds the config "
+              "file and the F-key cycle, and both are somewhere else");
+
 /// The pad's controls as the game names them.
 ///
 /// **The triggers are in here even though the device reports them as axes**,
@@ -71,6 +85,18 @@ struct Gamepad {
     /// A pad is plugged in and its layout is known. Stays true while the window
     /// is in the background; everything else goes quiet.
     bool connected = false;
+
+    /// Whether the **previous** frame actually read the pad - the window was
+    /// focused and a pad answered.
+    ///
+    /// Carried here because the triggers are the one control whose press edge
+    /// is derived rather than reported: `Window::updateGamepad` guards every
+    /// *button* edge against exactly this and the triggers had no equivalent,
+    /// so holding the left trigger, alt-tabbing away (which zeroes the axes)
+    /// and alt-tabbing back still holding it read as a fresh press - and a
+    /// fresh left trigger places a block, opens a chest or eats what you are
+    /// holding. Same on hot-plug with a trigger already down.
+    bool live = false;
 
     /// True on any frame the pad was genuinely touched, which is what drives
     /// automatic switching. A stick resting just past its dead zone does not

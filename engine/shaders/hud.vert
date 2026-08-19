@@ -13,8 +13,14 @@
 // the whole of what `hud.frag` actually consumes.
 
 // These locations must match Vertex::attributeDescriptions() in Vertex.hpp.
-// Only three are read; the pipeline still describes all five, so they are
+// Only `inSurface` is unread: `inPosition`, `inColor`, `inUv` and `inLayer` all
+// feed hud.frag, and `inLayer` is what selects between the font sheet, the HUD
+// sheet and the block array. The pipeline still describes all five, so they are
 // declared in full rather than left to be guessed at.
+// These five are not declared here so much as transcribed. `Vertex.hpp` owns
+// the layout - its `attributeDescriptions()` is the only table Vulkan reads,
+// and nothing in the build compares it against these lines. Change one end and
+// you must change the other by hand; the compiler will not say a word.
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUv;

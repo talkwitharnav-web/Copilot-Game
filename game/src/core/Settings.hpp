@@ -62,9 +62,12 @@ struct Settings {
     /// half of that produced bugs twice.
     bool creativeMode = true;
 
-    /// Sound and music, 0 to 1. **Two buses rather than one**, because turning
-    /// the music down without silencing the world is the split every settings
-    /// screen in this genre offers - and M34 builds the screen, not the system.
+    /// Sound and music, 0 to 1. **Two buses rather than one, and neither scales
+    /// the other**, because turning the music down without silencing the world
+    /// - or the world down without silencing the music - is the split every
+    /// settings screen in this genre offers, and M34 builds the screen, not the
+    /// system. `sound_volume=0` used to take the music with it, which is
+    /// exactly what having two of them is meant to prevent.
     float soundVolume = 1.0f;
     float musicVolume = 0.55f;
 
@@ -171,8 +174,23 @@ struct Settings {
     /// ray takes through it. Cycled live with C.
     unsigned clouds = 2;
 
-    /// How much of the sky is cloud, 0 to 1. The reference covers a little over
-    /// a quarter of it.
+    /// How much of the sky is cloud, 0 to 1.
+    ///
+    /// **This default is deliberately above the reference, and is not a
+    /// transcription of it - do not quietly converge the two.** Measured from
+    /// the reference's own `assets/minecraft/textures/environment/clouds.png`
+    /// in the `reference/` tree beside this repo (Java Edition assets 26.2,
+    /// which is the copy we have; the Bedrock file is not on disk and was not
+    /// checked): 256x256, strictly binary alpha - only 0 and 255 occur, there
+    /// is no partial coverage - and 18,103 of its 65,536 pixels are cloud, so
+    /// the reference deck covers 0.2762 of its plane, a little over a quarter.
+    ///
+    /// Ours is raymarched rather than a tiled quad - see `clouds` above, whose
+    /// levels are ray step counts - so the two figures are not measuring the
+    /// same quantity and 0.36 here is not comparable to 0.2762 there. Why 0.36
+    /// specifically was chosen is not recorded. Moving it is a look decision
+    /// and belongs to the playtester, not to whoever next reads this comment
+    /// and notices 0.36 is not 0.28.
     float cloudCoverage = 0.36f;
 
     /// How far a cloud darkens the ground beneath it. The cheapest part of the
@@ -272,6 +290,35 @@ struct Settings {
     /// sane upper bound and a corrupt file cannot ask for ten thousand threads.
     static constexpr unsigned kMaxWorkerThreads = 64;
 
+    /// How far from the origin a spawn column may be asked for, in blocks.
+    ///
+    /// **A sanity clamp on a config value, and its provenance is weaker than
+    /// this comment used to claim** (corrected 2026-08-19). It said 30,000,000
+    /// was "the reference's own world border". It is not: the world border is a
+    /// movable gameplay feature with a default of its own, and what this number
+    /// is reaching for is the *coordinate limit*, which is a different thing.
+    /// Neither figure is sourceable on disk here - `29999984` and `30000000`
+    /// appear in 0 of the 8,097 data JSON files in the reference tree, and the
+    /// phrase "world border" only in command and UI strings, consistent with
+    /// world limits being engine-side and unpublished. So the number stands on
+    /// minecraft.wiki alone, and is deliberately not being "corrected" to
+    /// 29,999,984: swapping one unsourced figure for another changes nothing
+    /// and no player can approach either.
+    ///
+    /// **A bound rather than a preference.** World code derives a chunk base
+    /// from this and adds constants to it, so a spawn near `INT_MAX` is signed
+    /// overflow: undefined behaviour, invisible at `/W4`, and it would surface
+    /// as terrain built somewhere other than where you asked rather than as a
+    /// crash. Past 2^24 a block coordinate also stops being exactly
+    /// representable as a `float`, so positions there would snap to a grid
+    /// coarser than a block - which this leaves possible but only just.
+    static constexpr int kMaxSpawn = 30000000;
+
+    /// Off, the full grid, or one species by index. Only a sanity bound: the
+    /// index is clamped against the real species count where it is used, which
+    /// is the only place that knows how many there are.
+    static constexpr int kMaxCreatureShowcase = 1000;
+
     /// Beyond this the chunk count grows faster than anything can feed it.
     static constexpr unsigned kMaxRenderDistance = 32;
 
@@ -293,6 +340,15 @@ struct Settings {
 /// file is written back so there is something to edit.
 Settings loadSettings(const std::filesystem::path& file);
 
-void saveSettings(const std::filesystem::path& file, const Settings& settings);
+/// Writes every setting, and answers whether the file on disk really changed.
+///
+/// **Returns a bool because the caller used to be told a lie.** `loadSettings`
+/// logged "Wrote default settings to ..." unconditionally, so a read-only
+/// directory or a full disk produced a warning and a cheerful confirmation of
+/// the same event, one line apart. Nothing is `[[nodiscard]]`: the six hotkey
+/// saves in the frame loop have nothing useful to do with a failure beyond the
+/// warning this already logs, and a discarded-result warning at every one of
+/// them would be noise.
+bool saveSettings(const std::filesystem::path& file, const Settings& settings);
 
 } // namespace game

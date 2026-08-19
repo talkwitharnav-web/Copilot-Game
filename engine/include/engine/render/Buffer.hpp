@@ -12,8 +12,10 @@ class VulkanContext;
 /// neither, so they are kept in one object that releases both. Copy and move are
 /// deleted: two objects owning one allocation is how double-frees happen.
 ///
-/// The memory is a **slice of a shared block**, not an allocation of its own -
-/// see `GpuMemory.hpp`. Vulkan caps the number of live allocations at a spec
+/// The memory is a **slice of a shared block** rather than an allocation of its
+/// own, unless the buffer is large enough that `GpuMemory` gives it a dedicated
+/// block to itself - see `GpuMemory.hpp`. Vulkan caps the number of live
+/// allocations at a spec
 /// floor of 4096, and a buffer each reached three thousand of them at render
 /// distance 12.
 class Buffer {

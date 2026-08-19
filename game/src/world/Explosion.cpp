@@ -70,377 +70,49 @@ const std::vector<glm::vec3>& rayDirections() {
     return directions;
 }
 
+/// **Exact packing, never a hash** — the same standard `Pathfinder.cpp`'s
+/// `cellKey` is held to, and for the same reason: a collision here folds two
+/// different cells into one and a block quietly survives a blast that took it.
+///
+/// This used to be a shift-and-XOR, where x lost its top ten bits off the end
+/// and the y and z fields overlapped at bits 21-31. It could not collide at
+/// crater scale, so it was safe *by accident* — two near-identical cell keys
+/// held to two different standards is exactly the shape that costs a session.
+/// Twenty-one bits of x and z reach about a million blocks either side of the
+/// origin and twelve of y cover a world 96 tall many times over.
 std::uint64_t packCell(const glm::ivec3& cell) {
-    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x)) << 42) ^
-           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y)) << 21) ^
-           static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z));
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & 0x1FFFFFu) << 33) |
+           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z) & 0x1FFFFFu) << 12) |
+           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & 0xFFFu));
 }
 
-/// True if anything solid stands between the two points. Water is not solid, so
-/// it shelters nothing — the reference's rule, arrived at for free.
+/// True if anything solid stands between the two points.
+///
+/// **Collision geometry, not selection geometry**, and that one word is the
+/// whole of a finding. `raycast` asks `worldSelectionBoxes`, which hands a
+/// plant a 0.75-wide column *precisely so the crosshair can pick it out* — so a
+/// tuft of grass, a flower, a torch, a rail, a button, a sign, a ladder or a
+/// vine all sheltered you from a blast that walks straight through them, and
+/// exposure feeds a squared damage curve. `sweepBlocks` asks
+/// `worldCollisionBoxes` instead, which is the question the reference's own
+/// exposure test asks and the one the projectile system next door already asks
+/// out of this same header.
+///
+/// Water still shelters nothing, because water collides with nothing — the
+/// reference's rule, and now it really does fall out for free rather than by
+/// coincidence.
 bool shielded(const World& world, const glm::vec3& from, const glm::vec3& to) {
-    const glm::vec3 offset = to - from;
-    const float distance = glm::length(offset);
-    if (distance < 0.0001f) {
-        return false;
-    }
-    return raycast(world, from, offset / distance, distance).hit;
+    // A zero-length segment is a sample point sitting on the centre, which
+    // `sweepBlocks` already reports as unobstructed.
+    return sweepBlocks(world, from, to).hit;
 }
 
 } // namespace
 
-float blastResistance(BlockId block) {
-    if (isFluid(block)) {
-        // 100, and it is the whole reason a blast underwater breaks nothing:
-        // a single 0.3 step costs 30, which no creeper ray can pay. Lava is the
-        // same figure in the reference.
-        return 100.0f;
-    }
-    // ---- Redstone, asked before the cut-shape forwarding. ----
-    // A button and a plate would otherwise inherit a plank's three, and every
-    // one of these is fragile in the reference. Without the branch they all
-    // reach the stone default at the bottom, which is the exact shape of bug
-    // that once left two whole table runs proof against any explosion.
-    if (isRedstoneWire(block) || isRedstoneTorch(block) || isRepeater(block) ||
-        isComparator(block) || isTripwireHook(block) || isTripwire(block)) {
-        return 0.0f;
-    }
-    if (isDaylightDetector(block)) {
-        return 0.2f;
-    }
-    if (isButton(block) || isPressurePlate(block) || isLever(block) || isTarget(block) ||
-        isPiston(block) || isPistonHead(block)) {
-        return 0.5f;
-    }
-    if (isRail(block)) {
-        return 0.7f;
-    }
-    if (isNoteBlock(block)) {
-        return 0.8f;
-    }
-    if (isObserver(block) || isLightningRod(block)) {
-        return 3.0f;
-    }
-    if (isDispenserLike(block)) {
-        return 3.5f;
-    }
-    // A cut shape resists exactly as the block it came from does, so an obsidian
-    // stair is as blast-proof as obsidian and an oak fence is not.
-    {
-        const BlockId material = shapedParent(block);
-        if (material != block) {
-            return blastResistance(material);
-        }
-    }
-    // Every facing and both lit states share one resistance, so the family is
-    // answered once rather than as eight cases.
-    if (isFurnace(block)) {
-        return 3.5f;
-    }
-    // Wooden, so the stone default at the bottom would be badly wrong.
-    if (isChest(block)) {
-        return 2.5f;
-    }
-    // Snow, which the stone default at the bottom would make blast-proof.
-    if (isSnowLayer(block)) {
-        return 0.1f;
-    }
-    if (isDoor(block) || isTrapdoor(block)) {
-        const bool metal = isDoor(block)
-                               ? kDoorFamilies[static_cast<std::size_t>(doorFamily(block))].metal
-                               : kTrapdoorFamilies[static_cast<std::size_t>(
-                                     trapdoorFamily(block))].metal;
-        return metal ? 5.0f : 3.0f;
-    }
-    if (isBed(block)) {
-        return 0.2f;
-    }
-    // **Above the run tests below, not after them.** A plant, a torch or a
-    // carpet offers a blast nothing at all, and each table run has its own
-    // catch-all that would otherwise answer 6.0 for the ones nobody named -
-    // which is what made bamboo, sweet berries, glow lichen, sea pickles and
-    // the four nether plants blast-proof.
-    if (blockShape(block) == BlockShape::Cross || blockShape(block) == BlockShape::Flat) {
-        return 0.0f;
-    }
-    // The farm, above the run tests for the same reason: the fourth run has no
-    // catch-all of its own, and soil is not rock.
-    if (isFarmland(block)) {
-        return 0.6f;
-    }
-    if (block == BlockId::DirtPath) {
-        return 0.65f;
-    }
-    if (isComposter(block)) {
-        return 0.6f;
-    }
-    if (isCarvedPumpkin(block) || isJackOLantern(block)) {
-        return 1.0f;
-    }
-    // The fifth run. **A branch of its own rather than the rock default at the
-    // bottom**, which is what made two whole table runs blast-proof last time.
-    if (block >= kFirstExtraBlock5 && block <= kLastExtraBlock5) {
-        if (block >= BlockId::OakWood && block <= BlockId::StrippedWarpedHyphae) {
-            return 2.0f;
-        }
-        if (isCoralBlock(block) ||
-            (block >= BlockId::WaxedCopperBlock && block <= BlockId::WaxedOxidizedCopperGrate) ||
-            isCopperBulb(block)) {
-            return 6.0f;
-        }
-        switch (block) {
-        case BlockId::CryingObsidian:
-        case BlockId::RespawnAnchor:
-        case BlockId::EnchantingTable:
-        case BlockId::Anvil:
-        case BlockId::ChippedAnvil:
-        case BlockId::DamagedAnvil:
-            return 1200.0f;
-        case BlockId::Grindstone:
-        case BlockId::Bell:
-            return 5.0f;
-        case BlockId::Lodestone:
-        case BlockId::BlastFurnace:
-        case BlockId::Stonecutter:
-            return 3.5f;
-        case BlockId::CartographyTable:
-        case BlockId::FletchingTable:
-        case BlockId::Loom:
-        case BlockId::Barrel:
-        case BlockId::Lectern:
-        case BlockId::Cauldron:
-        case BlockId::Campfire:
-        case BlockId::SoulCampfire:
-            return 2.5f;
-        case BlockId::ChiseledBookshelf:
-            return 1.5f;
-        case BlockId::SculkShrieker:
-        case BlockId::SculkSensor:
-            return 3.0f;
-        case BlockId::BrownMushroomBlock:
-        case BlockId::RedMushroomBlock:
-        case BlockId::MushroomStem:
-        case BlockId::SculkVein:
-        case BlockId::MossCarpet:
-            return 0.2f;
-        case BlockId::PowderSnow:
-        case BlockId::SuspiciousSand:
-        case BlockId::SuspiciousGravel:
-        case BlockId::RedstoneLamp:
-        case BlockId::RedstoneLampLit:
-            return 0.3f;
-        default:
-            return 1.0f;
-        }
-    }
-    // The sixth run. Named rather than left to the rock default below.
-    if (block >= kFirstExtraBlock6 && block <= kLastExtraBlock6) {
-        switch (block) {
-        case BlockId::EndPortalFrame:
-            return 3600.0f;
-        case BlockId::DragonEgg:
-            return 9.0f;
-        case BlockId::Beacon:
-        case BlockId::Conduit:
-            return 3.0f;
-        case BlockId::MonsterSpawner:
-            return 5.0f;
-        case BlockId::TintedGlass:
-            return 0.3f;
-        default:
-            return 1.0f;
-        }
-    }
-    // The sixth run. Named rather than left to the rock default at the bottom.
-    if (block >= kFirstExtraBlock6 && block <= kLastExtraBlock6) {
-        switch (block) {
-        case BlockId::EndPortalFrame:
-            return 3600.0f;
-        case BlockId::DragonEgg:
-            return 9.0f;
-        case BlockId::Beacon:
-        case BlockId::Conduit:
-            return 3.0f;
-        case BlockId::MonsterSpawner:
-            return 5.0f;
-        case BlockId::TintedGlass:
-            return 0.3f;
-        default:
-            return 1.0f;
-        }
-    }
-    // The second table run. Almost all of it is rock at 6; the exceptions are
-    // named and the rest falls through, which is what stops this needing an
-    // edit every time the run grows.
-    if (block >= kFirstExtraBlock2 && block <= kLastExtraBlock2) {
-        switch (block) {
-        case BlockId::Netherrack:
-        case BlockId::Sculk:
-            return 0.4f;
-        case BlockId::SoulSand:
-        case BlockId::SoulSoil:
-        case BlockId::Podzol:
-        case BlockId::Mycelium:
-            return 0.5f;
-        case BlockId::SlimeBlock:
-        case BlockId::DriedKelpBlock:
-        case BlockId::SnowBlock:
-        case BlockId::Azalea:
-        case BlockId::FloweringAzalea:
-            return 0.1f;
-        case BlockId::NetherWartBlock:
-        case BlockId::WarpedWartBlock:
-        case BlockId::Shroomlight:
-            return 1.0f;
-        case BlockId::Cactus:
-        case BlockId::Target:
-        case BlockId::OchreFroglight:
-        case BlockId::VerdantFroglight:
-        case BlockId::PearlescentFroglight:
-        case BlockId::CrimsonNylium:
-        case BlockId::WarpedNylium:
-            return 0.4f;
-        case BlockId::QuartzBlock:
-        case BlockId::SmoothQuartz:
-        case BlockId::ChiseledQuartz:
-        case BlockId::QuartzBricks:
-        case BlockId::QuartzPillar:
-            return 0.8f;
-        case BlockId::EndStone:
-        case BlockId::EndStoneBricks:
-            return 9.0f;
-        case BlockId::CrimsonStem:
-        case BlockId::WarpedStem:
-        case BlockId::MangroveLog:
-        case BlockId::BambooBlock:
-        case BlockId::CrimsonPlanks:
-        case BlockId::WarpedPlanks:
-        case BlockId::MangrovePlanks:
-        case BlockId::BambooPlanks:
-        case BlockId::BambooMosaic:
-        case BlockId::MuddyMangroveRoots:
-        case BlockId::BoneBlock:
-        case BlockId::PurpurPillar:
-            return 2.0f;
-        case BlockId::SculkCatalyst:
-            return 3.0f;
-        // The reference makes it blast-proof so a wither cannot open a vault.
-        case BlockId::ReinforcedDeepslate:
-            return 1200.0f;
-        default:
-            break;
-        }
-        if (isConcretePowder(block)) {
-            return 0.5f;
-        }
-        // **Falls through to the family rules at the bottom rather than
-        // answering 6.0 here.** A second copy of the rock default is a second
-        // place for a leaf block or a stripped log to be quietly declared
-        // blast-proof, which is exactly what happened to six of them.
-    }
-    switch (block) {
-    case BlockId::Air:
-        return 0.0f;
-    // A charge offers no resistance at all, which is what lets one blast set
-    // off a whole stack.
-    case BlockId::Tnt:
-    case BlockId::TntPrimed:
-    case BlockId::Fire:
-        return 0.0f;
-    case BlockId::Torch:
-    case BlockId::TallGrass:
-        return 0.0f;
-    case BlockId::Snow:
-        return 0.1f;
-    case BlockId::Leaves:
-        return 0.2f;
-    case BlockId::Dirt:
-    case BlockId::Sand:
-        return 0.5f;
-    case BlockId::Grass:
-    case BlockId::Gravel:
-        return 0.6f;
-    case BlockId::Log:
-        return 2.0f;
-    case BlockId::CraftingTable:
-        return 2.5f;
-    case BlockId::SmithingTable:
-        return 2.5f;
-    case BlockId::Planks:
-        return 3.0f;
-    case BlockId::Glowstone:
-        return 0.3f;
-    case BlockId::Bricks:
-        return 6.0f;
-    case BlockId::Glass:
-        return 0.3f;
-    case BlockId::Clay:
-        return 0.6f;
-    case BlockId::Sandstone:
-        return 0.8f;
-    case BlockId::Bookshelf:
-        return 1.5f;
-    case BlockId::Dandelion:
-    case BlockId::Poppy:
-    case BlockId::DeadBush:
-        return 0.0f;
-    case BlockId::Obsidian:
-        // 1200, and it is why obsidian is what you build a blast shelter from.
-        return 1200.0f;
-    case BlockId::AncientDebris:
-    case BlockId::EmberiteBlock:
-        // The reference's 1200 as well. Blasting for it is a real technique
-        // there precisely because the blast cannot destroy what it uncovers.
-        return 1200.0f;
-    case BlockId::Bedrock:
-        return 3600.0f;
-    case BlockId::PackedIce:
-    case BlockId::Ice:
-    case BlockId::BlueIce:
-        return 0.5f;
-    case BlockId::Terracotta:
-        return 4.2f;
-    case BlockId::CoalOre:
-    case BlockId::IronOre:
-    case BlockId::CopperOre:
-    case BlockId::GoldOre:
-    case BlockId::RedstoneOre:
-    case BlockId::LapisOre:
-    case BlockId::DiamondOre:
-    case BlockId::EmeraldOre:
-        return 3.0f;
-    default:
-        break;
-    }
-    // **Everything above is a named answer; everything below this line used to
-    // be rock.** Only the second table run was range-handled, so all of run one
-    // and all of run three fell through to 6.0 - sixteen stained glass blocks
-    // blast-proof against the reference's 0.3, every flower in run one at 6.0
-    // against 0, an end rod and two torches at 6.0 against 0. That is the same
-    // shape as `harvestTier`'s wood-tier default, which left two hundred blocks
-    // dropping nothing: **a `default:` that returns a real value hides every
-    // entry nobody wrote.**
-    //
-    // So the fall-through now asks the block what it is rather than assuming.
-    // Each rule is the reference's own figure for that family. The cross and
-    // flat shapes are answered further up, before the per-run catch-alls.
-    if (isPane(block) || isGlassBlock(block)) {
-        return 0.3f;
-    }
-    if (isLeafBlock(block)) {
-        return 0.2f;
-    }
-    if (isWoolBlock(block)) {
-        return 0.8f;
-    }
-    if (isFlammable(block)) {
-        // The woods, which is what is left once the leaves and wool are gone.
-        return 2.0f;
-    }
-    // Stone, cobblestone and everything cut from them - slabs and stairs
-    // inherit their material's resistance, and the march ignores shape anyway.
-    return 6.0f;
-}
+// `blastResistance` is a `constexpr` table in the header rather than a function
+// here. It is a per-block table like `blockName` and `miningRow`, and putting
+// it where a `static_assert` can walk it is what lets the sweep beside it prove
+// the ordering rather than hope for it.
 
 std::vector<glm::ivec3> explosionBlocks(const World& world, const glm::vec3& centre, float power,
                                         std::uint32_t seed) {
@@ -478,17 +150,37 @@ std::vector<glm::ivec3> explosionBlocks(const World& world, const glm::vec3& cen
 
 float explosionExposure(const World& world, const glm::vec3& centre, const Aabb& box) {
     const glm::vec3 size = box.max - box.min;
+
+    // **Counted, not accumulated.** The reference takes
+    // `ceil(2 x size + 1)` sample planes per axis, spaced `1 / (2 x size + 1)`
+    // apart across the box. Walking `u` from 0 while `u <= 1` is the same thing
+    // for every entity in the game today - a player, a creeper, a cow and a
+    // chicken all measure identically either way - but it is the same thing by
+    // luck, and it goes wrong in two directions at once.
+    //
+    // Where `2 x size + 1` lands on a whole number, `u` reaches exactly 1.0 and
+    // the loop takes **one extra plane per axis**: a frog is 0.5 by 0.5, so it
+    // was sampled 27 times against the reference's 8, and a polar bear is
+    // exactly one block wide. And because `u += spacing` accumulates rounding,
+    // whether that plane appears at all depends on which way the last addition
+    // rounded - a 1/3 spacing overshoots and drops it, a 1/2 spacing lands on
+    // it and keeps it. **A count cannot do either.**
+    const auto planes = [](float extent) {
+        return static_cast<int>(std::ceil(2.0f * extent + 1.0f));
+    };
+    const glm::ivec3 count{planes(size.x), planes(size.y), planes(size.z)};
     const glm::vec3 spacing{1.0f / (kExposureSpacing * size.x + 1.0f),
                             1.0f / (kExposureSpacing * size.y + 1.0f),
                             1.0f / (kExposureSpacing * size.z + 1.0f)};
 
     int total = 0;
     int clear = 0;
-    for (float u = 0.0f; u <= 1.0f; u += spacing.x) {
-        for (float v = 0.0f; v <= 1.0f; v += spacing.y) {
-            for (float w = 0.0f; w <= 1.0f; w += spacing.z) {
-                const glm::vec3 sample{box.min.x + size.x * u, box.min.y + size.y * v,
-                                       box.min.z + size.z * w};
+    for (int i = 0; i < count.x; ++i) {
+        for (int j = 0; j < count.y; ++j) {
+            for (int k = 0; k < count.z; ++k) {
+                const glm::vec3 sample{box.min.x + size.x * (static_cast<float>(i) * spacing.x),
+                                       box.min.y + size.y * (static_cast<float>(j) * spacing.y),
+                                       box.min.z + size.z * (static_cast<float>(k) * spacing.z)};
                 ++total;
                 if (!shielded(world, centre, sample)) {
                     ++clear;
@@ -500,16 +192,26 @@ float explosionExposure(const World& world, const glm::vec3& centre, const Aabb&
 }
 
 float explosionImpact(const glm::vec3& centre, float power, const glm::vec3& feet, float exposure) {
-    const float distance = glm::length(feet - centre);
-    const float reach = 2.0f * power;
-    if (distance >= reach) {
+    // **The same reach `withinBlast` publishes, read out of it rather than
+    // written again.** A second copy of `2 × power` here is how the pre-filter
+    // and the impact drift apart, and then something takes damage the filter
+    // said it could not.
+    if (!withinBlast(centre, power, feet)) {
         return 0.0f;
     }
-    return (1.0f - distance / reach) * exposure;
+    const float distance = glm::length(feet - centre);
+    return (1.0f - distance / (2.0f * power)) * exposure;
 }
 
 int explosionDamage(float power, float impact) {
-    if (impact <= 0.0f) {
+    // **Zero is a real answer here, not a reason to leave.** A fully sheltered
+    // entity inside twice the power produces an impact of exactly zero, and the
+    // reference still charges it one point - the trailing `+ 1` *is* that
+    // floor, and guarding against `impact <= 0` was the one edit that threw it
+    // away. Only a negative impact returns nothing, because the curve turns
+    // downward below zero; `explosionImpact` clamps to zero outside the reach,
+    // so no caller can produce one.
+    if (impact < 0.0f) {
         return 0;
     }
     const float raw = 7.0f * power * (impact * impact + impact) + 1.0f;

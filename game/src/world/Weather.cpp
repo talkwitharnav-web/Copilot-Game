@@ -1,5 +1,6 @@
 #include "world/Weather.hpp"
 
+#include "world/Climate.hpp"
 #include "world/World.hpp"
 
 #include <engine/render/MeshData.hpp>
@@ -46,10 +47,24 @@ Precipitation precipitationFor(BiomeId biome, int surfaceY) {
         return Precipitation::None;
     }
 
+    // `freezesAt`'s arithmetic without its jitter, off the constants that
+    // function reads too - see `kWarmthPerBlock` for the unit and for what
+    // quoting the reference's own figure here used to cost.
     const float lapse =
         std::max(0.0f, static_cast<float>(surfaceY) - kWarmthBaseHeight) * kWarmthPerBlock;
     const float warmth = biomeInfo(biome).warmth - lapse;
     return warmth < kFreezingWarmth ? Precipitation::Snow : Precipitation::Rain;
+}
+
+Precipitation precipitationFor(BiomeId biome, int surfaceY, std::uint32_t seed, int worldX,
+                               int worldZ) {
+    // The dry test has one owner and this is not it; only the temperature
+    // question differs between the two forms.
+    if (precipitationFor(biome, surfaceY) == Precipitation::None) {
+        return Precipitation::None;
+    }
+    return freezesAt(seed, biomeInfo(biome).warmth, worldX, surfaceY, worldZ) ? Precipitation::Snow
+                                                                             : Precipitation::Rain;
 }
 
 Weather::Weather(std::uint64_t seed) : m_random(seed ^ 0x5745415448455230ull) {
@@ -70,7 +85,16 @@ int Weather::rollTicks(int minTicks, int maxTicks) {
 }
 
 void Weather::force(int state) {
-    m_forced = state % 4;
+    // **Floored, not truncated.** C++'s `%` takes the sign of its left operand,
+    // so a negative argument left `m_forced` negative - which is not 0, so
+    // every `m_forced == 0` guard in `update` fails and the weather cycle
+    // freezes for the rest of the session with no way back to it. Neither live
+    // caller can reach it today (`Main.cpp` casts a settings enum, and the
+    // debug key passes `forced() + 1` off a value this function already
+    // clamped into 0-3), so it was a trap for the next caller rather than a
+    // live bug. It costs one token to close and the `+ 4` is only correct
+    // because the modulus is 4; if that ever changes, change both.
+    m_forced = ((state % 4) + 4) % 4;
     switch (m_forced) {
     case 1:
         m_rainOn = true;
@@ -87,6 +111,67 @@ void Weather::force(int state) {
     default:
         break;
     }
+}
+
+void Weather::restore(bool raining, bool thundering, float rainSeconds, float thunderSeconds) {
+    // Off disk, so the two timers are not trusted. Negative, infinite and NaN
+    // all become zero, which makes `update` roll a fresh countdown on the next
+    // tick - the same thing a genuinely expired timer does, so a corrupt save
+    // degrades into an ordinary cycle rather than into a frozen one. NaN is the
+    // clause that earns this: `m_rainSeconds <= 0.0f` is *false* for NaN, so an
+    // unguarded NaN counts down forever and the weather never changes again.
+    const auto sane = [](float seconds) {
+        return std::isfinite(seconds) && seconds > 0.0f ? seconds : 0.0f;
+    };
+    m_rainOn = raining;
+    // **Taken as given, not filtered against `raining`.** The two countdowns
+    // above are independent, so thunder-on with rain-off is a state `update`
+    // reaches by itself; `storming()` merely reports false for it. Silencing it
+    // here would drop the flag, and the thunder timer would then expire and
+    // turn it *on*, putting a reloaded world in the opposite phase to the one
+    // it was saved in.
+    m_thunderOn = thundering;
+    m_rainSeconds = sane(rainSeconds);
+    m_thunderSeconds = sane(thunderSeconds);
+
+    // Bolts are a second of screen flash, not save state, and anything left in
+    // the air belongs to the world being left rather than the one being loaded.
+    m_strikes.clear();
+
+    // **The ramps are snapped, not faded, and this reversed an earlier call.**
+    //
+    // A load is a resumption, not a transition: the storm was already at full
+    // when the player saved and they did not watch it arrive, so fading in from
+    // calm animates an event that never happened.
+    //
+    // The first version of `restore` left these to fade, and the note that
+    // defended it gave two supports. Both have since failed. It said snapping
+    // "needed a second copy of `update`'s target expressions" - answered by
+    // hoisting them into `rainLevelTarget`, `thunderLevelTarget` and
+    // `windSpeedTarget`, which is the better structure anyway. And it said the
+    // fade "bought a fade nobody objected to", which was true only while
+    // **nothing read the wind**; `Main.cpp`'s `weatherWind` and its cloud deck
+    // now do.
+    //
+    // That second one is a real defect and not a tidy-up. Wind ramps at
+    // `kWindRampPerSecond`, about six times slower than the levels, so loading
+    // into a saved thunderstorm gave **heavy rain over perfectly still trees
+    // for roughly half a minute** - `windSpeed()` starts at its calm default of
+    // 1.0 and `Main.cpp` subtracts exactly 1.0 as its calm floor, so the sway
+    // it computes starts at literally zero while the rain is at full in five
+    // seconds.
+    //
+    // Order matters: `windSpeedTarget` is a function of the two levels rather
+    // than the two flags, so the levels are assigned first and the wind last.
+    m_rainLevel = rainLevelTarget();
+    m_thunderLevel = thunderLevelTarget();
+    // Cover sits at the rain's level, which is where `update`'s own floor would
+    // drag it on the next tick regardless. The lead that makes the deck gather
+    // *before* rain starts is a prediction about a countdown, not a stored
+    // quantity, so it is not reconstructed here - if the save happened inside
+    // that window `update` re-enters it on the next tick by itself.
+    m_cloudLevel = m_rainLevel;
+    m_windSpeed = windSpeedTarget();
 }
 
 void Weather::update(float deltaSeconds, bool cycle) {
@@ -110,25 +195,39 @@ void Weather::update(float deltaSeconds, bool cycle) {
         }
     }
 
-    const float rainTarget = m_rainOn ? 1.0f : 0.0f;
-    const float thunderTarget = storming() ? 1.0f : 0.0f;
+    const float rainTarget = rainLevelTarget();
+    const float thunderTarget = thunderLevelTarget();
     m_rainLevel = approach(m_rainLevel, rainTarget, kLevelRampPerSecond, deltaSeconds);
     m_thunderLevel = approach(m_thunderLevel, thunderTarget, kLevelRampPerSecond, deltaSeconds);
 
-    // **Staggered on purpose.** If the sky, the light and the deck all move over
-    // the same five seconds it reads as someone dragging a slider; the cloud
-    // cover taking half a minute is what makes the weather feel like it has a
-    // cause.
-    m_cloudLevel = approach(m_cloudLevel, rainTarget, kCoverageRampPerSecond, deltaSeconds);
+    // **Staggered on purpose, and the stagger is a lead rather than a limp.**
+    // If the sky, the light and the deck all move over the same five seconds it
+    // reads as someone dragging a slider; the cover taking half a minute is
+    // what makes the weather feel like it has a cause. But a slow ramp that
+    // *starts* with the first drop is still lockstep, because the floor below
+    // drags it up - so the deck is told the rain is coming and begins gathering
+    // `kCoverageLeadSeconds` before the flag turns over.
+    //
+    // Only while the cycle is actually running: a frozen or forced countdown is
+    // not a prediction of anything, and the debug key wants weather now.
+    const bool gathering =
+        cycle && m_forced == 0 && !m_rainOn && m_rainSeconds <= kCoverageLeadSeconds;
+    m_cloudLevel = approach(m_cloudLevel, m_rainOn || gathering ? 1.0f : 0.0f,
+                            kCoverageRampPerSecond, deltaSeconds);
+    // Rain cannot fall out of a clear sky. With the lead doing its job the deck
+    // is already ahead and this never fires; it is here for the forced path,
+    // which turns the rain on with no warning at all.
     if (m_rainOn && m_cloudLevel < m_rainLevel) {
         m_cloudLevel = m_rainLevel;
     }
 
     // Calm, breezy, gale. Deliberately a single number: the deck's drift, the
     // rain's slant and anything added later all read it, so they cannot
-    // disagree about which way the weather is going.
-    const float windTarget = 1.0f + m_rainLevel * 5.0f + m_thunderLevel * 6.0f;
-    m_windSpeed = approach(m_windSpeed, windTarget, 0.35f, deltaSeconds);
+    // disagree about which way the weather is going. The expression itself now
+    // lives in `windSpeedTarget`, so `restore` can snap to it without keeping a
+    // second copy - which is what it had to do before, and why it did not.
+    const float windTarget = windSpeedTarget();
+    m_windSpeed = approach(m_windSpeed, windTarget, kWindRampPerSecond, deltaSeconds);
 
     m_flash = 0.0f;
     for (Strike& bolt : m_strikes) {
@@ -148,6 +247,21 @@ void Weather::update(float deltaSeconds, bool cycle) {
 }
 
 void Weather::strike(World& world, const glm::vec3& around, float deltaSeconds) {
+    // **Before the early-out, deliberately.** This is not about lightning: it is
+    // the whole of what the world needs to know about the weather, and `strike`
+    // is the only member that is handed a `World&` and the only one `Main.cpp`
+    // calls unconditionally every frame. Everything below returns on the first
+    // `if`, and snow settles in ordinary snowfall, so a push placed after any of
+    // them would only ever fire during a thunderstorm.
+    //
+    // Kind-agnostic on purpose. `World::m_precipitating` already carries "rain
+    // is wetting the player's own column", computed in `Main.cpp` and *false*
+    // by construction wherever it is cold enough to snow; this is the other
+    // fact, "something is falling out of the sky, world-wide", and the world
+    // decides per column which of the two it is by asking `precipitationFor`.
+    // One of those bits cannot do the other's job, which is why there are two.
+    world.setWeatherFalling(m_rainOn && m_rainLevel > kFallingLevel);
+
     if (!storming() || m_thunderLevel < 0.5f) {
         return;
     }
@@ -166,8 +280,11 @@ void Weather::strike(World& world, const glm::vec3& around, float deltaSeconds) 
         return;
     }
     // The reference re-validates that **rain, not snow**, is falling there, which
-    // is why lightning never strikes a cold or dry biome.
-    if (precipitationFor(sampleBiome(world.seed(), x, z).dominant, top) != Precipitation::Rain) {
+    // is why lightning never strikes a cold or dry biome. Asked of the column,
+    // so it is `freezesAt`'s own answer including the jitter - the jitter-free
+    // form put bolts on frozen peaks within a couple of blocks of the snow line.
+    if (precipitationFor(sampleBiome(world.seed(), x, z).dominant, top, world.seed(), x, z) !=
+        Precipitation::Rain) {
         return;
     }
 
