@@ -859,6 +859,34 @@ public:
     ///
     /// Every loader drops records whose position is outside the world and
     /// sanitises every stack, so nothing here needs the caller's trust.
+    ///
+    /// **A saver can now return false without any disk error, and a caller that
+    /// treats that as "the disk is broken" will be wrong.** It also means *this
+    /// build refused to read that file, so it will not delete it either* -
+    /// which is a bug that was live until 2026-08-19 and cost, in the worst
+    /// case, every container in a world.
+    ///
+    /// The shape: a loader that would not accept a file returned the same empty
+    /// vector as a world that genuinely has none, the live table came up empty,
+    /// and thirty seconds later - on `kAutosaveInterval`, not at quit -
+    /// `saveX({})` deleted the file and the log line said the save was
+    /// complete. **One launch of a binary whose version constants are older
+    /// than the file on disk was enough**, which in a tree where several people
+    /// bump those constants is an ordinary Tuesday rather than an exotic
+    /// scenario. For `creatures.dat` it took the populated-column markers with
+    /// it, so every explored column bred again.
+    ///
+    /// What happens now, in order: the loader records the refusal, keeps a copy
+    /// of the file as `<name>.rejected` (created, never overwritten), and the
+    /// saver refuses to delete and returns false. `saveEverything`'s existing
+    /// `unwritten` list then names the table and the save honestly reports
+    /// incomplete. A successful write of that table clears the refusal, because
+    /// the file on disk is then one this build wrote.
+    ///
+    /// > **Falsified by** any `saveX` in `WorldStore.cpp` calling `removeTable`
+    /// > directly instead of `removeTableUnlessRefused`, or by any loader
+    /// > returning an empty result on a path that does not first call either
+    /// > `refuseTable` or `acceptTable`.
     std::vector<PlacedFurnace> loadFurnaces() const;
     bool saveFurnaces(const std::vector<PlacedFurnace>& furnaces) const;
 
@@ -887,6 +915,26 @@ public:
     ///
     /// **`restore` must append rather than clear** on the entity side, or a
     /// load that happens after anything has already been dropped destroys it.
+    ///
+    /// **Both of these are LIVE, and this paragraph exists because a work queue
+    /// still says they are not.** Measured here 2026-08-19 15:45, not taken on
+    /// report: `Main.cpp` calls `world.store().loadDrops()` in the restore block
+    /// and `world.store().saveDrops(savedDrops)` in `saveEverything`, two live
+    /// calls among sixteen mentions of the drop machinery, against a control of
+    /// three for `saveChests` in the same file and zero for an invented name.
+    ///
+    /// > **Why it is worth a paragraph rather than a ledger entry.** Anyone who
+    /// > implements this a *second* time on the strength of a stale queue entry
+    /// > gives the player a duplicate of every item on the ground at each load,
+    /// > and this header is the file they must open to do it. A negative claim
+    /// > outlives every ledger entry, because the next reader has the file.
+    /// >
+    /// > **Re-measure rather than believing this line** - a reachability result
+    /// > is a measurement with a timestamp, not a property of the code, and this
+    /// > one was true at the moment it was written and nothing more. The search
+    /// > is the symbol, not a line number: `saveDrops` and `loadDrops` in
+    /// > `game/src/Main.cpp`. **Falsified by** either returning no call site
+    /// > outside a comment.
     std::vector<SavedItem> loadDrops() const;
     bool saveDrops(const std::vector<SavedItem>& drops) const;
 
@@ -939,6 +987,70 @@ public:
 
 private:
     std::filesystem::path pathFor(const ChunkCoord& coord) const;
+
+    /// The side tables that live beside the chunks, and the one place their
+    /// file names exist.
+    ///
+    /// **Both halves of a table used to spell its own file name**, so a loader
+    /// and its saver held the same literal twice - and a rename that reached
+    /// only one of them would have left the saver deleting a file nobody reads
+    /// while the loader read a stale one, with a clean build and no warning.
+    /// `tablePath` is now the only speaker, and every caller names a table
+    /// rather than a string.
+    ///
+    /// `Player` is here for the refusal record alone: `player.dat` is never
+    /// deleted, because `savePlayer` has no empty case to mistake for one.
+    enum class Table : std::size_t {
+        Furnaces,
+        Chests,
+        Campfires,
+        Stowboxes,
+        Drops,
+        Creatures,
+        Player,
+        Count,
+    };
+
+    std::filesystem::path tablePath(Table table) const;
+
+    /// Records that a table's file is **present but unusable by this build**,
+    /// and keeps a copy of it before anything can overwrite it.
+    ///
+    /// The distinction this exists to draw is between *there is no file* and
+    /// *there is a file and I will not read it*. Every loader used to answer
+    /// both with an empty vector, and an empty vector is indistinguishable from
+    /// a world whose last chest was just broken - so thirty seconds later the
+    /// autosave handed that emptiness to `saveX({})`, which deleted the file
+    /// and reported the save complete.
+    void refuseTable(Table table, const std::filesystem::path& path) const;
+
+    /// The other half of `refuseTable`: this build has just read that file and
+    /// found it sound, so any refusal recorded for it is history.
+    ///
+    /// **Called where the header is accepted, not where the loader returns.** A
+    /// loader that salvages a truncated tail still accepted the header, and the
+    /// file it accepted is one this build can write over safely.
+    void acceptTable(Table table) const;
+
+    /// `removeTable` for an emptiness that might be our own ignorance.
+    ///
+    /// Deletes as before when the table was genuinely read and is genuinely
+    /// empty; **refuses, loudly, when the last load of that file was a
+    /// refusal.** Returns false in that case so the caller's existing
+    /// `unwritten` list names the table and the save reports incomplete, which
+    /// is the honest answer: this build did not write that table and must not
+    /// pretend the absence of data is the absence of a world.
+    bool removeTableUnlessRefused(Table table, const std::filesystem::path& path) const;
+
+    /// Set by a loader that refused a file, cleared by one that read it and by
+    /// any successful write of it.
+    ///
+    /// **`mutable` because every load and save on this class is `const`** - the
+    /// object is handed out as `const WorldStore&` by `World::store()` - and
+    /// this is bookkeeping about the files, not about the world. One object per
+    /// world, held by `shared_ptr`, so the loader and the saver see the same
+    /// flags.
+    mutable std::array<bool, static_cast<std::size_t>(Table::Count)> m_refused{};
 
     std::filesystem::path m_directory;
     std::uint32_t m_seed;

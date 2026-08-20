@@ -33,6 +33,18 @@ public:
     VkExtent2D extent() const { return m_extent; }
     std::uint32_t imageCount() const { return static_cast<std::uint32_t>(m_images.size()); }
 
+    /// Whether these images may be the *source* of a copy - which is what
+    /// reading the finished picture back to the CPU needs.
+    ///
+    /// **A usage bit is decided when an image is created and can never be added
+    /// afterwards**, so this is not a question about the copy command: it is
+    /// whether `create` was allowed to ask for `TRANSFER_SRC` at all. The spec
+    /// guarantees a surface supports `COLOR_ATTACHMENT` and nothing else, so
+    /// the request can be refused, and a refusal must not stop the game
+    /// starting. Callers that read pixels back check this first and do nothing
+    /// when it is false.
+    bool supportsTransferSrc() const { return m_supportsTransferSrc; }
+
     const std::vector<VkImage>& images() const { return m_images; }
     const std::vector<VkImageView>& imageViews() const { return m_imageViews; }
 
@@ -45,6 +57,14 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_imageFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_extent{};
+
+    /// Recomputed by every `create`, because a surface's capabilities are
+    /// re-queried there and a display change can move them.
+    bool m_supportsTransferSrc = false;
+    /// So the refusal is reported once rather than once per rebuild. Resizing a
+    /// window by dragging its edge runs `recreate` many times a second, and a
+    /// warning repeated at that rate buries everything else in the log.
+    bool m_transferSrcWarningIssued = false;
 
     std::vector<VkImage> m_images;
     std::vector<VkImageView> m_imageViews;

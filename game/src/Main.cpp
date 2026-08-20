@@ -63,7 +63,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -71,6 +73,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -108,10 +111,36 @@ constexpr float kTntPower = 4.0f;
 /// ours does not: a player thrown off the ground keeps whatever horizontal
 /// speed the blast gave until they land. This is the sustained-speed equivalent
 /// of that impulse, tuned to just under a jump's worth of lift at point blank.
-constexpr float kBlastKnockback = 7.0f;
+///
+/// **Read from `Explosion.hpp` rather than repeated here, and that is the whole
+/// fix.** This was `7.0f` written out, and `Creature.cpp`'s `kBlastThrow` is
+/// the same fact for creatures; the pair had already drifted once, to a 2.9x
+/// difference between how far one blast threw the player and how far it threw
+/// a pig standing beside them. `Creature.cpp` now reads the shared constant, so
+/// leaving this one a literal would be bug shape #5 - a derivation applied to
+/// one of a pair and not the other - and would let the identical drift come
+/// back from the other side. Rung 1 of the ladder: derive, so the coupling
+/// cannot break rather than being asserted or commented into holding. No new
+/// include is needed; this file already calls `game::blast::explosionDropChance`.
+constexpr float kBlastKnockback = game::blast::kKnockbackSpeed;
 
 /// A pearl may be thrown once a second, the reference's own cooldown.
 constexpr float kPearlCooldownSeconds = 1.0f;
+
+/// How far below the eye anything the player launches actually leaves from.
+///
+/// The reference's own figure: a shot starts at `eyeY - 0.1`, and spawning at
+/// the eye itself puts an arrow or a thrown potion through your own head at
+/// point-blank range - `segmentEntersBox` reports a box *entered*, which saves
+/// you on tick zero but not on the tick after it.
+///
+/// **One owner, because the throw site already claimed to share it.** The bow
+/// and the egg/pearl/potion branch each carried their own
+/// `- glm::vec3{0.0f, 0.1f, 0.0f}`, while the second one's comment said "Same
+/// anchor as the bow" - a claim of sharing that the code did not implement, so
+/// retuning one would have silently left the other behind. This is the
+/// three-near-identical-rows question with the answer "they differ by nothing".
+constexpr float kLaunchDropBelowEye = 0.1f;
 
 /// How far above the impact the teleport will search for room to stand, in
 /// whole blocks. Two is enough to clear a slab or a stair underfoot; more than
@@ -516,10 +545,35 @@ static_assert(!game::isTallFlowerUpper(game::BlockId::SunflowerLower) &&
 constexpr int kFallerSweepStride = 512;
 
 /// One owner for the count, for the reason `Block.hpp`'s name sweep records:
-/// the passes are generated from this and the coverage assert multiplies the
-/// same constant, so raising it cannot quieten the alarm without also sweeping
-/// the ids it just admitted.
-constexpr int kFallerSweepPasses = 7;
+/// the passes are generated from this and the coverage assert multiplied the
+/// same constant, so raising it could not quieten the alarm without also
+/// sweeping the ids it just admitted.
+///
+/// **Derived rather than written, which is the tenth of eleven sweep counts in
+/// this tree to make the move.** It was `7`, with a `static_assert` below
+/// checking `7 * 512 >= kBlockIdCount` - a ceiling of 3584 against an id count
+/// that moved 3285 -> 3309 -> 3314 -> 3315 -> 3328 inside a single day. That
+/// assert was loud, which is better than silent, but its message told you to
+/// raise a number that should never have been a number: the stride *is* the
+/// count, so a gap is not expressible and there is nothing left to maintain.
+/// `game::` stays on the qualification because this file is outside that
+/// namespace.
+///
+/// **RETIRED FIGURES: the `7`, the `7 * 512` and the 3584 above are the state
+/// this constant replaced, not anything live in this file.** Nothing here
+/// fires when the id count grows - the expression simply yields one more pass.
+///
+/// Spelled out because 3584 is a collision rather than a shared ceiling.
+/// `Mining.hpp` carries a *live* limit at the same figure by different
+/// arithmetic: `kMiningChunkCapacity` is 14 against a 256-wide chunk, where
+/// this was 7 against 512, and 256 * 14 and 512 * 7 are both 3584 by
+/// coincidence. So a `3584` search returns two sites, one retired and one
+/// current, and the identical number invites reading them as one fact and
+/// "fixing" whichever is met first. Finding 161 routes that one; it is
+/// deliberate there, with spare capacity that self-activates as the count
+/// crosses 3328, and it is not this constant's problem to solve.
+constexpr int kFallerSweepPasses =
+    (static_cast<int>(game::kBlockIdCount) + kFallerSweepStride - 1) / kFallerSweepStride;
 
 constexpr bool fallersAreNeverOccupants(int stride) {
     const int first = stride * kFallerSweepStride;
@@ -571,41 +625,82 @@ static_assert(game::isFalling(game::BlockId::Sand) && game::isFalling(game::Bloc
                   game::isFalling(game::BlockId::Anvil),
               "isFalling answers no for sand, gravel or an anvil, so the sweep above is now "
               "proving nothing about an empty set");
-/// The passes are generated, so this is what proves there are enough of them:
-/// without it, ids appended past the last stride would simply stop being swept.
-static_assert(kFallerSweepPasses * kFallerSweepStride >= static_cast<int>(game::kBlockIdCount),
-              "the faller sweep no longer covers every block id - raise kFallerSweepPasses");
+/// **The coverage assert that stood here has been retired, not lost.** It read
+/// `kFallerSweepPasses * kFallerSweepStride >= kBlockIdCount`, and once the
+/// pass count is derived from exactly those two values that is one side of a
+/// derivation compared against itself - bug shape #11, a `static_assert` that
+/// cannot fail and therefore proves nothing, while reading like a guard. The
+/// property it protected is now structural: the passes are *generated* from
+/// the constant by `make_integer_sequence`, so ids appended past the last
+/// stride raise the pass count instead of falling off the end of it.
+///
+/// **This is the "run" case and only the run case.** `CLAUDE.md` is explicit
+/// that deriving a size does not retire a literal-row check - `std::array`
+/// zero-fills a short initialiser and the compiler says nothing. There is no
+/// array here and no initialiser list: nothing is written out per pass, so
+/// there is no second property left for an assert to hold. The two asserts
+/// above stay, because both check something a derivation cannot: that the
+/// swept population is not empty, and that every pass actually inspected it.
 
 // Change this and the entire world changes, reproducibly.
 constexpr std::uint32_t kWorldSeed = 1337u;
 // Selectable frame caps, lowest to highest. 0 means uncapped.
 // Temporary keyboard-driven stand-in until there is a real settings screen.
-constexpr std::array<double, 8> kFpsCapOptions{30.0, 60.0, 90.0, 120.0, 144.0, 165.0, 240.0, 0.0};
+//
+// **Size deduced, for the reason spelled out over `kToneMapperNames` below** -
+// and this one has no cross-file assert to fall back on, so the deduction is
+// the whole of its protection. `kDefaultFpsCapIndex` indexes it at startup and
+// F1/F2 walk it at runtime; a dropped row under an explicit `8` would have left
+// a silent `0.0` in the tail, which reads as "uncapped" rather than as damage.
+constexpr std::array kFpsCapOptions{30.0, 60.0, 90.0, 120.0, 144.0, 165.0, 240.0, 0.0};
 constexpr std::size_t kDefaultFpsCapIndex = 3;
+static_assert(kDefaultFpsCapIndex < kFpsCapOptions.size());
 
 // In the order `tonemap.frag` tests for them, which is also the order
 // `Settings::toneMapper` counts in. Short on purpose: these are shown on the F5
 // overlay as well as logged, and the overlay has one column to fit them in.
-constexpr std::array<const char*, 4> kToneMapperNames{"PBR neutral", "Hable", "Reinhard", "ACES"};
+//
+// **No explicit size, on this and the five arrays around it, and that is load
+// bearing rather than terseness.** Written `std::array<const char*, 4>` the
+// literal `4` and the rows are two independent facts, and `std::array` checks
+// only one of them: an initialiser that is too LONG is a hard error, one that
+// is too SHORT is not - it silently zero-fills, so a dropped row leaves a null
+// `const char*` in the tail. That is not a wrong string on the overlay, it is
+// undefined behaviour the moment `settings.toneMapper` happens to index it, and
+// the assert below would still pass because `.size()` reports the declared 4
+// either way. Deducing the size from the rows makes the shortfall
+// *inexpressible* rather than merely detected.
+//
+// **And it costs no new assert - it upgrades the one already here.** The
+// existing `static_assert` pins this against a count in another file, which is
+// the real coupling and is worth keeping; with the size deduced, that same
+// assert now covers both properties at once, because `.size()` IS the row
+// count. Rung 2 becomes rung 1 for the price of deleting a token.
+//
+// **The deduction is exact, not approximate**: `std::array`'s guide takes its
+// parameters by value, so every string literal decays to `const char*` before
+// deduction and all four agree, giving `std::array<const char*, 4>` - the type
+// that was spelled out here, unchanged.
+constexpr std::array kToneMapperNames{"PBR neutral", "Hable", "Reinhard", "ACES"};
 static_assert(kToneMapperNames.size() == game::Settings::kToneMapperCount);
 
 // What F12 cycles through, in the order `deferred.frag` tests for them. These
 // are how a deferred renderer is debugged: when the picture is wrong, one of
 // them says which input is wrong.
-constexpr std::array<const char*, 10> kDebugViewNames{
+constexpr std::array kDebugViewNames{
     "off",      "albedo",   "normal",   "roughness",   "metallic",
     "occlusion", "emissive", "sky/block light", "distance", "cast shadow"};
 static_assert(kDebugViewNames.size() == engine::Renderer::kDebugViewCount);
 
 // What G cycles through. Each step raises the shadow map's resolution, how many
 // slices of the view it is split across, and how far shadows are drawn.
-constexpr std::array<const char*, 4> kShadowQualityNames{"off", "low", "medium", "high"};
+constexpr std::array kShadowQualityNames{"off", "low", "medium", "high"};
 static_assert(kShadowQualityNames.size() == game::Settings::kShadowQualityCount);
 static_assert(game::Settings::kShadowQualityCount ==
               static_cast<unsigned>(engine::Renderer::kShadowQualityCount));
 
 // What C cycles through: how many steps each ray takes through the cloud deck.
-constexpr std::array<const char*, 3> kCloudQualityNames{"off", "fast", "fancy"};
+constexpr std::array kCloudQualityNames{"off", "fast", "fancy"};
 static_assert(kCloudQualityNames.size() == game::Settings::kCloudQualityCount);
 static_assert(game::Settings::kCloudQualityCount ==
               static_cast<unsigned>(engine::Renderer::kCloudQualityCount));
@@ -794,6 +889,20 @@ void probeWorldgen() {
             const game::Climate climate = game::climateAt(kWorldSeed, x, z);
             ++biomeCounts[static_cast<std::size_t>(game::biomeFor(climate))];
 
+            // **Both sizes stay written out, and this is the counter-example to
+            // the rule stated over `kToneMapperNames`.** Deducing is right when
+            // a short row zero-fills into a value that is *used*; it is wrong
+            // here, because the loop below walks `f < fields.size()` and
+            // subscripts `sample[f]`. The two arrays are pinned to each other by
+            // that loop and to nothing else. Left explicit, a row dropped from
+            // either gives a wrong statistic - `sample[4]` reads a zeroed float
+            // - which is bad. Deduced, the same edit makes `sample` shorter than
+            // the bound and `sample[f]` runs off the end, which is undefined
+            // behaviour. So deduction would convert a wrong number into a
+            // memory bug, and the honest fix is neither: it is that five climate
+            // fields have no single owner to derive from. If one ever appears,
+            // derive both from it; until then two literals that a reader can see
+            // on adjacent lines beat one deduced and one inferred.
             const std::array<float, 5> sample{climate.temperature, climate.humidity,
                                               climate.continentalness, climate.erosion,
                                               climate.weirdness};
@@ -1091,7 +1200,7 @@ void probeWorldgen() {
         //
         // Counting plans proves the *layout* solver runs. It says nothing about
         // whether a house has a floor, whether its door can be walked through,
-        // or whether the thing is standing on a plinth over a hole — and every
+        // or whether the thing is standing on a plinth over a hole - and every
         // one of those has to be a number, because none of them fails loudly.
         //
         // The village nearest the origin is the one inspected, because that is
@@ -1247,7 +1356,7 @@ void probeWorldgen() {
                         break;
                     }
                     // The exact slot is a style roll, so scan the wall rather
-                    // than re-deriving it — a second copy of that rule here is
+                    // than re-deriving it - a second copy of that rule here is
                     // precisely the bug this codebase keeps paying for.
                     bool hasDoor = false;
                     for (int t = -3; t <= 3 && !hasDoor; ++t) {
@@ -1340,7 +1449,11 @@ void probeWorldgen() {
                         const glm::ivec3 p = open.back();
                         open.pop_back();
                         ++size;
-                        constexpr std::array<glm::ivec3, 6> steps{
+                        // Size deduced: a dropped row under an explicit `6`
+                        // would zero-fill to `glm::ivec3{0, 0, 0}`, and a
+                        // flood-fill step of "stay where you are" is a silently
+                        // wrong answer rather than a crash.
+                        constexpr std::array steps{
                             glm::ivec3{1, 0, 0},  glm::ivec3{-1, 0, 0}, glm::ivec3{0, 1, 0},
                             glm::ivec3{0, -1, 0}, glm::ivec3{0, 0, 1},  glm::ivec3{0, 0, -1}};
                         for (const glm::ivec3& step : steps) {
@@ -1448,6 +1561,84 @@ void probeWorldgen() {
     return glm::normalize(glm::vec3{aim.x, -std::sin(lifted), aim.z});
 }
 
+/// Where a photo lands: a `photos/` folder in the project root.
+///
+/// **The exe does not run from the project root** - it sits in
+/// `build/<config>/bin`, and a photo written beside it would be inside the one
+/// folder `.gitignore` throws away and a clean rebuild deletes. The player
+/// asked for photos in the checkout, so the root is *found* rather than
+/// assumed: walk up from the executable until a directory holds a
+/// `CMakeLists.txt`. That is true of the checkout and of nothing between it and
+/// the exe, and it keeps working if the build folder is renamed, moved, or
+/// configured somewhere else entirely.
+///
+/// Falls back to a `photos/` beside the exe when there is no such directory,
+/// which is what a packaged copy with no source tree around it looks like -
+/// **`GAPS.md` section 0.6 owns that packaging question**, and this
+/// deliberately does not try to settle it.
+[[nodiscard]] std::filesystem::path photosDirectory() {
+    const std::filesystem::path& exeDirectory = engine::executableDirectory();
+    std::error_code error;
+    for (std::filesystem::path probe = exeDirectory;;) {
+        // The error_code overload, because the throwing one would end the
+        // session from inside a keypress handler if a directory on the way up
+        // happened to be unreadable.
+        if (std::filesystem::exists(probe / "CMakeLists.txt", error)) {
+            return probe / "photos";
+        }
+        // `parent_path()` of a root is that root again, so the walk is stopped
+        // by reaching a fixed point rather than by counting levels.
+        const std::filesystem::path parent = probe.parent_path();
+        if (parent.empty() || parent == probe) {
+            break;
+        }
+        probe = parent;
+    }
+    return exeDirectory / "photos";
+}
+
+/// Local wall-clock time, in fields, without a deprecation warning.
+///
+/// **`std::localtime` is the obvious call and cannot be used here**: it hands
+/// back a pointer into a shared static buffer, so MSVC deprecates it and warns
+/// at /W4, and this project builds warning-free. Its two replacements do the
+/// same job with their arguments in opposite orders and different names on the
+/// two platforms, which is the whole reason for the `#if`.
+[[nodiscard]] std::tm localTimeNow() {
+    const std::time_t now = std::time(nullptr);
+    std::tm broken{};
+#if defined(_WIN32)
+    localtime_s(&broken, &now);
+#else
+    localtime_r(&now, &broken);
+#endif
+    return broken;
+}
+
+/// A timestamped photo name that sorts chronologically and never overwrites one
+/// already there.
+///
+/// Local time rather than UTC: the player is looking for the picture they took
+/// a minute ago, and a name three hours out is one they have to do arithmetic
+/// on. The fields run largest-first so a plain alphabetical listing is also a
+/// chronological one.
+[[nodiscard]] std::filesystem::path nextPhotoPath(const std::filesystem::path& directory) {
+    const std::tm local = localTimeNow();
+    char stamp[32]{};
+    std::snprintf(stamp, sizeof(stamp), "photo-%04d-%02d-%02d-%02d%02d%02d", local.tm_year + 1900, local.tm_mon + 1,
+                  local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
+
+    // Two photos inside the same second collide, and one silently replacing the
+    // other is worse than a failure: the player would be looking at the second
+    // picture wondering where the first went.
+    std::error_code error;
+    std::filesystem::path candidate = directory / (std::string(stamp) + ".png");
+    for (int copy = 2; std::filesystem::exists(candidate, error); ++copy) {
+        candidate = directory / (std::string(stamp) + "-" + std::to_string(copy) + ".png");
+    }
+    return candidate;
+}
+
 } // namespace
 
 int main() {
@@ -1500,10 +1691,43 @@ int main() {
 
         // Reference block and item art, staged beside the exe rather than under
         // assets/ so it can never ship. Preferred per texture, so anything the
-        // reference has no counterpart for - the white utility layer, the sun -
-        // silently keeps ours.
+        // reference has no counterpart for silently keeps ours.
+        //
+        // **That set is exactly one file, `white.png`, measured 2026-08-19**
+        // against the staged copy this code actually opens rather than the
+        // repository's - those differ by nine stale skins and the repository is
+        // the wrong population to ask. Dated, because this sentence used to
+        // name the sun as a second example and `sun.png` has since been staged,
+        // so a reader chasing it would have gone hunting for hand-drawn art the
+        // reference already wins.
+        //
+        // The white layer is not art and cannot be given a counterpart: it is a
+        // 16x16 solid swatch, and every `TextureLayer::White` caller multiplies
+        // it by a vertex colour to draw the crosshair, the block outline, HUD
+        // panels, the inventory dim and particles.
+        //
+        // **Falsified by**: any second name present in
+        // `assets/textures/blocks` and absent from `blocks-reference` that also
+        // appears as a `blockTexture` argument - the three sets are what make
+        // this claim checkable without running anything.
         const std::filesystem::path referenceBlocks = engine::executableDirectory() / "blocks-reference";
         std::vector<std::string> missingTextures;
+        // **What reached the screen, not merely whether a file existed.** This
+        // vector is the whole of the fix and the distinction is the user's own
+        // red line: the reference art *is* the art, so a texture quietly served
+        // out of tier 2 - our hand-authored placeholder - is a wrong picture on
+        // screen, not a successful load. `missingTextures` cannot see that by
+        // construction, because tier 2 *returns a path*, so "0 block textures
+        // are missing" was true with all hundred-and-twenty of our placeholders
+        // on screen. Presence and provenance are different questions and only
+        // one of them was being asked.
+        //
+        // **The same concept is already right ninety lines below**, which is
+        // what makes this a rule that did not travel rather than a missing
+        // feature: `pushEgg` has only two tiers, staged or blank, so it is loud
+        // by accident of having no our-art tier to hide in. Blocks were silent
+        // for exactly the reason they have a richer fallback.
+        std::vector<std::string> ownArtTextures;
         const auto blockTexture = [&](const char* name) {
             std::filesystem::path staged = referenceBlocks / name;
             if (std::filesystem::exists(staged)) {
@@ -1511,6 +1735,13 @@ int main() {
             }
             std::filesystem::path own = textureDir / name;
             if (std::filesystem::exists(own)) {
+                // Recorded rather than counted, for the reason the drain below
+                // gives: a count says how bad it is and a name says what to
+                // look at. `white.png` is the one legitimate resident of this
+                // tier - it is a rendering primitive rather than art - so the
+                // drain filters it instead of this returning early, because a
+                // second exemption belongs in one place and not in two.
+                ownArtTextures.emplace_back(name);
                 return own;
             }
             // The list index *is* the layer index, so a missing file has to
@@ -1565,8 +1796,18 @@ int main() {
         // complete and still ahead of first use.
 
         // Spawn egg sprites, staged beside the exe rather than under assets/ for
-        // the same reason the reference skins are: they are placeholder art and
-        // the asset copy step must not be able to carry them into a build.
+        // the same reason the reference skins and `blocks-reference/` are:
+        // `assets/` is committed and copied by the build, while these are copied
+        // by a tool out of a reference tree the repository does not carry, so a
+        // fresh checkout has to start without them.
+        //
+        // **Not because they are provisional.** The 2026-08-17 ruling settled
+        // that Mojang's files are this game's permanent art - private
+        // repository, personal use, nothing ships - so the "placeholder art"
+        // wording that stood here was scheduling work the user had explicitly
+        // cancelled, and a reader acting on it would go hunting for an egg
+        // nobody is drawing. Where staged art should finally live is `GAPS.md`
+        // S0.6's packaging question, not this file's.
         //
         // A missing sprite falls back to blank rather than being skipped. The
         // list index *is* the layer index, so dropping one would silently shift
@@ -2274,10 +2515,18 @@ int main() {
                             std::to_string(twoByTwo) + " of them craftable without a table");
         }
 
-        // Reference skins are placeholder art for every species whose own skin
-        // has not been drawn yet. They sit beside the exe rather than under
-        // assets/, so the asset copy step cannot carry them into a build, and
-        // they are simply absent unless the tool has been run.
+        // Reference skins are the art, not a stand-in for it. The 2026-08-17
+        // ruling is explicit - private repository, personal use, nothing ships,
+        // Mojang's files stay - so "placeholder art for every species whose own
+        // skin has not been drawn yet", which stood here, described a queue that
+        // does not exist. Nobody is drawing a replacement and no later build
+        // swaps one in.
+        //
+        // They sit beside the exe rather than under assets/ because a tool
+        // stages them out of a reference tree the repository does not carry: the
+        // committed `creatures.png` is the default and the staged sheet
+        // overrides it when it exists, which is what lets a fresh checkout run
+        // at all.
         std::filesystem::path skinTexture = textureDir.parent_path() / "creatures.png";
         const std::filesystem::path referenceSkins = engine::executableDirectory() / "creatures-reference.png";
         if (std::filesystem::exists(referenceSkins)) {
@@ -2376,6 +2625,54 @@ int main() {
                              " block textures are missing and will draw blank: " + names);
         }
 
+        // **And every name served out of our own art instead, drained at the
+        // same site and for the same reason.** A texture found here loaded
+        // fine, so nothing above this line has anything to report - which is
+        // precisely the failure: the game comes up looking wrong and every log
+        // reads clean, so the first detector is the user opening the window.
+        //
+        // A warning rather than an error, and that ranking is deliberate: a
+        // blank layer is broken, whereas this is *drawn but not the reference*.
+        // Both are worth a line and only one of them stops you playing. The
+        // message names the exact staging tool because a diagnostic that does
+        // not say what to type is half a diagnostic - `pushEgg` names
+        // `make-spawn-egg-sprites.ps1` ninety lines below and the font check
+        // names `make-font.ps1` just above, so this names the one that fills
+        // `blocks-reference/`. **Checked against the directory rather than
+        // recalled**: `tools\run.ps1` does not exist, only a root `run.ps1`,
+        // and a diagnostic that tells you to run a missing script is worse than
+        // one that tells you nothing.
+        //
+        // `white.png` is excluded and is the only exclusion. It is a 16x16
+        // solid swatch multiplied by a vertex colour to draw the crosshair, the
+        // block outline, HUD panels, the inventory dim and particles - a
+        // rendering primitive that the reference has no counterpart for and
+        // never will, so listing it would put a permanent false positive at the
+        // top of every launch and teach the reader to skip the line.
+        //
+        // **Falsified by**: a second name appearing here on a fully staged
+        // tree. That is the same falsifier the paragraph above `referenceBlocks`
+        // carries, except this one fires in the log at runtime instead of
+        // waiting for somebody to re-run the three-set comparison by hand.
+        {
+            std::string ownNames;
+            std::size_t ownCount = 0;
+            for (const std::string& name : ownArtTextures) {
+                if (name == "white.png") {
+                    continue;
+                }
+                ownNames += (ownNames.empty() ? "" : ", ") + name;
+                ++ownCount;
+            }
+            if (ownCount > 0) {
+                engine::logWarn(std::to_string(ownCount) +
+                                " block textures fell back to our own art because the reference"
+                                " has not been staged for them - re-run"
+                                " tools\\make-reference-blocks.ps1: " +
+                                ownNames);
+            }
+        }
+
         engine::Renderer renderer(context, window, spriteLayers, hudTexture, fontTexture, skinTexture);
 
         // What each texture layer is made of. Built by walking every block, face
@@ -2396,7 +2693,8 @@ int main() {
 
         // How wide each glyph actually is, measured off the atlas that loaded
         // rather than written down: the rightmost opaque column of a cell, plus
-        // one texel of spacing. That is the reference's own rule, and it        // reproduces its published widths exactly - 'i' 2, 'l' 3, 'I' 4, 'a' 6,
+        // one texel of spacing. That is the reference's own rule, and it
+        // reproduces its published widths exactly - 'i' 2, 'l' 3, 'I' 4, 'a' 6,
         // '@' 7. A blank cell has no column to measure, so the space is the one
         // advance that has to be a number.
         {
@@ -2740,6 +3038,30 @@ int main() {
                     lastPhase = phase;
                     renderer.setScreenMesh(
                         game::hud::makeLoadingScreen(shown, phase, renderer.aspectRatio()));
+                    // **All three, because the renderer RETAINS whatever mesh
+                    // was last set** - `UI.md` S0.4 R6 states that as a rule.
+                    // `rebuildHud` ends by setting all three unconditionally and
+                    // this set only one, which is benign today for a reason that
+                    // is a measurement rather than a property: `makeLoadingScreen`
+                    // has exactly one call site, here, at world init, before
+                    // `rebuildHud` has ever run, so the other two layers are
+                    // still empty and `drawScreen` early-outs on an index count
+                    // of zero.
+                    //
+                    // Falsified the moment there is a *second* loading screen -
+                    // a world reload, a render-distance rebuild, or `UI.md`
+                    // S0.6's multi-world store - at which point the previous
+                    // session's cursor stack and F3 panel float over it, and
+                    // whoever debugs that will open `LoadingScreen.cpp`, which
+                    // is innocent. Two lines here cost nothing and remove the
+                    // trap rather than dating it.
+                    //
+                    // The clip rectangle is the HUD's own, so an empty mesh
+                    // cannot be clipped into visibility by a stale one.
+                    const auto [loadClipMin, loadClipMax] =
+                        game::inventoryScreen::catalogueListBounds();
+                    renderer.setClippedScreenMesh(engine::MeshData{}, loadClipMin, loadClipMax);
+                    renderer.setTopScreenMesh(engine::MeshData{});
                 }
                 renderer.drawFrame(engine::ClearColor{0.055f, 0.06f, 0.075f, 1.0f}, camera.viewMatrix());
             }
@@ -2844,17 +3166,35 @@ int main() {
                 timeOfDay = savedPlayer->timeOfDay - std::floor(savedPlayer->timeOfDay);
             }
             // **The weather, restored beside the hour.** `restore` takes the
-            // two flags and the two remaining countdowns and leaves the five
-            // ramps alone, so a world reloaded mid-storm fades up over about
-            // five seconds instead of snapping. `Weather.hpp` argues that case
-            // and I am not second-guessing it here.
+            // two flags and the two remaining countdowns.
             //
-            // **`settings.startWeather` still wins where it is set**, and that
-            // is deliberate rather than an ordering accident: the `force` call
-            // beside the declaration above is an explicit instruction from the
-            // settings file, while this writes the *simulated* state. They are
-            // two different facts, and `restore` does not touch `m_forced`, so
-            // neither erases the other.
+            // **It SNAPS the five ramps, and this paragraph used to say the
+            // opposite.** It read "leaves the five ramps alone, so a world
+            // reloaded mid-storm fades up over about five seconds instead of
+            // snapping - `Weather.hpp` argues that case and I am not
+            // second-guessing it here", which was true when written and is now
+            // false in the most expensive direction there is: it is a comment
+            // arguing, in this codebase's own voice and citing another file for
+            // support, for an edit that would put a fixed bug straight back.
+            // `Weather.cpp` now argues the reverse over `restore` itself - a
+            // load is a resumption rather than a transition, and the fade gave
+            // **heavy rain over perfectly still trees for roughly half a
+            // minute**, because wind ramps about six times slower than the
+            // levels and the cloud deck below reads it. Do not restore the fade.
+            //
+            // **`settings.startWeather` still wins where it is set - but NOT
+            // because of the call order, which is the other half this used to
+            // get wrong.** It credited the `force` call beside the declaration
+            // above running first, plus "`restore` does not touch `m_forced`".
+            // Both clauses are individually true and the conclusion did not
+            // follow: `force` ran first and then these two flags overwrote what
+            // it had just set, while `m_forced` stayed non-zero and went on
+            // freezing the cycle - so `start_weather=3` over a world saved in
+            // clear skies locked in *clear skies*, unchangeable for the whole
+            // session, which is worse than the override simply failing. What
+            // makes it true today is the `if (m_forced == 0)` inside `restore`,
+            // and the countdowns are deliberately assigned outside that guard so
+            // the cycle can carry on from the save the moment V clears it.
             //
             // **No sanitising on this side, on purpose.** `restore` is
             // documented as defensive about negative, infinite and NaN timers,
@@ -2958,6 +3298,7 @@ int main() {
                         "). F12 cycles the surface debug views.");
         engine::logInfo(std::string("C cycles clouds (now: ") + kCloudQualityNames[settings.clouds] + ").");
         engine::logInfo("F8 spawns a Bramble ahead of you, F9 a charged one.");
+        engine::logInfo("Enter takes a photo of the screen into " + photosDirectory().string() + ".");
         engine::logInfo("Right click a spawn egg to place that creature; the inventory's left card has them all.");
         engine::logInfo("Entering main loop. Close the window to exit.");
 
@@ -3129,7 +3470,14 @@ int main() {
 
         // Raw materials, in the storage rows rather than the hotbar: they are
         // crafting inputs rather than things to place, and the hotbar is full.
-        constexpr std::array<game::BlockId, 8> creativeStock{
+        // **Size deduced, and this is the one where the zero-fill is not
+        // abstract.** `BlockId` 0 is `Air`, so a row dropped from an explicit
+        // `8` would not shorten the creative kit - it would hand the player a
+        // hotbar slot holding air that looks empty, cannot be dropped and
+        // cannot be explained. That is the same bug `CLAUDE.md` records against
+        // a `kFlowers` declared 12 with 11 rows, which quietly planted Air as a
+        // flower. Deducing makes the short row inexpressible.
+        constexpr std::array creativeStock{
             game::BlockId::Log,     game::BlockId::Cobblestone,   game::BlockId::Sand,
             game::BlockId::Gravel,  game::BlockId::CraftingTable, game::BlockId::Furnace,
             game::BlockId::Torch,   game::BlockId::Bricks};
@@ -3322,8 +3670,46 @@ int main() {
         }
 
         // One of every block whose dropped form is not simply a little cube,
-        // laid out in a row so all of them can be judged in one look. A dropped
-        // item is never saved, so this writes nothing to the world.
+        // laid out in a row so all of them can be judged in one look.
+        //
+        // **This used to be free because dropped items were never saved, and
+        // since 2026-08-19 they are.** The sentence that stood here said so and
+        // would now be the reason a review mode quietly minted an anvil, an
+        // enchanting table and thirty more items into the world on every look.
+        // Both ends of the drop save are gated on this same flag instead - the
+        // restore beside `loadCreatures` and the write in `saveEverything` - so
+        // the showcase floor is neither loaded into nor written out.
+        //
+        // **Falsified by**: any of the three gates below going missing. **The
+        // search this used to give was its own name, and my own refactor broke
+        // it the same day - 2026-08-19.** The old text said to grep
+        // `dropShowcase` and expect three `if` gates; the persistence pair was
+        // then hoisted onto a derived owner, so that grep now finds exactly one
+        // and a reader following it would conclude two gates had been deleted
+        // and go looking for a bug that is not there. A falsifier that names one
+        // spelling of a question does not survive the question acquiring a
+        // second spelling. Three searches, because there are three names and
+        // the counts differ - and each is given as CODE sites, because this
+        // paragraph quotes all three and so appears in its own results:
+        //
+        //   `if (settings.dropShowcase)` - **one** code site, the placement
+        //   just below, correctly this mode alone, because filling the floor
+        //   for review is the only thing the creature showcase does not want.
+        //   `if (showcasing)` - **one** code site, the whole-body refusal at
+        //   the top of `saveEverything`.
+        //   `if (dropsPersist)` - **two** code sites, the restore beside
+        //   `loadCreatures` and the write inside `saveEverything`.
+        //
+        // So a correct tree greps 2, 2 and 3, one of each being this comment.
+        // That off-by-one is not pedantry: a `static_assert` count elsewhere in
+        // this project swallowed one quoted in a doc comment, reported six where
+        // there were five, and the shifted index produced a wrong verdict as
+        // well as a wrong number.
+        //
+        // `showcasing` and `dropsPersist` are exact De Morgan twins declared on
+        // adjacent lines, so the four cannot disagree about what a review mode
+        // is; the split exists so the reader of each site sees the question in
+        // the polarity that site asks it in.
         if (settings.dropShowcase) {
             const game::BlockId kAwkward[]{
                 game::BlockId::Torch,          game::BlockId::Bell,
@@ -3872,8 +4258,21 @@ int main() {
         /// not merely dropped on the floor and missed - it stopped existing
         /// anywhere the player could reach, recoverable only by building a new
         /// jukebox on that exact block, and a music disc is a one-per-dungeon
-        /// item. There is no periodic autosave, so "it comes back on reload"
-        /// meant "quit the game and come back".
+        /// item. **The claim that used to stand here is quoted below so it is
+        /// recognisable, and every line of it is marked, because an unmarked
+        /// quotation of a false claim is indistinguishable from the claim to
+        /// anything that searches by text - which has now cost this project
+        /// three false reports in one day, one of them against this very
+        /// paragraph.** RETIRED: "there is no periodic autosave, so
+        /// RETIRED: 'it comes back on reload' meant 'quit the game and come
+        /// RETIRED: back'." It is false, and it was load-bearing in the wrong
+        /// direction. `kAutosaveInterval` is thirty seconds and `saveEverything`
+        /// runs on it, so a reader reasoning about any of this file's
+        /// empty-collection-deletes-the-file shapes would have taken that
+        /// sentence as licence to assume the disk is only written at quit -
+        /// which is exactly the assumption that makes `saveDrops({})` and
+        /// `saveChests({})` look harmless. The stranding was real; the
+        /// thirty-second window is the whole of how long you had.
         ///
         /// The reference's own rule, and the same one the right-click uses: a
         /// broken jukebox ejects its disc (https://minecraft.wiki/w/Jukebox).
@@ -4178,6 +4577,77 @@ int main() {
             // rather than restoring half of it.
             for (const game::PopulatedColumn& column : world.store().loadPopulatedColumns()) {
                 creatures.restorePopulatedColumn(column.x, column.z);
+            }
+        }
+
+        // **The floor comes back too, and this is the call site the format had
+        // been waiting for.** Landed 2026-08-19. `WorldStore::loadDrops`,
+        // `saveDrops`, `SavedItem` and its `sizeof == 48` assert were written,
+        // proved on bytes and left with no caller anywhere - `CLAUDE.md` bug
+        // shape #15 - so everything lying on the ground at quit was deleted: a
+        // death drop you had not walked back to yet, a chest's contents spilled
+        // by a creeper, a mining trip's worth of stacks stacked outside the
+        // entrance. It read as the game eating your things, because it was.
+        //
+        // **Through `ItemEntities::restore`, never `spawn`.** `spawn` is the
+        // gameplay entry and every one of its three habits is wrong here: it
+        // adds a pop-out impulse, so the floor would scatter a little further
+        // from the truth on every load; it starts `age` at zero, so nothing
+        // dropped would ever reach the five-minute despawn across a save and a
+        // reload would be a way to keep a stack forever; and it takes the stack
+        // in three loose parts, which is the shape that puts the damage in the
+        // count. `restore` keeps both clocks exactly as they were, so an item
+        // thrown in the last second before quitting comes back still inside its
+        // `kThrowPickupDelay` window rather than being handed straight back.
+        //
+        // **Nothing is validated here.** `loadDrops` sanitises the stack, the
+        // finiteness, the position and the sign of both clocks on the way out,
+        // so a second set of rules on this side would be a second owner for a
+        // settled question. `ItemEntity.hpp` says the same over `restore`.
+        //
+        // **Gated on BOTH review modes, symmetric with the save**, for exactly
+        // the reason the creature showcase is gated above. `dropShowcase` is
+        // the obvious one: it is a review mode that fills the floor with one of
+        // everything, and loading the world's real drops into that frozen row -
+        // then writing the row back out - would inject thirty-odd free items
+        // into the world every time anyone looked at a model. **The creature
+        // showcase needed the same clause and did not have it**, which is the
+        // rule-that-did-not-travel shape: `Settings.cpp` states that mode's
+        // contract as "the world's own animals are neither loaded nor saved
+        // while it is on", the roster it spawns in front of you is killable, and
+        // with the floor now persisted every showcased sheep killed for a look
+        // at its death animation was banking wool into the real world's
+        // `drops.dat` for the next ordinary session to collect.
+        //
+        // **`<= 0`, never `== 0`.** A negative `creature_showcase` used to fall
+        // into a dead zone where every branch answered "no" - no showcase, no
+        // restore, no spawner, and no `saveCreatures`, which silently deleted
+        // the population. The comment above `loadCreatures` tells that story;
+        // this asks the question the same way so it cannot open a second one.
+        //
+        // **One owner for "is this a review mode", and `dropsPersist` is
+        // derived from it rather than repeating the test.** The two are exactly
+        // De Morgan's of each other - `!(a || b > 0)` is `!a && b <= 0` - so
+        // this is rung 1 of the ladder and the pair cannot drift. It matters
+        // because a *third* reader has just arrived: `saveEverything` refuses
+        // its whole body while `showcasing`, and gating the floor on one
+        // spelling of the question while gating the disk on another is how a
+        // review mode ends up half-sealed.
+        const bool showcasing = settings.dropShowcase || settings.creatureShowcase > 0;
+        const bool dropsPersist = !showcasing;
+        if (dropsPersist) {
+            // Counted off the roster rather than off the loop, matching the
+            // creature restore: `loadDrops` already dropped whatever it refused,
+            // so the loop count would report what was on disk and the line says
+            // "Restored".
+            const std::size_t dropsBefore = drops.count();
+            for (const game::SavedItem& saved : world.store().loadDrops()) {
+                drops.restore(saved.position, saved.velocity, saved.stack, saved.age,
+                              saved.pickupDelay, saved.onGround != 0);
+            }
+            const std::size_t restoredDrops = drops.count() - dropsBefore;
+            if (restoredDrops > 0) {
+                engine::logInfo("Restored " + std::to_string(restoredDrops) + " dropped items.");
             }
         }
 
@@ -4581,10 +5051,13 @@ int main() {
         /// tidiness. This called `spillBlockDrop` directly until finding 888,
         /// which means a gravel column settled at shutdown was paid flint 10% of
         /// the time exactly as the frame drain was, and a fix to one of the two
-        /// would have read as complete. Those items are then destroyed by
-        /// finding 592 - dropped items have no save file - but that is the
-        /// pre-existing gap and not one this opens: before this ran, the cube
-        /// was lost as *well as* the item.
+        /// would have read as complete. **Those items used to be destroyed
+        /// immediately afterwards by finding 592 - dropped items had no save
+        /// file - and since 2026-08-19 they are written out with the rest**, so
+        /// this ordering now matters rather than merely being tidy: this
+        /// destructor runs `settleFallers` *before* `save`, so a cube that lands
+        /// on a slab at shutdown becomes an item and that item reaches
+        /// `drops.dat`. Reverse the two and it is lost again.
         const std::function<void()> settleFallersBeforeFinalSave = [&] {
             for (const game::FallingBlocks::Crushed& hit : fallingBlocks.settleAll(world)) {
                 payForCrushed(hit);
@@ -4610,6 +5083,70 @@ int main() {
         /// it and the caller clears the flag, so a world that failed to write is
         /// marked clean and never retried.
         const std::function<bool()> saveEverything = [&] {
+            // **A review mode writes nothing at all, and the gate is here
+            // rather than on each writer.** Both showcases are non-destructive
+            // by contract - `Settings.cpp` states it for creatures, and
+            // `dropShowcase` fills the floor with one of everything purely to
+            // be looked at. Three writers were gated to honour that
+            // (`loadDrops`, `saveDrops`, `saveCreatures`) and the rest were
+            // not, so the floor had a **fourth exit and the bag was it**: the
+            // showcase spawns forty-one items, `ItemEntities` homes anything
+            // within two metres onto the player at seven metres a second and
+            // collects it inside seven tenths of one, collection is
+            // mode-independent by design, and walking up to a model is how you
+            // review it. An enchanting table, an anvil, an end portal frame and
+            // thirty-eight more were then minted into the real `player.dat`
+            // every time anyone looked. Zero removed from the world, up to
+            // forty-one added to a file that outlives the session.
+            //
+            // **Gating `savePlayer` alone would not have closed it.** The bag
+            // is only the widest door; put a minted anvil in a chest and
+            // `saveChests` carries it, a stowbox and `saveStowboxes` does, a
+            // furnace slot and `saveFurnaces` does. Refusing the body is the
+            // only version of this fix that closes the class rather than the
+            // instance - and it is also the only one that stays closed when
+            // somebody adds a sixth table here, which on this file's history is
+            // a matter of days.
+            //
+            // **Returns true, and that is not the "contradict the writer" bug
+            // this lambda's own doc block warns about.** Nothing failed; nothing
+            // was attempted. Saying false would mark the world permanently
+            // dirty, set `saveFailing`, and print "the shutdown save did not
+            // write everything" on every exit from a mode that is working
+            // exactly as intended.
+            //
+            // **Falsified by**: `showcasing` acquiring a reader that is not
+            // this line, the drop restore or `dropsPersist`.
+            //
+            // **This gate is named `showcasing`, and a search for "showcase"
+            // cannot find it - in any case-mode.** Not a style note: two
+            // separate reviews have now filed this very block as an ungated
+            // fourth exit for the player's bag, both because their probe swept
+            // the lambda body for a `Showcase` token, matched `dropShowcase`
+            // and `creatureShowcase` elsewhere, and concluded that no gate
+            // stood above `savePlayer`. The spelling is the entire cause:
+            // "showcasing" is "showcas" plus "ing", and "showcase" ends in an
+            // `e`, so it is not a substring of it at all. Measured 2026-08-19:
+            // case-sensitive `Showcase` and case-insensitive `showcase` both
+            // return false against this line, while `showcasing` returns true.
+            //
+            // **The fleet's known trap is a token that is a PREFIX of a longer
+            // name and so over-matches. This is the exact inverse**: an
+            // inflected form sharing a stem without being a superstring, so it
+            // under-matches to nothing - and a zero reads as a clean absence.
+            // `showcas` finds every form; so does this predicate's own name.
+            //
+            // **Consequence for anyone auditing the writers below**: this
+            // return dominates all eight of them, so none carries a gate of
+            // its own and none needs one. A per-writer sweep asking whether
+            // each call site is individually guarded answers "no" truthfully
+            // for all eight and still yields the wrong verdict. Wrapping any
+            // of them in `if (dropsPersist)` would compile and do nothing:
+            // `dropsPersist` is declared `!showcasing`, so past this line it
+            // is provably true and the condition is dead.
+            if (showcasing) {
+                return true;
+            }
             // **Which tables did not write, by name.** Named rather than
             // counted, because they are not equally recoverable. Furnaces,
             // stowboxes and creatures mostly re-derive or are simply lost;
@@ -4633,9 +5170,27 @@ int main() {
             const std::size_t chunksBefore = world.savedChunkCount();
             world.saveAll();
             {
-                game::SavedPlayer saved{player.position,   camera.yaw,        camera.pitch,
-                                        player.health,     player.food,       player.saturation,
-                                        player.exhaustion};
+                // **Designators, not position, and that is load-bearing rather
+                // than style.** The binding is by declaration order in
+                // `WorldStore.hpp`, a file this one cannot see change. An
+                // insertion before `health` shifts a float into an `int32` and
+                // the compiler stops it - fine. An insertion anywhere *within*
+                // the float run is silent: put a new float between `saturation`
+                // and `exhaustion` and the positional form hands the new member
+                // the exhaustion value, leaves `exhaustion` at its default and
+                // writes both to disk, with no warning at `/W4`, no validation
+                // error and no soak failure. The player just loads with their
+                // exhaustion quietly reset. C++20 designators may be **skipped
+                // but not reordered**, so this stays legal as fields are
+                // appended and any future insertion either keeps working or
+                // fails loudly *by name*.
+                game::SavedPlayer saved{.position = player.position,
+                                        .yaw = camera.yaw,
+                                        .pitch = camera.pitch,
+                                        .health = player.health,
+                                        .food = player.food,
+                                        .saturation = player.saturation,
+                                        .exhaustion = player.exhaustion};
                 // **The cursor and the crafting grid are part of the carried
                 // inventory as far as the disk is concerned**, because they are
                 // written nowhere else: only `closeScreen` hands them back, and
@@ -4655,10 +5210,15 @@ int main() {
                 // screen twitch.
                 //
                 // What will not fit is discarded rather than dropped, and that
-                // is the honest answer rather than an oversight: `ItemEntities`
-                // has no save file at all, so a drop made here would be gone on
-                // reload exactly as it is when a screen closes onto a full
-                // inventory.
+                // stays true now that `drops.dat` exists - the reason changed,
+                // not the behaviour. Dropping the overflow here would duplicate
+                // it: this runs at the end of a frame in which a drag may still
+                // be in progress, the sweep goes on writing `heldStack` every
+                // frame the button is held, so an autosave that threw the
+                // overflow on the floor would leave the player holding it *and*
+                // standing over a copy. Reaching this at all needs a completely
+                // full inventory *and* a cursor stack, which is why it is not
+                // worth a second mechanism to get right.
                 game::Inventory carried = inventory;
                 forEachScreenStack([&carried](const game::ItemStack& stack) {
                     if (!stack.empty()) {
@@ -4666,11 +5226,42 @@ int main() {
                     }
                 });
                 // **And every disc sitting in a jukebox**, for exactly the same
-                // reason and into the same copy. `jukeboxDiscs` is the third
-                // place an `ItemStack` lives that no save file can see, and the
-                // only one whose comment already promised the disc "comes back
-                // to you when the world reloads" - it did not, because loading
-                // a jukebox consumes the disc and nothing restores this list.
+                // reason and into the same copy - and the only one of these
+                // whose comment already promised the disc "comes back to you
+                // when the world reloads". It did not, because loading a
+                // jukebox consumes the disc and nothing restores this list.
+                //
+                // **The set is LISTED rather than counted, and this line used
+                // to say "the third place".** Three members today, in the order
+                // this block folds them: `heldStack`, the cursor; `craftSlots`,
+                // the open screen's grid - both reached through
+                // `forEachScreenStack`, which is why the fold looks like two
+                // statements and covers three homes; and `jukeboxDiscs`. The
+                // ordinal was correct when it was written and is still correct
+                // now, and that is the problem with it: a reviewer reading this
+                // after `drops.dat` landed could not recover which three were
+                // meant, could not tell whether the drop table leaving the set
+                // had shifted the number, and correctly declined to guess. An
+                // ordinal cannot be checked against the code; a list can, and
+                // the candidate set here is three.
+                //
+                // **Membership is "no save file can see it", and two things
+                // have LEFT the set** - so do not read the list as a census of
+                // everything an `ItemStack` can sit in. `drops` left when
+                // `drops.dat` acquired its writer, and it was never a member of
+                // *this* fold in any case, because the floor is the world's and
+                // this copy is the player's - folding it in here would hand the
+                // player every item lying in the world at every autosave.
+                // `enderChest` left when `SavedPlayer` grew a tail for it, forty
+                // lines below. Furnace input and output were never in it, which
+                // is the whole reason `forEachScreenStack` skips `craftSlots`
+                // for that one screen kind: `saveFurnaces` can already see them,
+                // and folding them in would duplicate a smelt every thirty
+                // seconds.
+                //
+                // **Falsified by**: a fourth home appearing in this fold, or
+                // any of the three named above acquiring a store call.
+                // Re-derived 2026-08-19 against `forEachScreenStack`.
                 //
                 // **Survival only, matching the consume.** Creative never took
                 // the disc out of the bag in the first place, so folding one in
@@ -4868,8 +5459,30 @@ int main() {
             for (const auto& [position, chest] : chests) {
                 // The break path's own three, so this cannot drift from what
                 // counts as a container there.
+                //
+                // **An empty HOPPER is written where an empty chest is not, and
+                // the difference is not cosmetic.** The transfer pass finds
+                // hoppers by walking this map, so a hopper with no record in it
+                // does not tick - and dropping the empty ones here meant every
+                // working hopper in the world went inert on the next load until
+                // the player opened it by hand, which is the same defect the
+                // placement path had. The chest reasoning does not carry across:
+                // "a chest nobody has used is indistinguishable from one that
+                // was never opened" is true of a chest, whose record is only
+                // storage, and false of a hopper, whose record is also its
+                // existence.
+                //
+                // **Residency is asked before the block**, so an entry in a
+                // column that is not loaded behaves exactly as it did before -
+                // `stillHasItsBlock` answers true for those without consulting
+                // the predicate, and widening `keep` for them would start
+                // writing records for chests the old rule dropped.
+                const bool hopperCell =
+                    world.columnResident(position.x, position.z) &&
+                    game::isHopper(world.blockAt(position.x, position.y, position.z));
                 const bool keep =
-                    !chest.empty() && stillHasItsBlock(position, [](game::BlockId here) {
+                    (!chest.empty() || hopperCell) &&
+                    stillHasItsBlock(position, [](game::BlockId here) {
                         return game::isChest(here) || game::isHopper(here) ||
                                here == game::BlockId::Lectern;
                     });
@@ -4957,6 +5570,17 @@ int main() {
             // negative `creature_showcase` skipped the save entirely, so every
             // creature in the world was deleted on quit by a setting that
             // showed nothing and logged nothing.
+            //
+            // **Unreachable since the whole-body `showcasing` refusal at the top
+            // of this lambda, and kept for the same reason its drop-side
+            // counterpart is kept - do not delete it.** `showcasing` is
+            // `dropShowcase || creatureShowcase > 0`, so reaching this line
+            // already proves `creatureShowcase <= 0`. It stays because it is the
+            // visible twin of the restore gate beside `loadCreatures`, and the
+            // symmetry between the load and save ends is only checkable while
+            // both are written down. Stated here as well as at the drop gate
+            // because a reason that lives at one of two identical sites is the
+            // rule that did not travel.
             std::vector<game::SavedCreature> savedCreatures;
             if (settings.creatureShowcase <= 0) {
                 savedCreatures.reserve(creatures.all().size());
@@ -5013,14 +5637,86 @@ int main() {
                 wrote(world.store().saveCreatures(savedCreatures, savedColumns), "creatures");
             }
 
+            // **Everything lying on the floor, which until 2026-08-19 was
+            // deleted on every quit.** The storage half - `saveDrops`,
+            // `loadDrops`, `SavedItem` and its `sizeof == 48` assert - had been
+            // written, asserted and proved on hand-built bytes with no caller
+            // anywhere in the tree, so a death drop, a creeper-spilled chest or
+            // a mining trip's worth of stacks simply did not exist at the next
+            // launch. This and the restore beside `loadCreatures` are the two
+            // lines that were missing.
+            //
+            // **`persisted()` composes the stack, and that is deliberate.**
+            // `ItemEntities::Drop` keeps `item`, `count` and `damage` loose;
+            // handing the three parts across this boundary and assembling them
+            // here is how a record ends up with the damage in the count, which
+            // compiles, writes, reads back and returns a stack of 47 diamond
+            // pickaxes. `ItemEntity.hpp` argues it over the struct.
+            //
+            // **The `bool` becomes an `std::int32_t` here and only here.**
+            // `SavedItem::onGround` is spelled wide because a one-byte member in
+            // a record opens three bytes of compiler-owned padding that reach
+            // the disk uninitialised; the live flag stays a `bool` because that
+            // is what it is in memory. That is the whole conversion, and it is
+            // the caller's by the same reasoning `SavedCreature::charged` is.
+            //
+            // **Field by field, not a positional aggregate**, matching
+            // `SavedCreature` twenty lines above and `SavedPlayer` above that:
+            // six members of which four are floats or vectors, so the day a
+            // seventh is appended a braced list silently puts the age in the
+            // pickup delay and nothing warns. `ItemEntity.hpp` carries a
+            // `static_assert` on `Persisted`'s last offset that stops the build
+            // if that struct changes, which is what routes the next editor here.
+            //
+            // **Skipped entirely while EITHER review mode is on**, exactly as
+            // the creature save is skipped for the creature showcase and for the
+            // same reason. The drop showcase drops one of every awkward-shaped
+            // block on the floor to be looked at, and writing those out would
+            // hand the world thirty-odd free items - including a full anvil and
+            // an enchanting table - every time anyone reviewed a model. The
+            // creature showcase spawns a killable roster in front of you, so
+            // without the same clause every showcased animal killed for a look
+            // at its death animation banked its loot into the real world's
+            // `drops.dat`. Skipping the write leaves whatever the real session
+            // saved untouched on disk, which is the right answer for both.
+            //
+            // **One owner: `dropsPersist`, declared beside the restore**, so the
+            // two ends cannot answer differently. A save gated on one mode and a
+            // load gated on two is how a review session quietly eats the floor.
+            //
+            // **Unreachable since the whole-body `showcasing` refusal at the top
+            // of this lambda, and kept anyway - do not delete it.** It is not
+            // clutter: it is the *load* side's twin, and the symmetry the
+            // paragraph above claims is only visible while both ends are
+            // written down. Deleting it would leave `dropsPersist` with one
+            // reader and make the next person to touch the outer gate believe
+            // the floor was never gated at all.
+            std::vector<game::SavedItem> savedDrops;
+            if (dropsPersist) {
+                const std::vector<game::ItemEntities::Persisted> floor = drops.persisted();
+                savedDrops.reserve(floor.size());
+                for (const game::ItemEntities::Persisted& record : floor) {
+                    game::SavedItem saved;
+                    saved.position = record.position;
+                    saved.velocity = record.velocity;
+                    saved.stack = record.stack;
+                    saved.age = record.age;
+                    saved.pickupDelay = record.pickupDelay;
+                    saved.onGround = record.onGround ? 1 : 0;
+                    savedDrops.push_back(saved);
+                }
+                wrote(world.store().saveDrops(savedDrops), "drops");
+            }
+
             // The chunk count is a running total, so the difference is what this
             // save actually wrote - and an autosave line reading zero chunks is
             // how you tell "nothing changed" from "the timer stopped firing".
             engine::logInfo("Saved " + std::to_string(world.savedChunkCount() - chunksBefore) +
                             " modified chunks, " + std::to_string(savedFurnaces.size()) +
                             " furnaces, " + std::to_string(savedChests.size()) + " chests, " +
-                            std::to_string(savedCampfires.size()) + " campfires and " +
-                            std::to_string(savedCreatures.size()) + " creatures.");
+                            std::to_string(savedCampfires.size()) + " campfires, " +
+                            std::to_string(savedCreatures.size()) + " creatures and " +
+                            std::to_string(savedDrops.size()) + " dropped items.");
             // **Said again, above the counts, because the counts are what was
             // *intended*.** Each writer already logged its own failure, and a
             // success line printed underneath it is how a reader talks
@@ -5573,8 +6269,8 @@ int main() {
         //
         // **The four corner cells must be exactly `Air`, not merely
         // non-occluding.** That reads like the mistake this codebase keeps
-        // making — asking `== Air` where `occludesFace` is the general
-        // question — but here it is what the reference actually tests: a snow
+        // making - asking `== Air` where `occludesFace` is the general
+        // question - but here it is what the reference actually tests: a snow
         // layer, a flower or a block of water in those cells prevents the
         // build, and any looser test would let a golem rise out of a snowfield.
         const auto tryRaiseGolem = [&world, &creatures](const glm::ivec3& head) {
@@ -5886,6 +6582,47 @@ int main() {
                     editSearchKey(key);
                     continue;
                 }
+                if (key == engine::Key::Enter) {
+                    // **Enter was otherwise unbound.** Swept across the whole
+                    // of `game/` on 2026-08-20: `Key::Enter` occurred only in
+                    // `Window.hpp`'s enum and `Window.cpp`'s two translation
+                    // tables, and nowhere in gameplay - so nothing confirms a
+                    // menu with it and there is nothing to collide with.
+                    // **Falsified by** any second `Key::Enter` under `game/`.
+                    //
+                    // Placed below the search-field branch on purpose, which
+                    // swallows every key while the catalogue's text box holds
+                    // the keyboard - and deliberately **not** gated on a screen
+                    // being closed, because photographing an inventory that
+                    // looks wrong is one of the things this was asked for.
+                    //
+                    // **No debounce of its own, and it does not need one.**
+                    // `consumeKeyPresses` fires once per physical press, and
+                    // `repeatsWhenHeld` refuses Enter a place in the repeat
+                    // queue - so leaning on it takes exactly one photo. F10,
+                    // F11, G, C and V are one-shots on the same two facts.
+                    const std::filesystem::path directory = photosDirectory();
+                    std::error_code error;
+                    std::filesystem::create_directories(directory, error);
+                    if (error) {
+                        engine::logWarn("Photo not taken: could not create " + directory.string() + " (" +
+                                        error.message() + ")");
+                        continue;
+                    }
+                    // Absolute by construction - `executableDirectory()` is,
+                    // and every step from it is a parent or a named child - so
+                    // the line below is a path the player can paste.
+                    const std::filesystem::path photo = nextPhotoPath(directory);
+                    if (renderer.capturePhoto(photo)) {
+                        engine::logInfo("Photo saved: " + photo.string());
+                    } else {
+                        // `capturePhoto` has already logged *why*. This adds the
+                        // half it cannot know is interesting: which file was
+                        // meant.
+                        engine::logWarn("Photo not saved: " + photo.string());
+                    }
+                    continue;
+                }
                 if (key == engine::Key::E) {
                     if (openScreen.has_value()) {
                         closeScreen();
@@ -5929,7 +6666,41 @@ int main() {
                 }
                 if (key == engine::Key::F6 || key == engine::Key::F7) {
                     const int step = (key == engine::Key::F7) ? 1 : -1;
-                    const int wanted = world.visibleRadius() + step;
+                    // **Clamped to what the SETTINGS FILE can carry, not to what
+                    // the world can render, and the gap between those two was
+                    // silent data loss.** `World::setVisibleRadius` clamps to
+                    // [1, 64], so walking F7 up past 32 was accepted by the
+                    // world and looked like it worked. The branch below then
+                    // copies the live radius into `settings.renderDistance` and
+                    // saves on the same keypress - and `Settings.cpp`'s
+                    // `parseUnsigned` REJECTS a value above its limit rather
+                    // than clamping it, so on the next launch the field keeps
+                    // its struct default of 12. Raise the distance to 40, quit,
+                    // come back: 12. Not 40, and not 32 either - which is what
+                    // makes it read as "the game forgot" rather than as a
+                    // setting being capped. The unit was never in question;
+                    // both sides are chunks. The defect was range.
+                    //
+                    // **The bound belongs on this side of the boundary.**
+                    // `world/` has never included `core/` - measured 0 hits
+                    // across it, with `item/` at 20 across 13 files as the
+                    // control proving the probe does see cross-layer game
+                    // includes - so writing 32 into `World.cpp` would be a
+                    // second independently authored copy of one number, which is
+                    // bug shape #1 one layer down. This file already includes
+                    // `core/Settings.hpp`, so it can name the owner directly.
+                    //
+                    // **Do not "fix" a future mismatch by raising
+                    // `kMaxRenderDistance` to 64 instead.** That would make the
+                    // loader accept a radius the renderer was never sized for.
+                    // The cap is deliberate; the writer was the side that was
+                    // wrong.
+                    //
+                    // **Falsified by**: `kMaxRenderDistance` and
+                    // `setVisibleRadius`'s own clamp coming to agree, at which
+                    // point this becomes redundant rather than wrong.
+                    const int wanted = std::clamp(world.visibleRadius() + step, 1,
+                                                  static_cast<int>(game::Settings::kMaxRenderDistance));
                     world.setVisibleRadius(wanted);
                     creatures.setActiveRadius(
                         static_cast<float>(world.visibleRadius() * game::Chunk::kSize));
@@ -6029,8 +6800,12 @@ int main() {
                     // storm you asked for has to stay until you ask for
                     // something else, or the countdown ends it mid-look.
                     weather.force(weather.forced() + 1);
-                    static constexpr std::array<const char*, 4> kForcedNames{"cycling", "rain",
-                                                                            "storm", "clear"};
+                    // Size deduced rather than written, for the reason given
+                    // over `kToneMapperNames`: `weather.forced()` indexes this
+                    // at runtime, so a dropped row under an explicit `4` would
+                    // be a null `const char*` concatenated into a log line.
+                    static constexpr std::array kForcedNames{"cycling", "rain",
+                                                             "storm", "clear"};
                     engine::logInfo(std::string("Weather: ") + kForcedNames[weather.forced()]);
                     continue;
                 }
@@ -6244,10 +7019,71 @@ int main() {
                     // **A worn piece is a real stack in a real slot**, so the
                     // ordinary pick-up, swap and shift-click all work through
                     // it. What this deliberately does *not* carry is the rule
-                    // about which piece may go where - that is `armourSlot`'s,
-                    // and it is enforced at the one place a piece can enter,
-                    // further down. A resolver that also policed the type would
-                    // be a second owner of the same question.
+                    // about which piece may go where - that is `armourSlot`'s.
+                    // A resolver that also policed the type would be a second
+                    // owner of the same question.
+                    //
+                    // **This used to say the rule is enforced "at the one place
+                    // a piece can enter, further down", and that undercount
+                    // cost two reviewers a wrong verdict on 2026-08-19.** One
+                    // read the bare pointer, went looking for the single door,
+                    // could not find one that covered a plain drag, and filed a
+                    // CRITICAL saying four stacks of anything could be parked in
+                    // the armour column; the recommended fix was a guard at the
+                    // deposit site, which is exactly the second owner the
+                    // paragraph above forbids. The code was right the whole
+                    // time. So the doors are LISTED rather than counted, because
+                    // an ordinal cannot be checked and a list can - and because
+                    // "further down" is not a search a reader can run.
+                    //
+                    // **Five callers, and Armour is unreachable at three of them
+                    // structurally rather than by a guard that could rot.**
+                    // `rewindDrag`, `applyDrag`'s target loop and the
+                    // drag-collapses-to-a-click branch all resolve entries out
+                    // of `draggedSlots`, and `draggedSlots` has exactly two fill
+                    // sites: the sweep's, which tests
+                    // `region != Region::Armour` explicitly beside the
+                    // `CraftResult` test, and the press-with-a-full-cursor one,
+                    // which sits *below* the plain-click armour branch and is
+                    // therefore dominated by that branch's unconditional
+                    // `continue`. An armour cell cannot join the list, so
+                    // nothing that reads the list can write one.
+                    //
+                    // **The other two each apply the one rule.** The plain click
+                    // asks `armourSlot(heldStack.item) == hit->index` before it
+                    // swaps, and shift-click hands the piece to
+                    // `Inventory::equipArmour`, which derives the destination
+                    // from the same `armourSlot`. Two enforcement sites, one
+                    // owner between them.
+                    //
+                    // **Falsified by**: a third `draggedSlots` fill site, a
+                    // sixth `stackAt` caller, or the press-with-a-full-cursor
+                    // branch moving above the armour branch. Grep
+                    // `draggedSlots.push_back` and `stackAt(...)` - **2 and 5
+                    // code sites, but a raw grep returns 3 and 6**, because this
+                    // paragraph names each token once and so matches itself.
+                    // Subtract this comment before concluding the falsifier has
+                    // fired. Measured 2026-08-19: 2 fill sites at the sweep and
+                    // the full-cursor press; 5 callers, being `rewindDrag`,
+                    // `applyDrag`'s target loop, the collapse-to-a-click branch,
+                    // and the two that apply the rule.
+                    //
+                    // **Reported as a live hole twice, on 2026-08-19, and it is
+                    // not one - both reports failed the same way.** Each
+                    // enumerated the sites that WRITE an armour cell, found no
+                    // type test at the drag path, and concluded it was
+                    // unpoliced. The refusal is not a guard at the write: it is
+                    // the plain-click armour branch's `continue`, which sits
+                    // outside that branch's inner type test and so fires for
+                    // EVERY armour-region click, including one holding a full
+                    // cursor of cobblestone. Control therefore never reaches the
+                    // full-cursor push below it with an armour hit. A sweep for
+                    // a guard cannot see a `continue` roughly fifty lines above
+                    // the site it protects, and this is the same instrument
+                    // failure that produced the report of an ungated
+                    // `savePlayer`, where an early return dominated all eight
+                    // writers. **When a per-site audit finds no guard, ask what
+                    // dominates the site before concluding it is open.**
                     if (at.region == Region::Armour &&
                         at.index < game::inventoryScreen::armourSlotCount(*openScreen)) {
                         return &inventory.armourAt(at.index);
@@ -6603,11 +7439,46 @@ int main() {
                             // second helmet trades with the one being worn
                             // rather than being refused or destroyed.
                             //
+                            // **And only when the open screen actually HAS
+                            // armour cells**, which with a chest, a double
+                            // chest, a hopper, a furnace, a crafting table, a
+                            // smithing table or a stonecutter open it does not.
+                            // `armourSlotCount` answers `kArmourSlots` for the
+                            // plain inventory and **0** for every other screen,
+                            // deliberately - the panel art for the others has
+                            // the armour column painted out - and all four
+                            // readers gate on it: `build`'s draw loop, `slotAt`,
+                            // the tooltip switch and this file's own `stackAt`.
+                            // So without this clause the piece left the grid,
+                            // was drawn nowhere, could not be clicked and could
+                            // not be reached by any means a player would find.
+                            // Nothing was destroyed - `equipArmour` is a swap -
+                            // but the observed behaviour was "the chest ate my
+                            // diamond helmet", and if something was already worn
+                            // the old piece appeared in the slot the new one had
+                            // just left, which reads as the chest trading a good
+                            // helmet for a bad one. The plain third consequence:
+                            // **armour could not be shift-clicked into a chest
+                            // at all**, which is how everybody stores it.
+                            //
+                            // **The screen test goes first so it short-circuits
+                            // ahead of `equipArmour`**, which mutates.
+                            //
+                            // Falsifier, so this does not rot: it becomes wrong
+                            // the day a container panel grows an armour column,
+                            // at which point `armourSlotCount` stops answering 0
+                            // for that `Kind` and this clause silently starts
+                            // permitting the equip again - which is the right
+                            // answer then. It read
+                            // `kind == Kind::Inventory ? kArmourSlots : 0` in
+                            // `hud/InventoryScreen.hpp` on 2026-08-19.
+                            //
                             // **Only from the grid.** Asked of a worn piece this
                             // would put it straight back on, and taking armour
                             // off with shift-click is exactly what the fall
                             // through to `quickMove` below already does.
                             const bool equipped =
+                                game::inventoryScreen::armourSlotCount(*openScreen) > 0 &&
                                 hit->region == Region::Grid && game::isArmour(moving->item) &&
                                 inventory.equipArmour(hit->index);
                             if (!equipped) {
@@ -7833,7 +8704,7 @@ int main() {
                         // `stepSmooth` - so an arrow loosed in the fifth of a
                         // second after a step up left from as much as 0.6 m
                         // below the eye it was aimed from.
-                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, 0.1f, 0.0f};
+                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, kLaunchDropBelowEye, 0.0f};
                         // Blocks per tick, which is the unit the whole
                         // projectile system is written in.
                         glm::vec3 launch =
@@ -8737,8 +9608,42 @@ int main() {
                         const bool rose =
                             level == 0 || roll < game::farming::compostChance(held.item);
                         if (rose) {
-                            world.setBlock(target.block.x, target.block.y, target.block.z,
-                                           game::composterAt(level + 1));
+                            // **Seven successful additions fill a composter, not
+                            // eight.** Layer seven is the last one an *item*
+                            // buys: the reference ripens a full tub to the ready
+                            // state on its own, twenty ticks later, for free -
+                            // "when the composter reaches the 7th layer of
+                            // compost and once 20 game ticks (1 second) have
+                            // passed, the compost changes appearance indicating
+                            // that bone meal can be collected". Raising by one
+                            // all the way to eight charged an extra compostable
+                            // for every single bone meal, about fourteen percent
+                            // over the reference for the whole life of the save.
+                            // The wiki's own average-items formula bottoms out
+                            // at seven for a hundred-percent item, which is the
+                            // arithmetic falsifier: if this ever needs eight
+                            // cakes for one bone meal again, it has regressed.
+                            //
+                            // **The one-second wait is dropped on purpose, and
+                            // that is the part to argue with rather than the
+                            // seven.** It is not a quantity a player can act on
+                            // - the tub is full for its duration so nothing may
+                            // be added, and *taking* is the only thing the ready
+                            // state unlocks. Honouring it would mean a timer
+                            // list that no save file carries, and a quit during
+                            // that second would strand a tub at seven, which is
+                            // the overcharge back again, rarer and stranger.
+                            // **The one reader that could ever tell 7 from 8 is
+                            // a comparator** - the reference gives them
+                            // different signal strengths - so revisit this if
+                            // comparators ever learn to read a composter, and
+                            // not before.
+                            const int raised = level + 1;
+                            world.setBlock(
+                                target.block.x, target.block.y, target.block.z,
+                                game::composterAt(raised >= game::farming::kComposterReady - 1
+                                                      ? game::farming::kComposterReady
+                                                      : raised));
                         }
                         sounds.play(audio, game::SoundEvent::DigGrass,
                                     glm::vec3{target.block} + glm::vec3{0.5f}, 0.6f);
@@ -8775,14 +9680,16 @@ int main() {
                         used == game::ItemId::Egg || game::isThrownPotion(used)) {
                         // A thrown entity that arcs, rather than a look-ray
                         // that dropped you where you were already aiming. Same
-                        // anchor as the bow: spawning at the eye itself puts it
-                        // through your own head at point-blank range.
+                        // anchor as the bow - and since 2026-08-19 that is
+                        // literally true rather than a claim: both read
+                        // `kLaunchDropBelowEye`, where each used to carry its
+                        // own copy of the number.
                         const game::ProjectileKind kind =
                             used == game::ItemId::Egg          ? game::ProjectileKind::Egg
                             : game::isSplashPotion(used)       ? game::ProjectileKind::SplashPotion
                             : game::isLingeringPotion(used)    ? game::ProjectileKind::LingeringPotion
                                                                : game::ProjectileKind::Pearl;
-                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, 0.1f, 0.0f};
+                        const glm::vec3 from = reachFrom - glm::vec3{0.0f, kLaunchDropBelowEye, 0.0f};
                         // A potion is lobbed, not thrown flat: `splash_potion.json`
                         // and `lingering_potion.json` publish `angle_offset: -20.0`
                         // while `egg.json` and `ender_pearl.json` publish `0.0`, so
@@ -9175,7 +10082,38 @@ int main() {
                 // A door or trapdoor already standing there swings rather than
                 // being built on. **Before the placement branch**, which would
                 // otherwise try to put a second one against it.
-                if (placeTimer <= 0.0f && target.hit) {
+                //
+                // **`wantInteract`, not the held button** - landed 2026-08-19
+                // against finding 154, and it is two bugs in one token.
+                //
+                // Everything in here is a *toggle*, and a toggle on a level
+                // signal repeats. `wantPlace` is `isMouseButtonDown` and the
+                // only brake was `placeTimer`, so holding right-click on a door
+                // flapped it open and shut 5.5 times a second for as long as the
+                // button was down, and holding it on a bed at night re-ran the
+                // sleep every 0.18 s - resetting `timeOfDay` to dawn and
+                // printing "Slept. Good morning." over and over. A lever, a
+                // button, a repeater, a comparator, a daylight detector and a
+                // note block all did the same. `wantInteract` is the just-
+                // pressed scan the gate, the bell, the jukebox and every screen
+                // already use, which is the point: this is the same gesture on
+                // the same kind of block and it was on the other input signal.
+                //
+                // **And it carries the sneak rule with it**, which is the second
+                // half. `wantInteract` tests `!LeftShift` (and `!B` on the pad),
+                // so sneaking now falls through to the placement branch below -
+                // which is how the reference lets you build against a door, a
+                // lever or a bed instead of using it (minecraft.wiki *Block*: a
+                // block that responds to use takes the interaction unless the
+                // player is sneaking). Before this, sneaking flapped the door
+                // and the block never went down.
+                //
+                // **`placeTimer <= 0.0f` stays and is not redundant.** It is
+                // what an earlier branch in the same frame sets to consume the
+                // click - the cauldron, the lectern, the composter and the whole
+                // use chain above all do it - so dropping it would let one press
+                // both fill a cauldron and swing whatever is behind it.
+                if (placeTimer <= 0.0f && wantInteract && target.hit) {
                     const game::BlockId hit =
                         world.blockAt(target.block.x, target.block.y, target.block.z);
                     if (game::isDoor(hit)) {
@@ -9373,28 +10311,111 @@ int main() {
                     floating && game::isWater(aimedAt)
                         ? placeTarget.block + glm::ivec3{0, 1, 0}
                         : (game::isReplaceable(aimedAt) ? placeTarget.block : placeTarget.adjacent);
-                if (placeTimer <= 0.0f && canPlace && placeTarget.hit && !cellIsOccupied(placeCell)) {
+                const bool clickedAbove = target.adjacent.y > target.block.y;
+                const bool clickedBelow = target.adjacent.y < target.block.y;
+
+                // **Which half of the clicked block the ray landed in, and
+                // it is not the same question as which face was crossed.**
+                // Landed 2026-08-19 against finding 140.
+                //
+                // https://minecraft.wiki/w/Stairs *Placement*: "Pointing at
+                // a block top or the bottom half of a block side places the
+                // stairs right side up. Pointing at a block bottom or the
+                // top half of a block side places the stairs upside-down."
+                // https://minecraft.wiki/w/Slab states the identical rule
+                // for top against bottom slabs, and
+                // https://minecraft.fandom.com/wiki/Trapdoor/BS the identical
+                // rule again for a trapdoor's `upside_down_bit`.
+                //
+                // Only `clickedBelow` existed, and it is false for **every**
+                // side click, so 416 stair ids and 110 slab ids could be
+                // built one way only. The single route to an upside-down
+                // stair was to click a *ceiling*, which in an ordinary build
+                // means digging a hole above yourself first - so from the
+                // player's side the game simply did not have them.
+                //
+                // **Measured against the clicked block rather than
+                // `std::floor`**, because it is that cell's half the rule
+                // names, and a point that lands exactly on an integer
+                // boundary makes `floor` ambiguous while a subtraction is
+                // not.
+                //
+                // **The slab merge below deliberately keeps the strict face
+                // tests and is not widened to this**, which looks like the
+                // same omission and is not: the raycast meets block
+                // *geometry*, so the side of a bottom slab is only ever hit
+                // between 0.0 and 0.5 and the side of a top slab only
+                // between 0.5 and 1.0. A side click on a slab therefore
+                // already resolves to the half that slab does not occupy,
+                // in the *neighbouring* cell, which is the reference's
+                // behaviour - a double slab is made by clicking the slab's
+                // own top or bottom face, and that is what `completesSlab`
+                // tests. Widening it would merge across a wall.
+                //
+                // `point` is `RaycastHit`'s, filled by `raycast` at no extra
+                // cost and until now read by nothing in the game;
+                // `Raycast.hpp` says over the member that this is what it is
+                // for. `target` rather than `placeTarget` deliberately, to
+                // match the two lines above: `placeTarget` differs only for
+                // a block that rests on water, and no slab or stair does.
+                const bool clickedSide = !clickedAbove && !clickedBelow;
+                const bool upperHalfClicked =
+                    clickedBelow ||
+                    (clickedSide && target.point.y - static_cast<float>(target.block.y) > 0.5f);
+
+                // Two halves meeting in one cell become a whole block. Left
+                // as separate halves they stack as slab, gap, slab, which is
+                // never what anyone is trying to build. **Both halves have
+                // to be the same material**, or a spruce slab dropped on a
+                // stone one silently produced a block of stone - **and the
+                // material has to survive the round trip**, which is what
+                // `slabMergeReturnsItsMaterial` is for: a stone pair merged
+                // to `Stone` and mined back as one cobblestone, so those two
+                // ids of the hundred and ten decline the merge rather than
+                // eating the slabs.
+                //
+                // **Hoisted out of the placement body on 2026-08-19, and the
+                // hoist is the fix rather than tidying** - finding 155. This
+                // is the one branch that redirects `where` away from
+                // `placeCell`, and the occupancy guard below was vetting
+                // `placeCell` while the write landed in `target.block`. Two
+                // bugs, opposite directions, one cause:
+                //
+                //   * A cell that **is** occupied was written. Nothing can
+                //     stand wholly inside a cell holding a half slab, but a
+                //     baby animal is 0.35 m tall and fits under a top slab
+                //     perfectly well - and merging seals it inside a full
+                //     block, which is exactly what `cellIsOccupied` was
+                //     written to prevent.
+                //   * A cell that is **not** occupied was refused. Crouched
+                //     under a top slab with your head in the cell below it,
+                //     the merge is refused because your head is in
+                //     `placeCell` - a cell nothing was going to write.
+                //
+                // `held` is only safe to read through `canPlace`, which is
+                // why that leads the expression: `blockForItem` of an empty
+                // slot is not a block and `slabFamily` of it is not a family.
+                const game::BlockId wouldPlace =
+                    canPlace ? game::blockForItem(held.item) : game::BlockId::Air;
+                const bool completesSlab =
+                    game::isSlab(wouldPlace) && game::isSlab(aimedAt) &&
+                    game::slabFamily(wouldPlace) == game::slabFamily(aimedAt) &&
+                    slabMergeReturnsItsMaterial(game::slabFamily(wouldPlace)) &&
+                    (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
+                // The cell the write actually lands in, which is the only one
+                // worth asking about. Every other branch either leaves `where`
+                // at `placeCell` or writes its second cell itself and asks
+                // `cellIsOccupied` of that cell on its own - the door's
+                // `upper`, the bed's `headCell`, the tall flower's `upper`.
+                // **Those three are why this guard cannot simply be moved
+                // below the branch chain**, which is the other repair this
+                // finding suggested: all three call `setBlock` on their second
+                // cell *inside* the chain, so a placement refused afterwards
+                // would already have left half a door standing.
+                const glm::ivec3 vetCell = completesSlab ? target.block : placeCell;
+                if (placeTimer <= 0.0f && canPlace && placeTarget.hit && !cellIsOccupied(vetCell)) {
                     game::BlockId placing = game::blockForItem(held.item);
                     glm::ivec3 where = placeCell;
-
-                    const bool clickedAbove = target.adjacent.y > target.block.y;
-                    const bool clickedBelow = target.adjacent.y < target.block.y;
-
-                    // Two halves meeting in one cell become a whole block. Left
-                    // as separate halves they stack as slab, gap, slab, which is
-                    // never what anyone is trying to build. **Both halves have
-                    // to be the same material**, or a spruce slab dropped on a
-                    // stone one silently produced a block of stone - **and the
-                    // material has to survive the round trip**, which is what
-                    // `slabMergeReturnsItsMaterial` is for: a stone pair merged
-                    // to `Stone` and mined back as one cobblestone, so those two
-                    // ids of the hundred and ten decline the merge rather than
-                    // eating the slabs.
-                    const bool completesSlab =
-                        game::isSlab(placing) && game::isSlab(aimedAt) &&
-                        game::slabFamily(placing) == game::slabFamily(aimedAt) &&
-                        slabMergeReturnsItsMaterial(game::slabFamily(placing)) &&
-                        (game::isUpperHalf(aimedAt) ? clickedBelow : clickedAbove);
 
                     if (completesSlab) {
                         placing = game::kSlabFamilies[static_cast<std::size_t>(
@@ -9402,18 +10423,46 @@ int main() {
                                       .parent;
                         where = target.block;
                     } else if (game::isSlab(placing)) {
-                        // Clicking an underside puts the half up against it.
-                        placing = game::slabAt(game::slabFamily(placing), clickedBelow);
+                        // Clicking an underside - or the top half of a side -
+                        // puts the half up against it.
+                        placing = game::slabAt(game::slabFamily(placing), upperHalfClicked);
                     } else if (game::isStairs(placing)) {
                         // Oriented blocks take their facing from the camera and
                         // their half from which end of the block was clicked,
                         // which is what lets you build a staircase that turns.
+                        //
+                        // **The facing is correct and its VALUE is not to be
+                        // touched** - the axis-dominant opposite of camera aim
+                        // puts the low step toward the player, which is the
+                        // wiki's own definition of the `facing` property. Only
+                        // the half was wrong.
+                        //
+                        // **The value is unchanged; only the spelling is.** This
+                        // was a sixth hand-rolled copy of the toward-the-placer
+                        // compass, and it wrote the `FaceDirection`-to-`Facing`
+                        // half of it out as well, which is the rung above a
+                        // comment on `CLAUDE.md`'s derive-or-assert ladder:
+                        // `facingToward` already inverts - it answers `NegX`
+                        // when `aimX > 0` - and `toFacing` already maps `NegX`
+                        // to `West`. Term for term against what stood here:
+                        // `ax > az` is `std::abs(aim.x) > std::abs(aim.z)` and
+                        // **both take the z branch on a tie**; `aimX > 0.0f`
+                        // splits West from East on exactly the same boundary,
+                        // and `aimZ > 0.0f` splits North from South. All four
+                        // arms agree, so this is a rename of an expression and
+                        // not a change of behaviour.
+                        //
+                        // **Not `facingToward(-aim.x, -aim.z)`**, which is the
+                        // redstone branch below and is the *other* rule - a
+                        // machine points where the player is looking, a stair's
+                        // low step points back at them. The sign is the whole
+                        // difference between the two and it is easy to copy the
+                        // wrong neighbour.
                         const glm::vec3 aim = camera.forward();
                         const game::Facing facing =
-                            std::abs(aim.x) > std::abs(aim.z)
-                                ? (aim.x > 0.0f ? game::Facing::West : game::Facing::East)
-                                : (aim.z > 0.0f ? game::Facing::North : game::Facing::South);
-                        placing = game::stairsAt(game::stairFamily(placing), facing, clickedBelow);
+                            game::toFacing(game::facingToward(aim.x, aim.z));
+                        placing =
+                            game::stairsAt(game::stairFamily(placing), facing, upperHalfClicked);
                     } else if (game::isRedstoneComponent(placing) ||
                                game::isRedstoneTorch(placing)) {
                         // ---- Redstone. ----
@@ -9626,13 +10675,28 @@ int main() {
                             : into.z < 0 ? game::FaceDirection::NegZ
                                          : game::FaceDirection::Unknown);
                     } else if (game::isTrapdoor(placing)) {
-                        // Top or bottom half by which way you were looking when
-                        // you hung it, which is the only way to get one under a
-                        // ceiling without a per-face click position.
-                        const bool top = camera.forward().y > 0.0f;
+                        // **Top or bottom half by where on the block you
+                        // clicked**, which is the same rule as a slab and a
+                        // stair and the same `upperHalfClicked` that derives it.
+                        // https://minecraft.fandom.com/wiki/Trapdoor/BS - the
+                        // `upside_down_bit` follows the clicked half exactly as
+                        // a slab's does.
+                        //
+                        // This read `camera.forward().y > 0.0f`, and its own
+                        // comment named the reason: "the only way to get one
+                        // under a ceiling without a per-face click position".
+                        // `RaycastHit::point` is that position and it landed on
+                        // 2026-08-19, so the workaround is retired rather than
+                        // merely improved. It was wrong in the ordinary case as
+                        // well as the awkward one - hanging a trapdoor on the
+                        // top half of a wall while looking level or slightly
+                        // down gave a bottom one every time, and the only way to
+                        // get a top trapdoor was to aim upward, which usually
+                        // means aiming at a different block entirely.
                         placing = game::trapdoorAt(
                             game::trapdoorFamily(placing),
-                            game::facingToward(camera.forward().x, camera.forward().z), false, top);
+                            game::facingToward(camera.forward().x, camera.forward().z), false,
+                            upperHalfClicked);
                     } else if (game::isBed(placing)) {
                         // A bed needs the cell beyond it as well. The facing is
                         // the direction the **head** lies from the foot, so one
@@ -9735,32 +10799,36 @@ int main() {
                         // both take the z branch on a tie.
                         const glm::vec3 aim = camera.forward();
                         const game::FaceDirection front = game::facingToward(aim.x, aim.z);
-                        // **Not `beeHomeAtLevel(placing, ...)`, and this is the
-                        // one place that helper must not be used.** It reads
-                        // the facing off the block handed to it, and the whole
-                        // point of this branch is that a *placed* home faces
-                        // the camera rather than wherever the item's canonical
-                        // id happened to point. Finding 9618 proposes the
-                        // one-token swap here that it correctly proposes at the
-                        // shear site above; taking it would fix a nest path
-                        // that cannot currently be reached - `Item.hpp` returns
-                        // `ItemId::None` for a nest, so one can never be held -
-                        // at the cost of breaking the facing of every hive a
-                        // player actually places. That is the "fixed one arm
-                        // and broke the working one" shape, so the kind is
-                        // carried by hand here and the facing comes from
-                        // `front`. Filed for `Block.hpp`'s owner as a request
-                        // for a facing-taking overload, so this rule stops
-                        // being written in two places.
+                        // **`beeHomeAtLevel`'s THREE-argument overload, and the
+                        // two-argument one still must not be used here.** They
+                        // differ in exactly the field this branch exists to
+                        // set: the short form reads the facing off the block
+                        // handed to it, and a *placed* home has to face the
+                        // camera rather than wherever the item's canonical id
+                        // happened to point. Finding 9618 proposed swapping in
+                        // the short form and taking it would have broken the
+                        // facing of every hive a player places, to fix a nest
+                        // path that cannot be reached at all - `Item.hpp`
+                        // returns `ItemId::None` for a nest, so one can never
+                        // be held. That is the "fixed one arm and broke the
+                        // working one" shape, which is why this site asked
+                        // `Block.hpp` for a facing-taking overload instead of
+                        // taking the swap. It arrived, so the kind rule stops
+                        // being written out here: `beeHomeAtLevel(placing,
+                        // front, carriedHoney)` is the ternary below it stood,
+                        // term for term - kind from `placing`, facing from the
+                        // camera, level carried - and `Block.hpp` guards the
+                        // substitution with two compiled negative controls, one
+                        // that turns and forgets the kind and one that keeps the
+                        // kind and ignores the new facing, so neither half can
+                        // rot into the other.
                         //
                         // The level is carried rather than
                         // `beehiveHasHoney`'d: that predicate collapses six
                         // honey levels to a bool, so a partially filled home
                         // rounded down to empty on the way through.
                         const int carriedHoney = game::beehiveHoneyLevel(placing);
-                        placing = game::isBeeNest(placing)
-                                      ? game::beeNestAtLevel(front, carriedHoney)
-                                      : game::beehiveAtLevel(front, carriedHoney);
+                        placing = game::beeHomeAtLevel(placing, front, carriedHoney);
                     } else if (game::isCarvedPumpkin(placing) || game::isJackOLantern(placing)) {
                         // **The carved face looks back at whoever put it down**
                         // - finding 248. There was no branch here at all, so
@@ -9814,7 +10882,35 @@ int main() {
                         } else if (game::isLadder(placing)) {
                             placing = game::ladderFacing(wall);
                         } else if (game::isCocoa(placing)) {
-                            placing = game::cocoaAt(wall, 0);
+                            // **Jungle wood only, and it is the block behind
+                            // that decides rather than merely something being
+                            // there.** `solidBehind` above is the shared test
+                            // for all three of these families, and for a pod it
+                            // is far too generous: the reference allows "jungle
+                            // logs, jungle wood, stripped jungle logs and
+                            // stripped jungle wood" and nothing else, so a pod
+                            // could be stuck on cobblestone as decoration.
+                            // Four ids, listed rather than reached through a
+                            // family predicate because none exists - the log
+                            // families are ranges keyed on species, not on
+                            // wood-versus-stripped, and inventing a fifth
+                            // spelling of "jungle" here would be the second
+                            // owner rather than the first.
+                            //
+                            // The other half of finding 247 - a pod left
+                            // floating when its log is mined - is **already
+                            // closed** and needs nothing here: `wallBehind`
+                            // answers `cocoaFacing` for a pod, and
+                            // `settleAround`'s sideways walk drops it with the
+                            // wall. Said so it is not fixed twice.
+                            const game::BlockId host =
+                                world.blockAt(placeTarget.block.x, placeTarget.block.y,
+                                              placeTarget.block.z);
+                            const bool jungleWood = host == game::BlockId::JungleLog ||
+                                                    host == game::BlockId::StrippedJungleLog ||
+                                                    host == game::BlockId::JungleWood ||
+                                                    host == game::BlockId::StrippedJungleWood;
+                            placing = jungleWood ? game::cocoaAt(wall, 0) : game::BlockId::Air;
                         } else {
                             // A vine clings to the side of its own cell facing
                             // the wall, which is the opposite of the wall's own
@@ -9889,11 +10985,32 @@ int main() {
                         // The one construction in the game: a T of iron blocks
                         // with a carved pumpkin on top becomes an iron golem.
                         // **Hung off the placement of the pumpkin**, because
-                        // that is the reference's rule — the head must go on
-                        // last — and because this is already the single point
+                        // that is the reference's rule - the head must go on
+                        // last - and because this is already the single point
                         // where the main thread writes a block.
                         if (game::isCarvedPumpkin(placing) || game::isJackOLantern(placing)) {
                             tryRaiseGolem(where);
+                        }
+                        // **A hopper needs its block entity the moment it is
+                        // placed, and this is why it looked broken.** The
+                        // transfer pass discovers hoppers by walking the `chests`
+                        // map - it has to, because scanning every loaded chunk
+                        // for hoppers eight times a second is not affordable -
+                        // so a hopper with no record in that map is not merely
+                        // empty, it **does not tick at all**. The erase four
+                        // lines above is what left it that way, and the only
+                        // thing that ever created the record was opening the
+                        // hopper by hand (`chests.try_emplace` in the use path).
+                        // So: build a hopper under a furnace, watch it do
+                        // nothing, right-click it once for no reason, and it
+                        // starts working. Nobody would ever guess that.
+                        //
+                        // `try_emplace` rather than `materialise`, deliberately:
+                        // `materialise` rolls loot on a cell it has not seen, and
+                        // a hopper is not a loot container. Same call the use
+                        // path makes.
+                        if (game::isHopper(placing)) {
+                            chests.try_emplace(where);
                         }
                         // A stowbox brings its contents back out of the side
                         // table. The handle is freed here rather than left
@@ -10505,6 +11622,34 @@ int main() {
                                                      : game::player_constants::kHeight;
                 // `position` is the feet, which is why the box starts there
                 // rather than being centred on it.
+                //
+                // **The box is EXACT, and the arrow has no width here - which
+                // is an open question rather than a settled one, measured
+                // 2026-08-19.** A creature's box is inflated by `kAimPadding`
+                // (0.15) inside `Creatures::findAimed`, the player's by
+                // nothing, and `ProjectileSpecies::halfWidth` - the field that
+                // looks like it owns the answer - is 0.125 with five writers
+                // and no readers at all. So the same arrow is fat against a
+                // sheep and a point against you: one that visually clips your
+                // shoulder passes through, while yours that clips a sheep
+                // lands.
+                //
+                // **Deliberately not fixed here, because every fix available
+                // from this file is the wrong one.** The callback is handed
+                // `(from, direction, reach)` and nothing else, so reaching the
+                // species means changing a signature in `Projectile.hpp`; and
+                // writing 0.125 into this lambda instead would give one value
+                // two owners, which is the exact shape that produced the
+                // problem. There is also a live counter-hypothesis worth more
+                // than a guess: `kAimPadding`'s own doc says it compensates for
+                // a creature's `halfWidth` being narrower than its model, which
+                // would make it a player-AIM allowance rather than a projectile
+                // extent - and `player_constants::kWidth` is the reference's
+                // full 0.6, needing no such compensation. Under that reading
+                // this box is right and only the dead field is wrong.
+                //
+                // **Falsified by**: this callback growing a species or extent
+                // parameter, or `halfWidth` acquiring its first reader.
                 const glm::vec3 boxMin{player.position.x - halfWidth, player.position.y,
                                        player.position.z - halfWidth};
                 const glm::vec3 boxMax{player.position.x + halfWidth, player.position.y + height,
@@ -10865,6 +12010,23 @@ int main() {
                 glm::vec3 blastPush{0.0f};
                 float strongestBlast = 0.0f;
                 int blastDamage = 0;
+                // **Two flags rather than reading `strongestBlast > 0`, because
+                // zero impact is a real answer and not an absence.** A player
+                // fully behind cover, inside twice the power, gets an impact of
+                // exactly zero and the reference still charges them one point -
+                // `explosionDamage`'s trailing `+ 1` *is* that floor, and it
+                // says so over itself. This block had three separate gates that
+                // each threw the floor away: `impact > strongestBlast` against a
+                // `strongestBlast` starting at 0, so a zero-impact blast never
+                // became the strongest of the frame; the `reach > 0.001f` guard,
+                // which is about the *push* and had the damage assignment inside
+                // it; and the `strongestBlast > 0.0f` test at the foot. Opening
+                // only the first, which is what finding 1039 proposed, is a
+                // silent no-op. `blastCaught` answers "did any blast reach you",
+                // `blastThrows` answers "and could it move you" - separately,
+                // because a sheltered hit hurts without shoving.
+                bool blastCaught = false;
+                bool blastThrows = false;
 
                 // Charges that finished their fuse join the creature blasts, so
                 // the whole destroy-spill-drop path below is shared rather than
@@ -11182,23 +12344,36 @@ int main() {
                         exposure = game::explosionExposure(world, blast.centre, body);
                         impact = game::explosionImpact(blast.centre, blast.power, player.position,
                                                        exposure);
-                        if (impact > strongestBlast) {
+                        if (!blastCaught || impact > strongestBlast) {
+                            // Blocks per tick in the reference; ours is per
+                            // second, so twenty times over. Only the strongest
+                            // blast of the frame throws you - several each
+                            // adding their own is the accumulator bug that once
+                            // launched the player clear off the map.
+                            //
+                            // **`!blastCaught ||` is the floor's first gate.**
+                            // Without it a lone blast of exactly zero impact
+                            // loses to a `strongestBlast` that starts at zero,
+                            // and the sheltered hit registers as no hit at all.
+                            blastCaught = true;
+                            strongestBlast = impact;
+                            blastDamage = game::explosionDamage(blast.power, impact);
                             // Aimed at the eyes rather than the feet, which is
                             // what gives a close blast its upward throw for
                             // free.
+                            //
+                            // **The push is worked out here and no longer gates
+                            // the damage.** `reach > 0.001f` only ever guarded
+                            // the division; having the damage assignment inside
+                            // it meant a blast centred exactly on your eyes did
+                            // nothing at all. The ternary is what keeps that
+                            // division unevaluated, so no NaN can escape.
                             const glm::vec3 away = player.eyePosition() - blast.centre;
                             const float reach = glm::length(away);
-                            if (reach > 0.001f) {
-                                // Blocks per tick in the reference; ours is per
-                                // second, so twenty times over. Only the
-                                // strongest blast of the frame throws you -
-                                // several each adding their own is the
-                                // accumulator bug that once launched the player
-                                // clear off the map.
-                                strongestBlast = impact;
-                                blastPush = away / reach * impact * kBlastKnockback;
-                                blastDamage = game::explosionDamage(blast.power, impact);
-                            }
+                            blastThrows = reach > 0.001f && impact > 0.0f;
+                            blastPush = blastThrows
+                                            ? away / reach * impact * kBlastKnockback
+                                            : glm::vec3{0.0f};
                         }
                     }
 
@@ -11240,7 +12415,7 @@ int main() {
                                     " damage at exposure " + std::to_string(exposure));
                 }
 
-                if (strongestBlast > 0.0f) {
+                if (blastCaught) {
                     // Damage follows the same "strongest of the frame" rule the
                     // throw does, rather than summing: several charges going off
                     // together should hit as hard as the worst of them, not as
@@ -11251,8 +12426,16 @@ int main() {
                     // in Bedrock's cause enum and both are ordinary
                     // armour-reducible damage.
                     hurtPlayer(blastDamage, inventory.armourSet());
-                    player.velocity += blastPush;
-                    player.onGround = false;
+                    if (blastThrows) {
+                        // **Separate from the damage, and the third gate the
+                        // floor had to get past.** A blast you were fully
+                        // sheltered from hurts you for one and does not move
+                        // you, so lifting `onGround` for it would be wrong as
+                        // well as pointless - it is what tells the physics you
+                        // are airborne.
+                        player.velocity += blastPush;
+                        player.onGround = false;
+                    }
                 }
 
                 creatures.manage(world, player.position, deltaSeconds, night);
@@ -11789,17 +12972,39 @@ int main() {
                 renderer.setPrecipitation(level, snow, precipitationFallen, slant);
 
                 // **Retriggered rather than looped**, because the mixer has no
-                // loop point. Eight recordings and a slightly early restart mean
-                // the seam never lands twice in the same place. Silent under a
-                // roof, which the sky light answers for free.
+                // loop point. Eight recordings, and the restart has to land
+                // *before* the shortest of them ends or the bed stops being a
+                // bed.
+                //
+                // **This interval read 3.4 s against a bank of 1.973-2.192 s**,
+                // so rain played for two seconds, fell silent for one and a
+                // half, and started again - heard as a noise switching on and
+                // off rather than as weather, and reported by the player as
+                // exactly that. The old comment claimed "a slightly early
+                // restart"; it was 1.4 s LATE, which is `CLAUDE.md`'s "number
+                // ported into a field measured against something else" - 3.4 s
+                // matches no rain clip and was almost certainly carried from a
+                // different recording set (`cave` runs 3.5-9.2 s).
+                //
+                // 1.8 s sits under the shortest clip (rain6, 1.973 s), so
+                // consecutive clips always overlap and the seam never opens.
+                // Measured 2026-08-20 from each file's final Ogg granule
+                // position divided by its sample rate, by two independent
+                // parsers that agreed. *Falsified by* any `rain*.ogg` shorter
+                // than 1.8 s joining the bank - re-measure, never assume.
+                // Silent under a roof, which the sky light answers for free.
                 rainSoundTimer -= deltaSeconds;
                 if (level > 0.05f && !snow && rainSoundTimer <= 0.0f) {
                     const int sky = world.skyLightAt(static_cast<int>(std::floor(camera.position.x)),
                                                      static_cast<int>(std::floor(camera.position.y)),
                                                      static_cast<int>(std::floor(camera.position.z)));
                     const float sheltered = static_cast<float>(sky) / static_cast<float>(game::kMaxLight);
-                    sounds.playGlobal(audio, game::SoundEvent::Rain, level * sheltered * 0.6f);
-                    rainSoundTimer = 3.4f;
+                    // 0.30 rather than 0.60 on the player's report that rain was
+                    // too loud. Broadband hiss reads louder than its amplitude
+                    // suggests, and the overlap above now sums two clips at the
+                    // seam, so the old gain would have got louder, not quieter.
+                    sounds.playGlobal(audio, game::SoundEvent::Rain, level * sheltered * 0.30f);
+                    rainSoundTimer = 1.8f;
                 }
             }
 

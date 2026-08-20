@@ -149,14 +149,31 @@ struct Road {
     int z1 = 0;
 };
 
+/// A lamp post: a plinth, three fence sections and a light on top. Every
+/// village has these down every street.
+constexpr std::uint8_t kDecorLampPost = 0;
+
+/// A campfire beside the street, taiga and snowy taiga only.
+///
+/// **Both of those biomes map to `VillageType::Taiga` here**, so the reference's
+/// rule - "campfires generate in taiga and snowy taiga villages" - comes out as
+/// a test against exactly one enumerator with nothing left over. `Snowy` is the
+/// reference's `ice` type and belongs to Snowy *Plains*, which has no campfire.
+constexpr std::uint8_t kDecorCampfire = 1;
+
 struct Decor {
     int x = 0;
     int z = 0;
-    /// 0 lamp post. **The only kind the layout produces today**, and the only
-    /// one `buildDecor` knows how to build — a kerb, a bench and a hay pile
-    /// were listed here long before anything placed one, which reads as four
-    /// features where there is one.
-    std::uint8_t kind = 0;
+    /// Which of the `kDecor*` kinds above this one is. **`buildDecor` must know
+    /// how to build every value that can appear here**, and its `default:` is a
+    /// silent no-op, so a kind the layout emits and the builder does not handle
+    /// is an empty patch of grass with no diagnostic anywhere.
+    ///
+    /// The list was once four kinds long - a kerb, a bench and a hay pile were
+    /// named beside the lamp post before anything placed one, which reads as
+    /// four features where there was one. Do not name a kind here until the
+    /// layout emits it and the builder draws it.
+    std::uint8_t kind = kDecorLampPost;
 };
 
 /// Where a villager generated with the village stands, and what it starts as.

@@ -38,11 +38,25 @@ struct Face {
     /// which way the surface points without recovering it from derivatives.
     std::uint32_t normalCode;
     /// Which world axis the face's normal points along.
+    ///
+    /// **Read from `FaceGeometry.hpp`, which owns it**, like the four columns
+    /// above it.
     int axis;
     /// World axes that U and V run along. Merged quads scale their texture
     /// coordinates by the extent along these, so the sampler tiles the texture
-    /// instead of stretching it. Read off the corner/uv tables rather than
-    /// derived, because getting them wrong is silent.
+    /// instead of stretching it.
+    ///
+    /// **Read from `FaceGeometry.hpp`, which owns them.** These were the last
+    /// two columns of this table still written out as literals, and the header
+    /// already carried `faceUAxis`/`faceVAxis` - so the icon path over in
+    /// `HudPrimitives.cpp` was deriving from the header while this file, the
+    /// one the header's own note names as where the rule was lifted *from*,
+    /// still restated it. A derivation that exists in one place and is written
+    /// out longhand in another is a second copy of a rule by another name, and
+    /// the answers agreeing today is exactly what made it invisible: all six
+    /// rows matched (2/1, 2/1, 0/2, 0/2, 0/1, 0/1) before this edit and match
+    /// after it, so nothing on screen moves. What changes is that they can no
+    /// longer drift, which no `static_assert` was watching for.
     int uAxis;
     int vAxis;
     /// Which way this face points, for blocks whose sides differ. The table
@@ -62,6 +76,29 @@ struct Face {
 /// Worth stating because the icon path in `HudPrimitives.cpp` deliberately
 /// draws only three of these, and the two files are checked against each other.
 /// **Falsified by** the declared size and the literal row count disagreeing.
+///
+/// **This is NOT a copy of `FaceGeometry.hpp` and there is nothing here to
+/// delete. Re-measured 2026-08-19 15:40.** Seven of the ten columns are calls
+/// into the shared owners - `faceCorners`, `kBottomLeftWinding`, `faceShade`,
+/// `faceNormalCode`, `faceAxis`, `faceUAxis`, `faceVAxis` - so a divergence is
+/// not expressible rather than merely absent. The three that are written out
+/// here are written out because nothing else owns them: `neighbourOffset` is
+/// bound to *both* enums by `facingsMatchFaceTable` and
+/// `cornersSitOnTheFaceSampled` below, and `facing` and `direction` are the
+/// mesher's own texture-lookup keys rather than geometry.
+///
+/// **So the standing warning about the other drawing paths does not apply to
+/// this one, and as of this measurement it applies to none of them.** Deleting
+/// a local face-table copy silently switches a file to the header with no
+/// diagnostic either way, so the check that matters is whether a copy AGREED -
+/// but **measured 2026-08-19 15:40, there is no copy left to disagree**:
+/// `FallingBlock.cpp`, `ItemEntity.cpp` and `HudPrimitives.cpp` all include
+/// `FaceGeometry.hpp` and all three read their corners from `faceCorners` or
+/// `cornersOf` and their winding from `kWindingU`/`kWindingV`. The older note
+/// naming those three as outstanding has rotted; **"X is missing" is the least
+/// reliable sentence in this repository** and this one was checked rather than
+/// repeated. **Falsified by** a literal appearing in any column of the six rows
+/// below, or by a bare corner table reappearing in one of those three.
 constexpr std::array<Face, 6> kFaces{{
     // +X
     {{1, 0, 0},
@@ -70,9 +107,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Side,
      faceShade(AxisFace::PosX),
      faceNormalCode(AxisFace::PosX),
-     0,
-     2,
-     1,
+     faceAxis(AxisFace::PosX),
+     faceUAxis(AxisFace::PosX),
+     faceVAxis(AxisFace::PosX),
      FaceDirection::PosX},
     // -X
     {{-1, 0, 0},
@@ -81,9 +118,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Side,
      faceShade(AxisFace::NegX),
      faceNormalCode(AxisFace::NegX),
-     0,
-     2,
-     1,
+     faceAxis(AxisFace::NegX),
+     faceUAxis(AxisFace::NegX),
+     faceVAxis(AxisFace::NegX),
      FaceDirection::NegX},
     // +Y
     {{0, 1, 0},
@@ -92,9 +129,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Top,
      faceShade(AxisFace::PosY),
      faceNormalCode(AxisFace::PosY),
-     1,
-     0,
-     2,
+     faceAxis(AxisFace::PosY),
+     faceUAxis(AxisFace::PosY),
+     faceVAxis(AxisFace::PosY),
      FaceDirection::Unknown},
     // -Y
     {{0, -1, 0},
@@ -103,9 +140,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Bottom,
      faceShade(AxisFace::NegY),
      faceNormalCode(AxisFace::NegY),
-     1,
-     0,
-     2,
+     faceAxis(AxisFace::NegY),
+     faceUAxis(AxisFace::NegY),
+     faceVAxis(AxisFace::NegY),
      FaceDirection::Unknown},
     // +Z
     {{0, 0, 1},
@@ -114,9 +151,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Side,
      faceShade(AxisFace::PosZ),
      faceNormalCode(AxisFace::PosZ),
-     2,
-     0,
-     1,
+     faceAxis(AxisFace::PosZ),
+     faceUAxis(AxisFace::PosZ),
+     faceVAxis(AxisFace::PosZ),
      FaceDirection::PosZ},
     // -Z
     {{0, 0, -1},
@@ -125,9 +162,9 @@ constexpr std::array<Face, 6> kFaces{{
      BlockFace::Side,
      faceShade(AxisFace::NegZ),
      faceNormalCode(AxisFace::NegZ),
-     2,
-     0,
-     1,
+     faceAxis(AxisFace::NegZ),
+     faceUAxis(AxisFace::NegZ),
+     faceVAxis(AxisFace::NegZ),
      FaceDirection::NegZ},
 }};
 
@@ -159,6 +196,60 @@ constexpr bool shapeUvsMatchFaceTables() {
 }
 static_assert(shapeUvsMatchFaceTables(),
               "a shaped block's faces must sample exactly where the merged ones do");
+
+/// **The largest sway height the surface word can still tell apart, discovered
+/// by asking the packer rather than by reading its bit layout.**
+///
+/// `packVertexSurface` saturates a too-large sway instead of letting it spill
+/// into a neighbouring field - which is the safe choice, and also a silent one.
+/// This walks up until the packer stops distinguishing `v` from `v + 1`; the
+/// first `v` that collides *is* the field's maximum, and the answer costs no
+/// knowledge of where the field sits or how wide it is.
+///
+/// **That is the whole point.** `Vertex.hpp` says bits 12-15, `displace.glsl`
+/// re-spells it as `(surface >> 12) & 15u`, and nothing in the build compares
+/// the two. A third hand-written copy here - the mesher's own idea of how big a
+/// sway may be - would be one more thing to keep in step. Asking the packer
+/// instead means widening the field widens this walk on its own, with no edit
+/// here and nothing to forget.
+constexpr std::uint32_t swayFieldMax() {
+    for (std::uint32_t v = 1; v < 4096u; ++v) {
+        if (engine::packVertexSurface(engine::kNormalUnaligned, 1.0f, false, v) ==
+            engine::packVertexSurface(engine::kNormalUnaligned, 1.0f, false, v + 1u)) {
+            return v;
+        }
+    }
+    return 4096u;
+}
+
+/// How many blocks below itself a plant may count before its sway stops
+/// growing, in blocks.
+///
+/// A vertex on a blade's top edge is emitted at `root + kSwayOneBlock`, so the
+/// deepest root that still fits is one block short of the field's maximum.
+/// Everything above simply shares the tallest value the word can hold.
+constexpr int kSwayWalkBlocks =
+    static_cast<int>((swayFieldMax() - engine::kSwayOneBlock) / engine::kSwayOneBlock);
+
+/// The tallest value this file can hand the packer, which must survive it.
+constexpr std::uint32_t kMaxSwayEmitted =
+    static_cast<std::uint32_t>(kSwayWalkBlocks) * engine::kSwayOneBlock + engine::kSwayOneBlock;
+
+/// **A round trip, not a re-spelling of the bit layout.** A value the packer had
+/// to clamp lands on the same word as the value below it, so requiring the
+/// tallest sway this file can emit to still differ from one step down catches
+/// the clamp without this file ever naming a bit position.
+///
+/// **Compared DOWNWARD on purpose.** Testing against `max + 1` looks equivalent
+/// and is not: it also fires when the maximum lands exactly *on* the field's
+/// last value, which is correct and clamps nothing. That case is unreachable
+/// while `kSwayOneBlock` is 2 and reachable the moment it is 1, which is
+/// precisely the kind of assert that passes until someone touches an unrelated
+/// constant and then accuses the wrong edit.
+static_assert(engine::packVertexSurface(engine::kNormalUnaligned, 1.0f, false, kMaxSwayEmitted) !=
+                  engine::packVertexSurface(engine::kNormalUnaligned, 1.0f, false, kMaxSwayEmitted - 1u),
+              "the tallest sway this mesher can emit is being silently clamped by the packer, so "
+              "the top edge of a tall plant's blade is encoded no higher than its own middle");
 
 /// How dark a fully enclosed corner becomes. Ambient occlusion is a cheat, not a
 /// simulation, so this is tuned by eye: too strong and the world looks grubby,
@@ -1213,10 +1304,22 @@ ChunkMeshes meshChunk(const ChunkVolume& volume, const glm::vec3& originOffset, 
                     // The walk stops at the volume's own edge, so a stalk that
                     // straddles a chunk boundary leans slightly less below the
                     // join than above it. Meshing may not read outside what it
-                    // was given, and a stalk is at most seven blocks against a
-                    // thirty-two block chunk.
+                    // was given.
+                    //
+                    // **The depth is the packer's answer, not a guess - and the
+                    // guess it replaced was wrong.** This read `below <= 7`
+                    // under a note saying "a stalk is at most seven blocks",
+                    // which is false: `farming::kBambooMaxHeight` is 16, and
+                    // kelp grows to the surface. Seven steps put 14 half-blocks
+                    // in `rootHalfBlocks`, so a top corner asked for 16 against
+                    // a field that stops at 15 - it did not overflow into the
+                    // fluid bit, it *saturated*, so the top edge of the blade
+                    // came back one step above its own bottom edge instead of
+                    // two. Every kelp block from the eighth upward drew with
+                    // half the bend across it that it should have had, and no
+                    // build or validation layer can see that.
                     std::uint32_t rootHalfBlocks = 0;
-                    for (int below = 1; below <= 7; ++below) {
+                    for (int below = 1; below <= kSwayWalkBlocks; ++below) {
                         if (y - below < -1 || volume.blockAt(x, y - below, z) != block) {
                             break;
                         }

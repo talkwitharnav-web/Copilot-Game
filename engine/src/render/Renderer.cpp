@@ -11,11 +11,41 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+// **`STB_IMAGE_WRITE_IMPLEMENTATION` may be defined in exactly one translation
+// unit in the entire program**, and this is it - `TextureArray.cpp` owns the
+// matching `STB_IMAGE_IMPLEMENTATION` for the decoder. Defining either twice
+// links, in the sense that it fails at the link step with duplicate symbols
+// rather than anywhere a reader would look. Writing a PNG lives in the engine
+// because the game links only `engine`, and it lives *here* because this is
+// where the pixels are.
+//
+// **The warning is disabled around the include, not in CMake.** stb has never
+// claimed to be /W4 clean; the one warning it raises here is a `sprintf` in
+// `stbi_write_hdr_core`, a function this file never calls. The header does
+// define `_CRT_SECURE_NO_WARNINGS` itself, and it is too late by then - the CRT
+// headers reached this translation unit long before, so `sprintf` already
+// carries its deprecation. `engine/CMakeLists.txt` silences `StbVorbis.cpp`
+// with a source-file property instead, which is right there because MSVC raises
+// C4701 from the *optimizer*, after any pragma region has closed; C4996 is a
+// front-end warning issued at the call site, so a pragma region that encloses
+// the call does catch it.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <exception>
+#include <string>
 #include <vector>
 
 namespace engine {
@@ -238,6 +268,32 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
                    const std::filesystem::path& skinTexture)
     : m_context(context), m_window(window), m_swapchain(context, toVkExtent(window.framebufferExtent())),
       m_depthImage(std::make_unique<DepthImage>(context, m_swapchain.extent())) {
+    // **Undoes everything below if any of it throws, and is disarmed on the
+    // last line.** C++ runs no destructor for an object whose constructor
+    // threw. It does destroy the members already built, so every RAII member
+    // here was always safe on that path - but the ten raw `Vk*` handles this
+    // body creates are plain members with no destructor of their own, and
+    // without this they survived a startup failure with nothing left holding
+    // them. The first of them is made on the next line and the first
+    // `GraphicsPipeline` below throws on a missing `.spv`, so the window is
+    // most of the constructor. See `destroy()`.
+    //
+    // A guard object rather than a `try` wrapped round the body, because the
+    // body is nearly two hundred lines and re-indenting all of it to buy the
+    // same behaviour is a far larger edit to get wrong. `destroy()` is
+    // `noexcept`, which is what makes calling it from a destructor that runs
+    // during stack unwinding legal.
+    struct Cleanup {
+        Renderer* self = nullptr;
+        ~Cleanup() {
+            if (self != nullptr) {
+                self->destroy();
+            }
+        }
+    };
+    Cleanup cleanup;
+    cleanup.self = this;
+
     createCommandResources();
 
     // Order matters: the texture upload needs the command pool, and the pipeline
@@ -423,6 +479,10 @@ Renderer::Renderer(const VulkanContext& context, Window& window,
 
     createSyncObjects();
     createTimestampPool();
+
+    // Built. Nothing above threw, so the renderer now owns every handle and
+    // `~Renderer` is the only thing that may release them.
+    cleanup.self = nullptr;
 }
 
 void Renderer::createPostSamplers() {
@@ -605,6 +665,13 @@ void Renderer::createShadowResources() {
         });
 }
 
+float Renderer::shadowReach() const {
+    // The far plane follows render distance, so a quality level asking for
+    // 192 m gets whatever the world actually extends to. Both the cascade fit
+    // and the shader's fade range must be this number - see the header.
+    return std::max(std::min(m_shadowDistance, m_farPlane), kShadowNear * 2.0f);
+}
+
 void Renderer::updateShadowCascades(const glm::mat4& view) {
     m_liveShadowCascades = 0;
     if (m_shadowQuality <= 0 || m_shadowMap == nullptr || m_sunDirection.y < kShadowMinSunHeight) {
@@ -613,7 +680,7 @@ void Renderer::updateShadowCascades(const glm::mat4& view) {
 
     const std::uint32_t cascades = m_shadowMap->cascades();
     const float resolution = static_cast<float>(m_shadowMap->resolution());
-    const float shadowFar = std::max(std::min(m_shadowDistance, m_farPlane), kShadowNear * 2.0f);
+    const float shadowFar = shadowReach();
     const glm::mat4 inverseViewProjection = glm::inverse(projectionMatrix() * view);
 
     // The four rays from the near plane's corners to the far plane's. Every
@@ -952,15 +1019,51 @@ void Renderer::readGpuTimestamps() {
 }
 
 Renderer::~Renderer() {
-    // Copies may still be queued against buffers that are about to be freed.
-    m_uploads->waitForCompletion();
+    destroy();
+}
 
-    // The GPU may still be reading resources we are about to free.
+void Renderer::destroy() noexcept {
+    // Copies may still be queued against buffers that are about to be freed.
+    //
+    // **Null-checked, unlike anything below it, because it is the one step here
+    // that dereferences.** Reached from the constructor's guard this can run
+    // before `m_uploads` exists: a failed texture load throws above it, a
+    // missing shader file below it.
+    if (m_uploads) {
+        m_uploads->waitForCompletion();
+    }
+
+    // The GPU may still be reading resources we are about to free. The context
+    // outlives the renderer, so the device handle is valid however early this
+    // is reached.
     vkDeviceWaitIdle(m_context.device());
 
-    // Explicit rather than left to member destruction order: everything here
+    // Explicit rather than left to member destruction order: everything below
     // owns Vulkan handles that must die while the device is still alive, and
     // the retired list in particular is easy to forget.
+    //
+    // **This list is deliberately NOT every GPU-owning member, and an earlier
+    // wording here claiming it was is what this paragraph replaces.** Three are
+    // left to member destruction on purpose: `m_swapchain` and `m_depthImage`,
+    // declared before everything handled here, and `m_shadowMap`, declared
+    // after the pipelines. Members die in reverse declaration order, which runs
+    // after this function returns in both of its callers, and for those three
+    // that order is already right - the descriptor sets that point at the
+    // shadow map are freed here with `m_postPool`, and the swapchain and depth
+    // image are the most depended-upon things this class owns, so dying last is
+    // what you want. Adding them here would be harmless but would hide that.
+    //
+    // **The rule for whether a member belongs in this list:** put it here if
+    // its destruction has to be ordered against something else in the list, or
+    // if it is a container the compiler will not empty for you. Otherwise leave
+    // it out - and note that leaving it out makes its DECLARATION POSITION
+    // load-bearing, which is warned about beside `m_swapchain` in Renderer.hpp
+    // because that is the file whose edit would break it.
+    //
+    // Measured 2026-08-19: 12 raw `Vk*` handle members declared, 11 destroyed
+    // here, and the 12th (`m_toneMapSet`) is a descriptor set freed with its
+    // pool. To re-check rather than trust this count, search Renderer.hpp for
+    // `Vk` in member declarations and match each against this function.
     m_retired.clear();
     m_meshes.clear();
     m_freeSlots.clear();
@@ -994,33 +1097,45 @@ Renderer::~Renderer() {
     m_gbufferAlbedo.reset();
     m_gbufferLight.reset();
     m_gbufferMaterial.reset();
+    // **Each handle is nulled as it dies**, which is what makes running this
+    // twice harmless - the guard in the constructor and the destructor are two
+    // callers, and a future third should not have to know which ran first.
     if (m_borderSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_borderSampler, nullptr);
+        m_borderSampler = VK_NULL_HANDLE;
     }
     if (m_edgeSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_edgeSampler, nullptr);
+        m_edgeSampler = VK_NULL_HANDLE;
     }
     if (m_pointSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_context.device(), m_pointSampler, nullptr);
+        m_pointSampler = VK_NULL_HANDLE;
     }
     if (m_postPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_context.device(), m_postPool, nullptr);
+        m_postPool = VK_NULL_HANDLE;
     }
     if (m_postSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_context.device(), m_postSetLayout, nullptr);
+        m_postSetLayout = VK_NULL_HANDLE;
     }
     if (m_toneMapSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_context.device(), m_toneMapSetLayout, nullptr);
+        m_toneMapSetLayout = VK_NULL_HANDLE;
     }
     if (m_deferredSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_context.device(), m_deferredSetLayout, nullptr);
+        m_deferredSetLayout = VK_NULL_HANDLE;
     }
 
     if (m_descriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_context.device(), m_descriptorPool, nullptr);
+        m_descriptorPool = VK_NULL_HANDLE;
     }
     if (m_descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_context.device(), m_descriptorSetLayout, nullptr);
+        m_descriptorSetLayout = VK_NULL_HANDLE;
     }
     m_frameUniformMapped.clear();
     m_frameUniformBuffers.clear();
@@ -1035,11 +1150,14 @@ Renderer::~Renderer() {
 
     if (m_timestampPool != VK_NULL_HANDLE) {
         vkDestroyQueryPool(m_context.device(), m_timestampPool, nullptr);
+        m_timestampPool = VK_NULL_HANDLE;
     }
 
     if (m_commandPool != VK_NULL_HANDLE) {
         // Destroying the pool frees every command buffer allocated from it.
         vkDestroyCommandPool(m_context.device(), m_commandPool, nullptr);
+        m_commandPool = VK_NULL_HANDLE;
+        m_commandBuffers.clear();
     }
 }
 
@@ -2160,6 +2278,47 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline->handle());
     }
 
+    // **The selection cage and the breaking cracks are drawn HERE, above the
+    // blended pass, and that position is the whole point of them being here.**
+    //
+    // Until 2026-08-19 they came after it, and a block targeted through water
+    // had no outline and no crack at all. Every link in that chain is
+    // deliberate and none of them is the bug: `m_trianglePipeline` writes depth
+    // while blending (kept on purpose - the rain rejection at the end of this
+    // function depends on it), `isTranslucent()` covers water so a lake's top
+    // face is in the loop below and stamps its distance, and the compare op is
+    // `LESS` for every pipeline with no dynamic depth state anywhere. The two
+    // meshes were then simply rejected. Aiming through water is the ordinary
+    // case rather than a corner one: `Raycast.hpp` defaults `stopAtFluid` to
+    // false and documents that you aim through it at whatever is behind, so the
+    // raycast targets the block happily and only the drawing disagreed.
+    //
+    // Moved above the water rather than given a `depthTest = false` pipeline,
+    // because the water should still tint them - a cage seen through a lake
+    // ought to look like it is under a lake, and turning depth testing off
+    // would instead paint it over the surface. Both meshes are cutout at 0.5
+    // and write depth, so the blended pass below still composites over them
+    // correctly, and where the cutout discards there is no depth write at all.
+    //
+    // **Their order against the particles, bolts and rain is unchanged** -
+    // those are all drawn after the blended pass and so remain after these two,
+    // exactly as before.
+    if (overlayTransform.has_value()) {
+        drawMesh(m_overlayMesh, viewProjection * *overlayTransform, false);
+    }
+
+    // The breaking cracks, in world space and lit, so the cutout test throws
+    // away everything but the crack lines themselves. After the outline because
+    // both sit on the same block and the cage should not be cracked over.
+    //
+    // **That relationship is correct and was never the bug.** It is worth
+    // knowing why this comment survived four milestones of review: the two
+    // draws were right about *each other* and wrong about the pass above them,
+    // so a reader checking the stated justification found it sound and never
+    // thought to ask what came before the pair. A locally-correct reason is not
+    // evidence that the position is correct.
+    drawMesh(m_crackMesh, viewProjection, true);
+
     // Blended geometry after it, so what shows through has already been drawn.
     //
     // **Farthest first.** `m_meshes` is in slot order, which is streaming
@@ -2240,18 +2399,14 @@ void Renderer::recordForwardPass(VkCommandBuffer commandBuffer, const glm::mat4&
         }
     }
 
-    if (overlayTransform.has_value()) {
-        drawMesh(m_overlayMesh, viewProjection * *overlayTransform, false);
-    }
-
-    // The breaking cracks, in world space and lit, so the cutout test throws
-    // away everything but the crack lines themselves. After the outline because
-    // both sit on the same block and the cage should not be cracked over.
-    drawMesh(m_crackMesh, viewProjection, true);
-
     // Particles, lit and cutout like any other world surface. After the
     // translucent pass so a chip in front of water draws, and before the rain
     // so a splash is not drawn over its own drop.
+    //
+    // Still drawn after the selection cage and the cracks, which moved *above*
+    // the blended pass on 2026-08-19: those two went up, this one did not, so
+    // a chip over a selected block still draws on top of the cage exactly as
+    // it did before. The relative order of these three is unchanged.
     drawMesh(m_particleMesh, viewProjection, true);
 
     // Lightning, unlit and emissive, so it clears 1.0 and blooms rather than
@@ -2560,6 +2715,15 @@ void Renderer::recordUiPass(VkCommandBuffer commandBuffer, std::uint32_t imageIn
 
 void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
                          const std::optional<glm::mat4>& overlayTransform) {
+    // Kept so `capturePhoto` can draw this frame a second time instead of
+    // inventing one. Stored before every early return below: a photo asked for
+    // while the window is minimized should replay the last frame that was real,
+    // not a blank.
+    m_lastClearColor = color;
+    m_lastView = view;
+    m_lastOverlayTransform = overlayTransform;
+    m_hasDrawnFrame = true;
+
     // Recovered from the view matrix rather than asked for separately, so it
     // cannot disagree with the matrix everything is actually drawn through.
     m_eyePosition = glm::vec3{glm::inverse(view)[3]};
@@ -2646,7 +2810,11 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
         uniforms.shadowMatrices[cascade] = m_shadowMatrices[cascade];
     }
     uniforms.shadowTexelWorld = m_shadowTexelWorld;
-    uniforms.shadowParams = glm::vec4{static_cast<float>(m_liveShadowCascades), m_shadowDistance,
+    // **`shadowReach()`, not `m_shadowDistance`.** `shadow.glsl` reads this as
+    // the range its distance fade completes over, and the cascades are fitted
+    // to the same function, so the fade now finishes exactly where the furthest
+    // cascade ends however low the render distance is.
+    uniforms.shadowParams = glm::vec4{static_cast<float>(m_liveShadowCascades), shadowReach(),
                                       kShadowDepthBias, 1.0f / static_cast<float>(m_shadowMap->resolution())};
     uniforms.cloud = glm::vec4{m_cloudDrift, m_cloudCoverage, m_cloudShadowStrength,
                                static_cast<float>(m_cloudQuality)};
@@ -2751,6 +2919,17 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     vkCheck(vkQueueSubmit(m_context.graphicsQueue(), 1, &submitInfo, m_frameInFlight[m_currentFrame]),
             "vkQueueSubmit");
 
+    // **A photo is copied out here and nowhere else.** Vulkan lets the
+    // application touch a swapchain image only between acquiring it and
+    // presenting it, so this narrow gap - the work submitted, the image not yet
+    // handed over - is the one point in the frame where the picture is finished
+    // and the image is still ours. Doing it after the present is the obvious
+    // place and is a validation error, measured rather than guessed; see
+    // `capturePhoto`.
+    if (m_photoPending) {
+        writePendingPhoto(imageIndex);
+    }
+
     const VkSwapchainKHR swapchain = m_swapchain.handle();
 
     VkPresentInfoKHR presentInfo{};
@@ -2771,6 +2950,288 @@ void Renderer::drawFrame(const ClearColor& color, const glm::mat4& view,
     vkCheck(presentResult, "vkQueuePresentKHR");
 
     m_currentFrame = (m_currentFrame + 1) % kFramesInFlight;
+}
+
+namespace {
+
+/// A one-shot command buffer and the fence that says when the GPU has finished
+/// with it, both released on every exit path including a throw part-way through
+/// recording.
+///
+/// **Deliberately not shared with `Buffer.cpp`'s `ScopedCommandBuffer`.** That
+/// one waits on the entire queue with `vkQueueWaitIdle`, which suits the
+/// start-up uploads it was written for; this owns a fence so the wait is on
+/// this submission alone. Two callers wanting two different waits is not yet a
+/// case for hoisting an RAII type into a public header - see the architecture
+/// rule about abstractions and second implementations.
+class OneShotCommands {
+public:
+    OneShotCommands(VkDevice device, VkCommandPool pool) : m_device(device), m_pool(pool) {
+        // A constructor that throws gets no destructor - the rule `Swapchain`
+        // and `DepthImage` are both built around - so a failure at the fence
+        // would otherwise strand the command buffer allocated just above it.
+        try {
+            VkCommandBufferAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocInfo.commandPool = pool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+            vkCheck(vkAllocateCommandBuffers(device, &allocInfo, &m_commandBuffer), "vkAllocateCommandBuffers");
+
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            vkCheck(vkCreateFence(device, &fenceInfo, nullptr, &m_fence), "vkCreateFence");
+        } catch (...) {
+            destroy();
+            throw;
+        }
+    }
+
+    ~OneShotCommands() { destroy(); }
+
+    OneShotCommands(const OneShotCommands&) = delete;
+    OneShotCommands& operator=(const OneShotCommands&) = delete;
+    OneShotCommands(OneShotCommands&&) = delete;
+    OneShotCommands& operator=(OneShotCommands&&) = delete;
+
+    VkCommandBuffer handle() const { return m_commandBuffer; }
+    VkFence fence() const { return m_fence; }
+
+private:
+    void destroy() {
+        // Reverse creation order: the fence was made last, so it goes first.
+        // Both tolerate a half-built object, which is what makes the catch
+        // above legal.
+        if (m_fence != VK_NULL_HANDLE) {
+            vkDestroyFence(m_device, m_fence, nullptr);
+            m_fence = VK_NULL_HANDLE;
+        }
+        if (m_commandBuffer != VK_NULL_HANDLE) {
+            vkFreeCommandBuffers(m_device, m_pool, 1, &m_commandBuffer);
+            m_commandBuffer = VK_NULL_HANDLE;
+        }
+    }
+
+    VkDevice m_device;
+    VkCommandPool m_pool;
+    VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
+    VkFence m_fence = VK_NULL_HANDLE;
+};
+
+} // namespace
+
+bool Renderer::capturePhoto(const std::filesystem::path& file) {
+    if (!m_swapchain.supportsTransferSrc()) {
+        // Explained in full where the bit is requested, in `Swapchain::create`:
+        // a swapchain image can only be copied from if it was *created* able
+        // to be, and that is a request the surface may refuse. Checked here
+        // rather than downstream so a surface that will never allow a photo
+        // does not draw a wasted frame per keypress.
+        logWarn("Photo not taken: this surface's images cannot be copied from");
+        return false;
+    }
+    if (!m_hasDrawnFrame) {
+        logWarn("Photo not taken: nothing has been drawn yet");
+        return false;
+    }
+    if (m_window.isMinimized()) {
+        logWarn("Photo not taken: the window is minimized");
+        return false;
+    }
+
+    m_photoPath = file;
+    m_photoPending = true;
+    m_photoWritten = false;
+
+    // **Copied out of the members first.** `drawFrame` writes these three on
+    // the way in, so passing them straight back in would be self-assignment
+    // through a reference - harmless for all three types today, and exactly the
+    // sort of thing that stops being harmless when one of them grows.
+    const ClearColor color = m_lastClearColor;
+    const glm::mat4 view = m_lastView;
+    const std::optional<glm::mat4> overlay = m_lastOverlayTransform;
+    drawFrame(color, view, overlay);
+
+    if (m_photoPending) {
+        // `drawFrame` never reached the copy - it returned early because the
+        // window was minimized between the check above and the draw, or because
+        // the swapchain went out of date mid-resize and had to be rebuilt.
+        // Nothing was written and nothing is wrong; pressing again works.
+        m_photoPending = false;
+        logWarn("Photo not taken: the frame was skipped, which happens while the window is being resized");
+        return false;
+    }
+
+    return m_photoWritten;
+}
+
+void Renderer::writePendingPhoto(std::uint32_t imageIndex) {
+    // Cleared on every path out of here, including the failures: a request that
+    // survived would be retried on the next frame, and the player would get a
+    // photo they did not ask for or a warning per frame forever.
+    m_photoPending = false;
+    m_photoWritten = false;
+
+    // **Which byte of a pixel holds which channel, and nothing beyond that.**
+    // Every format `Swapchain::chooseSurfaceFormat` accepts already holds
+    // sRGB-encoded eight-bit values, and PNG is sRGB by convention, so the
+    // bytes go through untouched - applying a gamma curve here would encode the
+    // picture a second time and hand back a washed-out photo of a correct
+    // screen.
+    //
+    // `B8G8R8A8` puts blue first, which is what Windows drivers overwhelmingly
+    // offer, so red and blue are swapped on the way out. `R8G8B8A8` is already
+    // in PNG's order. `A8B8G8R8_PACK32` names a 32-bit *word* with alpha in the
+    // top bits, and on a little-endian machine that word sits in memory as R,
+    // G, B, A - the same bytes as `R8G8B8A8` - so it needs no swap either.
+    bool swapRedAndBlue = false;
+    switch (m_swapchain.imageFormat()) {
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        swapRedAndBlue = true;
+        break;
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+        break;
+    default:
+        // Reachable only through `chooseSurfaceFormat`'s last-resort
+        // `available.front()`, which already warns that colours will be wrong.
+        // Refusing is right: a guessed channel order would write a photo that
+        // looks like a bug in the game rather than in this function.
+        logWarn("Photo not taken: swapchain format " + std::to_string(static_cast<int>(m_swapchain.imageFormat())) +
+                " is not one this knows how to unpack");
+        return;
+    }
+
+    const VkExtent2D extent = m_swapchain.extent();
+    if (extent.width == 0 || extent.height == 0) {
+        logWarn("Photo not taken: the window has no size");
+        return;
+    }
+
+    const VkDevice device = m_context.device();
+    const auto width = static_cast<std::size_t>(extent.width);
+    const auto height = static_cast<std::size_t>(extent.height);
+    const std::size_t byteCount = width * height * 4;
+
+    // **Everything below reports rather than throws.** `vkCheck` and `Buffer`
+    // both throw, `Main.cpp` wraps the whole session in one try/catch, and a
+    // photo that fails must not end the game the player was photographing -
+    // still less from inside `drawFrame`, which is where this runs.
+    try {
+        // **This frame's fence, not the whole device.** The caller has just
+        // submitted the frame that drew this image and it has to have finished
+        // before the copy reads it - including the barrier at the end of
+        // `recordCommands` that leaves the image in `PRESENT_SRC_KHR`, which is
+        // the layout the transition below names. Nothing else in flight matters,
+        // so `vkDeviceWaitIdle` would be a bigger hammer for no more safety.
+        vkCheck(vkWaitForFences(device, 1, &m_frameInFlight[m_currentFrame], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+
+        Buffer readback(m_context, byteCount, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        const auto* source = static_cast<const unsigned char*>(readback.persistentMap());
+        if (source == nullptr) {
+            logWarn("Photo not taken: the readback buffer did not come back host visible");
+            return;
+        }
+
+        const VkImage image = m_swapchain.images()[imageIndex];
+        const OneShotCommands commands(device, m_commandPool);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkCheck(vkBeginCommandBuffer(commands.handle(), &beginInfo), "vkBeginCommandBuffer");
+
+        // `makeMipBarrier` is this file's existing single-subresource colour
+        // barrier and level 0 of a swapchain image is the whole of it, so these
+        // are a reuse rather than two more near-identical struct literals.
+        const VkImageMemoryBarrier toTransfer =
+            makeMipBarrier(image, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        vkCmdPipelineBarrier(commands.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &toTransfer);
+
+        VkBufferImageCopy region{};
+        // Zero on both of these means "tightly packed at exactly the image's
+        // own width and height", which is what the PNG writer is handed below.
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = VkExtent3D{extent.width, extent.height, 1};
+        vkCmdCopyImageToBuffer(commands.handle(), image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle(), 1,
+                               &region);
+
+        // **Put back exactly as it was found.** The present that follows this in
+        // `drawFrame` requires `PRESENT_SRC_KHR`, and an image handed over in a
+        // transfer layout is a validation error and a frame of garbage on
+        // screen.
+        const VkImageMemoryBarrier toPresent =
+            makeMipBarrier(image, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT);
+        vkCmdPipelineBarrier(commands.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &toPresent);
+
+        // The fence below says the GPU has finished the work; this says the
+        // bytes it wrote are visible to a CPU read through the mapping. The
+        // memory is host-coherent, so this is belt as well as braces - but it
+        // is one struct, and the alternative is a photo that is subtly stale on
+        // some driver nobody here can test.
+        VkMemoryBarrier toHost{};
+        toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(commands.handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
+                             &toHost, 0, nullptr, 0, nullptr);
+
+        vkCheck(vkEndCommandBuffer(commands.handle()), "vkEndCommandBuffer");
+
+        VkCommandBuffer commandBuffer = commands.handle();
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        vkCheck(vkQueueSubmit(m_context.graphicsQueue(), 1, &submitInfo, commands.fence()), "vkQueueSubmit");
+
+        // The buffer and the command buffer are both destroyed the moment this
+        // scope ends, so the copy has to have finished reading and writing them
+        // first.
+        const VkFence fence = commands.fence();
+        vkCheck(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+
+        std::vector<unsigned char> pixels(byteCount);
+        const std::size_t redOffset = swapRedAndBlue ? 2u : 0u;
+        const std::size_t blueOffset = swapRedAndBlue ? 0u : 2u;
+        // **Alpha is forced opaque rather than copied.** A swapchain's alpha
+        // channel is not a transparency the player ever sees - the surface is
+        // composited with `COMPOSITE_ALPHA_OPAQUE`, so whatever the passes left
+        // in it is ignored by the display and is usually the tone mapper's
+        // scratch. Copied through, a photo of a perfectly ordinary frame opens
+        // in an image viewer as a ghost.
+        constexpr unsigned char kOpaque = 255;
+        for (std::size_t i = 0; i < byteCount; i += 4) {
+            pixels[i + 0] = source[i + redOffset];
+            pixels[i + 1] = source[i + 1];
+            pixels[i + 2] = source[i + blueOffset];
+            pixels[i + 3] = kOpaque;
+        }
+
+        if (stbi_write_png(m_photoPath.string().c_str(), static_cast<int>(width), static_cast<int>(height), 4,
+                           pixels.data(), static_cast<int>(width * 4)) == 0) {
+            // stb reports nothing beyond zero, and the overwhelmingly likely
+            // cause is a directory that does not exist, so the caller's path is
+            // the useful half of the message.
+            logWarn("Photo not taken: could not write " + m_photoPath.string());
+            return;
+        }
+    } catch (const std::exception& error) {
+        logWarn(std::string("Photo not taken: ") + error.what());
+        return;
+    }
+
+    m_photoWritten = true;
 }
 
 } // namespace engine

@@ -5356,6 +5356,42 @@ static_assert(stonecutterOption(BlockId::Stone, 0) != BlockId::Air &&
 static_assert(stonecutterOption(stonecutterOption(BlockId::Stone, 0), 0) == BlockId::Air,
               "a cut block cannot be cut again");
 
+/// **The lookup above returns its first match, and a parent named by two rows
+/// would send both to the first one's block.** The second family would then have
+/// no stonecutter entry at all - no compile error, no validation error, nothing
+/// to see but a cut that never appears in the list - which is what a finder
+/// hides and the reason this is a round trip rather than a scan for duplicates.
+/// It asks the lookup the question the stonecutter asks and checks the answer is
+/// the row it started from, so it also fires if a family's parent is `Air` from
+/// a short initialiser or is itself a cut block, both of which the guard at the
+/// top of `stonecutterOption` turns away before the search even begins.
+constexpr bool everyCutIsReachable() {
+    for (int family = 0; family < kStairFamilyCount; ++family) {
+        const BlockId parent = kStairFamilies[static_cast<std::size_t>(family)].parent;
+        if (stonecutterOption(parent, 0) != stairsAt(family, Facing::North, false)) {
+            return false;
+        }
+    }
+    for (int family = 0; family < kSlabFamilyCount; ++family) {
+        const BlockId parent = kSlabFamilies[static_cast<std::size_t>(family)].parent;
+        if (stonecutterOption(parent, 1) != slabAt(family, false)) {
+            return false;
+        }
+    }
+    for (int family = 0; family < kWallFamilyCount; ++family) {
+        const BlockId parent = kWallFamilies[static_cast<std::size_t>(family)].parent;
+        if (stonecutterOption(parent, 2) != wallAt(family)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyCutIsReachable(),
+              "two rows of kStairFamilies, kSlabFamilies or kWallFamilies name the same parent, "
+              "so the stonecutter's reverse lookup reaches only the first of them and the other "
+              "family cannot be cut at all");
+
 /// True for anything cut from another block.
 constexpr bool isShapedBlock(BlockId id) {
     return isStairs(id) || isSlab(id) || isWall(id) || isFence(id) || isFenceGate(id) ||
@@ -5424,6 +5460,35 @@ static_assert(shapedParent(carpetAt(9)) == BlockId::CyanWool &&
 ///
 /// Everything before M17b was a unit cube, and both meshing and collision
 /// assumed it. A shape is the one place that assumption is now written down.
+///
+/// **No name in this enum is ever a `BlockId`.** Measured 2026-08-19: 22 shape
+/// names, 709 ids, intersection **empty**. So the id enum qualified with any
+/// name below is a guaranteed compile error rather than a lookup returning
+/// something merely wrong - which is the good news, because it fails loudly.
+///
+/// **The reason the mistake feels safe, and it has been made once already:**
+/// 14 of these 22 names *do* exist as ids, under a run spelling. `Slab` lives
+/// as `SlabRunFirst`, `Door` as `DoorRunFirst`, `Vine` as `VineFirst`. A reader
+/// who half-remembers that slabs are in the id enum is right about the game and
+/// wrong about the token. Reach for the run bookends, or for a helper such as
+/// `vineWith`, `carpetAt` or `paneAt` - never for the bare shape name.
+///
+/// **Word-bound any check of this**, because the prefixes collide: unanchored,
+/// the id enum plus `Vine` also matches `VineFirst`, and plus `Bed` it matches
+/// `Bedrock`. A prefix hit has already once been read as evidence that a
+/// missing id existed. The search that survives, rather than a list that rots:
+/// take any name below and ask whether the id enum declares it, line-anchored,
+/// inside `enum class BlockId` itself. The falsifier for the claim above is a
+/// single name declared in both enums; if one ever appears, the spellings stop
+/// being distinguishable to a reader and this note is the thing that is wrong.
+///
+/// **This comment deliberately never writes one of those bad spellings out**,
+/// naming the enum and the suffix separately instead. That costs a sentence and
+/// buys a real property: a whole-file sweep for ids that do not exist finds
+/// nothing here, so this block can never be reported as the compile error it
+/// is describing. A warning that trips the detector aimed at it is a bad
+/// warning; measured 2026-08-19, the id enum spelled against `Vine`, `Bed`,
+/// `Slab` and `Door` returns **0** in this file, against 4 for `VineFirst`.
 enum class BlockShape : std::uint8_t {
     /// Occupies nothing: air, and anything you walk straight through.
     Empty,
@@ -8732,6 +8797,24 @@ static_assert(collisionBoxes(BlockId::SeaPickle).count == 0 &&
 // between the player and a fast death. **A green build reports neither**, which
 // is why this is written down rather than left to the assert alone. Falsified by
 // the freeze clock ceasing to test cell occupancy.
+//
+// **Update 2026-08-19 16:53 - this coupling has gone from anticipated to
+// load-bearing.** The note above was written while the freezing work was still
+// owed, and it has since LANDED: `sinksInPowderSnow` is declared in the creature
+// header and read five times in its translation unit, so the empty box is no
+// longer merely consistent with a plan, it is what a shipped feature stands on.
+// Nothing here changed; what changed is that the silent consequence now has a
+// real consumer to break. **A reachability claim is a measurement with a date on
+// it, not a property of the code** - which is exactly why the sentence above
+// needed this one rather than being trusted.
+//
+// **The search, since a list of readers would rot:** before touching this
+// assert, sweep this block's name across `game/src` CASE-INSENSITIVELY, and read
+// each hit for whether it asks where a body *is* rather than what it stands on -
+// those are the ones a box breaks. Today that sweep reaches the player, creature,
+// survival and tick owners. Restoring the box is therefore not a change to this
+// file that happens to affect others; it is a change to the freezing and
+// suffocation rules that happens to be typed here, and it needs their owners.
 static_assert(collisionBoxes(BlockId::PowderSnow).count == 0 &&
                   selectionBoxes(BlockId::PowderSnow).count > 0 &&
                   !isSolid(BlockId::PowderSnow),
@@ -8878,9 +8961,20 @@ constexpr BlockBoxes selectionBoxesWith(BlockId id, std::uint8_t connections) {
 ///
 /// **Stated as a constraint rather than as the state of the world, so it cannot
 /// rot**: while this overload exists, a caller holding `opaqueAbove` should
-/// prefer it, and the vine roof must not be written a third time. Falsified by
-/// a third caller of `vineBoxes` appearing - run that search and expect exactly
-/// two, this one and `drawnBoxes`, rather than trusting this paragraph.
+/// prefer it, and the vine roof must not be written a third time.
+///
+/// **The count in an earlier version of this paragraph was wrong, and correcting
+/// it matters more than it looks.** It said to search `vineBoxes` and expect
+/// exactly two callers. There are **three**, and a reader running that search
+/// would have read the extra one as the violation this note warns about and
+/// deleted a load-bearing clause. The three, and what each passes for `roof`:
+/// this overload and `drawnBoxes` pass the real `opaqueAbove`, and
+/// `selectionBoxes` pins `false` **on purpose**, because a context-free outline
+/// has no neighbour to ask - it is the deliberate exception, not a third
+/// writing of the roof. So the constraint is *at most two callers pass a
+/// variable roof*, which is what "not written a third time" was always trying
+/// to say; the caller count on its own was never the thing that mattered.
+/// Falsified by a fourth caller, or by a third that passes anything but `false`.
 constexpr BlockBoxes selectionBoxesWith(BlockId id, std::uint8_t connections, bool opaqueAbove) {
     if (blockShape(id) == BlockShape::Vine) {
         return vineBoxes(vineSides(id), opaqueAbove);
@@ -8888,19 +8982,45 @@ constexpr BlockBoxes selectionBoxesWith(BlockId id, std::uint8_t connections, bo
     return selectionBoxesWith(id, connections);
 }
 
+/// The one vine both facts below are asked of, named once so the pair cannot be
+/// half-edited into disagreeing about which id they mean.
+///
+/// **It has to carry at least one side bit, and picking the sideless one is a
+/// mistake this file invites.** `selectionBoxes` reads a vine whose sides are 0
+/// as clinging to *all four* walls - its `vineSides(id) == 0 ? ConnectAll`
+/// clause, which exists so an outline with nothing to ask still draws - while
+/// the three-argument form below passes `vineSides(id)` through untouched. So
+/// `VineFirst` is the single id in the run where the two overloads legitimately
+/// disagree, and the second assert would read `4 == 0` there. One north sheet
+/// keeps that special case inert and leaves **both** counts non-zero, so neither
+/// assert can pass by comparing nothing against nothing.
+constexpr BlockId kVineWithOneSheet = vineWith(ConnectNorth);
+
 /// **The argument has to change the answer, or it is decoration.** `roof` adds
-/// exactly one box inside `vineBoxes`, so this holds whatever sides the id
-/// carries, and it fails the moment the vine clause above is dropped.
-static_assert(selectionBoxesWith(BlockId::Vine, 0, true).count ==
-                  selectionBoxesWith(BlockId::Vine, 0, false).count + 1,
+/// exactly one box inside `vineBoxes`, so this reads `2 == 1 + 1`, and it fails
+/// the moment the vine clause above is dropped - both sides would then fall
+/// through to the two-argument form and the `+ 1` would have nothing to answer.
+///
+/// **Both counts were read out of `vineBoxes`, not assumed** - 2026-08-19, with
+/// no compiler available to settle it. That function appends one box per set
+/// side bit and then exactly one more under its `if (roof)`, so a single north
+/// sheet gives 1 without a roof and 2 with one. `BlockBoxes` carries ten boxes
+/// and the most any vine can emit is five, so no `constexpr` overrun is
+/// reachable from here either. **If this assert is what breaks the next build,
+/// read `vineBoxes` before suspecting the id above**: falsified by a second
+/// roof box, or by `if (roof)` acquiring any further condition.
+static_assert(selectionBoxesWith(kVineWithOneSheet, 0, true).count ==
+                  selectionBoxesWith(kVineWithOneSheet, 0, false).count + 1,
               "opaqueAbove must reach vineBoxes and add the ceiling panel");
 /// **The compiled negative control, and the more valuable half.** The
 /// two-argument form answers as though nothing were overhead - which is exactly
 /// the defect this overload exists to remove. Pinning the old behaviour here
 /// proves the fix changes something rather than merely looking as though it
 /// does, which is the failure eleven asserts in this file once passed under.
-static_assert(selectionBoxesWith(BlockId::Vine, 0).count ==
-                  selectionBoxesWith(BlockId::Vine, 0, false).count,
+/// Reads `1 == 1`, and it also catches the sideless clause being widened to
+/// every vine, which is a fault the id above was chosen to keep visible.
+static_assert(selectionBoxesWith(kVineWithOneSheet, 0).count ==
+                  selectionBoxesWith(kVineWithOneSheet, 0, false).count,
               "the two-argument form must still answer as though nothing were overhead");
 /// And the third fact must stay inert everywhere else, or it has leaked into
 /// blocks that have no roof rule at all.
@@ -10729,13 +10849,42 @@ constexpr int kExtraBlockSprites = 3;
 /// the enum run exactly**; nothing else does, and a mismatch would silently give
 /// a block someone else's name and texture.
 ///
-/// `topLayer` is -1 for the overwhelming majority, which use the same image on
-/// every face. Only logs differ, and only on the two end caps.
+/// **A row can name up to three images: a side, a lid and an underside.**
+/// `layer` is the side and is the only one required; `topLayer` is the lid and
+/// `bottomLayer` the underside, and -1 in either means "no separate image".
+///
+/// **The underside falls back to the LID, not to the side.** That is the rule
+/// the table followed for its whole life, back when the comment here said only
+/// logs set a second image -- true when it was written, and false by 137 rows
+/// when it was finally measured (2026-08-19). The fallback is right for the 77
+/// rows shaped like a log, a pillar or a melon, where the two end caps really
+/// are one picture, and wrong for the 35 that could be checked against the
+/// reference: an anvil, a jukebox and farmland want the SIDE underneath, and a
+/// barrel, a cactus, a stonecutter and two dozen more want a third image. A
+/// further 25 rows -- the chests and the stowboxes -- vanilla draws as entities,
+/// so there is no cube model to read and no answer to copy.
+///
+/// Eleven of the 35 are fixed below, because the picture each one needs is
+/// already some other row's `layer`. The rest wait on art that
+/// `tools/make-reference-blocks.ps1` does not stage; that is filed as 190.
+///
+/// **So a new row that sets `topLayer` and stops has silently chosen the log's
+/// answer.** Before leaving `bottomLayer` unset, open the reference's
+/// `models/block/<name>.json` and read its `down` face: if it names a file the
+/// other two faces do not, this row needs a third entry, and no compiler, sweep
+/// or soak in this project can tell you that. Falsified by any row whose `down`
+/// differs while its `bottomLayer` is -1. (A whole-file count of the word
+/// `bottomLayer` sweeps up this comment too; the data entries below are spelled
+/// `.bottomLayer = `.)
 struct ExtraBlockInfo {
     const char* name;
     /// Offset into the appended texture run.
     int layer;
+    /// The lid. Falls back to `layer`.
     int topLayer = -1;
+    /// The underside. Falls back to `topLayer`, then to `layer` -- read the
+    /// paragraph above before accepting that default.
+    int bottomLayer = -1;
     /// Belongs under Nature rather than Construction. A flag rather than a
     /// range test, because the run is no longer sorted by tab.
     bool natural = false;
@@ -10908,7 +11057,7 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Melon", .layer = 156, .topLayer = 157, .natural = true},
     {.name = "Hay Bale", .layer = 158, .topLayer = 159, .natural = true},
     {.name = "Note Block", .layer = 160},
-    {.name = "Jukebox", .layer = 161, .topLayer = 162},
+    {.name = "Jukebox", .layer = 161, .topLayer = 162, .bottomLayer = 161},  // side underneath
 
     {.name = "Blue Orchid", .layer = 163, .natural = true},
     {.name = "Pink Tulip", .layer = 164, .natural = true},
@@ -11031,8 +11180,11 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Ochre Froglight", .layer = 285, .topLayer = 286},
     {.name = "Verdant Froglight", .layer = 287, .topLayer = 288},
     {.name = "Pearlescent Froglight", .layer = 289, .topLayer = 290},
-    {.name = "Crimson Nylium", .layer = 291, .topLayer = 292, .natural = true},
-    {.name = "Warped Nylium", .layer = 293, .topLayer = 294, .natural = true},
+    // Nylium is a crust on netherrack, so 176 -- the "Netherrack" row's own
+    // layer -- is what shows underneath. Correcting an existing row, not
+    // building the Nether: both ids were already here and already drawn.
+    {.name = "Crimson Nylium", .layer = 291, .topLayer = 292, .bottomLayer = 176, .natural = true},
+    {.name = "Warped Nylium", .layer = 293, .topLayer = 294, .bottomLayer = 176, .natural = true},
     {.name = "Crimson Stem", .layer = 295, .topLayer = 296, .natural = true},
     {.name = "Warped Stem", .layer = 297, .topLayer = 298, .natural = true},
     {.name = "Crimson Planks", .layer = 299},
@@ -11089,8 +11241,11 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     // ---- The fourth run: the farm. ----
     // Farmland keeps dirt on its sides, which is why it is the one pair of rows
     // that shares a `layer` and differs only in `topLayer`.
-    {.name = "Farmland", .layer = 359, .topLayer = 360, .natural = true},
-    {.name = "Farmland", .layer = 359, .topLayer = 361, .natural = true},
+    // Farmland sits in dirt: `models/block/farmland.json` gives both `down` and
+    // the four sides the `dirt` texture, so the answer was already in `layer`
+    // and the row simply had no way to say it.
+    {.name = "Farmland", .layer = 359, .topLayer = 360, .bottomLayer = 359, .natural = true},
+    {.name = "Farmland", .layer = 359, .topLayer = 361, .bottomLayer = 359, .natural = true},
     {.name = "Dirt Path", .layer = 362, .topLayer = 363, .natural = true},
 
     // Wheat is the one crop with a picture per age.
@@ -11223,7 +11378,17 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Dead Horn Coral Block", .layer = 425, .natural = true},
 
     // Waxed copper wears the same face as unwaxed copper - wax is a promise,
-    // not a picture - so these nine reuse the run's existing layers.
+    // not a picture - so these nine cost no art whatsoever.
+    //
+    // **They do not reuse the unwaxed layer indices, though: they get their own,
+    // and the sprite list in `Main.cpp` names the same nine files a second time
+    // to fill them.** That is deliberate, and the sprite list states the reason
+    // where it does the same thing for the farm run - naming a file twice costs
+    // one layer and keeps a run's numbering contiguous, which is far cheaper than
+    // reaching back at an earlier layer index. **The waxed grates a few rows
+    // below do the opposite and genuinely share indices with the unwaxed ones**,
+    // so both conventions are live in this one table: copy the one you mean
+    // rather than whichever is nearest.
     {.name = "Waxed Block of Copper", .layer = 426},
     {.name = "Waxed Exposed Copper", .layer = 427},
     {.name = "Waxed Weathered Copper", .layer = 428},
@@ -11263,8 +11428,10 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Lodestone", .layer = 455, .topLayer = 456},
     {.name = "Enchanting Table", .layer = 457, .topLayer = 458},
     {.name = "Chiseled Bookshelf", .layer = 459, .topLayer = 460},
-    {.name = "Cartography Table", .layer = 461, .topLayer = 462},
-    {.name = "Fletching Table", .layer = 463, .topLayer = 464},
+    // The work tables are built on planks and show them underneath. 117 and 39
+    // are the "Dark Oak Planks" and "Birch Planks" rows' own layers.
+    {.name = "Cartography Table", .layer = 461, .topLayer = 462, .bottomLayer = 117},
+    {.name = "Fletching Table", .layer = 463, .topLayer = 464, .bottomLayer = 39},
     {.name = "Barrel", .layer = 465, .topLayer = 466},
     {.name = "Blast Furnace", .layer = 467, .topLayer = 468},
     {.name = "Loom", .layer = 469, .topLayer = 470},
@@ -11274,9 +11441,11 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Bell", .layer = 477, .topLayer = 478},
     {.name = "Cauldron", .layer = 479, .topLayer = 480},
     {.name = "Brewing Stand", .layer = 481, .topLayer = 482},
-    {.name = "Anvil", .layer = 483, .topLayer = 484},
-    {.name = "Chipped Anvil", .layer = 483, .topLayer = 485},
-    {.name = "Damaged Anvil", .layer = 483, .topLayer = 486},
+    // Cast metal underneath, not the scarred top plate. `models/block/anvil.json`
+    // gives `down` the `anvil` texture, which is already these rows' side.
+    {.name = "Anvil", .layer = 483, .topLayer = 484, .bottomLayer = 483},
+    {.name = "Chipped Anvil", .layer = 483, .topLayer = 485, .bottomLayer = 483},
+    {.name = "Damaged Anvil", .layer = 483, .topLayer = 486, .bottomLayer = 483},
     {.name = "Scaffolding", .layer = 487, .topLayer = 488},
     {.name = "Flower Pot", .layer = 489, .natural = true},
 
@@ -11351,7 +11520,8 @@ constexpr std::array<ExtraBlockInfo, 580> kExtraBlocks{{
     {.name = "Beacon", .layer = 557},
     {.name = "Conduit", .layer = 558},
     {.name = "Dragon Egg", .layer = 559, .natural = true},
-    {.name = "End Portal Frame", .layer = 560, .topLayer = 561},
+    // 198 is the "End Stone" row's own layer; the frame is set into end stone.
+    {.name = "End Portal Frame", .layer = 560, .topLayer = 561, .bottomLayer = 198},
     {.name = "Monster Spawner", .layer = 562},
     {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
     {.name = "Trapped Chest", .layer = 563, .topLayer = 564},
@@ -11508,7 +11678,11 @@ constexpr int kCandleColours = 17;
 /// one short of a texture `blockTextureLayer` still returns. They are folded in
 /// now, so the claim and the code agree.
 constexpr int maxTableLayer() {
-    int highest = kBedFirstLayer + kBedColours * 4 + 1;
+    // The seed is the *last* bed picture, not one past it. It said
+    // `+ kBedColours * 4 + 1` and so claimed two layers the beds do not own -
+    // safe only because the rows below reach higher, and a lie in the one
+    // function whose whole job is to be exact about the maximum.
+    int highest = kBedFirstLayer + kBedColours * 4 - 1;
     const int codeOnly[] = {kCarvedPumpkinFaceLayer,   kJackOLanternFaceLayer,
                             kTrappedChestFaceLayer,    kBlastFurnaceFaceLayer,
                             kBlastFurnaceLitFaceLayer, kUnlitCandleFirstLayer + kCandleColours - 1,
@@ -11519,6 +11693,11 @@ constexpr int maxTableLayer() {
     for (const ExtraBlockInfo& info : kExtraBlocks) {
         highest = info.layer > highest ? info.layer : highest;
         highest = info.topLayer > highest ? info.topLayer : highest;
+        // The third image counts too. It cannot raise the ceiling today -- every
+        // underside below reuses a picture some other row already names -- but a
+        // row whose underside is its own file would, and a sprite count derived
+        // from a stale ceiling is a load that runs off the end of the array.
+        highest = info.bottomLayer > highest ? info.bottomLayer : highest;
     }
     return highest;
 }
@@ -12405,9 +12584,15 @@ constexpr float blockTextureLayerOrNone(BlockId id, BlockFace face,
                                                                 : kBlastFurnaceFaceLayer));
         }
         const ExtraBlockInfo& info = extraBlockInfo(id);
-        const bool cap = (face == BlockFace::Top || face == BlockFace::Bottom);
-        return static_cast<float>(kTableSpritesFirst +
-                                  (cap && info.topLayer >= 0 ? info.topLayer : info.layer));
+        // Three faces, three answers. Welding Top and Bottom into one `cap`
+        // boolean is what painted 137 blocks' lids onto their floors, and it did
+        // it in all five drawing paths at once -- mesher, icon, drop, thrown
+        // item and falling block -- because they all arrive here.
+        const int lid = info.topLayer >= 0 ? info.topLayer : info.layer;
+        const int underside = info.bottomLayer >= 0 ? info.bottomLayer : lid;
+        return static_cast<float>(kTableSpritesFirst + (face == BlockFace::Top      ? lid
+                                                        : face == BlockFace::Bottom ? underside
+                                                                                    : info.layer));
     }
 
     // **Before the hive, because `isBeehive` is true of a nest.** A nest asks
@@ -12534,6 +12719,49 @@ constexpr float blockTextureLayer(BlockId id, BlockFace face,
     const float layer = blockTextureLayerOrNone(id, face, direction, half);
     return layer < 0.0f ? static_cast<float>(TextureLayer::Stone) : layer;
 }
+
+/// **Proof that the underside is a face this table can answer on its own.**
+/// Both witnesses are ids that `blockTextureLayerOrNone` never names: search
+/// that function's body for either and you get nothing, while a control search
+/// for `isBed` in the same span returns one. Neither can therefore be caught
+/// by an earlier special case, so both provably land in the `kExtraBlocks`
+/// branch and these asserts test the split itself rather than some other branch
+/// that happens to agree. (Counted inside that function on purpose. A count
+/// over the whole file would sweep up this comment and the asserts below it,
+/// and would have gone stale the moment they were written.)
+///
+/// A jukebox shows its side underneath and an end portal frame shows end stone:
+/// the two shapes the old welded `cap` boolean could not express. Both halves
+/// are stated because either alone is weak. `Bottom != Top` would also pass on
+/// a table that had simply lost `topLayer`, and `Bottom == Side` would pass on
+/// the old welded table for any block whose lid happened to equal its side.
+static_assert(blockTextureLayer(BlockId::Jukebox, BlockFace::Bottom) !=
+                      blockTextureLayer(BlockId::Jukebox, BlockFace::Top) &&
+                  blockTextureLayer(BlockId::Jukebox, BlockFace::Bottom) ==
+                      blockTextureLayer(BlockId::Jukebox, BlockFace::Side),
+              "a jukebox draws its side underneath, not the record slot from its lid");
+static_assert(blockTextureLayer(BlockId::EndPortalFrame, BlockFace::Bottom) !=
+                      blockTextureLayer(BlockId::EndPortalFrame, BlockFace::Top) &&
+                  blockTextureLayer(BlockId::EndPortalFrame, BlockFace::Bottom) !=
+                      blockTextureLayer(BlockId::EndPortalFrame, BlockFace::Side),
+              "an end portal frame's underside is end stone: a third image, and neither of its "
+              "other two faces - the case a side-underneath witness cannot reach");
+
+/// **No `bottomLayer` may repeat the lid it overrides.** Such a row would draw
+/// nothing the default did not already draw, and the next author would copy it
+/// as the house style for "this block has an underside". Cheap over the whole
+/// table: two integer compares on the rows that set it, a skip on the rest.
+constexpr bool noUndersideRepeatsItsLid() {
+    for (const ExtraBlockInfo& info : kExtraBlocks) {
+        if (info.bottomLayer >= 0 && info.bottomLayer == info.topLayer) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(noUndersideRepeatsItsLid(),
+              "a `bottomLayer` equal to its own row's `topLayer` is the default written out "
+              "longhand; delete it rather than leave a third entry that changes nothing");
 
 /// **Where farmland stops looking watered** - the half of this block a player
 /// actually sees, and the half two ids got wrong.
@@ -12880,9 +13108,16 @@ constexpr const char* blockName(BlockId id) {
     if (isSmoker(id)) {
         return "Smoker";
     }
-    if (isBlastFurnace(id)) {
-        return "Blast Furnace";
-    }
+    // **There is no blast furnace branch, and the absence is the decision.**
+    // Unlike the other two cookers it arrived inside the table - all eight of
+    // its ids sit in extra runs - so `isExtraBlock` above has already returned
+    // and a test here could never run. It was written anyway and sat dead:
+    // harmless only because the rows happen to read the same string, and a
+    // second owner for a name `kExtraBlocks` already holds is free to drift
+    // from it on a clean build. `blockTextureLayerOrNone` answers the mouth the
+    // same way, from inside its own `isExtraBlock` block, because the table has
+    // no column for a front. Add ids outside every extra run and this becomes a
+    // real branch again - check `isExtraBlock` before writing one.
     if (isFurnace(id)) {
         return "Furnace";
     }

@@ -74,6 +74,94 @@ constexpr std::array<const char*, static_cast<std::size_t>(VoiceState::Count)> k
     "idle", "hurt", "death",
 };
 
+/// The same pin `kStems` has had since it was written, for the two tables that
+/// were left without one.
+///
+/// **Both are positional against an enum and neither could say so.** A row
+/// inserted, deleted or moved in `kVoiceStems` shifts every family below it,
+/// and the result is not silence - it is a sheep bleating like a creeper, off a
+/// bank that loads perfectly, on a clean build, with `sweep()` reporting all is
+/// well because every family found its recordings. That is the identical defect
+/// `stemMatches` exists to catch on `kStems`, and it was catchable there and
+/// not here purely because nobody had written these three lines.
+///
+/// **The deletion case is worse than a wrong noise.** `std::array` zero-fills a
+/// short initialiser, so a removed row leaves a `nullptr` at the end that
+/// `load` feeds straight into `std::string("voice_") + stem`, which is
+/// undefined behaviour at startup rather than a missing sound. Too *long* is a
+/// hard error; too short is not, and that asymmetry is the whole hazard.
+///
+/// Anchored at both ends, which is what makes an insertion anywhere between
+/// them fail - the same arrangement, and the same reasoning, as the three
+/// asserts above.
+constexpr bool voiceStemMatches(CreatureVoice family, std::string_view stem) {
+    return std::string_view(kVoiceStems[static_cast<std::size_t>(family)]) == stem;
+}
+
+constexpr bool voiceStateMatches(VoiceState state, std::string_view stem) {
+    return std::string_view(kVoiceStates[static_cast<std::size_t>(state)]) == stem;
+}
+
+static_assert(voiceStemMatches(CreatureVoice::Sheep, "sheep"),
+              "the voice family table has shifted at the top");
+static_assert(voiceStemMatches(CreatureVoice::Zombie, "zombie"),
+              "the voice family table has shifted in the middle");
+static_assert(voiceStemMatches(CreatureVoice::Golem, "golem"),
+              "the voice family table has shifted at the bottom");
+static_assert(voiceStateMatches(VoiceState::Idle, "idle") &&
+                  voiceStateMatches(VoiceState::Death, "death"),
+              "the voice state table has shifted - every family's recordings are addressed "
+              "through it, so a swap here mislabels all thirty-five at once");
+
+/// Every row of all three tables is really a row.
+///
+/// **The three-anchor pins above cannot catch the commonest edit of all: an
+/// enumerator APPENDED to the end.** Add `SoundEvent::ArmourEquip` after `Bell`
+/// and forget the stem, and `Bell` keeps index 59, so
+/// `stemMatches(SoundEvent::Bell, "bell")` still passes - it is the rows
+/// *below* a change that shift, and there are none below the last one. The
+/// anchors are for insertion and reordering; this is for growth, and growth is
+/// what actually happens to this enum.
+///
+/// What it catches is `std::array`'s asymmetry, which is the whole hazard:
+/// **too many initialisers is a hard error, too few is silence.** A short list
+/// value-initialises the tail, and for a `const char*` that means `nullptr`.
+/// `load`'s `loadRun` takes a `const std::string&`, so the null is converted at
+/// the call - `loadRun(kStems[event], ...)` with a null row constructs a
+/// `std::string` from a null pointer, which is undefined behaviour. There is no
+/// explicit `std::string(...)` to grep for; the conversion is the parameter.
+/// So the symptom is a crash or a garbage filename at startup rather than one
+/// missing sound. This turns all of that into a compile error naming the table.
+///
+/// Empty strings are rejected too, since `""` addresses `1.ogg` and would load
+/// whichever file happened to be called that.
+///
+/// The same shape as `ambientRowsAreSane` below and `everyRumbleShapeIsFilled`
+/// in `Gamepad.cpp`: a `constexpr` sweep for the default-constructed row.
+constexpr bool everyStemIsFilled() {
+    for (const char* stem : kStems) {
+        if (stem == nullptr || *stem == '\0') {
+            return false;
+        }
+    }
+    for (const char* stem : kVoiceStems) {
+        if (stem == nullptr || *stem == '\0') {
+            return false;
+        }
+    }
+    for (const char* stem : kVoiceStates) {
+        if (stem == nullptr || *stem == '\0') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyStemIsFilled(),
+              "a stem table is short - a SoundEvent, CreatureVoice or VoiceState enumerator was "
+              "added without its row, and the missing row is a null pointer that load() would "
+              "build a std::string from");
+
 /// At most this many variants per event. The staging script writes them as
 /// `<stem>1.ogg` upward, so loading stops at the first gap.
 constexpr int kMaxVariants = 8;
@@ -251,9 +339,27 @@ struct AmbientRow {
     bool global = false;
 };
 
+/// **Every interval here is measured against its own recording, not guessed.**
+/// Durations taken 2026-08-20 from each file's final Ogg granule position over
+/// its sample rate: `fire1` 1.821 s, `lava1` **8.182 s**, `lava_pop1` 0.129 s,
+/// `water1` 2.578 s. A row's `seconds` must sit just *under* its clip so the
+/// bed overlaps rather than gapping.
+///
+/// **Lava read 2.4 s against an 8.182 s recording** and was the worst kind of
+/// wrong: three to four copies of the same waveform stacked on themselves and
+/// summed *correlated* into the mixer, which then hard-clipped - heard as a
+/// buzz near any lava. It is the same fault the rain bed had in `Main.cpp`
+/// (3.4 s against ~2.0 s clips), in the opposite direction, and both are
+/// `CLAUDE.md`'s "number ported into a field measured against something else".
+///
+/// **`LavaPop`'s 2.8 s against a 0.129 s clip is deliberate and must stay** - a
+/// pop is a discrete event that should be sparse, not a continuous bed. Do not
+/// "correct" it to 0.13; that is forty pops a second.
+///
+/// *Falsified by* any of these recordings being restaged at a different length.
 constexpr std::array<AmbientRow, static_cast<std::size_t>(AmbientCue::Count)> kAmbientCues{{
     /* Fire    */ {SoundEvent::Fire, 1.6f, 0.50f, false},
-    /* Lava    */ {SoundEvent::Lava, 2.4f, 0.50f, false},
+    /* Lava    */ {SoundEvent::Lava, 7.9f, 0.50f, false},
     /* LavaPop */ {SoundEvent::LavaPop, 2.8f, 0.60f, false},
     /* Water   */ {SoundEvent::Water, 1.9f, 0.40f, true},
     /* Breath  */ {SoundEvent::Breath, 1.00f, 0.70f, true},

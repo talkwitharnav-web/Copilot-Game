@@ -681,21 +681,41 @@ constexpr float blastResistance(BlockId block) {
 // on the wrong number through three clean builds and a soak.
 // ---------------------------------------------------------------------------
 
-/// 512 for the reason it is 512 in `Block.hpp` and `Mining.hpp`: seven of them
-/// cover the enum with room to spare.
+/// 512 for the reason it is 512 in `Block.hpp` and `Mining.hpp`.
 ///
 /// **This is the heaviest of the five sweeps per iteration** and the first one
 /// to halve if MSVC's constexpr step budget ever runs short. Each id evaluates
 /// `blastResistance`, `blockShape` and `shapedParent`, and a deepslate ore
 /// evaluates a nested `blastResistance(stoneOreFor(block))` on top - and it
 /// instantiates in all three translation units that include this header. If a
-/// future block pushes it over, halve this to 256 and double `kBlastSweepPasses`
-/// to 14; the coverage `static_assert` below holds either way and nothing else
-/// has to change.
+/// future block pushes it over, **halve this and change nothing else**: the
+/// pass count below recomputes itself and the coverage assert holds either way.
+/// It used to say "and double `kBlastSweepPasses` to 14", which was a second
+/// edit a reader had to remember; it is no longer possible to forget it.
 constexpr int kBlastSweepStride = 512;
 
-/// How many strides the generated sweep instantiates.
-constexpr int kBlastSweepPasses = 7;
+/// How many strides the generated sweep instantiates - **derived, not chosen,
+/// so this coupling cannot break.**
+///
+/// However many strides of `kBlastSweepStride` it takes to reach the end of the
+/// block table, that is how many passes there are. Covering every id is now
+/// true *by construction* rather than by somebody remembering to raise a
+/// number, which is the whole point: `Block.hpp` can no longer break this file
+/// and its owner never needs to know this file exists. This was a literal `7`
+/// carrying only the assert below, which is the remedy ladder's second rung
+/// sitting where its first is available - and 7 x 512 = 3584 left barely two
+/// hundred ids of headroom, on a table that gained forty in one evening.
+///
+/// **The stride is fixed and the passes derive, deliberately that way round**,
+/// exactly as `Copper.hpp` argues for `kCopperSweepPasses`: the stride is what
+/// bounds per-pass `constexpr` work, so it is the quantity that must not be
+/// allowed to grow with the block count. `Block.hpp`'s `kModelSweepStride` does
+/// it the other way because its pass count is what it must hold still.
+///
+/// A pass past the end costs nothing: `blastTableSound`'s own `i < kBlockIdCount`
+/// bound makes the last one iterate zero times.
+constexpr int kBlastSweepPasses =
+    (static_cast<int>(kBlockIdCount) + kBlastSweepStride - 1) / kBlastSweepStride;
 
 namespace blast {
 
@@ -947,8 +967,15 @@ static_assert(blast::everyBlastPassSwept(std::make_integer_sequence<int, kBlastS
               "the blast table is wrong somewhere - the failing BlastSweep instantiation above "
               "names which stride");
 /// The passes are generated, so this is what proves there are enough of them.
+/// **Kept after the derivation above rather than deleted**, for the reason
+/// `Copper.hpp` keeps its twin: it now reads as a check on the *arithmetic*
+/// rather than on somebody's memory, and it is the thing that fires if the
+/// rounding is ever written `kBlockIdCount / kBlastSweepStride` without the
+/// `+ stride - 1`, which silently drops the last partial stride and stops
+/// sweeping every id past the final multiple of 512.
 static_assert(kBlastSweepPasses * kBlastSweepStride >= static_cast<int>(kBlockIdCount),
-              "the blast sweep no longer covers every block id - raise kBlastSweepPasses");
+              "kBlastSweepPasses is derived from kBlockIdCount, so if this fires the derivation "
+              "itself is broken - the ceiling division above lost its rounding term");
 
 // ---------------------------------------------------------------------------
 // The named checks: one per finding whose fix is a *value* rather than an
@@ -1238,10 +1265,20 @@ constexpr bool alwaysDropsFromBlast(BlockId block) {
 /// **`Main.cpp` solved it by ordering rather than by a field, which is why no
 /// struct changed.** Creeper blasts are appended to the shared vector first and
 /// TNT is pushed after, so the boundary is known without storing it: the flag
-/// is computed at `Main.cpp:10563` as `fromTnt = blastIndex >= creeperBlasts`
-/// and consumed at `:10758`. **Do not add `bool fromTnt` to `CreatureExplosion`
+/// is computed as `fromTnt = blastIndex >= creeperBlasts` and passed straight
+/// into the call below. **Do not add `bool fromTnt` to `CreatureExplosion`
 /// now** - the question already has an answer, and a second one that nothing
 /// reads is bug shape #1 and the most expensive shape in this project.
+///
+/// **Cited as searches, not line numbers, and that is not fussiness - the three
+/// numbers that stood here had all rotted by 2026-08-19.** They read
+/// `Main.cpp:10563`, `:10758` and `:10729`; the file has since grown by roughly
+/// six hundred lines and `:10729` now sits in the middle of an unrelated note
+/// about `armourDefence`, so a reader following it would have concluded this
+/// whole comment was fiction. Grep `creeperBlasts` for the boundary, `fromTnt)`
+/// for the consumer, and `26-block charge` for the measurement. A search
+/// survives an edit above it; a number does not (`CLAUDE.md`, the remedy
+/// ladder).
 ///
 /// **What would make THIS claim false**, dated 2026-08-19 and stated so the
 /// next reader checks in one grep rather than trusting the date, because a
@@ -1251,15 +1288,29 @@ constexpr bool alwaysDropsFromBlast(BlockId block) {
 /// reordering of those two pushes silently inverts every drop in the game.
 ///
 /// **The 4x TNT loss this documented is fixed, and the creeper arm was never
-/// broken.** `Main.cpp` rolls at `roll * blast.power < 1.0f`, which *is* the
-/// 1/power rule rearranged; it was correct for creepers all along and was only
-/// ever wrong because TNT was being sent through it too. `Main.cpp:10729`
-/// records the measurement after the fix: **26 of 26 for TNT, with the creeper
-/// side bit-identical either way**, which is the right shape for a control - it
-/// fired, it moved in one direction only, and the untouched arm did not budge.
+/// broken.** The creeper's rule is `1.0f / power`, written out plainly in the
+/// function below, and it was correct all along - it was only ever wrong
+/// because TNT and the always-drop blocks were being sent through it too.
+/// `Main.cpp` records the measurement after the fix, findable by grepping
+/// `26-block charge`: **a 26-block charge yielded 6.5 and now yields 26, while
+/// the creeper at 0.3340 and the charged creeper at 0.1665 are bit-identical
+/// either side**, which is the right shape for a control - it fired, it moved
+/// in one direction only, and the untouched arm did not budge.
 ///
-/// **So do not "fix" the arithmetic.** The expression looks like a bug to
-/// anyone who expects to see `1.0f / power` written out, and it is not one.
+/// **The old site expression was `roll * blast.power < 1.0f`, and that string
+/// is kept HERE on purpose - do not delete it, and do not paste it back into
+/// `Main.cpp`.** It is the creeper's 1/power rule algebraically rearranged,
+/// which is why it looked defensible while it was quietly applied to charges
+/// and dragon eggs as well. `Main.cpp` says in its own comment that a later
+/// reader confirms the adoption **by that expression having left that file**,
+/// so this header holds the only copy the grep should ever find. Verified
+/// 2026-08-19: one hit tree-wide, this line. Two hits means somebody helpfully
+/// pasted it back and the check is now a false negative.
+///
+/// **So do not "fix" the arithmetic.** `1.0f / power` is the whole of the
+/// creeper rule, and the four asserts below pin both arms - the charge at
+/// 100%, both creeper powers, and a negative twin so that widening
+/// `alwaysDropsFromBlast` into "yes to everything" cannot pass.
 ///
 /// The rule lives here because the two sources that need it - the charge in
 /// `Main.cpp` and the creeper coming out of `Creature.cpp` - sit in different

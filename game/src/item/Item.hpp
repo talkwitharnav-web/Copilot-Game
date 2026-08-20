@@ -1765,11 +1765,22 @@ constexpr int armourMaterial(ItemId item) {
 ///      exactly where the old comment said it had to - `survival::armourDamageTaken`
 ///      beside `effects::damageTakenScale` and after `chargeDamageWindow`,
 ///      because the invulnerability window compares the *raw* blow.
-///   3. **STILL OPEN.** `Creature.cpp` has `chargeDamageWindow` and **no call
-///      to `armourDamageTaken`**, so a creature wearing armour takes full
-///      damage. The shared function the old comment asked for already exists;
-///      what is missing is the call.
-/// **This paragraph is false the moment `Creature.cpp` names `armourDamageTaken`.**
+///   3. **CLOSED, and NOT by wiring the call** (2026-08-19, 17:10). This step
+///      used to read "still open - `Creature.cpp` has `chargeDamageWindow` and
+///      no call to `armourDamageTaken`". That framing was wrong, and acting on
+///      it would have been a real defect: `Creature.cpp` now carries a dated
+///      ruling that **there is no armour on a creature to read**. No creature
+///      file names `ArmourSet` at all - every `armour*` hit in `Creature.hpp` is
+///      prose about the villager *armourer* profession. So there is no defence
+///      value to pass, and adding a defence column to feed the call would create
+///      a second owner for a number nothing produces.
+///      `damageCreature` is the single site that would take the call **if mob
+///      equipment ever exists**; until then the absence is structural, not a gap.
+/// **Falsified by**: a creature gaining wearable equipment - i.e. a creature
+/// file naming `ArmourSet`, or `CreatureSpecies` growing an armour/defence
+/// field. Deliberately phrased as *calls*, not *names*: a bare grep for
+/// `armourDamageTaken` already matches this paragraph and the ruling that
+/// replaced it, so the token alone proves nothing either way.
 constexpr int armourDefence(ItemId item) {
     if (item == ItemId::TurtleHelmet) {
         return 2;
@@ -1906,6 +1917,27 @@ static_assert(maxStackFor(itemForBlock(BlockId::BedRunFirst)) == 1 &&
                   maxStackFor(itemForBlock(BlockId::BannerRunFirst)) == 16,
               "a block item's cap is this function's job too - deleting the isBed or isSignLike "
               "branch drops all four back to the sixty-four they silently were");
+
+/// **The top of the block enum must fall all the way through to the default,
+/// and `kLastBlock` is written rather than a name so this follows the enum.**
+///
+/// Every branch above is a bounded range, and this is what keeps them bounded.
+/// `Block.hpp` now parks new families in **tail runs appended after the last
+/// enumerator** rather than inside their own runs, because a run that grows
+/// renumbers every id above it and those ids are already in saved chunks - the
+/// forty waxed cut copper stair and slab ids landed exactly that way on
+/// 2026-08-19. A tail id is therefore numerically **higher than every special
+/// case here**, so a single range predicate written `id >= XRunFirst` with no
+/// upper bound would sweep in the whole tail and cap the newest blocks in the
+/// game at 1 or 16.
+///
+/// Checked and correct today: `isStowbox`, `isBed`, `isSign`, `isHangingSign`
+/// and `isBanner` all close both ends, so a waxed cut copper slab stacks to 64
+/// as the reference has it. This line is what says so tomorrow.
+static_assert(maxStackFor(itemForBlock(kLastBlock)) == kMaxStack,
+              "the last block id no longer stacks to sixty-four - either a range predicate in "
+              "Block.hpp lost its upper bound and now swallows the tail runs, or a genuinely "
+              "unstackable family was appended at the end and wants its own branch above");
 
 /// Bring a stack down to its item's cap, and **say how much that destroyed**.
 ///
@@ -2222,9 +2254,24 @@ constexpr ItemId dropForBlock(BlockId block) {
     if (isBeeNest(block)) {
         return ItemId::None;
     }
-    // A hive is one block however it is turned, and however full it is. What
-    // the honey inside is worth is not a drop - harvesting it is the bee work,
-    // and until that lands a full hive simply keeps its honey when moved.
+    // A hive is one block however it is turned, and however full it is.
+    //
+    // **Mining a full hive LOSES the honey**, and that is the trade rather than
+    // an oversight: this function hands back an `ItemId` and nothing else, so
+    // there is nowhere for a level to ride along, and the canonical `Beehive`
+    // is level zero by construction - the run stores facing as `offset % 4` and
+    // honey as `offset >= 4`, so the head of it is empty and north-facing. Break
+    // a hive at level five and put it down again and it is empty. The way to be
+    // paid for the honey is to shear it first: `Main.cpp`'s shear site drops
+    // three honeycomb and resets the home through `beeHomeAtLevel(hive, 0)`.
+    //
+    // This used to say "until that lands" of the bee work. **It landed on
+    // 2026-08-19**, and the same edit made the clause beside it wrong as well -
+    // it claimed a moved hive "simply keeps its honey", which is the one thing
+    // it cannot do. Falsifier for what replaced it: an `ItemStack` field that
+    // survives a drop, at which point a level could ride in `damage` the way a
+    // stowbox's contents already do.
+    //
     // The reference drops nothing for a crafted hive either; that divergence
     // is deliberate, because a hive you crafted and placed would otherwise be
     // unrecoverable while Silk Touch is dormant, which is the worse trade.

@@ -433,29 +433,44 @@ private:
 // What each effect actually does. Every number here is Bedrock's, and where
 // Bedrock and Java disagree the divergence is stated at the function.
 //
-// **Six of the twenty-four have no consumer in this file and no reader
-// anywhere** - swept function by function on 2026-08-18, after `meleeDamage`
-// was found with no caller and Strength and Weakness turned out to have been
-// doing nothing since the day they were brewable:
+// **Five of the twenty-four have no consumer in this file and no reader in the
+// three files that would hold one** - `Main.cpp`, `item/Item.hpp` and this one,
+// swept function by function on 2026-08-18 after `meleeDamage` was found with no
+// caller and Strength and Weakness turned out to have been doing nothing since
+// the day they were brewable. **Re-measured 2026-08-19** and it was six then:
 //
 //   Nausea, Blindness      - a post-process each, so they belong to the
 //                            renderer and nothing here would help.
-//   NightVision            - a floor under the light level. **Brewable today**
-//                            (`item::kPotions` carries its base and extended
-//                            rows), so two potions are drinkable and do
-//                            literally nothing.
 //   Invisibility           - skips drawing the player and held item.
-//                            **Brewable today** (`item::kPotions` again, base
-//                            and extended), same.
+//                            **Brewable today** (`item::kPotions`, base and
+//                            extended rows), so two potions are drinkable and
+//                            do literally nothing.
 //   HealthBoost            - +4 max health per level, which is `Survival.hpp`'s
 //                            twenty to widen, not a number this file owns.
 //   Saturation             - refills the food bar directly; `Survival.hpp`.
 //
-// No accessor is written for any of them, deliberately: an accessor with no
+// **NightVision was the sixth row and it is now wired**, which is why this list
+// is five (finding 10358). `Main.cpp` reads
+// `player.effects.level(Effect::NightVision)` and swaps `sky::kAmbientFloor`
+// for `sky::lighting(0.25f).ambient` - noon's own ambient, off the day curve
+// rather than a literal - in the `setSunLighting` call. Search for
+// `Effect::NightVision` rather than trusting a line number.
+//
+// **A row that lies about a wired effect is worse than no table at all, and
+// this one did for a while**, so: the sweep above is `Effect::<name>` over
+// those three files, graded rather than asserted - `Absorption`,
+// `InstantHealth`, `InstantDamage`, `None` and `Count` all fire in `Main.cpp`
+// while an invented enumerator returns 0, so a zero for the five above carries
+// information. **What it cannot see** is a reader in a file not on that list;
+// `Creature.cpp` is the obvious candidate and contains no `effects.level` at
+// all, so the player's effect state is not plumbed into creatures - wiring
+// Invisibility is a plumbing job rather than one call site.
+//
+// No accessor is written for any of the five, deliberately: an accessor with no
 // caller is the exact shape this sweep exists to find. What is written down is
 // where each one goes, so the next reader does not have to sweep again.
 //
-// Absorption is a seventh of a different kind - granted by the two apples, and
+// Absorption is of a different kind again - granted by the two apples, and
 // spent by a pool on `Player` rather than by anything in this file. See
 // `absorptionPoints`.
 // ---------------------------------------------------------------------------

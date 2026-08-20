@@ -6,6 +6,7 @@
 #include "world/FaceGeometry.hpp"
 #include "world/FaceShading.hpp"
 #include "world/Fluid.hpp"
+#include "world/Tick.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
@@ -51,7 +52,25 @@ constexpr float kSettleSpeed = 2.0f;
 constexpr float kGroundFriction = 0.6f;
 
 /// Five minutes, as the reference has it. Ours runs on wall time rather than
-/// pausing when a chunk stops ticking, because drops are not saved anyway.
+/// pausing when a chunk stops ticking.
+///
+/// **`age` survives a save now, and that is deliberate.** This comment used to
+/// justify itself on the grounds that drops were never written to disk, which
+/// stopped being true on 2026-08-19 when `Main.cpp` wired
+/// `WorldStore::saveDrops`/`loadDrops` to `persisted()` and `restore` below.
+/// `restore` takes the stored `age` rather than starting at zero precisely so
+/// this clock cannot be reset by quitting and reloading - otherwise a save
+/// would be a way to keep a stack forever.
+///
+/// **The retired claim is described above and NOT quoted, deliberately.** It
+/// was quoted verbatim here for a few hours, and in that time a seam sweep
+/// looking for exactly that sentence hit this line and re-reported the premise
+/// as still live - the correction was indistinguishable from the fault it
+/// documented. A retired negative claim left spelled out in the file is a
+/// permanent false positive for every future sweep, in the same way that
+/// pasting a superseded expression back into `Main.cpp` would be a permanent
+/// false negative for the blast-drop check (`Explosion.hpp` says so at its own
+/// site). **Do not helpfully restore the original wording.**
 constexpr float kDespawnSeconds = 300.0f;
 
 /// A single frame may not advance a drop further than this. **The same 0.05 the
@@ -60,6 +79,21 @@ constexpr float kDespawnSeconds = 300.0f;
 /// all resolve against the same world with the same one-block-deep assumption,
 /// so a frame that is too long for one is too long for all three.
 constexpr float kMaxDeltaSeconds = 0.05f;
+
+/// **It is one tick, and until now nothing here said so.** The paragraph above
+/// states the coupling in prose and nothing enforced it, which is the remedy
+/// ladder's third rung sitting where its second is available. Copied verbatim
+/// from `Player.cpp` and `Creature.cpp` so all three read identically.
+///
+/// The first half pins the clamp to the one owner (`Tick.hpp`), so it follows a
+/// tick-rate change instead of being left behind. The second half is the
+/// **absolute anchor**, and it is the half that does the work: both sides of
+/// the first are derived, so a coherent tick-rate move would satisfy it on its
+/// own, and this clamp is not free to move - it is what makes the sweep bound
+/// below hold at terminal velocity.
+static_assert(kMaxDeltaSeconds == tick::kSeconds && kMaxDeltaSeconds == 0.05f,
+              "a frame may advance a drop by at most one simulation tick, and that tick is "
+              "50 ms - the same clamp the player, the creatures and the falling cubes use");
 
 /// Longest slice of a move - on **any** axis - that may be tested in one go.
 ///
@@ -649,6 +683,34 @@ void ItemEntities::update(const World& world, const glm::vec3& playerFeet, float
         // stops, where a vertical one has to ask `highestSurfaceBelow` where
         // the surface actually is - a slab's top is halfway up its cell - and
         // then decide between a bounce and a settle.
+        //
+        // **And a rising drop is stopped too, which it was not.** The test used
+        // to read `step.y > 0.0f || !overlapsSolid(...)`, so an upward move was
+        // waved through without any collision test at all. Gravity made that
+        // almost invisible - `spawn`'s 3 m/s pop rises under a fifth of a block
+        // before it turns over - but **water does not turn over**: an item in a
+        // fluid is pushed at a steady `kFloatSpeed` for as long as it is in one,
+        // so anything dropped in a flooded cave, under a ledge or in a pocket
+        // with rock above it rose straight through the ceiling, cleared the
+        // water, and then fell onto whatever was above - out of reach, and
+        // reading as the game eating it. Every other axis already refused to
+        // enter a solid; this was the only one that did not.
+        //
+        // **`startedClear` is what keeps that from pinning an embedded drop.**
+        // Rising was the last way out of a block for an item that somehow ended
+        // up inside one, and closing it unconditionally would hold that item
+        // there until it despawned. Measured once per drop rather than per
+        // slice, from the post-horizontal position the vertical walk starts at.
+        // **The `step.y > 0.0f` term is a short-circuit, not a condition.** The
+        // only read of `startedClear` is eight lines below, already inside
+        // `if (step.y > 0.0f)`, and `step.y` is not written anywhere in the
+        // slice loop - so the value is identical either way and this simply
+        // stops a falling or resting drop paying for an `overlapsSolid` it can
+        // never consult. Every drop on the floor was running that probe once a
+        // frame; at ~140 drops and 120 fps that is ~17,000 wasted AABB tests a
+        // second, each walking up to eight cells of the shape table.
+        const bool startedClear = step.y > 0.0f && !overlapsSolid(world, boxAt(next));
+
         const int slices =
             std::max(1, static_cast<int>(std::ceil(std::abs(step.y) / kMaxSweepStep)));
         const float slice = step.y / static_cast<float>(slices);
@@ -659,8 +721,16 @@ void ItemEntities::update(const World& world, const glm::vec3& playerFeet, float
             // fallen past, which is a teleport upward.
             const float from = next.y;
             next.y += slice;
-            if (step.y > 0.0f || !overlapsSolid(world, boxAt(next))) {
+            if (!overlapsSolid(world, boxAt(next))) {
                 continue;
+            }
+            if (step.y > 0.0f) {
+                if (!startedClear) {
+                    continue;
+                }
+                next.y = from;
+                drop.velocity.y = 0.0f;
+                break;
             }
             // Landing reads the shape table, so a slab's top is halfway up its
             // cell rather than the cell boundary - the same rule that stopped
@@ -929,8 +999,27 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
                 }
             };
 
-            const auto face = [&](const glm::vec3& a, const glm::vec3& b2, const glm::vec3& d,
-                                  const glm::vec3& e, const glm::vec2* rect, float layer, float shade) {
+            // **Both arrays are taken by reference-to-array, not as loose
+            // corners and a bare pointer, and that is the whole defence of this
+            // seam.** The four corners used to arrive as `a`, `b2`, `d`, `e`
+            // and were immediately packed back into an array to be indexed - so
+            // the parameter list existed only to give a caller four chances to
+            // write them in the wrong order, which is exactly the mirror that
+            // shipped on every dropped block for twenty milestones (vertices
+            // 0<->1 and 2<->3 swapped). Nothing asserted the pairing, and no
+            // `static_assert` could: this is a runtime lambda, unreachable from
+            // constant evaluation.
+            //
+            // So it is derived instead of checked. Corner `i` meets uv slot `i`
+            // inside one loop, the caller fills its array with the same index it
+            // will be read back on, and a swap is no longer expressible at the
+            // call site. `const glm::vec2 (&rect)[4]` rather than
+            // `const glm::vec2*` for the same reason `faceUvs` already takes
+            // `glm::vec2 (&out)[4]` - a raw array decays to a pointer and a
+            // pointer carries no bound, so `rect[4]` would have been a silent
+            // read past the end with no diagnostic possible.
+            const auto face = [&](const glm::vec3 (&corners)[4], const glm::vec2 (&rect)[4],
+                                  float layer, float shade) {
                 // **A dropped pane of stained glass is the fourth place a block
                 // is drawn**, and the one that would have been missed: its art
                 // keeps a real alpha now, so left in the opaque mesh the cutout
@@ -939,7 +1028,6 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
                 const bool blend = blended != nullptr && isBlendedGlass(block);
                 engine::MeshData& out = blend ? *blended : mesh;
                 const auto base = static_cast<std::uint32_t>(out.vertices.size());
-                const glm::vec3 corners[4]{a, b2, d, e};
                 for (int i = 0; i < 4; ++i) {
                     out.vertices.push_back(
                         engine::Vertex{{corners[i].x, corners[i].y, corners[i].z},
@@ -991,13 +1079,18 @@ engine::MeshData ItemEntities::buildMesh(const World& world, float timeSeconds,
                 glm::vec2 rect[4];
                 faceUvs(quad, rect);
                 const float layer = faceLayer(quad);
-                const auto at = [&](int c) {
-                    FaceCorners corners = cornersOf(quad.face);
-                    return corner(corners[c][0] != 0 ? b.maxX : b.minX,
-                                  corners[c][1] != 0 ? b.maxY : b.minY,
-                                  corners[c][2] != 0 ? b.maxZ : b.minZ);
-                };
-                face(at(0), at(1), at(2), at(3), rect, layer, faceShade(quad.face));
+                // One index fills both arrays, which is what makes the corner
+                // and its uv slot impossible to mismatch - see the note on
+                // `face` above. `cornersOf` is read once here rather than once
+                // per corner, which it was when this was a four-argument call.
+                const FaceCorners corners = cornersOf(quad.face);
+                glm::vec3 points[4];
+                for (int c = 0; c < 4; ++c) {
+                    points[c] = corner(corners[c][0] != 0 ? b.maxX : b.minX,
+                                       corners[c][1] != 0 ? b.maxY : b.minY,
+                                       corners[c][2] != 0 ? b.maxZ : b.minZ);
+                }
+                face(points, rect, layer, faceShade(quad.face));
             }
         };
 

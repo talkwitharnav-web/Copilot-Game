@@ -26,3 +26,8 @@ reference/
 capture.png
 run.log
 run.err
+
+# In-game photos, written by pressing Enter. The player's own pictures of their
+# own world - useful to them, never part of the build, and potentially hundreds
+# of megabytes of PNG.
+photos/

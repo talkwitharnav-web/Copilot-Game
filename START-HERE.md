@@ -7,15 +7,15 @@
 
 - **1** &middot; START HERE
   - **28** &middot; 0. The sixty-second version
-  - **38** &middot; 1. The five rules that will otherwise cost the user time
-  - **50** &middot; 2. Read these, in this order
-  - **80** &middot; 3. Where the project actually is
-  - **226** &middot; 4. Build and run
-  - **257** &middot; 5. The reference art and sound — where it is staged, and why it is not a placeholder
-  - **282** &middot; 6. Building a creature model — the procedure that stopped the failures
-  - **300** &middot; 7. The one bug shape that keeps recurring
-  - **312** &middot; 8. Things that are settled — do not re-litigate
-  - **326** &middot; 9. Talking to the user
+  - **39** &middot; 1. The five rules that will otherwise cost the user time
+  - **51** &middot; 2. Read these, in this order
+  - **82** &middot; 3. Where the project actually is
+  - **228** &middot; 4. Build and run
+  - **259** &middot; 5. The reference art and sound — where it is staged, and why it is not a placeholder
+  - **284** &middot; 6. Building a creature model — the procedure that stopped the failures
+  - **302** &middot; 7. The one bug shape that keeps recurring
+  - **314** &middot; 8. Things that are settled — do not re-litigate
+  - **328** &middot; 9. Talking to the user
 
 <!-- /INDEX -->
 
@@ -28,7 +28,8 @@ You are picking up a **custom C++20 + Vulkan voxel sandbox** built from scratch.
 ## 0. The sixty-second version
 
 - **Milestones 1–29 are done** (plus M29b–m). The game is genuinely playable: an endless seeded world, survival, combat, farming, villages, 58 creature species, a deferred HDR renderer with shadows, clouds, weather and water reflections. **M30, hardware ray tracing, is parked** — the user's own words on 2026-08-17: *"i agree ray tracing is a long way out."*
-- **A great deal is open, and none of it has been acted on.** Two whole-project documents were written on 2026-08-17 and they are the honest state of the game. **`audit.md` is what is *broken*** — its §16 is one page of ten severe confirmed faults, including **no autosave** (a crash keeps the terrain and loses every item, chest, furnace and creature), every drop path erasing a stack's `damage`, a skeleton's arrow that cannot hit you, crops that never grow at or above y=32, and villager job and bed claims that are never saved. **`GAPS.md` is what is *absent*** — §0.3 scores every area and §0.5 ranks what to do about it. The last *playtest* round closed on 2026-08-12 (M29m), which is not the same thing as nothing being wrong: neither document's findings came from playing. **Read `audit.md` §16 before trusting that anything works.**
+- **A great deal is still open, but the 2026-08-17 fault list is NOT the current one — do not read it as today's state.** Three correctness rounds have run since: the consolidation of **2026-08-18**, and a 27-agent sweep on **2026-08-19**. **`audit.md` §A0 is the current round and §A the one before it**; PART TWO is history and its line references are stale by design. Of the ten severe faults §16 once listed, the autosave now runs on a 30-second interval, villager bed/job/meeting claims persist (`kCreatureVersion` is at 6), and drops keep their `damage` through `SavedItem`. **`GAPS.md` is still what is *absent*** — §0.3 scores every area, §0.5 ranks what to do. **Neither document's findings came from playing, and the last playtest round closed on 2026-08-12 (M29m)**, so "fixed" here means read, re-read and reasoned — not played.
+- **⚠️ The tree has not compiled since 2026-08-19.** The last round ran under a hardware throttle that forbade every build tool, and landed **64 files, +7,537 / −1,045 uncompiled**. **Get a build before trusting anything**, and read `audit.md` §A0's list of failures that will be *misread* first — several asserts will fire in a way that looks like a fix broke them when the assert is doing its job.
 - **Build:** `. .\tools\dev-env.ps1` then `cmake --build build\release`, run with `.\run.ps1 release`. PowerShell 5.1, chain with `;` and never `&&`.
 - **The bar:** both presets clean at `/W4` with zero warnings, and `tools\soak.ps1 -Seconds 45` with zero validation errors and an empty stderr. **That bar proves it does not crash and almost nothing else** — see §7.
 - **Never commit to Git. The user is the playtester. Textures and sounds are Mojang's, permanently. The overworld only. One agent at a time.** Those catch most new sessions out; §1, §5 and §8 are the long versions.
@@ -52,9 +53,10 @@ They have paid for each of these once already. Do not make them pay twice.
 | File | What it is | When |
 |---|---|---|
 | **`CLAUDE.md`** | The hard rules, the working style and the architecture rules. **Auto-attached every turn, and opens with a box of the bug shapes that have cost the most.** | Always |
-| **`DECISIONS.md`** | Why every settled choice is the way it is — 45 sections. Split out of `CLAUDE.md` so it is *not* auto-attached. | **Before undoing anything that looks deliberate** |
+| **`DECISIONS.md`** | Why every settled choice is the way it is. Split out of `CLAUDE.md` so it is *not* auto-attached. | **Before undoing anything that looks deliberate** |
 | **`LESSONS.md`** | Every mistake already paid for once, and what it cost. Also split out of `CLAUDE.md`. | **Before debugging in an area you have not touched** |
-| **`audit.md`** | Every confirmed fault in the tree as of 2026-08-17 — what is **broken**, with a `file:line` each. **§16 is the whole of it on one page.** Nothing in it is fixed. | **Before debugging anything, and before believing a system works because it shipped** |
+| **`MEASURING.md`** | How to measure this codebase without lying to yourself — controls, absence claims, the traps that make a probe return a plausible wrong number. Split out of `CLAUDE.md` on 2026-08-19, where it had grown to 12,199 characters on a file paid for every turn. | **Before writing a probe, making a count, or claiming something does not exist** |
+| **`audit.md`** | What is **broken**, newest round first. **§A0 is the 2026-08-19 round, §A the 2026-08-18 one; PART TWO is the 2026-08-17 history and its line references are stale by design.** Much of the original list is now fixed — read the status label on each row, not the section title. | **Before debugging anything, and before believing a system works because it shipped** |
 | **`GAPS.md`** | What is **absent** rather than broken, area by area, with Bedrock's real numbers and an effort estimate per gap. ~700 KB and not meant to be read through. | **Before planning any feature work — §0.3 the scoreboard and §0.5 the P0 list, then the one section you need** |
 | **`UI.md`** | The interface: how ours actually renders, Minecraft's measured cell and screen geometry, the palette, and every screen we do not have. Backed by three JSON files under `assets/ui/`. **§0.4 is eleven binding rules that override anything later in the file, because six agents wrote it in parallel and contradicted each other.** | **Before any UI, HUD or menu work — §0.4 then §0.6, never end to end** |
 | **`SYSTEM_MEMORY.md`** | Current technical truth — structure, build, invariants, sizes | Before touching code |
@@ -69,11 +71,11 @@ They have paid for each of these once already. Do not make them pay twice.
 
 **Every one of them opens with a generated index of section names and line numbers, so you can jump straight to what you need instead of reading to find it.** `tools/index-docs.ps1` rebuilds every index; run it after editing any document. `-Check` fails if one is stale, and `tools/check-index.ps1` proves every entry still points at the heading it names.
 
-**One agent at a time.** Two were run side by side on 2026-08-11 with a message log, a board of file claims and a script that announced unread messages from the build and every script. It is all deleted at the user's instruction — _"remove the multi-agent thing it's not working out man."_ Both windows had been handed the same brief, so both claimed and both wrote the same file. **Research subagents are a different thing and are still wanted**, with `model: "Claude Opus 5 (copilot)"`.
+**One coordinator, many agents, strict disjoint file ownership — and never a channel between them.** The rule was written after 2026-08-11, when two *windows* were run side by side with a message log, a board of file claims and a script announcing unread messages. All of that is deleted at the user's instruction — _"remove the multi-agent thing it's not working out man."_ **The failure was not the number of agents: both windows had been handed the same brief, so both claimed and both wrote the same file.** The pattern that does work has now run twice — sixteen fixers on 2026-08-18 and **twenty-seven agents on 2026-08-19** — and its rules are: **one coordinator routes everything, fixers own disjoint files and never overlap, read-only reviewers may overlap freely because they cannot collide, and no agent talks to another.** Research subagents were always fine. Launch every one with `model: "Claude Opus 5 (copilot)"`.
 
-**Read the section you need, not the whole file.** `SYSTEM_MEMORY.md` and `RESEARCH.md` are the two biggest by a wide margin and neither is meant to be read end to end.
+**Read the section you need, not the whole file.** `GAPS.md`, `SYSTEM_MEMORY.md`, `LESSONS.md` and `RESEARCH.md` are the biggest by a wide margin and none is meant to be read end to end.
 
-**If you only read three:** `CLAUDE.md`'s opening box, §3 of this file, and `audit.md` §16.
+**If you only read three:** `CLAUDE.md`'s opening box, §3 of this file, and `audit.md` §A0.
 
 ---
 
@@ -250,7 +252,7 @@ cmake --build build\release    # or build\debug
 
 **Do not read its old numbers as a baseline.** It reported 1792/0 for weeks, then 2539/**275**, then 2629/0. The 275 arrived because the tool stopped comparing union extents alone — that check had been passing a flower pot whose two X walls carried the lid's rect and a scaffolding missing four top rails, neither of which moves an outer box. **A checker's fault count rising after you improve it is the improvement, not a regression**, and the same applies to the "no model" bucket falling from 1370 to 271: the tool learned to follow variants and templates rather than giving up on the first filename that did not match.
 
-**`drop_showcase=1` throws one of every awkward block on the floor** in front of the spawn point, with the flat-sprite drops beside them for comparison. A dropped block is a miniature of the block itself, and nothing but looking will tell you whether a bell reads as a bell. Dropped items are never saved, so it leaves no trace.
+**`drop_showcase=1` throws one of every awkward block on the floor** in front of the spawn point, with the flat-sprite drops beside them for comparison. A dropped block is a miniature of the block itself, and nothing but looking will tell you whether a bell reads as a bell. **The world's own dropped items are neither loaded nor saved while it is on** — the same shape as `creature_showcase` — so it leaves your real save alone. **Restore it to `0` when you are done.** *(This line asserted the opposite until 2026-08-19 — that drops never reached disk at all. Drop persistence landed that day and both gates in `Main.cpp` now do real work. The retired sentence is described rather than quoted, deliberately: a superseded negative left spelled out is a permanent false positive for the next sweep. Re-check with a search of `Main.cpp` for `saveDrops|loadDrops`.)*
 
 ---
 

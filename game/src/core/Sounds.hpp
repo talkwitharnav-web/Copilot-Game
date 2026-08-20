@@ -32,6 +32,34 @@ namespace game {
 /// loader addresses files by stem name - but a stem this table names and the
 /// script never writes is an event that silently never sounds, which is what
 /// `sweep()` is for.
+///
+/// **Adding an enumerator takes three edits and this header is only the
+/// first.** Written down here because the audit partition hands this file and
+/// `Sounds.cpp` to different owners often enough that it has already blocked
+/// one piece of work (the armour equip sound), and an owner of the header alone
+/// has no way to see the other two from here:
+///
+///   1. the enumerator, here, before `Count`;
+///   2. its stem in `kStems` at the same index, in `Sounds.cpp`, **plus an arm
+///      in the `eventUse` switch beside it** - that switch is what tells
+///      `sweep()` whether a silent event is a fault or deliberate. It has no
+///      `default:` and names all 61 tokens, falling through to `Unclassified`,
+///      which is the right shape - but do not expect the compiler to enforce
+///      it. `-Wswitch` would; MSVC's equivalent C4062 is off by default and
+///      this build sets only `/W4` (CMakeLists.txt:90, no `/w14062`, no
+///      `/WX`), so on this toolchain a missing arm is caught by `sweep()` at
+///      startup and by nothing earlier;
+///   3. a row in `tools/make-reference-sounds.ps1`, which is where the audio
+///      comes from - this project never authors sound.
+///
+/// Only the first two are enforced. Since 2026-08-19 a fourth `static_assert`,
+/// `everyStemIsFilled()`, makes step 2's *stem* half a compile error rather
+/// than a crash: the three anchors catch insertion and reordering but cannot
+/// catch an enumerator **appended after the last one**, because nothing shifts
+/// below it - it just leaves `kStems` a row short, and a short `std::array`
+/// value-initialises the tail to `nullptr`, which `load` builds a
+/// `std::string` from. Step 2's *switch* half and step 3 are still caught only
+/// at run time, by `sweep()`, which is why `sweep()` runs at startup.
 enum class SoundEvent : std::uint8_t {
     DigStone,
     DigWood,

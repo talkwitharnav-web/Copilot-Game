@@ -10,16 +10,16 @@
   - **60** &middot; 0.2 The verdict
   - **74** &middot; 0.3 What was found while writing this
   - **93** &middot; 0.4 The rules — read these before writing any UI code
-  - **278** &middot; 0.5 What this pass deliberately cut
-  - **292** &middot; 0.6 The build order
-  - **318** &middot; 0.7 What this pass did not do
-  - **334** &middot; 1. The UI we have, and how it works
-  - **1073** &middot; 2. The extracted sprite atlas
-  - **1286** &middot; 3. The UI palette, measured
-  - **1779** &middot; 4. Cell and screen geometry
-  - **2320** &middot; 5. The screens we do not have
-  - **3456** &middot; 6. The HUD we do not have
-  - **4542** &middot; 7. Constructed mockups
+  - **316** &middot; 0.5 What this pass deliberately cut
+  - **330** &middot; 0.6 The build order
+  - **356** &middot; 0.7 What this pass did not do
+  - **372** &middot; 1. The UI we have, and how it works
+  - **1111** &middot; 2. The extracted sprite atlas
+  - **1324** &middot; 3. The UI palette, measured
+  - **1817** &middot; 4. Cell and screen geometry
+  - **2358** &middot; 5. The screens we do not have
+  - **3494** &middot; 6. The HUD we do not have
+  - **4580** &middot; 7. Constructed mockups
 
 <!-- /INDEX -->
 
@@ -95,6 +95,11 @@ Two more were found by the menu specification and belong to other systems: **sav
 Six agents wrote §1–§7 independently and **contradicted each other in nine places**. Every contradiction was
 adjudicated by a reviewer with the source open. **These resolutions win over anything in the sections
 below.** Where a section still says otherwise, it is wrong and this table is right.
+
+**R1–R11 are those adjudications. R12 onward are not** — they are hazards found later that a UI author
+must know before writing code, and they are kept here because this is the section people actually read
+first. **The "binding" property is the same either way: if a section below contradicts a rule here, the
+rule wins.**
 
 ### R1 · One art-pixel constant, and container panels shrink 4.19%
 
@@ -272,6 +277,39 @@ proposed `gui_scale` twice with different types. There must be **one** `kOptions
   **2 art pixels**, or snap widget rects to device pixels at build time.
 - **`Renderer.hpp:389`'s "retired meshes should hover near zero" is wrong** whenever a screen is open —
   steady state is 6–9 with three meshes rebuilt per frame. A future session will read it as a leak.
+
+### R12 · The craft grid's WIDTH and the buffer that holds it are two constants nothing links
+
+**Added 2026-08-19.** `craftSize(Kind)` is the exemplar of a well-guarded switch — the `default:`
+was deliberately deleted, `Kind::Count` falls to `return -1`, `everyKindStatesItsGrid()` walks the
+**enum** rather than the switch, and there is a negative control asserting the sentinel still fails.
+**It reads as fully guarded. It is not.**
+
+**The sweep proves only that each `Kind` states a NON-NEGATIVE width. It never proves the width
+FITS THE BUFFER.**
+
+- Buffer: `std::array<game::ItemStack, game::kMaxCraftSlots> craftSlots{}` — **9 elements**
+  (`kMaxCraftSize = 3`, `Recipe.hpp`, namespace `game`)
+- Extent: `craftExtent = inventoryScreen::craftSize(*openScreen)` — **a width chosen in a different
+  namespace and a different file**
+- **The bound dies at `craftSlots.data()`**, and `consumeIngredients(ItemStack* slots, int size)`
+  then writes `for (s = 0; s < size*size; ++s)`
+
+**Today 3 → 9 fits exactly, with zero headroom.** A future `Kind` declaring a 4×4 grid **passes
+`everyKindStatesItsGrid()` (4 ≥ 0)** and writes **7 `ItemStack`s past the end of a stack array**,
+with no diagnostic possible — and **the `Kind` enum's own comment explicitly anticipates "a ninth
+screen"**.
+
+**Measured, not asserted:** the files naming `craftSize` are {`Main.cpp`, `InventoryScreen.cpp`,
+`InventoryScreen.hpp`}; the files naming `kMaxCraftSize`/`kMaxCraftSlots` are {`Main.cpp`,
+`Recipe.cpp`, `Recipe.hpp`}. **The intersection is `Main.cpp` alone — the decay site, which holds
+no assert.**
+
+**The rule: if you add a screen `Kind`, the grid width must be bound to the buffer in the same
+edit** — either `craftSize(k) <= kMaxCraftSize` inside the existing constexpr sweep, or by passing
+`std::span` so the bound rides with the pointer. **The second is stronger**: it is the same fix
+shape as taking `CreatureKind (&out)[kMaxPenSpecies]` instead of a raw pointer, where putting the
+bound *in the type* makes caller and callee unable to disagree.
 
 ---
 

@@ -137,6 +137,66 @@ struct BreakContext {
     bool explosion = false;
 };
 
+/// **`explosion` is LIVE, and it is the one field here a bare-name sweep cannot
+/// see. Re-verified 2026-08-19 15:57.**
+///
+/// `Main.cpp` builds the blast context in the local named **`blasted`** - cited
+/// by symbol, not by line, for the reason in the note below - and it is reached
+/// in play whenever TNT or a creeper takes a block:
+///
+/// ```
+/// const game::BreakContext blasted{game::ToolKind::Pickaxe,
+///                                  game::kDiamondTier, false, 0, true};
+/// ```
+///
+/// > **That is a POSITIONAL aggregate initialiser, so the `true` is `explosion`
+/// > by its ORDINAL and the field name appears nowhere.** A sweep for
+/// > `.explosion` or `explosion =` returns **zero hits in `Main.cpp`** and reads
+/// > exactly like a dormant flag - which is CLAUDE.md's "a value routed through
+/// > a struct is invisible to a call-site sweep", and it very nearly cost this
+/// > audit a false dormancy verdict today. The honest instrument is to find the
+/// > call sites of the *consumer* (`resolveBreak`, via `spillBlockDrop`) and
+/// > read what each one passes, not to search for the field.
+///
+/// **This is why the layout is pinned below rather than merely described.**
+/// There are five positional initialisers of this struct and only one of them
+/// is in a file whose owner would notice: `breakContextFor` just below, three
+/// sweep asserts in this file, and the live blast in `Main.cpp`. **Not one of
+/// them names a field.** Inserting a member anywhere above `explosion` - a
+/// `bool fireAspect`, say - shifts every one of them silently: the blast's
+/// `true` would land in the new field, `explosion` would fall back to its
+/// default `false`, and every blasted block would start dropping as if mined by
+/// hand. It compiles, it validates, and nothing in the tree says a word.
+///
+/// The check reproduces the `blasted` initialiser exactly and asserts each
+/// value arrives where that call site means it to. **Sited here, in the file
+/// whose edit would break it**, per CLAUDE.md: the reader about to add a field
+/// is the one who has to be told, and `Main.cpp`'s owner cannot see this
+/// coupling from there. Adding a member is fine - it just has to go **after**
+/// `explosion`, or every positional call site has to be updated in the same
+/// batch, and this assert is what forces that choice to be made deliberately.
+///
+/// > **Cited by SYMBOL because the line number was already wrong.** This
+/// > paragraph said `Main.cpp:11513` when it was written at 15:37; by 15:57
+/// > that line held `&found->second.output}) {` and the blast context had moved
+/// > to 11668 - 155 lines in twenty minutes, with the code unchanged. Search
+/// > `\bBreakContext\b` in `Main.cpp` and take the one declaration that is a
+/// > named local rather than a temporary; there is exactly one, and every other
+/// > hit is `BreakContext{}` or a designated `.tool` form. **Word-bound the
+/// > search**: in this codebase `Name` is routinely a prefix of `NameFirst` and
+/// > `NameLast`, and an unanchored enum probe overcounted elsewhere tonight.
+constexpr bool blastContextFieldsLandWhereMeant() {
+    const BreakContext blast{ToolKind::Pickaxe, kDiamondTier, false, 0, true};
+    return blast.tool == ToolKind::Pickaxe && blast.tier == kDiamondTier &&
+           !blast.silkTouch && blast.fortune == 0 && blast.explosion;
+}
+
+static_assert(blastContextFieldsLandWhereMeant(),
+              "a BreakContext member was inserted above `explosion`, so the five positional "
+              "initialisers of this struct - `breakContextFor` below, three sweep asserts in this "
+              "file, and the live blast context `blasted` in Main.cpp - now fill the wrong fields; "
+              "move the new member below `explosion` or update all five together");
+
 /// The context for a player holding `held`.
 ///
 /// **Not `constexpr`**, because `toolFor` is a runtime table in `Tool.cpp`. The
@@ -155,10 +215,11 @@ inline BreakContext breakContextFor(ItemId held) {
 ///
 /// **Derived from the block position, never from a running generator**, so
 /// breaking the same gravel twice gives the same haul and a reloaded save does
-/// not re-roll it. This is the rule gravel already followed at `Main.cpp:5010`
-/// and the reason that line exists - the three mixing constants here are that
-/// line's own, moved rather than invented. The rate is unchanged; **which cells
-/// give flint moves**, because the salt and the avalanche steps are new.
+/// not re-roll it. This is the rule gravel already followed, and the three
+/// mixing constants here are `Main.cpp`'s own `BlockPositionHash` constants,
+/// moved rather than invented - find it by searching `73856093`, which appears
+/// exactly once in that file. The rate is unchanged; **which cells give flint
+/// moves**, because the salt and the avalanche steps are new.
 ///
 /// **Two mix rounds, not one, and the second one is here to make the paragraph
 /// above true rather than nearly true.** A salt folds in as an XOR *before* any
@@ -399,8 +460,30 @@ constexpr std::array<LeafDrop, 10> kLeafDrops{{
     {BlockId::JungleLeaves, itemForBlock(BlockId::JungleSapling), 40, false},
     {BlockId::AcaciaLeaves, itemForBlock(BlockId::AcaciaSapling), 20, false},
     {BlockId::DarkOakLeaves, itemForBlock(BlockId::DarkOakSapling), 20, true},
-    // No cherry sapling exists in the enum, so cherry leaves shed sticks only.
-    // The row is here rather than absent so the coverage assert stays honest.
+    // **These next two rows say `ItemId::None` for OPPOSITE reasons, and the
+    // difference matters because closing one is a fix and closing the other is
+    // a bug.** Verified against the reference 2026-08-19 16:07.
+    //
+    // * **Cherry is a GAP, and the row is already tuned for the fix.** The
+    //   reference drops a cherry sapling at **5%**, which is exactly the `20`
+    //   this row already carries - so the only thing missing is the id.
+    //   `CherrySapling` does not exist: `Block.hpp` has 32 `Cherry` ids -
+    //   log, leaves, planks, stripped log, wood, stripped wood - and no
+    //   sapling, and `Item.hpp` has none either. **Whoever adds the id should
+    //   change this `ItemId::None` to `itemForBlock(BlockId::CherrySapling)`
+    //   and nothing else**, because the rate is already right. Until then
+    //   cherry trees are non-renewable: the leaves shed sticks only.
+    // * **Mangrove is CORRECT and must be left alone.** The reference gives
+    //   mangrove leaves no sapling at all - mangroves propagate by
+    //   *propagules*, which hang from the tree as their own block and are
+    //   collected there, not shed by the leaves. `Propagule` returns 0 in
+    //   `Block.hpp`, so that block does not exist here either, but adding a
+    //   `MangroveSapling` would be inventing a drop the reference does not
+    //   have. **Do not mirror the cherry fix onto this row.**
+    //
+    // Both rows are present rather than absent so the coverage assert below
+    // stays honest. Source tier: SECONDARY (wiki drop tables); leaf drop
+    // chances are not in the behaviour-pack JSON.
     {BlockId::CherryLeaves, ItemId::None, 20, false},
     {BlockId::MangroveLeaves, ItemId::None, 20, false},
     {BlockId::AzaleaLeaves, itemForBlock(BlockId::Azalea), 20, false},
@@ -1007,8 +1090,10 @@ constexpr BlockDrop dropsForBlock(BlockId block, BreakContext ctx = {}) {
     // > what a **sword** yields; **shears yield the web itself**, and the
     // > three-way `static_assert` at the foot of this file has pinned both
     // > answers the whole time. `miningRow(Cobweb).tool` is `ToolKind::Shears`
-    // > (`Mining.hpp:1397`), and **no mining row in the game names a sword**,
-    // > so string was never the reachable failure at all.*
+    // > (set by the `Cobweb` branch of `derivedTool` in `Mining.hpp` - cited by
+    // > symbol because the line this named, 1397, now holds an unrelated
+    // > `case BlockId::HayBlock:`), and **no mining row in the game names a
+    // > sword**, so string was never the reachable failure at all.*
     // >
     // > *The trap itself is unchanged and real - a blast must yield nothing,
     // > and either item breaks that. But the **symptom** was wrong, and a trap
@@ -1651,7 +1736,25 @@ constexpr bool dropTableSane(int stride, const BreakContext& ctx) {
 /// > a *different* translation unit - see `kDropSweepStride` above for what the
 /// > two actually measure and why one `#include` line would turn a coincidence
 /// > into shadowing.
-constexpr int kDropSweepPasses = 7;
+///
+/// **Derived rather than written by hand, 2026-08-19.** It was a hand-written
+/// `7` and a tree-wide census of `*SweepPasses` had missed it, reporting
+/// `Mining.hpp` as the last literal when there were two; both moved in the same
+/// batch. `Block.hpp`, `Copper.hpp` and `ItemEntity.cpp` took this form first,
+/// and `kNameSweepPasses`'s note says why it costs nothing: the *stride* is what
+/// the constexpr step budget cares about and it does not move, so a pass stays
+/// exactly as dear as it was and only their number grows. Rounding is **up** -
+/// rounding down under-covers silently, which is the failure this sweep exists
+/// to catch.
+///
+/// > **This knowingly retires the coverage assert below into a form-guard, and
+/// > the assert is KEPT anyway.** `ceil(N/S) * S >= N` holds for every
+/// > `N >= 0`, so it can no longer fire; the failure it caught is now
+/// > unexpressible rather than merely detected, which is the better end of the
+/// > trade. `ChunkMesher.cpp` and `ItemEntity.cpp` both kept theirs through the
+/// > identical conversion.
+constexpr int kDropSweepPasses =
+    (static_cast<int>(kBlockIdCount) + kDropSweepStride - 1) / kDropSweepStride;
 
 /// One pass of the sweep, in **five separate constant evaluations**.
 ///

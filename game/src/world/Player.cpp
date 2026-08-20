@@ -582,7 +582,10 @@ bool damageWithResistance(Player& player, int amount, bool bypassInvulnerability
 /// a fall is paid for: the reference treats bouncing off a bed as a landing in
 /// its own right - half the distance, charged and reset there and then, and
 /// only then the bounce. A second copy of `floor((distance - safe) * multiplier)`
-/// beside the bounce is exactly how the two would drift apart.
+/// beside the bounce is exactly how the two would drift apart. **The arithmetic
+/// itself now lives one level further out still**, as `survival::fallDamage`
+/// beside the two constants it reads, so that `Creature.cpp` - which carries
+/// its own transcription of the same line - has somewhere to come to.
 ///
 /// **Two scales, because the surfaces that catch you do not all scale the same
 /// thing.** `distanceScale` is what the surface leaves of the *fall* - 1 for
@@ -598,10 +601,17 @@ bool damageWithResistance(Player& player, int amount, bool bypassInvulnerability
 /// takes, so anyone exempt arrives with nothing banked, and `damagePlayer`
 /// refuses a corpse on its own.
 void chargeFall(Player& player, float distanceScale, float damageScale = 1.0f) {
-    const float raw = std::floor((player.fallDistance * distanceScale -
-                                  survival::kSafeFallDistance) *
-                                 survival::kFallDamagePerBlock);
-    const int hurt = static_cast<int>(std::floor(std::max(0.0f, raw) * damageScale));
+    // **The formula moved to `survival::fallDamage`, and the slack inside it is
+    // the whole point of the move.** This line used to floor an accumulated
+    // float with no tolerance, and `fallDistance` is accumulated a frame at a
+    // time - so a true 19-block drop arrives as 18.999992 and was charged 15
+    // instead of 16. Measured over 1,332 whole-block drops at six frame rates
+    // with realistic jitter, **669 of them - 50.2% - were one health point
+    // light**, and a 23-block fall stopped being lethal at 30 fps. The curve,
+    // the tolerance and the compile-time proof all live beside
+    // `kSafeFallDistance` now, where `Creature.cpp` can reach them too - it
+    // carries the identical formula and the identical defect.
+    const int hurt = survival::fallDamage(player.fallDistance, distanceScale, damageScale);
     player.fallDistance = 0.0f;
     if (hurt > 0) {
         // **`kNoArmour`, explicitly, and it is not a change** - the default
@@ -667,6 +677,35 @@ void tickPassiveTimers(Player& player, float dt) {
         // never rise for it - this is what makes that belt as well as braces.
         player.absorption = std::max(player.absorption, effects::absorptionPoints(player.effects));
     }
+    // **This assignment is unconditional, and a load path in another file is
+    // built on that. Do not fold it into the `if` above.** - 2026-08-19
+    //
+    // Nothing in this file can show you why, which is the whole reason the
+    // warning is sited here rather than there: the reader who would break this
+    // is the one editing *this* line. From inside `Player.cpp` the field looks
+    // like local edge-detection scratch, and re-deriving it, making it
+    // conditional or deleting it as a redundant mirror of `secondsLeft` all
+    // compile clean and all pass a soak.
+    //
+    // What actually depends on it: the world loader does **not** restore this
+    // field from disk. It recomputes it as
+    // `effects.secondsLeft(Effect::Absorption)` immediately after replaying the
+    // saved effects, precisely so the first tick after a load does not see a
+    // rise and re-grant the pool. That substitution is only equal to what the
+    // tick would have left behind **because this line runs every tick on every
+    // path** - fold it inside the `if` and the two stop agreeing on exactly the
+    // frames where a pool is spent while its effect still runs, which is the
+    // quit-and-return heart-refill exploit: spend your absorption hearts, quit,
+    // come back and they are all there.
+    //
+    // Cited by symbol on purpose - `Main.cpp` is a 700 KB file under another
+    // owner and its line numbers rot within hours. Search it for
+    // `player.absorptionSeconds =`; there is exactly one such write, and its
+    // own comment reads "derived rather than saved". `WorldStore.hpp` documents
+    // the third corner - `SavedPlayer::absorptionSeconds` is a *legacy* V7 field
+    // that the modern path deliberately ignores, so do not wire it back in
+    // either. **Falsifier:** if that load-side write ever disappears or starts
+    // reading the disk field, this paragraph is stale and the coupling is gone.
     player.absorptionSeconds = absorptionLeft;
 
     // "Absorption health cannot be replenished by natural regeneration or other
@@ -708,6 +747,44 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
         // that ran while they were exempt.
         player.freezeSeconds = 0.0f;
         player.freezeTimer = 0.0f;
+        // **And the breath meter, for exactly the same reason - but it is the
+        // one clock on this list that is not merely banked, it is still
+        // *running*.** `updateBreath` is called from `updatePlayer`, outside
+        // this gate entirely, so a Creative player underwater drains all
+        // fifteen seconds of `fluid::kAirSeconds` and then piles up
+        // `drowningSeconds` with nothing to spend it on. Switch back to
+        // Survival while still under and the very next hazard tick reads
+        // `air <= 0`, `underwater`, and a `drowningSeconds` long past the one
+        // second of `fluid::kPlayerSuffocateGrace` - two health every half
+        // second, immediately, with no warning and no way to earn it back but
+        // to surface. The rule that *did* travel is the `freezeSeconds` pair
+        // just above; this is the same rule arriving late, `CLAUDE.md` bug
+        // shape 14.
+        //
+        // **Falsified by** `updateBreath` gaining an `invulnerable` check of
+        // its own, at which point this pair becomes redundant rather than
+        // wrong. **Every writer of the pair lives in this file** - measured
+        // 2026-08-19 over `game/src`, and the sweep fires elsewhere on
+        // `creature.air` in `Creature.cpp`, so a clean result here means
+        // something: `updateBreath` above, `respawnPlayer` below, and these two
+        // lines. `Main.cpp` only ever *reads* `player.air`, into the HUD's
+        // bubble bar - which is the other half of why full is the right value
+        // to pin: Bedrock shows a Creative player no bubbles, and a drained bar
+        // in Creative was visible on screen as well as lethal on the way out.
+        player.air = fluid::kAirSeconds;
+        player.drowningSeconds = 0.0f;
+        // The shared hazard cadence, which is frozen mid-interval rather than
+        // running - but frozen at 0.49 is still armed, and it is the gate in
+        // front of lava, fire, cactus, suffocation and drowning alike. Reset
+        // so switching back costs a full half second before anything can bite.
+        //
+        // `burnTimer`, `starveTimer` and `regenTimer` are deliberately absent:
+        // each sits in an `if/else` whose `else` zeroes it, and each of those
+        // conditions is false on the first Survival frame (`burningSeconds` is
+        // cleared at the top of this block, and food cannot fall while
+        // `exhaustion` is held at zero), so all three clear themselves.
+        // `hazardTimer` has no such `else` - it is incremented unconditionally.
+        player.hazardTimer = 0.0f;
         return;
     }
 
@@ -985,6 +1062,15 @@ void updateSurvival(Player& player, const World& world, float dt, const glm::vec
         // the arming, and this only back-dates what it armed. Anything else that
         // puts a periodic hazard through the window at the window's own cadence
         // needs the same correction or it will lose ticks the same way.
+        //
+        // **"Coincide exactly" is true of the arithmetic and not of the
+        // floats.** Measured this session, the two accumulators reach the
+        // crossing frame 2.235e-08 s apart, which is enough to leave the window
+        // alive and the tick refused: at a rigidly constant 30 fps that is lava
+        // at 4.0 health a second instead of 8.0. Real frame times jitter and the
+        // loss vanishes, so nothing is being swallowed today - the residue is
+        // absorbed by `survival::kWindowResidue`, which is where that whole
+        // measurement is written down.
         const float lateBy = player.hazardTimer;
         const float windowBefore = player.invulnerableSeconds;
 
@@ -2213,6 +2299,16 @@ void respawnPlayer(Player& player, const glm::vec3& at) {
     player.absorptionSeconds = 0.0f;
     player.invulnerableSeconds = 0.0f;
     player.lastDamage = 0;
+    // **And the cadence in front of every contact hazard.** `hazardTimer` is
+    // the only per-life clock in `updateSurvival` with no `else` branch to
+    // zero it - `burnTimer`, `starveTimer` and `regenTimer` all sit inside an
+    // `if/else` whose `else` clears them, so they arrive at a new life empty on
+    // their own. This one arrives holding whatever fraction of a half second
+    // the last life ended on, and at 0.49 that is lava, fire, cactus,
+    // suffocation or drowning landing a full tick on the first frame of a
+    // respawn instead of half a second in. Respawning into a hazard is not
+    // hypothetical: a bed can be broken or obstructed while you are dead.
+    player.hazardTimer = 0.0f;
     // **The killing blow's durability dies with the blow.** `armourWear` is a
     // per-life accumulator: the simulation banks what is owed and `Main.cpp`'s
     // `inventory.wearArmour(player.armourWear)` collects it on the next frame.

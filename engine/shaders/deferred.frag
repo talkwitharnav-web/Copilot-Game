@@ -29,11 +29,22 @@ layout(set = 0, binding = 5) uniform sampler2DArrayShadow sunShadowMap;
 
 layout(location = 0) in vec2 fragUv;
 
-layout(push_constant) uniform Post {
-    vec4 filterParams;
-    // x exposure, y tone curve, z bloom strength, **w which debug view**.
-    vec4 imageParams;
-} post;
+// The push block, from the file that owns it.
+//
+// **This was a second hand-written copy until 2026-08-19, and it had already
+// drifted** - it documented `imageParams.w` as the debug view while neither
+// `post_common.glsl` nor `PostPushConstants` mentioned `w` at all, so anyone
+// editing the shared file had no reason to look here. There was never much
+// reason for the copy: this pass already includes seven other `.glsl` files,
+// and nothing it includes pulls in `post_common.glsl`, so there is no double
+// declaration to fear.
+//
+// Only `y` is read in this pass: the contact-occlusion radius in pixels. `x` is
+// the anti-alias amount in `tonemap.frag` and one texel of the source in
+// `bloom_down.frag` - one field, three meanings, so do not carry a value over
+// from another pass. `PostPushConstants` in PushConstants.hpp is the owner and
+// holds the full four-pass table.
+#include "post_common.glsl"
 
 layout(location = 0) out vec4 outColor;
 

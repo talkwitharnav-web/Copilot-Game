@@ -1,7 +1,9 @@
 #include "world/Particles.hpp"
 
+#include "world/Campfire.hpp"
 #include "world/Collision.hpp"
 #include "world/Survival.hpp"
+#include "world/Tick.hpp"
 #include "world/World.hpp"
 
 #include <engine/render/MeshData.hpp>
@@ -42,8 +44,8 @@ constexpr float kTorchFlameHeight = 0.62f;
 constexpr float kSmokeShade = 0.34f;
 
 /// A single frame may not advance a particle further than this. **The same 0.05
-/// the player, the drops and the falling blocks already clamp to**, and
-/// deliberately not a new number.
+/// the player, the drops, the creatures and the falling blocks already clamp
+/// to**, and deliberately not a new number.
 ///
 /// A particle's collision is a destination-only point test - a fleck has no
 /// extent worth sweeping - so it is the *one* mover whose guard has to be the
@@ -53,6 +55,33 @@ constexpr float kSmokeShade = 0.34f;
 /// because there is nothing to lose: a particle over absent ground falls and
 /// expires, and nothing is saved or dropped.
 constexpr float kMaxDeltaSeconds = 0.05f;
+
+/// **The comment above claimed the agreement and nothing enforced it - this is
+/// the fifth copy of an assert the other four movers have all carried.**
+/// `Player.cpp`, `Creature.cpp`, `ItemEntity.cpp` and `FallingBlock.cpp` each
+/// pin their clamp exactly this way; this file said "the same 0.05" in prose
+/// and stopped there, which is the remedy ladder's third rung sitting where its
+/// second is available. The condition is copied verbatim so all five read
+/// identically.
+///
+/// **Both halves are load-bearing and neither is redundant.** The first pins
+/// the clamp to the one owner (`Tick.hpp`) so it follows a tick-rate change
+/// instead of being left behind. The second is the **absolute anchor**, and it
+/// is the half that does the work here: both sides of the first are derived, so
+/// a coherent tick-rate move would satisfy it on its own and slide this clamp
+/// with it.
+///
+/// **Do not "improve" this to `= tick::kSeconds`.** That looks like the ladder's
+/// top rung and is the wrong move: `CLAUDE.md` bug shape #7 is *never raise the
+/// tick rate to fix smoothness*, and this pair is one of the tripwires that
+/// enforces it. Deriving the clamp would let a tick-rate change silently widen
+/// how far a particle may travel in one frame - and this mover has no sweep and
+/// no unloaded-column guard, so the clamp is the *only* thing between a hitch
+/// and a shower of stone erupting through the floor.
+static_assert(kMaxDeltaSeconds == tick::kSeconds && kMaxDeltaSeconds == 0.05f,
+              "a frame may advance a particle by at most one simulation tick, and that tick is "
+              "50 ms - the same clamp the player, the drops, the creatures and the falling cubes "
+              "use");
 
 /// How many of the oldest go at once when the cap is reached.
 ///
@@ -146,7 +175,7 @@ void Particles::spawnFootstep(const glm::vec3& at, BlockId under, int count) {
     }
 }
 
-void Particles::spawnSmoke(const glm::vec3& at, float size, float spread, float life) {
+void Particles::spawnSmoke(const glm::vec3& at, float size, float spread, float life, float lift) {
     Particle& p = emplace();
     p.position = at + glm::vec3{(roll() - 0.5f) * spread, roll() * spread * 0.5f,
                                (roll() - 0.5f) * spread};
@@ -157,7 +186,7 @@ void Particles::spawnSmoke(const glm::vec3& at, float size, float spread, float 
     p.layer = static_cast<float>(TextureLayer::White);
     p.uvOrigin = glm::vec2{0.0f};
     // Rises, and slowly - a puff that shoots upward reads as a rocket.
-    p.gravity = -0.045f;
+    p.gravity = -lift;
     p.shade = kSmokeShade * (0.8f + roll() * 0.4f);
     p.drift = 0.6f;
     p.fades = true;
@@ -237,7 +266,7 @@ void Particles::emitAmbient(const World& world, const glm::vec3& eye, float delt
                 for (int x = ex - kEmitterReach; x <= ex + kEmitterReach; ++x) {
                     const BlockId id = world.blockAt(x, y, z);
                     if (id == BlockId::Torch || id == BlockId::SoulTorch || id == BlockId::Fire ||
-                        isFurnaceLit(id) || isLava(id)) {
+                        isCampfire(id) || isFurnaceLit(id) || isLava(id)) {
                         m_emitters.push_back({x, y, z});
                     }
                 }
@@ -279,6 +308,14 @@ void Particles::emitAmbient(const World& world, const glm::vec3& eye, float delt
         float smoke = 0.0f;
         float height = kTorchFlameHeight;
         float spread = 0.06f;
+        // How far above the flame the smoke leaves. One base height serves both
+        // so they cannot drift apart; only a campfire, whose fire sits down in
+        // its log bowl while its column leaves from the top of the cell, wants
+        // the two far apart.
+        float smokeRise = 0.08f;
+        float smokeSize = 0.028f;
+        float smokeLife = 1.4f;
+        float smokeLift = kWispLift;
         if (id == BlockId::Torch || id == BlockId::SoulTorch) {
             flames = 3.0f;
             smoke = 1.1f;
@@ -287,6 +324,43 @@ void Particles::emitAmbient(const World& world, const glm::vec3& eye, float delt
             smoke = 3.5f;
             height = 0.45f;
             spread = 0.34f;
+        } else if (isCampfire(id)) {
+            // **The campfire had neither fire nor smoke, and it is the block
+            // that most needs both.** Its emitter was simply absent from the
+            // list above - `Block.hpp`'s own `postModel` note records that the
+            // reference's animated fire quads "are still left out", so until
+            // now a lit campfire was five wooden boxes with an ember plank and
+            // nothing burning on it at all, while emitting light 15. These
+            // flames are the only fire the block has.
+            //
+            // Low and wide: `template_campfire`'s logs are four texels tall,
+            // so the fire sits in the bowl above them rather than at a torch's
+            // height, and it spans most of the cell.
+            flames = 8.0f;
+            height = 0.32f;
+            spread = 0.28f;
+            // The cosy column, which is the campfire's signature in Bedrock and
+            // the one plume in this game that is meant to be seen from across a
+            // valley rather than noticed up close.
+            //
+            // **Reached by lift and life, never by launch speed.** Drag settles
+            // a rising puff at `kParticleGravity * lift / kDrag` almost at once,
+            // so the climb is that steady speed times the life: 12 * 0.16 / 3.2
+            // is 0.6 blocks per second, and five seconds of it is a three-block
+            // column. A torch's wisp is the same arithmetic at 0.17 and 1.4 s,
+            // which is the quarter of a block you see above one.
+            smoke = 1.6f;
+            smokeRise = 0.62f;
+            smokeSize = 0.07f;
+            smokeLife = 5.0f;
+            smokeLift = 0.16f;
+            // **Budget, because a long life is what makes a plume expensive.**
+            // A campfire holds about twelve particles at once - 1.6/s across a
+            // five-second life is eight puffs, and 8/s across a half-second
+            // flame is four - against a torch's five. The emitter cap of 48
+            // bounds the whole scene at some six hundred, a fifth of
+            // `kMaxParticles`, so a camp full of them cannot starve the shower
+            // off a broken block.
         } else if (isFurnaceLit(id)) {
             // Out of the top, like a chimney - the mouth is where the light is,
             // but the smoke has to leave somewhere it can.
@@ -303,7 +377,8 @@ void Particles::emitAmbient(const World& world, const glm::vec3& eye, float delt
             spawnFlame(centre + glm::vec3{0.0f, height, 0.0f}, spread);
         }
         if (smoke > 0.0f && roll() < smoke * deltaSeconds) {
-            spawnSmoke(centre + glm::vec3{0.0f, height + 0.08f, 0.0f}, 0.028f, spread, 1.4f);
+            spawnSmoke(centre + glm::vec3{0.0f, height + smokeRise, 0.0f}, smokeSize, spread,
+                       smokeLife, smokeLift);
         }
     }
 }

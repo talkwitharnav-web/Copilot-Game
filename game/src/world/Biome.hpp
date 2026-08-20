@@ -15,10 +15,21 @@ namespace game {
 /// rows are listed before the general ones.
 ///
 /// **Reorder this enum and `kBiomes` TOGETHER, never one alone.** Nothing
-/// persists a `BiomeId` - the save layer does not mention one, checked
-/// 2026-08-19 - so unlike `BlockId` and `ItemId`, which are written to disk and
-/// can only ever be appended to, the *pair* may be rearranged at will to change
-/// priority. But `biomeFor` returns `static_cast<BiomeId>(i)` off a row index,
+/// persists a `BiomeId` - the save layer does not mention one - so unlike
+/// `BlockId` and `ItemId`, which are written to disk and can only ever be
+/// appended to, the *pair* may be rearranged at will to change priority.
+///
+/// > Measured, not assumed, and **re-measured on 2026-08-19 at 15:58 for a
+/// > reason**: drop persistence landed that afternoon, which grew the save
+/// > layer by a whole record type, and a reachability result is a measurement
+/// > with a timestamp rather than a property of the code. `BiomeId` is 0 hits
+/// > across `WorldStore.hpp` and `WorldStore.cpp`; `BlockId` is 2 and `ItemId`
+/// > 23 in the same files, so the search demonstrably sees what is there, and
+/// > `SavedItem` carries position, velocity, an `ItemStack`, age, pickup delay
+/// > and a ground flag - no biome. Falsifier: any `BiomeId` at all in those two
+/// > files, or a new side file beside `chests.dat` that stores one.
+///
+/// But `biomeFor` returns `static_cast<BiomeId>(i)` off a row index,
 /// so **row order is the enumeration**: move a row without its enumerator, or
 /// insert one enumerator without a row, and every `BiomeId::X` silently begins
 /// naming its neighbour. `Structures.cpp` and `Village.cpp` switch on these
@@ -192,14 +203,13 @@ enum class TreeShape : std::uint8_t {
     /// an enumerator costs nothing. Appending anyway is habit worth keeping,
     /// because mid-enum insertion is the block-id hazard.
     ///
-    /// **Draws as `Round` until `Structures.cpp` grows a branch for it, and as
-    /// of 2026-08-19 13:35 it has none.** That chain tests `None`, `Tall` and
-    /// `Jungle`, then leaves `Round` as a bare `else` - so a shape it does not
-    /// recognise silently draws an oak instead of failing. Pointing Savanna
-    /// here is therefore a behavioural no-op today rather than an improvement,
-    /// and the acacia trunk placer stays unreachable from worldgen until that
-    /// branch lands. **The date is the point: delete this paragraph when it
-    /// does, because a negative aged past its fix reads as a defect report.**
+    /// **Reachable: `Structures.cpp` grew its `TreeShape::Acacia` branch at
+    /// 13:41 on 2026-08-19**, six minutes after the paragraph that used to sit
+    /// here said it had none and that the acacia trunk placer was unreachable
+    /// from worldgen. That paragraph carried its own instruction to be deleted
+    /// once the branch landed, and this is that deletion - a negative aged past
+    /// its fix reads as a defect report, and this one had already outlived its
+    /// falsifier by a matter of minutes.
     Acacia,
 };
 
@@ -379,6 +389,29 @@ struct Biome {
     /// of that comes up a flower rather than a tuft.
     float grassDensity;
     float flowerShare;
+
+    /// Chance that a naturally generated oak-family tree here carries a bee
+    /// nest, as a fraction of 1. `Structures.cpp` reads it and nothing else
+    /// does.
+    ///
+    /// **Defaulted to nothing, and for this column the default is the
+    /// reference's own answer** rather than an unported blank: the Bedrock
+    /// table names four of our thirty rows and gives every other biome no
+    /// chance at all. That is the opposite of `snow` above, where a blank had
+    /// to be argued for row by row.
+    ///
+    /// **It is a column here rather than a `switch` in the generator, and that
+    /// is the whole finding** (9620 and 9685, both 2026-08-19). A `switch` over
+    /// `BiomeId` in another translation unit cannot be reached by this file's
+    /// `constexpr` validators, cannot be covered by `everyRowIsFilledIn`, and
+    /// answers 0 through a `default:` for a biome nobody remembered - with no
+    /// diagnostic, because `C4062` is off at `/W4`. A column gets the row/enum
+    /// binding at `rowIs` for free.
+    ///
+    /// The source note, and the Java control that pins which of the wiki's two
+    /// adjacent columns was read, are in `Biome.cpp` beside the assert that
+    /// reads these rows.
+    float beeNestChance = 0.0f;
 
     std::uint32_t tags;
 

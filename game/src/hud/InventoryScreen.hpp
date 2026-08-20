@@ -1,6 +1,7 @@
 #pragma once
 
 #include "item/Inventory.hpp"
+#include "item/Recipe.hpp"
 #include "world/Chest.hpp"
 
 #include <engine/render/MeshData.hpp>
@@ -115,6 +116,48 @@ static_assert(everyKindStatesItsGrid(), "every Kind must state its own crafting 
 static_assert(craftSize(Kind::Count) < 0,
               "an unstated Kind must answer the sentinel, or the sweep above proves nothing");
 
+/// Whether every `Kind`'s grid fits the buffer that will hold it.
+///
+/// **`everyKindStatesItsGrid` proves only that each `Kind` states a NON-NEGATIVE
+/// width. It never proves the width FITS ANYTHING**, and the two constants that
+/// have to agree are declared in different files, in different namespaces, with
+/// nothing linking them. `Main.cpp` holds a screen's slots in a
+/// `std::array<ItemStack, game::kMaxCraftSlots>` - nine, because `Recipe.hpp`
+/// derives `kMaxCraftSlots` from `kMaxCraftSize = 3` - then passes
+/// `craftSlots.data()` with a width taken from `craftSize` here.
+///
+/// **The bound dies at `.data()`.** A raw pointer carries no extent, so
+/// `consumeIngredients(ItemStack*, int)` cannot check it and no diagnostic is
+/// possible - it simply writes `size * size` elements. Today 3 squares to
+/// exactly 9, with **zero headroom**, and the `Kind` enum above explicitly
+/// anticipates a ninth screen: one declaring a 4x4 grid would pass
+/// `everyKindStatesItsGrid` (4 >= 0) and then write seven `ItemStack`s past the
+/// end of a stack array. This sweep is what makes that a build failure instead.
+///
+/// Takes the bound as a parameter purely so the control below can vary it, and
+/// that bound is the **one** variable between the two assertions.
+constexpr bool everyGridFitsTheBuffer(int maxSize) {
+    for (int i = 0; i < static_cast<int>(Kind::Count); ++i) {
+        if (craftSize(static_cast<Kind>(i)) > maxSize) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyGridFitsTheBuffer(game::kMaxCraftSize),
+              "a Kind states a crafting grid wider than kMaxCraftSize, so Main.cpp would run "
+              "off the end of its kMaxCraftSlots array - widen kMaxCraftSize in Recipe.hpp, "
+              "which resizes the buffer with it, rather than narrowing the grid here");
+/// Graded negative control, and it is not the tautology it would be if it
+/// compared `kMaxCraftSize` against itself: the **same** sweep with the bound
+/// lowered by one must FAIL, because `CraftingTable` states 3 and so a bound of
+/// 2 has something real to catch. Without it, the assertion above would pass
+/// just as cheerfully if the loop never ran or `craftSize` became unreachable.
+static_assert(!everyGridFitsTheBuffer(game::kMaxCraftSize - 1),
+              "the fit sweep proves nothing unless a too-small bound fails it - if this fires, "
+              "no Kind states the widest grid any more and the check above went vacuous");
+
 constexpr std::size_t craftSlotCount(Kind kind) {
     // `craftSize` answers -1 for a `Kind` that never stated its grid, and a
     // negative squared through `std::size_t` wraps to a plausible-looking 1.
@@ -160,8 +203,8 @@ struct FurnaceProgress {
 /// Grepping `SlotHit{Region::` finds no `Offhand` and never will - not even
 /// after somebody wires one through a local, a ternary or an assignment,
 /// because that pattern tests the *accessor* rather than the data. Use a
-/// bare-name search over comment-stripped source, then reconcile every hit
-/// against a form. In `InventoryScreen.cpp`:
+/// bare-name search over comment-stripped source, **case-sensitively**, then
+/// reconcile every hit against a form. In `InventoryScreen.cpp`:
 ///
 ///   | symbol         | hits | what they are                     |
 ///   |----------------|------|-----------------------------------|
@@ -169,6 +212,33 @@ struct FurnaceProgress {
 ///   | `Offhand`      |    2 | 0 constructions + 2 `case` labels |
 ///   | `FurnaceInput` |    2 | 0 constructions + 2 `case` labels |
 ///   | `FurnaceFuel`  |    2 | 0 constructions + 2 `case` labels |
+///
+/// **The case-sensitivity above is load-bearing, and it is one of two ways this
+/// recipe is known to lie.** `Select-String`, this project's usual tool,
+/// ignores case unless told not to, and a case-insensitive run reads `Armour`
+/// as 4. The extra hit is the lowercase word "armour" inside the
+/// `static_assert` message beneath `kArmourTopCentreY` - a *code* line, so
+/// stripping comments does not remove it, and the four `///` paragraphs that
+/// also say "armour" are removed and hide how easily this happens. Measured
+/// 2026-08-19: case-sensitive 3/2/2/2, case-insensitive 4/2/2/2. It is the
+/// *control* row that inflates, so the failure looks like a broken table
+/// rather than a broken search, and a reader who distrusts the table is
+/// exactly the reader this paragraph was written to stop.
+///
+/// **The second way is a word boundary, and this enum contains a live instance
+/// of it: `Craft` is a PREFIX of `CraftResult`.** An unbounded search for
+/// `Craft` also collects `CraftResult`, `craftSlots`, `craftSize` and
+/// `craftResult`, so it reports a produced enumerator as several and would read
+/// as a residue that is not there. Anchor every name in this recipe as
+/// `\bName\b`, which is what makes `Armour` measurable at all: in
+/// `InventoryScreen.cpp` a case-sensitive unbounded `Armour` counts 15 against
+/// a word-bounded 5, the other ten being `kArmourSlots`, `kArmourTopCentreY`,
+/// `armourSlotCount` and friends. Measured 2026-08-19, alongside a fleet-wide
+/// report of the same shape in `BlockId`, where `Vine` does not exist as an id
+/// at all and only `VineFirst`/`VineLast` do.
+///
+/// **`Armour` itself is safe from this**, and that is checkable rather than
+/// hopeful: no other enumerator above begins with it.
 ///
 /// **`Armour` is the control, and it is the right control because it is the
 /// same kind of symbol, in the same file, under the same search** - a produced

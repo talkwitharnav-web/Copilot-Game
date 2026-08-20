@@ -94,6 +94,15 @@ void Weather::force(int state) {
     // clamped into 0-3), so it was a trap for the next caller rather than a
     // live bug. It costs one token to close and the `+ 4` is only correct
     // because the modulus is 4; if that ever changes, change both.
+    //
+    // **And change `Settings::kStartWeatherCount` with them, which is the same
+    // 4 written down in `core/Settings.hpp` and is what bounds `start_weather`
+    // in the config file.** No assert can hold the two together: this file is
+    // in `world/` and does not include a settings header, and pulling one in
+    // for one comparison would be a heavier coupling than the one it checks. A
+    // fifth state added here is simply unreachable from `settings.cfg` until
+    // that constant moves too - a complete feature one constant short of
+    // existing, with a green build and nothing in the log.
     m_forced = ((state % 4) + 4) % 4;
     switch (m_forced) {
     case 1:
@@ -123,20 +132,59 @@ void Weather::restore(bool raining, bool thundering, float rainSeconds, float th
     const auto sane = [](float seconds) {
         return std::isfinite(seconds) && seconds > 0.0f ? seconds : 0.0f;
     };
-    m_rainOn = raining;
-    // **Taken as given, not filtered against `raining`.** The two countdowns
-    // above are independent, so thunder-on with rain-off is a state `update`
-    // reaches by itself; `storming()` merely reports false for it. Silencing it
-    // here would drop the flag, and the thunder timer would then expire and
-    // turn it *on*, putting a reloaded world in the opposite phase to the one
-    // it was saved in.
-    m_thunderOn = thundering;
+    // **A `start_weather` override outranks the save, and this `if` is the only
+    // place the two facts ever meet.** Three files already stated this as the
+    // intended behaviour and none of them was describing the code:
+    // `Settings.hpp` promises of `start_weather` that "anything but 0 holds
+    // until V is pressed"; `WorldStore.hpp` calls `m_forced` the
+    // `settings.startWeather` override, "re-read from settings on every
+    // launch", and lists it among the members it deliberately does not save;
+    // and `Main.cpp`'s own call site reads "`settings.startWeather` still wins
+    // where it is set ... `restore` does not touch `m_forced`, so neither
+    // erases the other".
+    //
+    // Not touching `m_forced` was never enough. `Main.cpp` calls `force` first
+    // and `restore` second, so the two assignments below overwrote the flags
+    // `force` had just set, while `m_forced` stayed non-zero and went on
+    // freezing the cycle in `update`.
+    //
+    // **The result is worse than the override merely failing: it locks in the
+    // state it failed to change.** Read off the code, `start_weather=1` over a
+    // world saved in clear weather gave clear skies that could then never
+    // change again for the whole session, and `start_weather=3` over one saved
+    // mid-storm gave a thunderstorm that could never end. Pressing V is the
+    // only escape from either, and V is the thing the setting exists to save
+    // you from pressing.
+    //
+    // **Only the two flags are held back.** The countdowns below are simulated
+    // state rather than an instruction, and `update` leaves them where they are
+    // for as long as anything is forced - so restoring them is precisely what
+    // lets the cycle carry on from where the save left it at the moment V
+    // returns `m_forced` to 0.
+    if (m_forced == 0) {
+        m_rainOn = raining;
+        // **Taken as given, not filtered against `raining`.** The two
+        // countdowns above are independent, so thunder-on with rain-off is a
+        // state `update` reaches by itself; `storming()` merely reports false
+        // for it. Silencing it here would drop the flag, and the thunder timer
+        // would then expire and turn it *on*, putting a reloaded world in the
+        // opposite phase to the one it was saved in.
+        m_thunderOn = thundering;
+    }
     m_rainSeconds = sane(rainSeconds);
     m_thunderSeconds = sane(thunderSeconds);
 
     // Bolts are a second of screen flash, not save state, and anything left in
     // the air belongs to the world being left rather than the one being loaded.
+    //
+    // **Both halves of that, which is a pair this applied to one of.** `m_flash`
+    // *is* the screen flash - the list is only what produces it - so clearing
+    // one without the other left the previous world's last bolt lighting the
+    // sky of the one being loaded until the next `update` recomputed it. It
+    // heals itself within a frame, which is exactly why a derivation applied to
+    // one of a pair survives being read.
     m_strikes.clear();
+    m_flash = 0.0f;
 
     // **The ramps are snapped, not faded, and this reversed an earlier call.**
     //

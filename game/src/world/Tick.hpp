@@ -140,8 +140,23 @@ namespace game::tick {
 /// fuse multiplied out by a person - so a tick-rate change would leave them
 /// untouched while everything else moved. That is one more reason the rate is
 /// not a knob, and it is why the seven absolute-anchor asserts named above
-/// matter more than the derived ones. What would make this note false: any of
-/// those queues changing to hold a tick count, or an eighth appearing.
+/// matter more than the derived ones.
+///
+/// **There is an EIGHTH wall-clock holder, and it is not a queue** (2026-08-19,
+/// 17:10). `World.hpp`'s `m_nextGrowthTick` is a bare
+/// `std::chrono::steady_clock::time_point` driving crop growth, so a sweep that
+/// counts *queues* finds seven and stops - which is exactly what happened, and
+/// why this sentence exists. `World.hpp` documents it at its declaration. The
+/// growth tick is rebased on load (`time_since_epoch().count() == 0` -> `now`),
+/// so a restored world runs one normal tick rather than the whole catch-up
+/// budget in a single frame; that guard reads as redundant and is load-bearing.
+///
+/// What would make this note false: any of those queues changing to hold a tick
+/// count, or a NINTH holder appearing. Do not count queues - search
+/// `steady_clock|system_clock|high_resolution_clock` across `game/src/world`
+/// and read each hit for whether it is a gameplay deadline (as opposed to a
+/// frame-delta source, a pacing limiter or a log timestamp, none of which
+/// count). That search was last run 2026-08-19 17:10 and found no ninth.
 constexpr float kSeconds = 0.05f;
 
 /// The same rate the other way up, for the places that read more naturally as a

@@ -41,6 +41,28 @@ constexpr float kGraphMaxMilliseconds = 25.0f;
 
 // Depth bands. A HUD element hidden behind another produces no warning of any
 // kind, so these are spaced far more generously than precision requires.
+//
+// **Not a depth test.** The UI pass has no depth attachment at all - the HUD
+// pipeline in `Renderer.cpp` sets `depthFormat = VK_FORMAT_UNDEFINED`,
+// `depthTest = false` and `depthWrite = false` - so z is only the key its
+// `stable_sort` runs on, far first, and equal keys fall back to append order.
+// `StatusBars.cpp` says this at its own band and `InventoryScreen.cpp` at its
+// held-stack append; this file is the third that needs it and the one where it
+// bites.
+//
+// **Ordering is decided by mesh first and z only within a mesh, so these
+// numbers may not be compared against another screen's.** `Main.cpp` appends
+// this overlay to the `top` mesh, drawn after `main` and `clipped` whatever the
+// numbers say - and that is load-bearing rather than incidental, because these
+// bands sit *inside* `InventoryScreen.cpp`'s range: 0.0050 is farther than its
+// `kDimDepth` of 0.0044, and `kTextDepth` here is exactly its `kLabelDepth`.
+// Read as one scale, this panel is buried by an open screen's dim quad - which
+// is not a hypothetical, it is what happened until the overlay was moved to
+// `top`, and only the text survived. Moving it back to the main mesh, or
+// renumbering these to "fit" that file's scheme, restores the bug.
+//
+// Falsified by `Main.cpp` appending `makeDebugOverlay` to anything but
+// `topLayer`. Re-read that call site rather than trusting this paragraph.
 constexpr float kPanelDepth = 0.0050f;
 constexpr float kGraphBackDepth = 0.0045f;
 constexpr float kGraphInkDepth = 0.0040f;
@@ -114,7 +136,16 @@ struct Row {
 engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<float>& history, float aspect) {
     engine::MeshData mesh;
 
-    const std::array<Row, 20> rows{{
+    // **The row count is deduced, never written down.** This was
+    // `std::array<Row, 20>`, and `std::array` is silent about a *short*
+    // initialiser: deleting a row would have left a zero-filled `Row` whose
+    // `label` is a null `const char*`, handed straight to `appendText` and to
+    // the width measurement below. Too *long* is a hard error, too short is
+    // not, so only one direction of that edit is caught. `std::to_array` takes
+    // the bound from the list, which makes both directions impossible rather
+    // than merely checked - the same reason `kArmourSlots` is derived from
+    // `ArmourSlot::None` instead of being written as 4.
+    const auto rows = std::to_array<Row>({
         {"fps", std::to_string(stats.fps)},
         {"cpu", formatFloat(stats.frameMilliseconds, 2) + " ms"},
         {"gpu", formatFloat(stats.gpuMilliseconds, 2) + " ms"},
@@ -147,7 +178,7 @@ engine::MeshData makeDebugOverlay(const OverlayStats& stats, const std::vector<f
         {"tone F10", stats.toneMapper},
         {"shade G", stats.shadows},
         {"cloud C", stats.clouds},
-    }};
+    });
 
     const float panelLeft = -aspect + kMargin;
     const float panelTop = -1.0f + kMargin;

@@ -34,6 +34,7 @@ $depth = @{
     'DECISIONS.md'        = 2
     'INTERFACE.md'        = 2
     'LESSONS.md'          = 2
+    'MEASURING.md'        = 3
     'RESEARCH.md'         = 2
     'START-HERE.md'       = 2
     'SYSTEM_MEMORY.md'    = 3

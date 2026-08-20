@@ -310,11 +310,50 @@ public:
     /// Pushed from `Weather::strike`, which is the weather's only world-touching
     /// tick; the comment on that function says why it lives there.
     ///
-    /// **No matching getter, deliberately.** The only reader is
-    /// `weatherTickColumn`, which is a member and reads the field. A public
-    /// accessor with no caller is the exact shape three findings were filed
-    /// about tonight, and adding one "for symmetry" is how they start.
+    /// **No matching getter, deliberately - and if you came here wanting one
+    /// for creature behaviour, `rainFallsOn` just below is the bit you want.**
+    /// The only reader of this field is `weatherTickColumn`, which is a member
+    /// and reads it directly. This bit is *global*: it means "something is
+    /// coming down somewhere", so a creature gated on it shelters in a desert
+    /// because it is snowing two thousand blocks away - which is the exact
+    /// defect `rainFallsOn` was written to fix, one scale up. Asked and
+    /// answered 2026-08-19, when bee storm shelter needed a weather query and
+    /// this was the wrong one.
+    ///
+    /// What would make this false: a reader appearing that genuinely wants the
+    /// world-wide bit rather than a per-cell answer - snow accumulation is the
+    /// plausible one. Search `m_weatherFalling`; it is the only name involved.
     void setWeatherFalling(bool falling) { m_weatherFalling = falling; }
+
+    /// Whether **rain** is landing on this cell, which must be one open to the
+    /// sky - the farmland asks it of the air above the soil, the fire of its
+    /// own cell, and a creature of its own feet.
+    ///
+    /// **`m_precipitating` alone is not this question, and both readers were
+    /// asking it.** That bit is sampled in the *camera's* column (see its
+    /// declaration), so applying it cell-by-cell rains on the whole world
+    /// wherever the player happens to be standing: a campfire in a desert went
+    /// out because it was drizzling on a plains two hundred blocks away, and a
+    /// desert field hydrated itself from the same shower. The per-column answer
+    /// already exists and `weatherTickColumn` has been using it -
+    /// `weather::precipitationFor`, which knows the biome, the height and the
+    /// freezing jitter - so this is `CLAUDE.md` bug shape #1 rather than a
+    /// missing rule: correct in one of the two places that need it.
+    ///
+    /// It can only ever *narrow* `m_precipitating`, never widen it: the storm
+    /// bit stays the gate, so nothing gets rained on that was not being rained
+    /// on before, and the intensity threshold `Main.cpp` folds into that bit is
+    /// left where its owner put it. Snow deliberately does not count - the
+    /// reference puts fires out with rain, and a snowy biome gets snow.
+    ///
+    /// **Public because it is the one owner of "is rain landing here", and a
+    /// second caller arrived on 2026-08-19.** `Creature.cpp` cannot include
+    /// `Weather.hpp`, so a creature asking about rain would otherwise derive a
+    /// third answer of its own - the thing this function exists to prevent.
+    /// Pull it per entity exactly as `columnResident` is already pulled; both
+    /// are const main-thread reads of cached state. Snow is still not this
+    /// question, so a creature sheltering from *snow* needs a different one.
+    bool rainFallsOn(int x, int y, int z) const;
 
     /// Charges that reached the end of their fuse this frame. Drained by the
     /// caller and turned into blasts there, because `World` reads blocks and
@@ -568,6 +607,27 @@ private:
     /// sky light can be traced from the top of the world downwards.
     bool columnLoaded(int chunkX, int chunkZ) const;
 
+    /// Whether every chunk column a search of this horizontal reach can touch
+    /// is resident.
+    ///
+    /// **A residency gate has to be as wide as the read it is guarding, and for
+    /// one caller it was not.** `columnResident` asks about the cell's own
+    /// column, which is the whole answer for everything that only ever looks
+    /// straight down - a fall, a support, a dripstone's anchor, a fluid, which
+    /// reads its neighbours through `blockIfLoaded` and treats an absent one as
+    /// a wall. `leafHasWoodNearby` is the exception: it flood-fills
+    /// `farming::kLeafDecayReach` blocks in every direction through `blockAt`,
+    /// which answers `Air` for a chunk that is not resident, and a leaf that
+    /// cannot see its trunk is **destroyed**. So a canopy straddling a column
+    /// boundary shed its leaves whenever the neighbour column had not arrived,
+    /// which on a world load is most of them. `CLAUDE.md` bug shape #1: the
+    /// rule existed, was correct, and covered one of the two extents that
+    /// needed it.
+    ///
+    /// `reach` is in blocks. Zero is exactly `columnResident`, which delegates
+    /// here so there is one walk and not two.
+    bool columnsResidentAround(int x, int z, int reach) const;
+
     /// Fills in a column's sky light and seeds the propagation queues. Runs once
     /// per column, when the last of its chunks arrives.
     void seedColumnLight(int chunkX, int chunkZ);
@@ -694,6 +754,32 @@ private:
     /// Budgeted and one chunk per call, because this is 32,768 cells and it
     /// runs during streaming, when the frame has the least room to spare.
     void rescanRestoredChunks(const BudgetCheck& budgetSpent);
+    /// Columns whose last chunk has arrived and whose sky light is still owed.
+    ///
+    /// **Budgeted for the same reason `rescanRestoredChunks` is, and it is the
+    /// more expensive of the two by three times** - `seedColumnLight`'s own
+    /// comment measures it at ~98,000 cells per column against that sweep's
+    /// 32,768. It used to be called straight from `collectFinishedJobs`, which
+    /// takes no budget and runs *before* `update` has even built its
+    /// `budgetSpent` lambda, so every column that finished since the last frame
+    /// was seeded unconditionally: with eleven workers several can land
+    /// together, and the frame paid all of them before the 3 ms streaming
+    /// budget started counting. That is main-thread cost proportional to how
+    /// fast the player is moving, which is the shape a stutter-while-walking
+    /// report has.
+    ///
+    /// **This is a bound on the burst, not a throttle on normal play.** Walking
+    /// seeds roughly two columns a second; this drains as many as the budget
+    /// allows and *always at least one*, so at 120 fps it can clear 120 a
+    /// second and the cap is unreachable except when a batch lands at once -
+    /// world load, a teleport, or a stall that let several jobs pile up.
+    /// Seeding is idempotent (`m_litColumns` guards it), so deferring a column
+    /// only delays it, and `propagateLight` was already budgeted, so light was
+    /// always progressive.
+    ///
+    /// *Falsified by* this being called after `propagateLight` rather than
+    /// before it, which would cost a frame of lighting latency per column.
+    void seedPendingColumns(const BudgetCheck& budgetSpent);
     /// The sweep itself, for one resident chunk. Split out so the budget loop
     /// above holds no per-cell logic.
     void rescanChunk(const ChunkCoord& coord);
@@ -934,8 +1020,15 @@ private:
     /// the back of its own queue, which is what keeps the deque in due order:
     /// every entry carries the same delay, so one pushed now is due after
     /// everything already in it.
+    ///
+    /// **`reach` is how far the update it guards will read**, in blocks, and it
+    /// defaults to the cell's own column because that is what four of the five
+    /// queues need. The leaf queue passes `farming::kLeafDecayReach`; see
+    /// `columnsResidentAround` for what a too-narrow gate cost there. The
+    /// deferral itself is still decided on the cell's own column - that is the
+    /// one whose absence means "no chunk is ever coming back for this".
     bool columnReadyOrDeferred(const glm::ivec3& p, std::deque<PendingFluid>& queue,
-                               std::chrono::milliseconds retryDelay);
+                               std::chrono::milliseconds retryDelay, int reach = 0);
 
     /// Lava's own, drained on its own slower cadence.
     std::deque<PendingFluid> m_lavaUpdates;
@@ -991,9 +1084,30 @@ private:
     /// `rescanRestoredChunks`.
     std::deque<ChunkCoord> m_pendingRescan;
 
+    /// Columns whose sky light is owed, in arrival order. Coordinates rather
+    /// than deadlines, exactly like `m_pendingRescan` above: this is work owed
+    /// as soon as the frame can afford it. See `seedPendingColumns`.
+    std::deque<ChunkCoord> m_pendingColumnSeeds;
+
     /// The growth sampler's own clock and randomness, kept apart from the
     /// fire's for the same reason that one is kept apart from worldgen's: a
     /// field growing must not shift what a burning forest does next.
+    ///
+    /// **This is a wall-clock scheduler, and it is the EIGHTH one in this
+    /// class** - the other seven are the `due` deadlines carried by the
+    /// `PendingFluid` queues above. It is easy to miss because it is a bare
+    /// `time_point` rather than a queue, so a sweep that counts queues finds
+    /// seven and stops. It matters for the same reasons theirs does: it is
+    /// `steady_clock`, so it **cannot be written to disk** and does not survive
+    /// a process restart, and anything that changes the tick rate or the save
+    /// format has to account for it. Not saved, default-constructed, and
+    /// rebased to `now` on the first frame after a load - see the guard at the
+    /// top of `World::updateGrowth`, which looks redundant and is not.
+    ///
+    /// Noted 2026-08-19 because `Tick.hpp`'s closing list of wall-clock
+    /// holders names the seven queues and not this. Falsifier: search
+    /// `steady_clock` across `world/` and count the holders; if this one is on
+    /// that list, or has become a tick count, this paragraph is owed an edit.
     std::chrono::steady_clock::time_point m_nextGrowthTick{};
     std::uint32_t m_growthRandom = 0x85EBCA6Bu;
 

@@ -214,6 +214,35 @@ static_assert(kNormalPosX == 0 && kNormalNegX == 1 && kNormalPosY == 2 && kNorma
 /// bits 0-2 the normal code, bits 3-10 ambient occlusion, bit 11 fluid top,
 /// bits 12-15 how far above its own root a swaying vertex sits, in half blocks.
 ///
+/// **Every one of those four positions is re-spelled as a bare literal in GLSL,
+/// and nothing in the build compares the two ends.** The `static_assert`s below
+/// prove `packVertexSurface` against itself - substitute the definitions and
+/// they reduce to arithmetic on this one function - so they are worth having
+/// and they cannot see a shader at all. That is the same gap the `kNormal*`
+/// block above closes for the *values*; this closes it for the *positions*,
+/// which had nothing. The decoders, as of 2026-08-19:
+///
+/// - `triangle.vert` fills `fragNormalCode` from `inSurface & 7u`
+/// - `triangle.vert` fills `fragOcclusion` from `(inSurface >> 3) & 0xffu`
+/// - `displace.glsl` fills `fluidTop` from `(surface & (1u << 11))`
+/// - `displace.glsl` fills `swayUnits` from `(surface >> 12) & 15u`
+///
+/// **Cited by symbol rather than by line, deliberately.** The first draft of
+/// this list gave line numbers and two of the four were stale within minutes,
+/// because adding the reciprocal note to `displace.glsl` moved both of its
+/// decoders down nine lines. The variable names above do not drift.
+///
+/// Move a field here and the build stays green while grass sways at the wrong
+/// height, ambient occlusion decodes as a normal code, and water tops stop
+/// rising. None of it raises a validation error.
+///
+/// **Re-run the search rather than trusting that list** - a list rots, a search
+/// does not: `inSurface`, `surface >>` and `surface &` across `engine/shaders`.
+/// Today it returns four files, and the distinction matters: `triangle.vert`
+/// and `displace.glsl` *decode* these bits, while `hud.vert` and `shadow.vert`
+/// only declare the attribute or hand it to `displacedPosition` untouched, so
+/// they follow a change for free. Only the first two have to move with it.
+///
 /// **A height rather than a flag, because a plant taller than one block is one
 /// plant.** A flag can only say "this vertex moves", so every block of a sugar
 /// cane bent its own top half against its own bottom half and the stalk came

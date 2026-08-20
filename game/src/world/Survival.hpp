@@ -134,6 +134,45 @@ constexpr int chargeDamageWindow(float& invulnerableSeconds, int& lastDamage, in
     return landed;
 }
 
+/// **How much of a window counts as none of it.**
+///
+/// `kInvulnerableSeconds` and `kHazardInterval` are the same half second, and
+/// that is not a coincidence - the note above `chargeDamageWindow` says every
+/// contact hazard's cadence *is* this window. So the window a hazard tick arms
+/// is due to expire on precisely the frame the next tick is due to fire, and
+/// `Player.cpp` back-dates the armed window by how late the tick was so that
+/// the two land together. In exact arithmetic they cancel perfectly. They are
+/// not exact: they are two independently accumulated `float` sequences, and at
+/// the crossing frame they were measured this session disagreeing by
+/// **2.235e-08 s** - enough to leave the window technically alive, so the
+/// hazard tick finds `invulnerableSeconds > 0` and is swallowed whole.
+///
+/// **What that costs when it happens: exactly half of the hazard.** Simulated
+/// at a rigidly constant 30 fps, lava dealt 4.0 health a second where the
+/// published rate is 8.0, and drowning 1.0 where it is 2.0. You survive twice
+/// as long in lava as the reference allows.
+///
+/// **It is a knife edge rather than a live bug, and the honest version of that
+/// sentence matters.** Re-run with the +/-0.2 ms jitter a real `steady_clock`
+/// produces and the loss disappears completely - 239 or 240 of 240 ticks land
+/// at every frame rate tested. `Main.cpp` derives its delta from that clock, so
+/// today nothing is being swallowed. **The one genuinely constant delta in the
+/// game is the `kMaxDeltaSeconds` clamp below 20 fps**, which pins dt at
+/// exactly 0.05 and happens to fall the right way - by luck, and luck that any
+/// retune of the clamp, the interval or the window would re-roll.
+///
+/// A hundred-microsecond floor is **1/5000th of the half-second window it
+/// guards and 1/500th of one tick**, so no window a caller can ask for is
+/// shortened by an amount anything can observe - while it sits about 4,500
+/// times above the 2.235e-08 s of noise it exists to swallow. **Falsified by**
+/// a hazard becoming reachable twice in one interval, which would need this to
+/// reach a whole hazard tick: 5,000 times larger, and the `static_assert`
+/// below refuses anything past 5e-4.
+constexpr float kWindowResidue = 1e-4f;
+static_assert(kWindowResidue > 0.0f && kWindowResidue < tick::kSeconds * 0.01f,
+              "the window's residue floor must swallow float noise and nothing else - it is a "
+              "fraction of one tick, let alone of the half second it guards");
+
 /// The other half of the same rule: running the window down.
 ///
 /// **The pair is cleared together or not at all.** `lastDamage` outliving its
@@ -141,10 +180,16 @@ constexpr int chargeDamageWindow(float& invulnerableSeconds, int& lastDamage, in
 /// for the same reason `chargeDamageWindow` exists. **Also not a
 /// de-duplication**: `tickPassiveTimers` in `Player.cpp` ran this pair down at
 /// HEAD, and the creature half is new alongside the window it serves.
+///
+/// **The comparison is against `kWindowResidue` and not zero**, for the reason
+/// written above it - and note that clearing the pair here rather than
+/// loosening `chargeDamageWindow`'s `> 0.0f` test is deliberate: it keeps the
+/// two fields dying at the same instant, which is this function's entire job.
 constexpr void tickDamageWindow(float& invulnerableSeconds, int& lastDamage,
                                 float deltaSeconds) {
     invulnerableSeconds = std::max(0.0f, invulnerableSeconds - deltaSeconds);
-    if (invulnerableSeconds <= 0.0f) {
+    if (invulnerableSeconds <= kWindowResidue) {
+        invulnerableSeconds = 0.0f;
         lastDamage = 0;
     }
 }
@@ -255,6 +300,124 @@ static_assert(damageWindowFollowsTheRule(),
 /// the *damage*) and swapping them gives 5 and 18 where it should give 17 and 7.
 constexpr float kSafeFallDistance = 3.0f;
 constexpr float kFallDamagePerBlock = 1.0f;
+
+/// **How close to a whole block counts as that whole block.**
+///
+/// `Player.cpp` does not *measure* a fall, it **accumulates** one - a frame's
+/// descent added to a running total, dozens of times over, in `float`. So a
+/// drop of exactly nineteen blocks does not arrive as 19. Measured this
+/// session against the real integrator (gravity, the `kMaxDeltaSeconds` clamp,
+/// the sub-step split and the resolver's collision-skin snap), a true 19
+/// arrives as **18.999992370605469** at 30 fps and **18.999990463256836** at
+/// 60, and `floor(18.99999 - 3)` is 15 where the curve above says 16.
+///
+/// **This is not a rounding curiosity, it is half of every fall in the game.**
+/// Over 1,332 whole-block drops - heights 4 to 40, six frame rates, six seeds
+/// of realistic `steady_clock` jitter - **669 of them, 50.2%, were charged one
+/// health point light**, and which ones is frame-rate dependent, so the same
+/// ledge costs a different amount on a different machine. The published anchor
+/// goes with it: a 23-block drop, recorded above as lethal, comes out as
+/// 22.999980926513672 at 30 fps and leaves a full-health player standing on
+/// half a heart.
+///
+/// **The error is one-sided in practice** - an accumulator lands a hair under
+/// the whole block far more often than a hair over - so this has always
+/// favoured the player, which is exactly why twenty-odd milestones of play
+/// never reported it.
+///
+/// **A millimetre, and that is the largest it can be without lying.** The worst
+/// accumulated drift over those runs was 4.0e-05 blocks, so this is
+/// twenty-five times the error it absorbs, and nothing a player can do puts a
+/// fall within a millimetre of a damage boundary on purpose. It is *not*
+/// derived from `collision::kCollisionSkin`, which happens to be the same
+/// figure: that constant lives in a header this one must not depend on (see
+/// this file's own opening note), and the agreement is a coincidence of scale
+/// rather than a coupling - moving one does not require moving the other.
+///
+/// **Falsified by** a fall a real fraction of a block short being rounded up.
+/// The negative twin below feeds it 18.9 and requires 15.
+constexpr float kFallFloorTolerance = 0.001f;
+static_assert(kFallFloorTolerance > 0.0f && kFallFloorTolerance < 0.01f,
+              "the fall floor's slack absorbs float drift and nothing else - zero restores the "
+              "one-point-light bug, and a hundredth of a block begins forgiving real distance");
+
+/// **The fall curve, once, in the file that owns both of its constants.**
+///
+/// `distanceScale` is what a surface leaves of the *fall* - 1 for ordinary
+/// ground, a half for a bed - and the three free blocks come off **after** it.
+/// `damageScale` is what a surface leaves of the *damage*, which is how honey
+/// and hay are published, and the free blocks come off **before** it. They are
+/// not interchangeable, swapping them is silent, and the assert below pins both
+/// readings of a 40-block drop so the trap is written down as arithmetic rather
+/// than as a warning.
+///
+/// **No `std::floor`**, which is not `constexpr` before C++23. Every value
+/// truncated here is already known non-negative, and `static_cast<int>`
+/// truncates toward zero, which for a non-negative value *is* `floor`. That is
+/// what lets the whole curve be checked at compile time, where a check can
+/// never rot.
+constexpr int fallDamage(float distance, float distanceScale = 1.0f,
+                         float damageScale = 1.0f) {
+    const float blocks = (distance * distanceScale - kSafeFallDistance) * kFallDamagePerBlock;
+    if (blocks <= 0.0f) {
+        return 0;
+    }
+    const int whole = static_cast<int>(blocks + kFallFloorTolerance);
+    if (whole <= 0) {
+        return 0;
+    }
+    const float scaled = static_cast<float>(whole) * damageScale;
+    if (scaled <= 0.0f) {
+        return 0;
+    }
+    return static_cast<int>(scaled + kFallFloorTolerance);
+}
+
+/// The form this replaced, kept for one reason: so the control below can show
+/// the slack doing real work rather than agreeing with a formula that never
+/// needed it. Same device as `retiredFlatFourPercent` further down.
+constexpr int fallDamageWithoutSlack(float distance) {
+    const float blocks = (distance - kSafeFallDistance) * kFallDamagePerBlock;
+    return blocks <= 0.0f ? 0 : static_cast<int>(blocks);
+}
+
+static_assert(fallDamage(3.0f) == 0 && fallDamage(10.0f) == 7 &&
+                  fallDamage(23.0f) == kMaxHealth,
+              "the three published anchors - 3 blocks free, 10 costs 7, 23 kills a full-health "
+              "player outright - which the note above says must not be re-derived");
+
+/// **The measurement, as an assert.** Four distances this project's own
+/// integrator actually produced for whole-block drops.
+static_assert(fallDamage(18.999992370605469f) == 16 &&
+                  fallDamage(18.999990463256836f) == 16 &&
+                  fallDamage(9.9999713897705078f) == 7 &&
+                  fallDamage(22.999980926513672f) == kMaxHealth,
+              "an accumulated fall arrives a few millionths under the whole block it really "
+              "was, and the damage must not truncate away with it");
+
+/// **The control**, and it is what makes the assert above a test rather than a
+/// restatement: the retired form is fed the identical distances and must lose
+/// the point. If someone sets the slack to zero, this one starts passing and
+/// the one above starts failing - they cannot both be green.
+static_assert(fallDamageWithoutSlack(18.999992370605469f) == 15 &&
+                  fallDamageWithoutSlack(22.999980926513672f) == kMaxHealth - 1,
+              "without the slack those same measured distances each lose a health point, and a "
+              "23-block drop stops being lethal");
+
+/// **The negative twin: slack must not forgive real distance.** A tenth of a
+/// block is a hundred times the slack and stays short.
+static_assert(fallDamage(18.9f) == 15 && fallDamage(3.5f) == 0 && fallDamage(3.9f) == 0,
+              "a fall genuinely short of the next whole block is still charged the lower "
+              "number - the slack absorbs float drift, not distance");
+
+/// **The two scales are different units, written as arithmetic.** The live
+/// values are `Player.cpp`'s `kBedFallScale` and `kHoneyFallDamageScale`; they
+/// are spelled as literals here on purpose, because what is being pinned is the
+/// *shape* of the two arguments and not either surface.
+static_assert(fallDamage(40.0f, 0.5f) == 17 && fallDamage(40.0f, 1.0f, 0.2f) == 7 &&
+                  fallDamage(40.0f, 0.2f) == 5 && fallDamage(40.0f, 1.0f, 0.5f) == 18,
+              "a distance scale and a damage scale are not interchangeable - swapping them on a "
+              "40-block drop gives 5 and 18 where it should give 17 and 7");
 
 // --- Hazards. §3.1's table, converted from "per half second" to an interval.
 
@@ -700,8 +863,24 @@ static_assert(freezeOnsetIsThreeAndAHalfCadences(),
 /// of this list carried `Main.cpp` line numbers, and every one of the ten was
 /// already wrong when checked hours later - they had drifted between +49 and
 /// +91 lines, because `Main.cpp` is a 700 KB file under active edit by another
-/// owner and finding 9635 (worn armour is never dropped on death) will move
-/// them again. A line number into somebody else's live file is the most
+/// owner. **That prediction has since been confirmed twice over, and the thing
+/// it named has itself changed state:** finding 9635 - which this note used to
+/// describe, in the present tense, as "worn armour is never dropped on death" -
+/// **landed on 2026-08-19**, so that claim is now false and the line numbers
+/// moved again exactly as predicted. Verified here by following the data rather
+/// than by counting a name: `Main.cpp` loops `game::kArmourSlots`, calls
+/// `game::dropStack` on each `inventory.armourAt(wornSlot)` and clears the cell
+/// in the same statement. Search for `kArmourSlots` near `dropStack`; do not
+/// trust a line number, which is the whole point of this paragraph.
+///
+/// **And note what nearly went wrong re-checking it**, because it is the reason
+/// this paragraph is worth its length: a sweep for lines containing *both*
+/// "armour" and "drop" returned **zero** while three instrument controls all
+/// fired, because the two words sit on different lines. A one-line filter is
+/// punctuation standing in for grammar, and it fails silently in the
+/// false-all-clear direction.
+///
+/// A line number into somebody else's live file is the most
 /// rot-prone citation this project has, and it fails silently: the name it
 /// points at is still *somewhere*, so a reader who checks the line sees
 /// unrelated code and cannot tell whether the claim or the number is the wrong
@@ -726,11 +905,17 @@ static_assert(freezeOnsetIsThreeAndAHalfCadences(),
 /// false - `Inventory.hpp`'s `m_armour` does exactly that and did not rot.
 ///
 /// What this file still owns, and all of it is asserted below: the curve, the
-/// durability cost, and which damage sources may touch either. Two of those
-/// asserts are the first callers `armourDefence` ever had, and a runtime probe
-/// drove the whole chain - a ten-point blow costs 10 naked, 9 in leather, 6 in
-/// iron and 3 in diamond, and a thirty-point blow separates Emberite from
-/// diamond 13 to 15 on toughness alone.
+/// durability cost, and which damage sources may touch either. **The sentence
+/// that used to stand here - that two of those asserts were the first callers
+/// `armourDefence` ever had - was itself a negative claim and it rotted, which
+/// is the fifth instance of the rule two paragraphs above.** Re-measured
+/// 2026-08-19 (finding 9661): 5 calls in this file and 3 in
+/// `item/Inventory.hpp`, one of them the live path that puts worn points on the
+/// player. The full count, its controls and its falsifier are written beside
+/// `fullSetDefence` below, where the asserts actually are. What remains true is
+/// the runtime probe that drove the chain - a ten-point blow costs 10 naked, 9
+/// in leather, 6 in iron and 3 in diamond, and a thirty-point blow separates
+/// Emberite from diamond 13 to 15 on toughness alone.
 
 /// The ceiling on effective defence points, and the divisor that turns them
 /// into a fraction. **Both dimensionless.** Twenty points at 4% each is the 80%
@@ -816,9 +1001,21 @@ static_assert(nearly(armourDamageTaken(30, 20, 12.0f), 13.2f, 0.001f),
               "the 6.8 health the Bedrock 1.18.30 page reports as 7");
 
 /// The points table itself, checked through `armourDefence` rather than against
-/// hand-copied literals. **These two asserts are that function's first callers
-/// in the history of the tree**, and being `constexpr` on both sides they can
-/// never rot - the shape `CLAUDE.md` names in `foodTablesAgree`.
+/// hand-copied literals - and being `constexpr` on both sides these can never
+/// rot, the shape `CLAUDE.md` names in `foodTablesAgree`.
+///
+/// **They are not that function's only callers and the claim that they were is
+/// withdrawn** (finding 9661, re-measured here 2026-08-19): `armourDefence` has
+/// **5 calls across 3 lines in this file**, all of them inside the helper
+/// directly below, and **3 in `item/Inventory.hpp`** - one of which,
+/// `Inventory::armourSet()` at its line 243, is the live gameplay path that
+/// puts worn points on the player. `Inventory.hpp` writes that chain out at its
+/// own line 219. Instrument controls for that count: an invented name in this
+/// file returned 0, a different symbol in this file returned 4, and a
+/// case-insensitive sweep found no fifth spelling.
+///
+/// **Falsified by** `Inventory.hpp` ceasing to sum worn defence itself, which
+/// is the only thing that would put this file back in sole possession.
 constexpr int fullSetDefence(ItemId helmet) {
     return armourDefence(helmet) + armourDefence(static_cast<ItemId>(static_cast<int>(helmet) + 1)) +
            armourDefence(static_cast<ItemId>(static_cast<int>(helmet) + 2)) +

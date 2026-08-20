@@ -125,8 +125,32 @@ struct Settings {
     /// for it. A dropped block is a miniature of the block itself, and the only
     /// way to know a bell reads as a bell rather than a gold brick is to look.
     ///
-    /// Nothing is written to the world - dropped items are not saved - so this
-    /// leaves no trace beyond the setting itself.
+    /// **The world's real drops are neither loaded nor saved while it is on**,
+    /// exactly as `creatureShowcase` above freezes the spawner and skips the
+    /// creature save. `Main.cpp` gates both halves on `!settings.dropShowcase`:
+    /// the `loadDrops` restore beside the creature restore, and the
+    /// `saveDrops` write beside `saveCreatures`.
+    ///
+    /// **Both gates are load-bearing — do not remove either.** Drop the save
+    /// gate and reviewing a model writes the whole showcase roster into the
+    /// real world file, a full anvil and an enchanting table among them, every
+    /// time anyone looks. Drop the load gate and the world's genuine floor is
+    /// restored into the frozen review row, which is then written back out by
+    /// the first ordinary quit.
+    ///
+    /// **The retired claim is described here and deliberately NOT quoted.**
+    /// Until 2026-08-19 this comment asserted the opposite of the paragraph
+    /// above - that nothing reached the world and so the flag left no trace.
+    /// It was true when written and died the day drop persistence landed, at
+    /// which point it was an argument for deleting two live gates. It is not
+    /// reproduced verbatim because `ItemEntity.cpp` paid for that mistake the
+    /// same day: a retired negative claim left spelled out in a file is a
+    /// permanent false positive for every future sweep, and the correction
+    /// becomes indistinguishable from the fault it documents.
+    /// **Re-check rather than trusting this paragraph:** search `Main.cpp` for
+    /// `saveDrops|loadDrops`. It returned 0 that morning and 9 by 15:53 the
+    /// same afternoon, of which exactly 2 are call sites - a restore and a
+    /// write. *Falsified by that search returning 0, or by finding a third.*
     bool dropShowcase = false;
 
     /// Which curve squashes the high dynamic range image back into a range a
@@ -320,6 +344,31 @@ struct Settings {
     static constexpr int kMaxCreatureShowcase = 1000;
 
     /// Beyond this the chunk count grows faster than anything can feed it.
+    ///
+    /// **This is not the only bound on that radius, and the other one is
+    /// larger - measured 2026-08-19.** `World::setVisibleRadius` clamps to a
+    /// hand-written `std::clamp(chunks, 1, 64)`, so the F6/F7 keys can walk the
+    /// live radius to 64 while this rejects anything past 32. The gap between
+    /// the two is not cosmetic, because the same keypress that moves the radius
+    /// also writes it: `Main.cpp` copies it into `renderDistance` and calls
+    /// `saveSettings` immediately, so 33 or more reaches the file - and
+    /// `parseUnsigned` **rejects rather than clamps**, returning false above
+    /// `limit`, which sends `read` down its warning branch and leaves the field
+    /// on its **struct default of 12**. A player who raised the distance to 40
+    /// is given 12 on the next launch, not 40 and not 32, with only a line in
+    /// the log to say so.
+    ///
+    /// **Do not close this by raising the number here.** The two bounds want
+    /// deriving from one another rather than matching by hand, and the one that
+    /// should survive is this one, because the settings file has to be able to
+    /// express every radius the game can actually reach. Filed against
+    /// `world/World.cpp` by `r2-systems`; that file is not this agent's to
+    /// edit.
+    ///
+    /// **What would make this note stale:** `World::setVisibleRadius` naming a
+    /// constant instead of a literal. Search `setVisibleRadius` in
+    /// `world/World.cpp` and read its first line - if the clamp no longer says
+    /// `64`, this has been overtaken.
     static constexpr unsigned kMaxRenderDistance = 32;
 
     /// How many curves `tonemap.frag` implements.
@@ -333,6 +382,38 @@ struct Settings {
 
     /// Auto, keyboard and mouse, gamepad.
     static constexpr unsigned kInputModeCount = 3;
+
+    /// Follow the cycle, rain, storm, clear - the four values `start_weather`
+    /// may take, and the bound `loadSettings` parses it against.
+    ///
+    /// **The same 4 is written down again as a modulus in `Weather::force`**,
+    /// which is what turns this number into a state. No assert holds them
+    /// together: `world/Weather.hpp` does not include this header and should
+    /// not start doing so for one comparison, so the coupling is stated in both
+    /// files instead - there and here. **Falsified by `Weather::force` gaining
+    /// a fifth case**, at which point the new state is reachable from the V key
+    /// and unreachable from `settings.cfg` until this moves with it. Stated
+    /// 2026-08-19.
+    static constexpr unsigned kStartWeatherCount = 4;
+
+    /// The furthest the falling curtain may be asked for, in columns.
+    ///
+    /// A sanity bound rather than a taste: the mesh is one quad per column
+    /// inside the disc, so the cost is quadratic, and a hand-edited 5000 would
+    /// build twenty-five million quads on the first rainy frame. `rain_distance`
+    /// is meant to be kept well inside the fog anyway.
+    static constexpr unsigned kMaxRainDistance = 48;
+
+    /// The most of a stick's travel that may be given up to the dead zone.
+    ///
+    /// **One owner, because `Gamepad.cpp` clamps it a second time.** It has to:
+    /// `applyDeadzone` divides by `1 - deadzone`, so the value it is handed has
+    /// to be a real fraction of the stick whatever produced it. What it must
+    /// not do is carry its *own* number, which it did - 0.9 there against 0.6
+    /// here - two bounds for one quantity, free to disagree the day either
+    /// moves. Never near 1: a dead zone of one leaves the pad inert with
+    /// nothing on screen to say why.
+    static constexpr float kMaxControllerDeadzone = 0.6f;
 };
 
 /// Reads `file`, filling anything missing with defaults for this machine. A

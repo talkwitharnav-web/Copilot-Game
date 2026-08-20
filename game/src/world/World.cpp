@@ -673,13 +673,35 @@ bool World::columnLoaded(int chunkX, int chunkZ) const {
     return true;
 }
 
+bool World::columnsResidentAround(int x, int z, int reach) const {
+    // Walked in chunk coordinates rather than block ones, so the cost is the
+    // number of *columns* the box touches - one, two or four at any reach below
+    // `Chunk::kSize` - and not the eighty-one cells a per-block sweep would ask
+    // about at reach four.
+    const int firstX = floorDiv(x - reach, Chunk::kSize);
+    const int lastX = floorDiv(x + reach, Chunk::kSize);
+    const int firstZ = floorDiv(z - reach, Chunk::kSize);
+    const int lastZ = floorDiv(z + reach, Chunk::kSize);
+    for (int cz = firstZ; cz <= lastZ; ++cz) {
+        for (int cx = firstX; cx <= lastX; ++cx) {
+            if (!columnLoaded(cx, cz)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool World::columnResident(int x, int z) const {
-    return columnLoaded(floorDiv(x, Chunk::kSize), floorDiv(z, Chunk::kSize));
+    // Reach zero **is** this question, so it delegates rather than restating the
+    // floor division. This one is public and has callers outside this file; the
+    // wider one is private and is the walk both go through.
+    return columnsResidentAround(x, z, 0);
 }
 
 bool World::columnReadyOrDeferred(const glm::ivec3& p, std::deque<PendingFluid>& queue,
-                                  std::chrono::milliseconds retryDelay) {
-    if (columnResident(p.x, p.z)) {
+                                  std::chrono::milliseconds retryDelay, int reach) {
+    if (columnsResidentAround(p.x, p.z, reach)) {
         return true;
     }
 
@@ -690,6 +712,14 @@ bool World::columnReadyOrDeferred(const glm::ivec3& p, std::deque<PendingFluid>&
     // that cell again. Once the column is out of load range nothing is going to
     // bring it back, and the entry dies here - which is what stops the frontier
     // accumulating retries as the player travels.
+    //
+    // **Measured on the cell's own column even when `reach` is wider**, and
+    // that is the right asymmetry rather than an oversight: the question here is
+    // "is anything ever coming back for this entry", and the answer belongs to
+    // the column the entry is *in*. A neighbour that is out of load range while
+    // this column is inside it is a frontier that will move again; giving up on
+    // the entry for that would strand a leaf on the very edge of the loaded
+    // world for the rest of the session.
     const ChunkCoord column{floorDiv(p.x, Chunk::kSize), 0, floorDiv(p.z, Chunk::kSize)};
     if (!m_hasCentre || chebyshevDistance(column, m_centre) <= m_loadRadius) {
         queue.push_back({p, std::chrono::steady_clock::now() + retryDelay, 0});
@@ -800,6 +830,70 @@ void World::seedColumnLight(int chunkX, int chunkZ) {
             for (int y = floorY + 1; y < highestDarkNeighbour && y <= worldTop; ++y) {
                 m_skyAdditions.push_back({worldX, y, worldZ});
             }
+        }
+    }
+
+    // **And now the same rule applied to the ring, for the columns that were
+    // seeded before this one existed.**
+    //
+    // The margin above is read through `blockAt`, and `blockAt` answers `Air`
+    // for a chunk that is not resident - so a *neighbour* seeded while this
+    // column was still streaming in scored this side as open sky all the way
+    // down, took its `highestDarkNeighbour` from three real values and one
+    // zero, and queued none of its border cells. Zero is the minimum, so an
+    // absent neighbour can only ever make that maximum too small; it can never
+    // make it too large. And nothing asks again - `m_litColumns` makes seeding
+    // once-only, and a chunk arriving marks its neighbours for a *remesh*, not
+    // a relight.
+    //
+    // What that left on screen is a strip against a cliff face at a column
+    // boundary lit only by what crept up from the lowest full-sky cell - one
+    // level dimmer per block, black about fifteen up - beside a column that is
+    // at full 15 the whole way. It needs a height difference across the
+    // boundary and it needs the taller column to arrive second, so it is
+    // roughly one boundary in two at the streaming frontier, which is every
+    // boundary in the world once the player has walked far enough.
+    //
+    // The rule is the interior one unchanged: a cell is worth queueing where it
+    // has full sky and the cell across from it does not. Idempotent where the
+    // neighbour got it right, because `propagateLight` drops an addition whose
+    // target is already at least as bright, and free where the two columns are
+    // level, because then `from == to` and nothing is pushed.
+    const auto floorAt = [&](int lx, int lz) {
+        return skyFloor[static_cast<std::size_t>(lz + 1) * span + (lx + 1)];
+    };
+    const auto queueRingRun = [&](int lx, int lz, int interiorLx, int interiorLz) {
+        const int worldX = chunkX * size + lx;
+        const int worldZ = chunkZ * size + lz;
+        const int top = std::min(floorAt(interiorLx, interiorLz) - 1, worldTop);
+        for (int y = floorAt(lx, lz); y <= top; ++y) {
+            m_skyAdditions.push_back({worldX, y, worldZ});
+        }
+    };
+
+    // Only the four sides, because light does not travel diagonally - a corner
+    // is reached through one of these. Residency is asked per column rather
+    // than per cell: an absent one reads as `floorY == 0` and would queue the
+    // whole height of every border cell, thousands of entries the propagator
+    // would then drop one at a time. A column that is loaded but not yet seeded
+    // is all zeroes and drops just as cheaply, and its own seeding will get the
+    // answer right now that this one is here.
+    const bool westResident = columnLoaded(chunkX - 1, chunkZ);
+    const bool eastResident = columnLoaded(chunkX + 1, chunkZ);
+    const bool northResident = columnLoaded(chunkX, chunkZ - 1);
+    const bool southResident = columnLoaded(chunkX, chunkZ + 1);
+    for (int i = 0; i < size; ++i) {
+        if (westResident) {
+            queueRingRun(-1, i, 0, i);
+        }
+        if (eastResident) {
+            queueRingRun(size, i, size - 1, i);
+        }
+        if (northResident) {
+            queueRingRun(i, -1, i, 0);
+        }
+        if (southResident) {
+            queueRingRun(i, size, i, size - 1);
         }
     }
 
@@ -1073,16 +1167,46 @@ bool World::fireCanSurvive(int x, int y, int z) const {
     return false;
 }
 
+bool World::rainFallsOn(int x, int y, int z) const {
+    // **The storm bit is the gate and stays the gate**, so this can only ever
+    // narrow what it used to admit and never widen it - the intensity threshold
+    // `Main.cpp` folds into that bit is left where its owner put it. It is also
+    // the cheap test, which keeps the biome sample off every fire tick and every
+    // farmland tick in clear weather.
+    if (!m_precipitating) {
+        return false;
+    }
+    // Open to the sky, asked exactly as both callers asked it before this
+    // function existed.
+    if (skyLightAt(x, y, z) < kMaxLight) {
+        return false;
+    }
+    // **And then the column's own answer, which is the half that was missing.**
+    // `m_precipitating` is sampled in the camera's column, so a fire in a desert
+    // was being put out by a shower two hundred blocks away over a plains, and a
+    // desert field hydrated itself from it. `weatherTickColumn` has been asking
+    // this same function for the settling half all along; one call site is
+    // `CLAUDE.md` bug shape #1 and two is the fix.
+    //
+    // **Rain only.** minecraft.wiki [[Fire]] extinguishes on rain and
+    // [[Farmland]] hydrates on rain; a snowy biome gets snow, and neither rule
+    // applies there. `precipitationFor` answers `None` for a dry biome, which is
+    // what keeps a desert dry however hard it is raining where the player is.
+    const BiomeSample biome = sampleBiome(m_seed, x, z);
+    return weather::precipitationFor(biome.dominant, y, m_seed, x, z) ==
+           weather::Precipitation::Rain;
+}
+
 bool World::farmlandIsHydrated(int x, int y, int z) const {
     // **Rain hydrates too, and ours ignored it.** minecraft.wiki [[Farmland]]:
     // "Farmland becomes hydrated if ... rain falls on the block". So a field
     // out in the open never dries during a shower, which is the behaviour a
     // player notices - they stop hauling buckets when it rains.
     //
-    // Sky exposure is what "rain falls on it" means, and it is asked the same
-    // way `updateFire` asks it, so the two cannot disagree about which cells
-    // the weather reaches.
-    if (m_precipitating && skyLightAt(x, y + 1, z) >= kMaxLight) {
+    // Sky exposure and the biome are both `rainFallsOn`'s business, and it is
+    // the same call `updateFire` makes, so the two cannot disagree about which
+    // cells the weather reaches.
+    if (rainFallsOn(x, y + 1, z)) {
         return true;
     }
     // The reference's rule is a **nine-by-nine box at this level or one above**
@@ -1184,6 +1308,24 @@ void World::growOne(const glm::ivec3& at) {
             if (moisture != kFarmlandFullMoisture) {
                 setBlock(at.x, at.y, at.z, farmlandAtMoisture(kFarmlandFullMoisture));
             }
+            return;
+        }
+        // **"Not wet" and "could not tell" are different answers, and only one
+        // of them may dry a field.** `farmlandIsHydrated` sweeps a nine-by-nine
+        // box two deep through `blockAt`, and `blockAt` answers `Air` for a
+        // chunk that is not resident - so a field whose pond is in the next
+        // column along reads bone dry at the streaming frontier. Nothing above
+        // is at risk: an absent chunk can only ever read as *less* water, so a
+        // false `wet` is not reachable and setting full moisture stays safe.
+        // It is everything below, which walks a field down seven levels and
+        // then turns unsown ground back into dirt.
+        //
+        // Slower than the leaf case rather than different from it - one level
+        // per random tick, not one tick - and the same `CLAUDE.md` bug shape #1
+        // answer: the same walk `decayLeafIfOrphaned` makes, at this rule's own
+        // reach. Refusing costs one random tick; the field is sampled again
+        // long before a player notices.
+        if (!columnsResidentAround(at.x, at.z, farming::kHydrationReach)) {
             return;
         }
         // **Drying takes seven random ticks, and ours did it in one.**
@@ -1800,6 +1942,27 @@ bool World::growSaplingAt(const glm::ivec3& at, BlockId sapling) {
         return false;
     }
 
+    // **And the box has to be readable before it can be believed.** Everything
+    // below reads through `blockAt`, which answers `Air` for a chunk that is
+    // not resident - so a sapling four blocks from a column boundary at the
+    // streaming frontier finds imaginary room, and then `setBlock` drops every
+    // log and leaf that lands outside the resident chunks on the floor. The
+    // result is a permanently half-built tree, sliced flat down a chunk line.
+    //
+    // Same walk `decayLeafIfOrphaned` and the farmland rule make, at this
+    // plan's own reach rather than a constant: the clearance box below runs dx
+    // and dz from `-radius` to `radius + trunkSpan - 1`, so the furthest cell
+    // it can name is that upper bound, taken over every level it checks.
+    // Refusing is what the plan already does when a wall is in the way, and it
+    // costs one random tick - or one bone meal, which "no room" already costs.
+    int planReach = 0;
+    for (int dy = 1; dy <= plan.clearHeight; ++dy) {
+        planReach = std::max(planReach, plan.clearedRadiusAt(dy) + plan.trunkSpan - 1);
+    }
+    if (!columnsResidentAround(corner.x, corner.z, planReach)) {
+        return false;
+    }
+
     // The reference's taper, and it comes off the plan rather than being
     // written out again here - see `SaplingPlan::clearedRadiusAt` for why that
     // matters. A box for the whole height would refuse to grow a tree beside a
@@ -2273,6 +2436,20 @@ bool World::applyBoneMeal(const glm::ivec3& at) {
 
 void World::updateGrowth(const BudgetCheck& budgetSpent) {
     const auto now = Clock::now();
+    // **Load-bearing, and it looks redundant - do not delete it.** A
+    // default-constructed `time_point` is the clock epoch, which is in the
+    // past, so *every* deadline test below is already true on the first frame
+    // after a world load. Without this rebase the catch-up loop would run the
+    // full `kMaxGrowthCatchUp` ticks in one frame, every single load: a field
+    // that sprints the moment the world appears, which is exactly what the cap
+    // further down exists to prevent. `m_nextGrowthTick` is **not** saved and
+    // is default-constructed by `World.hpp`, so this is the state on every
+    // load and not an edge case. Asked and answered 2026-08-19; the question
+    // is easy to ask twice because the guard has no visible caller.
+    //
+    // What would make this comment false: `m_nextGrowthTick` gaining a
+    // serialised value in `WorldStore`, or moving to a tick count - search
+    // `m_nextGrowthTick`, which is the only name involved.
     if (m_nextGrowthTick.time_since_epoch().count() == 0) {
         m_nextGrowthTick = now;
     }
@@ -2629,8 +2806,13 @@ void World::updateFire(const BudgetCheck& budgetSpent) {
         // the same bank in the reference. The two branches above are not: a
         // fire that runs out of floor or out of fuel simply stops, with no
         // water involved and no sound.
-        if (m_precipitating && !feedsEternalFire(under) &&
-            skyLightAt(p.x, p.y, p.z) >= kMaxLight) {
+        //
+        // **`rainFallsOn`, not the bare storm bit**, which is where the sky test
+        // and the biome test now live together: that bit is sampled in the
+        // player's column, so this used to drown a desert campfire whenever it
+        // drizzled wherever the player happened to be. Same call
+        // `farmlandIsHydrated` makes.
+        if (!feedsEternalFire(under) && rainFallsOn(p.x, p.y, p.z)) {
             setBlock(p.x, p.y, p.z, BlockId::Air);
             recordFizz(p, BlockId::Air);
             continue;
@@ -2803,6 +2985,25 @@ bool World::decayLeafIfOrphaned(const glm::ivec3& at) {
     if (stateBitAt(at.x, at.y, at.z)) {
         return false;
     }
+    // **The residency gate belongs here, beside the rule, and not only on the
+    // queue that feeds it.** Both callers reach this line - the queue, which is
+    // gated and can defer, and `growOne`'s random tick, which is sampled
+    // straight out of a resident chunk and has no gate at all. What follows
+    // reads `farming::kLeafDecayReach` blocks in every direction through
+    // `blockAt`, and `blockAt` answers `Air` for a chunk that is not resident:
+    // a leaf whose trunk is in the next column along cannot see it, and this
+    // function's whole job is to *destroy* what it decides is orphaned. Reach 4
+    // against a 32-block column means roughly two cells in five are within
+    // range of a boundary, so a canopy at the streaming frontier came apart on
+    // its own. `CLAUDE.md` bug shape #1: the gate existed, was correct, and was
+    // one column wide where the read is nine.
+    //
+    // A refusal is not a decision that the leaf lives - the queue re-asks and
+    // the random tick comes round again - which is why it is safe for it to
+    // share the "did not decay" answer.
+    if (!columnsResidentAround(at.x, at.z, farming::kLeafDecayReach)) {
+        return false;
+    }
     if (leafHasWoodNearby(at)) {
         return false;
     }
@@ -2827,11 +3028,37 @@ void World::updateLeafDecay(const BudgetCheck& budgetSpent) {
 
         // A canopy straddling a chunk boundary must not be judged against a
         // neighbour that has not arrived, or half a tree's leaves vanish the
-        // moment it streams in. Same gate the fall and support queues use.
-        if (!columnReadyOrDeferred(p, m_leafChecks, kLeafCheckDelay)) {
+        // moment it streams in. Same gate the fall and support queues use -
+        // **but as wide as the search**, because the wood scan reaches four
+        // blocks into the columns around this one and those queues only ever
+        // look straight down. Without the reach the entry was consumed here and
+        // the decision taken on `Air`; with it the entry is deferred and
+        // re-asked when the neighbour lands.
+        if (!columnReadyOrDeferred(p, m_leafChecks, kLeafCheckDelay, farming::kLeafDecayReach)) {
             continue;
         }
         decayLeafIfOrphaned(p);
+    }
+}
+
+void World::seedPendingColumns(const BudgetCheck& budgetSpent) {
+    // **Always at least one, then as many as the frame can afford.** Without
+    // the `first` term a frame whose budget was already spent upstream would
+    // seed nothing, and a column that never seeds never lights - the queue
+    // would stall permanently behind whatever else is busy. With it, progress
+    // is guaranteed and the worst case is one column's ~98,000 cells, which is
+    // what the old code paid per column anyway.
+    bool first = true;
+    while (!m_pendingColumnSeeds.empty() && (first || !budgetSpent())) {
+        const ChunkCoord column = m_pendingColumnSeeds.front();
+        m_pendingColumnSeeds.pop_front();
+        first = false;
+        // The player may have walked away between arrival and this frame, and
+        // a partly-unloaded column cannot be traced from the top down.
+        if (!columnLoaded(column.x, column.z)) {
+            continue;
+        }
+        seedColumnLight(column.x, column.z);
     }
 }
 
@@ -3769,6 +3996,29 @@ void World::recordFizz(const glm::ivec3& p, BlockId became) {
     m_fizzes.push_back({p, became});
 }
 
+// **This 64 is not the bound the save file will accept, and the gap loses the
+// player's setting silently.** `Settings::kMaxRenderDistance` is 32, and
+// `parseUnsigned` in `core/Settings.cpp` *rejects* rather than clamps - it
+// returns false on `value > limit`. So a radius walked past 32 here is written
+// to disk by the same keypress that moved it, refused on the next load, and the
+// field falls back to its struct default of 12. Raise it to 40, quit, come
+// back: 12. Not 40, not 32.
+//
+// **The clamp is deliberately not derived from that constant, and that is a
+// layering fact rather than an oversight.** No file under `world/` has ever
+// included `core/` - 0 of 60 on 2026-08-19, against 20 includes of `item/` from
+// 13 of those same files, so the boundary is observed rather than accidental.
+// Pulling settings in here to fix an off-by-32 would be the first such edge,
+// and it would put a user-preference bound inside the layer that is supposed to
+// supply mechanism. The bound that protects the player therefore belongs where
+// both halves are already visible: the F7/F8 site in `Main.cpp`, which includes
+// `core/Settings.hpp` today - search `setVisibleRadius` there. **Check whether
+// that clamp is already present before adding one**; a second independently
+// authored bound is the same defect again, one layer up.
+//
+// What would make this note false: `Settings::kMaxRenderDistance` changing to
+// 64, `parseUnsigned` learning to clamp, or `world/` gaining a `core/` include.
+// Search `kMaxRenderDistance` - it is the only name on the other side.
 void World::setVisibleRadius(int chunks) {
     const int radius = std::clamp(chunks, 1, 64);
     if (radius == m_visibleRadius) {
@@ -4581,8 +4831,19 @@ void World::collectFinishedJobs() {
 
         // Sky light is traced from the top of the world down, so it can only be
         // done once every chunk in the column is present.
+        //
+        // **Queued rather than seeded here, and that is the whole fix.** This
+        // function takes no budget and runs *before* `update` builds one, while
+        // `seedColumnLight` is ~98,000 cells per column by its own measurement.
+        // Doing it inline therefore paid for every column that finished since
+        // the last frame, uncapped, ahead of the 3 ms streaming budget - and
+        // with eleven workers several land together. `rescanRestoredChunks`
+        // already carried exactly this rule for a sweep a third the size; this
+        // is that rule reaching the second place that needed it.
+        //
+        // Re-checked at the drain, because the column can unload in between.
         if (columnLoaded(result.coord.x, result.coord.z)) {
-            seedColumnLight(result.coord.x, result.coord.z);
+            m_pendingColumnSeeds.push_back(result.coord);
         }
 
         // Nothing in the save file remembers a queued leaf check or a queued
@@ -4721,6 +4982,11 @@ std::vector<ChunkMeshUpdate> World::update(const glm::vec3& playerPosition, floa
     const auto budgetSpent = [&] {
         return std::chrono::duration<float>(Clock::now() - start).count() >= budgetSeconds;
     };
+
+    // **Before `propagateLight`, which drains what this fills.** The ordering
+    // is identical to when `collectFinishedJobs` seeded inline; the only change
+    // is that the cost is now metered instead of being paid ahead of the budget.
+    seedPendingColumns(budgetSpent);
 
     propagateLight(budgetSpent);
     flushLightDirty();

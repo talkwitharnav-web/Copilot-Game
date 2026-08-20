@@ -169,9 +169,24 @@ static_assert(theInverseIsRejected(),
 /// to rest. `columnAt(y)` answers what is in the column at cell `y`.
 ///
 /// **Every cell the cube would pass through this frame is tested, not just the
-/// one it ends in.** At terminal speed a frame covers half a metre, and a fast
-/// block that only checked its destination would drop straight through a
-/// one-block floor.
+/// one it ends in.** At terminal speed a clamped frame covers **1.96 m** - the
+/// reference's 1.96 blocks a tick, and one tick is exactly the clamp - so the
+/// cube crosses two whole cell boundaries at once and can straddle parts of two
+/// more. A fast block that only checked its destination would drop straight
+/// through a one-block floor.
+///
+/// **That figure was understated four times over until 2026-08-19**, at a value
+/// below one cell. The code was right and the comment was wrong, which is the
+/// dangerous direction: a sub-cell distance quietly argued that the walk below
+/// is redundant and a destination test would do. `FallingBlock.cpp` now asserts
+/// the distance stays above one cell, sited beside `kTerminalVelocity` and
+/// `kMaxDeltaSeconds` because this header cannot see either constant and so
+/// cannot state the number honestly on its own.
+///
+/// The retired wording is deliberately **not** quoted here. A dead claim
+/// repeated verbatim reads exactly like a live one to the next reader sweeping
+/// for it - which is how one correction in this codebase got re-reported as an
+/// open bug after it had already been fixed.
 ///
 /// Pure and templated on the column so the probe drives this function rather
 /// than a copy of it - the fall is decided here and applied by the caller,

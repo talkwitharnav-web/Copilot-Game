@@ -137,7 +137,13 @@ void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& s
     const bool wasLive = pad.live;
 
     const engine::GamepadAxes axes = window.gamepadAxes();
-    const float deadzone = std::clamp(settings.controllerDeadzone, 0.0f, 0.9f);
+    // **Clamped again, against `Settings`' own bound rather than a second
+    // number.** `applyDeadzone` divides by `1 - deadzone`, so this has to be a
+    // real fraction of the stick whatever produced it - but this line carried
+    // its own 0.9 while `loadSettings` clamped to 0.6, which is one quantity
+    // with two bounds and nothing to notice when either moves.
+    const float deadzone =
+        std::clamp(settings.controllerDeadzone, 0.0f, Settings::kMaxControllerDeadzone);
 
     // The device reports Y negative upward, so both sticks are flipped here to
     // the "up is positive" the rest of this file is written in.
@@ -171,8 +177,18 @@ void updateGamepad(Gamepad& pad, const engine::Window& window, const Settings& s
     // lines. The real pair is `lookRadians` and this, both off the right stick.
     // Which of the two scalings a hotbar cycle should take, or whether it should
     // take one at all when the reference puts hotbar cycling on the bumpers, is
-    // a judgement about feel and belongs to the playtester. One line either way
-    // once it is called.
+    // a judgement about feel and belongs to the playtester.
+    //
+    // **It is called, and this note used to end "once it is called".** That
+    // clause was true when written and was false by 2026-08-19 15:00:
+    // `Main.cpp` adds it into the same accumulator the mouse wheel feeds,
+    // gated on `inputDevice == Gamepad && openScreen.has_value()`, so the right
+    // stick scrolls a catalogue while a panel is up and drives the camera
+    // otherwise. **The behaviour above is therefore live rather than latent** -
+    // a player who raises `controller_look_sensitivity` for the camera gets no
+    // change in how fast the catalogue scrolls, which is the thing to judge.
+    // Falsified by that call site disappearing; search `scrollNotches` outside
+    // this file.
     pad.scrollNotches = lookStick.y * kScrollNotchesPerSecond * deltaSeconds;
 
     for (std::size_t i = 0; i < kPadButtonCount; ++i) {

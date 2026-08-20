@@ -58,6 +58,16 @@ struct Particle {
     bool fades = true;
 };
 
+/// How hard a wisp of smoke pushes upward, as the negative-gravity fraction
+/// `Particle::gravity` carries.
+///
+/// **One owner, because it is now two files' business**: `spawnSmoke` fills the
+/// particle with it and its own default argument names it, and a second copy is
+/// how a torch and a furnace would quietly stop agreeing. A torch's wisp, a
+/// furnace's chimney and a lightning strike's puff all take this; only a
+/// campfire asks for more.
+inline constexpr float kWispLift = 0.045f;
+
 class Particles {
 public:
     /// Past this the oldest are dropped. A hard ceiling rather than a growing
@@ -82,7 +92,20 @@ public:
 
     /// A rising grey puff. Drawn from the white sprite and darkened, because a
     /// particle carries no colour of its own.
-    void spawnSmoke(const glm::vec3& at, float size, float spread, float life);
+    ///
+    /// `lift` is the upward acceleration, as the same negative-gravity fraction
+    /// `Particle::gravity` carries, and it is what decides how far the puff
+    /// climbs rather than how fast it starts. **Drag settles a rising particle
+    /// at `kParticleGravity * lift / kDrag` within a fraction of a second**, so
+    /// a puff's whole journey is that steady speed times its life - which is
+    /// why a torch's wisp and a campfire's column need different `lift`, not
+    /// different launch velocities. Pushing one harder at birth buys a rocket
+    /// that stops, because drag has eaten it before the eye has followed it.
+    ///
+    /// Defaulted to the wisp a torch, a furnace and a lightning strike already
+    /// had, so every existing caller is untouched.
+    void spawnSmoke(const glm::vec3& at, float size, float spread, float life,
+                    float lift = kWispLift);
 
     /// A lick of flame, lighting itself so it reads at night, which is when a
     /// torch is worth looking at.
@@ -96,7 +119,7 @@ public:
     /// charged Bramble reads as bigger without a second table.
     void spawnExplosion(const glm::vec3& centre, float power);
 
-    /// Ambient emitters - torches, fire, lit furnaces and lava.
+    /// Ambient emitters - torches, campfires, fire, lit furnaces and lava.
     ///
     /// **The emitters near the player are cached and refreshed on a timer**,
     /// because the alternative is either a full scan every frame or a random

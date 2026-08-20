@@ -81,7 +81,25 @@ struct ProjectileSpecies {
     /// not fit. Giving it a reader means widening one of those two, which is a
     /// `Raycast.cpp`/`Creature.cpp` change rather than one here.
     ///
-    /// > Checked 2026-08-18: zero readers in this file or any other.
+    /// **The plausible wrong fix is available inside this file, which is why it
+    /// is named here.** `segmentEntersBox` lives in `Projectile.cpp` and is the
+    /// player's hit test - one call site, `Main.cpp` - so padding its box by
+    /// this field looks like the whole job and compiles. It is half of one:
+    /// creatures do not go through `segmentEntersBox` at all, so arrows would
+    /// grow against the player and stay thin against every mob. That is this
+    /// codebase's recorded failure shape fourteen, and this file already wears
+    /// a scar from it - see the landing rule in `FallingBlock.cpp`, where the
+    /// displaced-fluid test was correct for water and wrong for lava twenty-two
+    /// lines apart. **Widen both paths or neither.**
+    ///
+    /// > Re-measured 2026-08-19, tree-wide: 1 declaration, 5 writes, **0
+    /// > reads**. Note when checking this that `halfWidth` is a field name
+    /// > shared by four unrelated types - `CreatureSpecies` (read heavily),
+    /// > `path::Agent` (read by `Pathfinder.cpp`), a local in `Main.cpp` and a
+    /// > parameter in `HudPrimitives` - so a bare search for the name returns
+    /// > about a hundred hits and reads as "widely used". Only
+    /// > `ProjectileSpecies::halfWidth` is dead, and only a per-type count
+    /// > shows it.
     float halfWidth = 0.125f;
     /// Whether it stays where it landed instead of vanishing.
     bool sticksInGround = true;

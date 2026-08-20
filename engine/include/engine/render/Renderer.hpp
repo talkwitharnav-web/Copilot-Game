@@ -402,6 +402,41 @@ public:
     void drawFrame(const ClearColor& color, const glm::mat4& view,
                    const std::optional<glm::mat4>& overlayTransform = std::nullopt);
 
+    /// Writes the frame the player is looking at to a PNG file, and returns
+    /// whether it got there. Every failure logs its own reason first, so a
+    /// caller only has to decide what to say about `false`.
+    ///
+    /// **The mechanism, not the policy.** When a photo is taken, what it is
+    /// called and where it lands are the game's business; this knows only how
+    /// to get the pixels off the GPU. It copies the swapchain image - the one
+    /// the display shows - so what is written is exactly what was on screen,
+    /// HUD, crosshair, open inventory and all, rather than a re-rendered scene
+    /// that would have to guess at all of that.
+    ///
+    /// **It draws one extra frame, and that is not an implementation detail
+    /// that could be optimised away.** Vulkan permits an application to touch a
+    /// swapchain image only between acquiring it and presenting it; the moment
+    /// `vkQueuePresentKHR` returns, the image belongs to the display and even
+    /// reading it is undefined behaviour. That is not a theoretical rule - it
+    /// was measured here, as `VUID` "performs a layout transition on
+    /// presentable VkImage ... but the image has not been acquired", from a
+    /// first version that copied after the present. So this repeats the last
+    /// frame with the last frame's own camera, clear colour and overlay, and
+    /// takes its copy in the one gap where the image is still ours. The picture
+    /// is identical because every input to it is; the cost is one frame, once,
+    /// on a keypress.
+    ///
+    /// **Blocking on purpose.** It waits for that frame on a fence and again
+    /// for the copy, then encodes the PNG on the calling thread. A photo is a
+    /// rare, deliberate act; the alternative is a readback buffer and a fence
+    /// chain that every one of the other few thousand frames a minute pays for.
+    ///
+    /// Returns false without writing anything if the surface refused
+    /// `TRANSFER_SRC` (see `Swapchain::supportsTransferSrc`), if nothing has
+    /// been drawn yet, if the window is minimized or resizing, or if the
+    /// swapchain format is one this does not know how to unpack.
+    bool capturePhoto(const std::filesystem::path& file);
+
     /// Vertical field of view in degrees. Wider shows more of the world and
     /// exaggerates perspective; narrower feels zoomed in. Clamped to a sane
     /// range, because past roughly 130 the distortion at screen edges makes the
@@ -475,6 +510,21 @@ private:
     /// Fits every cascade to its slice of the view frustum. Writes
     /// `m_shadowMatrices`, so it runs before the frame's uniforms are uploaded.
     void updateShadowCascades(const glm::mat4& view);
+    /// **How far shadows actually reach this frame**, which is the quality
+    /// level's distance held back to the far plane, never the level's distance
+    /// on its own.
+    ///
+    /// One function with two callers rather than the same clamp written twice:
+    /// `updateShadowCascades` fits the cascades out to this, and `drawFrame`
+    /// publishes it as `shadowParams.y`, which `shadow.glsl` uses as the range
+    /// its distance fade completes over. Those two must be the same number.
+    /// They were not - the fade was handed the level's requested distance while
+    /// the cascades were fitted to the clamped one - so lowering the render
+    /// distance below the shadow distance (192 m at the top quality, against a
+    /// far plane that follows render distance) left shadows ending at a hard
+    /// circle with the fade still to come. That line across the ground is the
+    /// exact artefact the fade exists to hide.
+    float shadowReach() const;
     /// The HDR scene image and the bloom pyramid, both sized from the swapchain
     /// and therefore rebuilt whenever it is.
     void createRenderTargets();
@@ -485,7 +535,33 @@ private:
     void readGpuTimestamps();
     void createSyncObjects();
     void destroySyncObjects();
+    /// Every teardown step, in reverse creation order. **This is `~Renderer`'s
+    /// whole body**, split out so the constructor can call it too.
+    ///
+    /// C++ does not run a destructor for an object whose constructor threw. It
+    /// *does* destroy the members already built, so every RAII member here was
+    /// always cleaned up on that path - but the ten raw `Vk*` handles below are
+    /// plain members with no destructor of their own, and they were not. The
+    /// path is real and short: `createCommandResources` makes `m_commandPool`
+    /// on the constructor's first line, and a missing `.spv` makes the first
+    /// `GraphicsPipeline` throw two thirds of the way down, leaking the command
+    /// pool, three descriptor set layouts, two descriptor pools, three
+    /// samplers, the timestamp query pool and every semaphore and fence.
+    ///
+    /// **`noexcept` is not a new promise.** A destructor already is one, so
+    /// this is exactly the guarantee the body ran under before it moved, and it
+    /// is what makes the constructor's guard legal - that guard runs during
+    /// stack unwinding, where an escaping exception would call `std::terminate`.
+    ///
+    /// **Every step is safe against the resource never having been created**,
+    /// which is what lets it be called from any point in the constructor, and
+    /// each raw handle is nulled as it dies, so calling it twice is harmless.
+    void destroy() noexcept;
     void recreateSwapchain();
+    /// Copies `imageIndex` into a readback buffer and encodes the PNG, then
+    /// clears the request. Called from `drawFrame` between the frame's submit
+    /// and its present, which is the only place it is legal.
+    void writePendingPhoto(std::uint32_t imageIndex);
     glm::mat4 projectionMatrix() const;
 
     /// One uploaded mesh. Both buffers are owned here and freed together.
@@ -610,6 +686,23 @@ private:
 
     const VulkanContext& m_context;
     Window& m_window;
+    /// **The declaration POSITION of these two is load-bearing and nothing can
+    /// assert it.**
+    ///
+    /// `destroy()` explicitly destroys most of what this class owns, but
+    /// deliberately leaves these two - and `m_shadowMap` further down - to
+    /// member destruction, which runs in reverse declaration order *after*
+    /// `destroy()` has returned. Declared first, they die last, which is
+    /// correct: every pipeline, render target and descriptor set that
+    /// references them is destroyed inside `destroy()` before that.
+    ///
+    /// **Move either one below the members `destroy()` handles and the order
+    /// silently inverts** - a resource freed while something still referencing
+    /// it is alive. There is no compiler diagnostic for this and a clean run
+    /// need not produce a validation error, so the cost is a use-after-free
+    /// that shows up under load. Dated 2026-08-19; to check this rather than
+    /// trust it, re-read `Renderer::destroy` and confirm these three are still
+    /// absent from it.
     Swapchain m_swapchain;
     std::unique_ptr<DepthImage> m_depthImage;
 
@@ -658,6 +751,15 @@ private:
     /// everything drawn after it.
     std::unique_ptr<GraphicsPipeline> m_precipitationPipeline;
 
+    /// **Deliberately absent from `destroy()`, which makes this declaration's
+    /// position load-bearing.** It is destroyed by member destruction, in
+    /// reverse declaration order, after `destroy()` has returned - and that is
+    /// correct only because the descriptor sets that bind this shadow map are
+    /// freed inside `destroy()` with `m_postPool`, before anything here runs.
+    /// **Move this above `m_postPool` and the map dies while sets still point
+    /// at it.** No compiler diagnostic, no guaranteed validation error. Same
+    /// rule and same date as the note on `m_swapchain` above; to check, re-read
+    /// `Renderer::destroy` rather than trusting this paragraph.
     std::unique_ptr<ShadowMap> m_shadowMap;
     int m_shadowQuality = 2;
     /// How far cast shadows reach, in metres. Derived from the quality and
@@ -791,6 +893,30 @@ private:
     std::vector<VkSemaphore> m_renderFinished;
 
     std::uint32_t m_currentFrame = 0;
+
+    /// A photo asked for and not yet taken, where it is to be written, and
+    /// whether the last one got there.
+    ///
+    /// **Three fields rather than one, because "asked for" and "succeeded" are
+    /// genuinely different answers.** `drawFrame` clears `m_photoPending` only
+    /// when it has actually reached the copy, so a frame that returned early -
+    /// minimized, or a swapchain that went out of date mid-resize - leaves the
+    /// request standing, and that is how `capturePhoto` tells a skipped frame
+    /// from a failed write.
+    bool m_photoPending = false;
+    bool m_photoWritten = false;
+    std::filesystem::path m_photoPath;
+
+    /// The last frame's own arguments, so `capturePhoto` can draw that frame
+    /// again rather than invent one.
+    ///
+    /// **Copies, not references.** They outlive the call that supplied them by
+    /// design - the whole point is to reuse them later - and the game builds
+    /// its view matrix in a local.
+    bool m_hasDrawnFrame = false;
+    ClearColor m_lastClearColor;
+    glm::mat4 m_lastView{1.0f};
+    std::optional<glm::mat4> m_lastOverlayTransform;
 
     RenderStats m_stats;
     /// Two timestamps per frame in flight: one before any work, one after.

@@ -462,14 +462,10 @@ static_assert(everyFaceHolds(),
 // and moving a corner to the wrong face keeps both rect rules, so only the
 // first one does.
 //
-// **Two of those three claims are now shown failing at the bottom of this file
-// and the third is not** - `everyReversedRowIsRejected` and
-// `everyMirroredRowIsRejected` exist; nothing feeds in a row with a corner
-// moved to the wrong face. That third one is the cheapest of the three to
-// write and the least likely to have shipped, which is why it is last rather
-// than forgotten. **Falsified by an `everyOffFaceRowIsRejected` appearing
-// beside the other two** - if you write it, delete this paragraph rather than
-// adding a second note. Dated 2026-08-19.
+// **All three claims are now shown failing at the bottom of this file** -
+// `everyReversedRowIsRejected`, `everyMirroredRowIsRejected` and
+// `everyOffFaceRowIsRejected`. The last of those closes the note that used to
+// stand here saying it was the one still missing.
 static_assert(faceIsWhereItsNameSays(AxisFace::PosX, cornersOf(AxisFace::PosX)) &&
                   faceIsWhereItsNameSays(AxisFace::NegY, cornersOf(AxisFace::NegY)),
               "a face's corners left the face its name says it is");
@@ -590,5 +586,65 @@ static_assert(everyMirroredRowIsRejected(),
               "a horizontally mirrored face is being accepted - that is the bug that shipped on "
               "every dropped block, the winding rules cannot see it, and only "
               "wallReadsLeftToRightFromOutside and lidReadsNorthUp can");
+
+/// **The third proof, shown failing** - one corner moved to the opposite side
+/// of the cube, which is the fault the three-claims note above says only
+/// `faceIsWhereItsNameSays` can see.
+///
+/// **Every rule but that one is asserted to still PASS**, which is what makes
+/// this a graded control rather than a single expectation: the naming rule has
+/// to swing to false while the other three hold still. A test that only
+/// required `!faceReadsAsTheWorldDoes` would be satisfied by *any* of the four
+/// firing and could not tell this fault from a reversal.
+///
+/// **Derived on all six faces and all four corners, not sampled on one.** A
+/// face's outward normal has exactly one non-zero component, at `faceAxis`, so
+/// the only cross-product component `windsOutward` ever dots against it is
+/// `cross[axis]` - and that component is built from the *other two* axes'
+/// coordinates alone (`cross[0]` from y and z, `cross[1]` from z and x,
+/// `cross[2]` from x and y). Moving a corner along the face's own axis
+/// therefore cannot reach it. The same argument covers the two rect rules:
+/// `wallReadsLeftToRightFromOutside` bails on a lid, and on a wall its
+/// `right` vector is `(normal.z, 0, -normal.x)`, which is zero on exactly the
+/// axis the face looks along, so the moved coordinate is multiplied by nothing
+/// - while `topRowIsHigher` reads y, which only a lid's fault touches, and a
+/// lid is excused. `lidReadsNorthUp` bails on a wall and reads only x and z,
+/// which a lid's own-axis move never touches. So all three survive on all
+/// twenty-four cases by construction, and only the on-face test fails.
+///
+/// **This is the cheapest of the three faults to make and the one with the
+/// least visible symptom**: three corners of the quad stay put and the fourth
+/// leaps a whole cell, so the face becomes a bent sheet reaching into the
+/// neighbouring block - it still draws, still winds outward, and still samples
+/// its texture the right way round.
+constexpr bool offFaceRowIsRejected(AxisFace face, int moved) {
+    const int axis = faceAxis(face);
+    std::uint8_t off[4][3]{};
+    for (int c = 0; c < 4; ++c) {
+        for (int a = 0; a < 3; ++a) {
+            off[c][a] = cornersOf(face)[c][a];
+        }
+    }
+    off[moved][axis] = static_cast<std::uint8_t>(1 - off[moved][axis]);
+    return !faceIsWhereItsNameSays(face, off) && windsOutward(face, off) &&
+           wallReadsLeftToRightFromOutside(face, off) && lidReadsNorthUp(face, off) &&
+           !faceReadsAsTheWorldDoes(face, off);
+}
+
+constexpr bool everyOffFaceRowIsRejected() {
+    for (int i = 0; i < static_cast<int>(AxisFace::Count); ++i) {
+        for (int moved = 0; moved < 4; ++moved) {
+            if (!offFaceRowIsRejected(static_cast<AxisFace>(i), moved)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(everyOffFaceRowIsRejected(),
+              "a corner that has wandered onto the far side of the cube is being accepted, or one "
+              "of the other three rules has started firing on it - the naming rule is the only "
+              "one that can see this fault and the only one that may reject it");
 
 } // namespace game

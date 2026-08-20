@@ -253,10 +253,26 @@ constexpr float kHotbarCentreY = 150.0f;
 /// reference's x 8 would have put every armour cell one pixel out, in the
 /// direction nothing would notice until a click near the edge missed.
 constexpr float kArmourTopCentreY = 16.0f;
-static_assert(kArmourTopCentreY + 3.0f * kSlotPitchPixels + kSlotPitchPixels * 0.5f <
+/// **The last cell's index is `kArmourSlots - 1`, derived, and it used to be a
+/// literal `3`.** That literal is the one edit that would have let this check
+/// pass while being false. `kArmourSlots` is itself derived from
+/// `ArmourSlot::None` precisely so a fifth worn slot costs one line in
+/// `Item.hpp`'s enum - and on that edit `armourSlotCount`, `slotAt` and `build`
+/// would all have grown a fifth cell together, at art y 88, whose 18-pixel box
+/// runs 79..97 and overlaps the first storage row's 83..101. `slotAt` tests the
+/// grid before the armour column, so the fifth cell would be **drawn over
+/// storage slot 0 and answer no click at all**: the piece goes on, the icon
+/// sits on top of whatever is in that storage slot, and it can never be taken
+/// off. A guard whose own constant does not move with the thing it guards is
+/// not a guard, and here the fix is free because the count is already derived
+/// one file away.
+static_assert(kArmourTopCentreY + static_cast<float>(kArmourSlots - 1) * kSlotPitchPixels +
+                      kSlotPitchPixels * 0.5f <
                   kStorageTopCentreY - kSlotPitchPixels * 0.5f,
               "the armour column must clear the storage rows, or two regions answer for one "
-              "point and which one wins is whichever loop slotAt happens to run first");
+              "point and which one wins is whichever loop slotAt happens to run first. If this "
+              "fires after a slot was added to ArmourSlot, the column is now too long for the "
+              "art - move kArmourTopCentreY up or redraw the panel, do not put the 3 back");
 
 constexpr float kSlotHalf = kSlotPitchPixels * kPixel * 0.5f;
 

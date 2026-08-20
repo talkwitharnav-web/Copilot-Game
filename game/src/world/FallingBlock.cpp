@@ -3,6 +3,7 @@
 #include "item/Item.hpp"
 #include "world/FaceGeometry.hpp"
 #include "world/FaceShading.hpp"
+#include "world/Tick.hpp"
 #include "world/World.hpp"
 
 #include <algorithm>
@@ -45,6 +46,40 @@ static_assert(kTerminalVelocity > 39.19f && kTerminalVelocity < 39.21f,
 /// `pollEvents` for its whole duration - carried a cube thirty-nine blocks in a
 /// single frame, straight past everything it should have crushed on the way.
 constexpr float kMaxDeltaSeconds = 0.05f;
+
+/// **It is one tick, and until now nothing here said so.** The paragraph above
+/// states the coupling in prose - "a frame too long for one is too long for all
+/// of them" - and nothing enforced it, which is the remedy ladder's third rung
+/// sitting where its second is available. Copied verbatim from `Player.cpp` and
+/// `Creature.cpp` so all three read identically.
+///
+/// The first half pins the clamp to the one owner (`Tick.hpp`), so it follows a
+/// tick-rate change instead of being left behind. The second half is the
+/// **absolute anchor**, and it is the half that does the work: both sides of
+/// the first are derived, so a coherent tick-rate move would satisfy it on its
+/// own, and this clamp is not free to move - it is the only thing bounding how
+/// far a cube travels at `kTerminalVelocity` in a single frame.
+static_assert(kMaxDeltaSeconds == tick::kSeconds && kMaxDeltaSeconds == 0.05f,
+              "a frame may advance a falling cube by at most one simulation tick, and that tick "
+              "is 50 ms - the same clamp the player, the drops and the creatures use");
+
+// **And that bound is almost two cells, not one.** `kTerminalVelocity *
+// kMaxDeltaSeconds` is 1.96 m, so a cube at terminal speed crosses two whole
+// cell boundaries in a single frame. This is the premise `fallingCubeRest`
+// exists for - it walks every cell in `[toCell, fromCell]` instead of testing
+// where the cube lands - and the header's note above that function understated
+// this distance four times over until 2026-08-19, at a value below one cell,
+// so it read as an argument that the walk is redundant.
+//
+// The bound rather than the exact figure is asserted on purpose: 39.2 is
+// already pinned twenty lines up, and repeating it here would be a second copy
+// of one number. What is stated here is the independent thing - that a frame
+// crosses more than one cell - which is what makes the walk necessary.
+static_assert(kTerminalVelocity * kMaxDeltaSeconds > 1.0f,
+              "a clamped frame at terminal speed no longer crosses a whole cell, so the note "
+              "above `fallingCubeRest` in the header - which tells the reader the walk is what "
+              "stops a cube falling through a one-block floor - no longer describes this build; "
+              "re-read it before simplifying that walk into a destination test");
 
 /// Below this the cube is close enough to its resting cell to snap into it
 /// without the last fraction of a block reading as a hover.
@@ -429,49 +464,55 @@ static_assert(wholeCellBoxIsTheUnitCube(),
 /// carries a turn yet (measured: 268 turn-bearing faces, every one a lid or a
 /// floor, 0 walls), and `Block.hpp` says two boxes want one. This is the shape
 /// where a proxy that happens to be right today is worse than no rule at all.
-/// **Whether a quarter turn runs forward or backward through the four uv
-/// slots.** A turn is stated in the *texture's* space, and a face's uv
-/// parameterisation is a mirror of its neighbour's on half the cube, so on
-/// those faces the same turn walks the slots the other way.
 ///
-/// The rule is `flipU == flipV`, read off the shared corner table exactly as
-/// the mesher reads it. **It is emphatically not `faceIsPositive`**, which
-/// agrees on four faces and is wrong on `+Z` and `-Z` - see
-/// `theWrongTurnRuleIsRejected`. Nothing is drawn wrong today because no wall
-/// carries a turn yet (measured: 268 turn-bearing faces, every one a lid or a
-/// floor, 0 walls), and `Block.hpp` says two boxes want one. This is the shape
-/// where a proxy that happens to be right today is worse than no rule at all.
+/// **The answer comes from `FaceGeometry.hpp`, and this file no longer claims a
+/// second route to it.** What stood here until 2026-08-19 was a
+/// `turnRuleFromFloatCorners` that read the *float* corners against
+/// `kBottomLeftWinding`, asserted to agree with the header's integer
+/// `turnRunsWithTheSlots`, over a message reading *"one of the two tables has
+/// moved without the other"*.
 ///
-/// **The answer now comes from `FaceGeometry.hpp`. What stays here is this
-/// file's independent derivation of the same rule, demoted from an answer to a
-/// proof** - which is the whole difference between a duplicate and a check.
-/// The header reads the integer corner bits against `kWindingU`/`kWindingV`;
-/// this reads the *float* corners against `kBottomLeftWinding`. Same rule, two
-/// routes, and until 2026-08-19 both were live and nothing compared them. Two
-/// derivations that agree are worth keeping; two that answer are bug shape #1.
-constexpr bool turnRuleFromFloatCorners(AxisFace face) {
-    const std::array<glm::vec3, 4> corners = faceCorners(face);
-    const bool flipU = corners[0][faceUAxis(face)] != kBottomLeftWinding[0].x;
-    const bool flipV = corners[0][faceVAxis(face)] != kBottomLeftWinding[0].y;
-    return flipU == flipV;
-}
-
-/// This file's float route against the header's integer route, on every face.
-constexpr bool bothTurnDerivationsAgree() {
-    for (int i = 0; i < static_cast<int>(AxisFace::Count); ++i) {
-        const AxisFace face = static_cast<AxisFace>(i);
-        if (turnRuleFromFloatCorners(face) != turnRunsWithTheSlots(face)) {
+/// **It was a tautology, and it is worth spelling out why, because it read as
+/// the strongest proof in the file.** `faceCorners(f)[c][a]` is
+/// `float(kFaceCornerBits[f][c][a])`, and `kBottomLeftWinding[0].x/.y` are
+/// `float(kWindingU[0])`/`float(kWindingV[0])` - so the float route reduced to
+/// `(float(bits) != float(windingU)) == (float(bits) != float(windingV))` and
+/// the integer route to the identical expression without the casts. Every
+/// operand is 0 or 1 and exact in `float`, so the two are the same expression
+/// and the condition held for **every possible content of all four tables**.
+/// There were never two tables: `kFaceCornerBits`, `kWindingU`, `kWindingV`,
+/// `kBottomLeftWinding` and `turnRunsWithTheSlots` all live in that one header,
+/// and this file supplied nothing to compare against. `CLAUDE.md` bug shape
+/// #11 - a `static_assert` comparing one side of a derivation against itself.
+///
+/// **What replaces it is the one real premise that pair could ever have
+/// tested, stated directly and widened from one corner to four.**
+/// `makeBottomLeftWinding` does not loop - it names indices 0, 1, 2 and 3 by
+/// hand - so a swapped or mistyped entry there is a genuine, silent defect.
+/// The header guards that function's *length* (`kBottomLeftWinding.size() ==
+/// sizeof(kWindingU) / sizeof(kWindingU[0])`) and nothing guards its
+/// *contents*. The old assert reached only corner 0, and only through a double
+/// negation that cancelled; this reaches all four directly.
+///
+/// **This is a check, not an answer** - it derives nothing and is read by
+/// nobody, which is the whole difference between a proof and the duplicate that
+/// bug shape #1 warns about. It belongs in `FaceGeometry.hpp` beside the length
+/// guard it completes; filed against that file rather than moved, since it is
+/// not this one's to edit.
+constexpr bool bottomLeftWindingTranscribesTheIntegers() {
+    for (int c = 0; c < 4; ++c) {
+        if (kBottomLeftWinding[c].x != static_cast<float>(kWindingU[c]) ||
+            kBottomLeftWinding[c].y != static_cast<float>(kWindingV[c])) {
             return false;
         }
     }
     return true;
 }
 
-static_assert(bothTurnDerivationsAgree(),
-              "this file reads the turn rule off the float corners and "
-              "`FaceGeometry.hpp` reads it off the corner bits, and they no longer "
-              "agree - one of the two tables has moved without the other, which is "
-              "the mirroring shape that cost this project four milestones");
+static_assert(bottomLeftWindingTranscribesTheIntegers(),
+              "`kBottomLeftWinding` no longer matches the `kWindingU`/`kWindingV` pair it is "
+              "built from - `makeBottomLeftWinding` names indices 0..3 by hand, so check it for "
+              "a swapped u/v or a mistyped entry; the header's own assert covers only its length");
 
 /// The rectangle one face of one box wants, in this file's slot order: the
 /// override-aware rect, mirrored if the box forbids the automatic mirror on

@@ -774,8 +774,38 @@ struct MaterialTable {
     int firstConflictWanted = -1;
     /// Layers no block ever asks for - item sprites, the white utility layer,
     /// animation frames. They keep the default row.
+    ///
+    /// **This is now the whole of what the block pipeline can request, and it
+    /// was not before.** The walk asks `blockTextureLayer` *and* every model
+    /// box's own `boxFaceLayer`, which is the pair the mesher asks; until the
+    /// second was added, every layer a model named for itself - a bell's gold
+    /// body, a grindstone's stone wheel, a campfire's embers - counted here as
+    /// "nothing asks for it" while being drawn in the world every frame.
+    ///
+    /// **Still authoritative for block faces only.** An item sprite is very
+    /// much on screen, in the hotbar and the inventory; it simply does not
+    /// arrive through this pipeline, so reading a layer's presence here as
+    /// "not drawn anywhere" exempts exactly the item art an asset audit is
+    /// aimed at.
     int unclaimed = 0;
 };
+
+/// **How many faces a model box has, derived rather than written, and derived
+/// WITHOUT reaching for `AxisFace::Count`.**
+///
+/// `Block.hpp` forward-declares `AxisFace` opaquely on purpose and says so at
+/// the declaration: the enumerators are out of reach there, which is why
+/// `boxFaceRole` is arithmetic on a cast instead of a switch. That isolation is
+/// what keeps a 669 KB header that everything includes free of the engine, so
+/// pulling `FaceShading.hpp` in here to get `Count` would undo a deliberate
+/// choice **and** drag `vulkan.h` into `core/Sounds.hpp`, which includes this
+/// file and sees no Vulkan today.
+///
+/// So take the number from the shape of the data instead. `boxFaceRole` states
+/// the roles as **0 the lid, 1 the floor, then the four walls**, and the walls
+/// are a real array whose size the compiler already knows. Add a fifth wall
+/// slot and this follows on its own; there is nothing to keep in step.
+constexpr int kBoxFaces = 2 + static_cast<int>(sizeof(BoxWallFaces::face) / sizeof(BoxFaceOverride));
 
 /// Walks every block, face and facing, and writes what each texture layer is
 /// made of.
@@ -816,37 +846,89 @@ inline MaterialTable buildMaterialTable(std::size_t layerCount) {
             flags |= kMaterialFlagTranslucent;
         }
 
+        // **One claiming rule, called from both walks.** The model-box walk
+        // below arrived after this one, and a second copy of the conflict and
+        // emission bookkeeping is exactly the shape `CLAUDE.md` #14 names: a
+        // rule that is correct, and commented, in only one of the two places
+        // that need it.
+        const auto claim = [&](float rawLayer) {
+            const auto layer = static_cast<int>(rawLayer);
+            if (layer < 0 || static_cast<std::size_t>(layer) >= layerCount) {
+                return;
+            }
+            const auto slot = static_cast<std::size_t>(layer);
+
+            if (claimedBy[slot] < 0) {
+                claimedBy[slot] = static_cast<int>(family);
+                table.rows[slot] = packMaterial(properties.roughness, properties.metallic, 0.0f, flags);
+            } else if (claimedBy[slot] != static_cast<int>(family) && !conflicted[slot]) {
+                conflicted[slot] = true;
+                if (table.firstConflictLayer < 0) {
+                    table.firstConflictLayer = layer;
+                    table.firstConflictHeld = claimedBy[slot];
+                    table.firstConflictWanted = static_cast<int>(family);
+                }
+                ++table.conflicts;
+            }
+
+            // **The lowest claim wins, and that is what gets the furnace
+            // right.** `FurnaceTop` is drawn by the unlit furnace as well as
+            // the lit one, so it scores zero and stays dark; `FurnaceFrontLit`
+            // is only ever drawn by the lit one, so it keeps its 13 and only
+            // the mouth glows. A block-keyed emissive would light the whole
+            // box.
+            float& stored = emission[slot];
+            stored = stored < 0.0f ? emissive : std::min(stored, emissive);
+        };
+
         for (BlockFace face : faces) {
             for (FaceDirection direction : directions) {
                 for (ChestHalf half : halves) {
-                    const auto layer = static_cast<int>(blockTextureLayer(id, face, direction, half));
-                    if (layer < 0 || static_cast<std::size_t>(layer) >= layerCount) {
-                        continue;
-                    }
+                    claim(blockTextureLayer(id, face, direction, half));
+                }
+            }
+        }
 
-                    if (claimedBy[static_cast<std::size_t>(layer)] < 0) {
-                        claimedBy[static_cast<std::size_t>(layer)] = static_cast<int>(family);
-                        table.rows[static_cast<std::size_t>(layer)] =
-                            packMaterial(properties.roughness, properties.metallic, 0.0f, flags);
-                    } else if (claimedBy[static_cast<std::size_t>(layer)] != static_cast<int>(family) &&
-                               !conflicted[static_cast<std::size_t>(layer)]) {
-                        conflicted[static_cast<std::size_t>(layer)] = true;
-                        if (table.firstConflictLayer < 0) {
-                            table.firstConflictLayer = layer;
-                            table.firstConflictHeld = claimedBy[static_cast<std::size_t>(layer)];
-                            table.firstConflictWanted = static_cast<int>(family);
-                        }
-                        ++table.conflicts;
+        // **The layers a model box names for itself, which no amount of asking
+        // `blockTextureLayer` will ever return.**
+        //
+        // A `ModelBox` may carry its own `sideLayer`/`lidLayer`, and the mesher
+        // reads it per face through `boxFaceLayer` and only falls back to
+        // `blockTextureLayer` when the box declines - that is what lets a bell
+        // be a wooden frame round a gold bell and a grindstone a stone wheel
+        // between two posts. Every one of those layers was **outside this walk
+        // entirely**, so it fell to `unclaimed` and kept the Organic fallback
+        // row: default roughness, zero metallic, zero emissive and no flags,
+        // whatever the block was made of.
+        //
+        // **Measured rather than reasoned about**: `kCampfireLogLayer`,
+        // `kCampfireLitLogLayer` and `kSoulCampfireLitLogLayer` appear in
+        // `Block.hpp` only at their own definitions, in the box face tables, in
+        // `postModel`'s campfire branch and in `static_assert`s - never in a
+        // `blockTextureLayer` table. So a campfire, which emits light 15 and
+        // whose ember plank is by its own model note the only face in the whole
+        // block painted from the ember picture, handed that picture a material
+        // row saying it emits nothing.
+        //
+        // The gate is the mesher's own, id for id: `postModel` is asked exactly
+        // where the shape pass asks it. Anything else would key the table on a
+        // set the renderer never draws.
+        //
+        // **Expect `conflicts` and `unclaimed` to MOVE, and do not read that as
+        // a regression** - this walk asks strictly more questions than it did,
+        // so a layer two families both want was always a disagreement and is
+        // now merely visible. `unclaimed` falling is the whole point.
+        const BlockShape shape = blockShape(id);
+        if (shape == BlockShape::Model || shape == BlockShape::Cocoa || shape == BlockShape::Bed) {
+            const ModelBoxes model = postModel(id);
+            for (int b = 0; b < model.count; ++b) {
+                for (int f = 0; f < kBoxFaces; ++f) {
+                    // Negative means "take the block's own", which the walk
+                    // above has already claimed. Only a stated layer is new.
+                    const float own = boxFaceLayer(model.boxes[b], static_cast<AxisFace>(f));
+                    if (own >= 0.0f) {
+                        claim(own);
                     }
-
-                    // **The lowest claim wins, and that is what gets the furnace
-                    // right.** `FurnaceTop` is drawn by the unlit furnace as
-                    // well as the lit one, so it scores zero and stays dark;
-                    // `FurnaceFrontLit` is only ever drawn by the lit one, so it
-                    // keeps its 13 and only the mouth glows. A block-keyed
-                    // emissive would light the whole box.
-                    float& stored = emission[static_cast<std::size_t>(layer)];
-                    stored = stored < 0.0f ? emissive : std::min(stored, emissive);
                 }
             }
         }

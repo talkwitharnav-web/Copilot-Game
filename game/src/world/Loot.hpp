@@ -266,6 +266,82 @@ inline constexpr std::array<Entry, 84> kEntries{{
     {ItemId::Emerald, 1, 1, 4},
 }};
 
+/// **`kEntries` is the one table here that a short initialiser can hole
+/// silently, and none of the four asserts below catches it. These two do.**
+///
+/// The size is the hand-written literal `84` and `Entry`'s NSDMIs are
+/// `{None, 1, 1, 1}`. Aggregate initialisation does not object to *too few*
+/// initialisers - too many is a hard error, too few is value-initialisation -
+/// so deleting the last row leaves element 83 as a fully-formed, perfectly
+/// legal `Entry` that no existing check dislikes. Walked one at a time:
+///
+///   - **`poolsSane`** sums the temple slice 78..83 and compares it against the
+///     stored total 19. The deleted row was `{Emerald, 1, 1, 4}`, **weight 1**,
+///     and the hole's NSDMI weight is **also 1**, so the sum is still
+///     `2+7+7+1+1+1 = 19` and it passes. *The assert that looks like it should
+///     catch this is defeated by the default value, not by an oversight* - and
+///     1 is the commonest weight in the table, so most rows land here.
+///   - **`entriesSane`** reaches `if (entry.item == ItemId::None) continue;`
+///     and skips the row entirely.
+///   - **`tablesSane`** never reads entries.
+///   - **`sliceOwnershipIsExclusive`** counts claims over the **declared** size,
+///     and element 83 is still claimed by the temple pool - it is claimed *and*
+///     empty, which is exactly the state it cannot distinguish.
+///
+/// The silent result: **emerald becomes a weighted-nothing in `village_temple`,
+/// forever.** No build error, no warning, no validation message.
+///
+/// > **Why `kTables` needs none of this and must not be given any.** Its size is
+/// > derived from `TableId::Count`, but that is not what saves it - the general
+/// > rule is that **a derived size fixes declared-vs-enum and NOT
+/// > literal-vs-declared**, because `std::array<T, DerivedN> x{{...}}` zero-fills
+/// > a short initialiser just the same. `kTables` escapes because a zero row
+/// > there is *independently invalid*: `tablesSane()`'s first test is
+/// > `table.poolCount == 0 -> return false`, so the hole fires on its own
+/// > merits. `kEntries` does not escape, because a zero row here is silently
+/// > legal - `{None, 1, 1, 1}` is a well-formed weighted-nothing, and the table
+/// > deliberately contains one already.
+///
+/// **The last-element test is the complete one**, and it is complete for a
+/// reason worth keeping: a shortfall of any size, from a deletion anywhere in
+/// the table, always leaves the **final** element value-initialised, because
+/// everything after the deletion point shifts up. So this one test catches every
+/// short initialiser unconditionally - it does not depend on which row went, on
+/// what its weight was, or on any pool sum failing to reconcile.
+///
+/// The counter beside it is the weaker of the two on its own - delete the
+/// deliberate empty row *and* lose a row and the count is still 1 - but it is
+/// kept because it states the **intent** rather than the mechanism: exactly one
+/// empty row is meant to exist, it is the horse-armour placeholder above, and
+/// the day horses arrive and it goes, this number becomes 0 and must be changed
+/// deliberately rather than drifting.
+///
+/// > If a genuinely empty row ever belongs last, these fire spuriously. That is
+/// > the intended direction: a false alarm gets checked, a false all-clear goes
+/// > quiet for good.
+constexpr std::size_t deliberateEmptyRows() {
+    std::size_t empty = 0;
+    for (const Entry& entry : kEntries) {
+        if (entry.item == ItemId::None) {
+            ++empty;
+        }
+    }
+    return empty;
+}
+
+static_assert(kEntries[kEntries.size() - 1].item != ItemId::None,
+              "kEntries has fewer initialisers than its declared size, so its trailing element "
+              "value-initialised into a legal but empty entry - poolsSane cannot see it because a "
+              "hole's default weight is 1, and entriesSane skips ItemId::None rows; add the "
+              "missing row back or correct the 84 in the declaration");
+
+static_assert(deliberateEmptyRows() == 1,
+              "kEntries should hold exactly one deliberate empty row - the horse-armour "
+              "placeholder, kept as a weighted nothing so the weaponsmith's other fourteen rates "
+              "stay exact. Two means a row was lost and the array zero-filled; zero means the "
+              "placeholder was removed, which is correct the day horses arrive - change this "
+              "count deliberately rather than deleting the check");
+
 inline constexpr std::array<Pool, 11> kPools{{
     {0, 15, 3, 8, 94},
     {15, 8, 3, 8, 53},
@@ -519,9 +595,28 @@ inline void placeStack(Chest& chest, ItemId item, int count, int slot) {
 /// > **The failure is quiet.** A chunk-format bump that leaves a loot chest
 /// > sitting over a stale chest record rolls a second time into the stale
 /// > contents rather than over them, and the player finds a doubled chest with
-/// > nothing in any log to say so. Verified 2026-08-19: one call site,
-/// > `Main.cpp`. That stops being true the day a second one appears, which is
-/// > exactly when this paragraph matters.
+/// > nothing in any log to say so. Verified 2026-08-19 15:57: one call site,
+/// > in the `materialise` lambda in `Main.cpp`, on the line after it reads
+/// > `world.blockAt` into `id`. That stops being true the day a second one
+/// > appears, which is exactly when this paragraph matters.
+/// >
+/// > **Cited by SYMBOL rather than by line, because the line MOVED while this
+/// > note was being written.** The claim first read `Main.cpp:3839` at 15:37;
+/// > by 15:57 the same single call site sat at 3858, nineteen lines down, with
+/// > the count unchanged. `Main.cpp` is edited continuously by other agents, so
+/// > a line number there is stale roughly as fast as it is written, and a
+/// > reader who follows one to the wrong function concludes the claim is false
+/// > when it is merely mis-addressed. Re-measure with a word-bounded search for
+/// > `\brollInto\b` - unanchored is unsafe in this codebase, where `Name` is
+/// > routinely a prefix of `NameFirst` and `NameLast`.
+/// >
+/// > **Dated to the MINUTE on purpose, and re-checked rather than trusted.**
+/// > This claim originally carried the day alone, and a day is not a unit on a
+/// > tree where ~30 agents write in parallel - drop persistence landed and
+/// > falsified a premise six other files still asserted, all within the same
+/// > date stamp this claim wore. A reachability result is a measurement with a
+/// > timestamp, not a property of the code, so re-reading one costs a grep and
+/// > believing one costs a bug.
 inline void rollInto(Chest& chest, TableId table, std::uint32_t worldSeed, const glm::ivec3& at) {
     noise::Stream stream{streamSeed(worldSeed, at)};
     const Table& row = kTables[static_cast<std::size_t>(table)];

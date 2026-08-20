@@ -17,6 +17,15 @@
 // Include `frame.glsl` and `waves.glsl` before this. Neither declares a
 // sampler, which is what lets the shadow pass include them - see the binding
 // ban in `triangle.frag`.
+//
+// **The two bit positions this file decodes are owned by `packVertexSurface` in
+// `engine/include/engine/render/Vertex.hpp`, not here.** Bit 11 is the fluid
+// top and bits 12-15 the sway height; both are read below as bare literals,
+// and nothing in the build compares them against the packer that wrote them.
+// Change either there first - that function's own note names this file and
+// `triangle.vert` as its only two decoders, and explains what a silent
+// mismatch looks like on screen. Dated 2026-08-19; re-run the search
+// `surface >>` / `surface &` across `engine/shaders` rather than trusting it.
 
 /// The vertex's world position once wind and water have moved it.
 ///

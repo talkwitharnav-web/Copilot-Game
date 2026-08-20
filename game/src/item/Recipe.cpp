@@ -205,6 +205,59 @@ static_assert(woodsLeadEveryFamilyTable(),
               "get another wood's recipe, and a twelfth wood with no twelfth door family would "
               "craft the iron one");
 
+/// **The fifth family table the wood loops index, and the only one that was
+/// not proved.** `woodsLeadEveryFamilyTable` above covers buttons, plates,
+/// doors and trapdoors; `kSlabFamilies` is read by the same loops through
+/// `slabFamilyOf(wood.planks)` and had nothing under it at all.
+///
+/// **What it costs to be wrong is a silent skip, not a wrong answer**, which is
+/// worse: both call sites are written `if (const int f = slabFamilyOf(...);
+/// f >= 0)`, so a wood whose planks are not a slab parent takes the `-1`,
+/// falls straight past the block and generates nothing. That is **five recipes
+/// per wood** - the barrel, the composter, the lectern, the chiselled bookshelf
+/// and the daylight detector, 55 across the eleven woods - vanishing on a clean
+/// build with no warning, no validation error and no reader anywhere. It is
+/// exactly the shape `everyChiselledParentHasASlab` further down was written
+/// for, one section away and never carried up here: a rule that did not travel.
+///
+/// **The guard itself is right and stays.** `slabFamilyOf` genuinely can return
+/// `-1` and indexing `slabAt(-1, false)` would walk off the front of the slab
+/// run into unrelated blocks, so the `if` is the correct handling of a case
+/// this assert now proves cannot arise. Deleting the guard on the strength of
+/// this line would trade a silent skip for a silent wrong block.
+///
+/// Takes the wood list as an argument for the same reason `copperCutsAreSound`
+/// does: a check wired to the real table can never be shown to say no.
+constexpr bool everyWoodHasASlab(const std::array<Wood, kWoods.size()>& woods) {
+    for (const Wood& wood : woods) {
+        if (slabFamilyOf(wood.planks) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// One wood's planks replaced by `Air`, which is the exact value a short
+/// `kSlabFamilies` initialiser zero-fills its tail with - so the negative pin
+/// rehearses the real failure rather than an invented one.
+constexpr std::array<Wood, kWoods.size()> woodsWithAPlankThatIsNoSlab() {
+    std::array<Wood, kWoods.size()> broken = kWoods;
+    broken[0].planks = BlockId::Air;
+    return broken;
+}
+
+/// **Delete any plank row from `kSlabFamilies` and this fires.** Nothing else
+/// would: every other recipe for that wood still generates, the build is clean,
+/// and the only symptom is five recipes that were there yesterday and are not
+/// there today.
+static_assert(everyWoodHasASlab(kWoods),
+              "a wood's planks are no longer a slab family parent, so slabFamilyOf returns -1 for "
+              "it and the barrel, composter, lectern, chiselled bookshelf and daylight detector "
+              "loops below skip that wood in silence");
+
+static_assert(!everyWoodHasASlab(woodsWithAPlankThatIsNoSlab()),
+              "the wood-slab check cannot fail, so the assert above proves nothing");
+
 /// Which flower yields which dye. The reference's own pairings; everything not
 /// named here is mixed from two others.
 struct FlowerDye {
@@ -486,41 +539,63 @@ static_assert(static_cast<int>(BlockId::OxidizedCopperGrate) -
 /// 6 shapes over 4 oxidation stages (chiselled, bulb, grate, cut, cut slab,
 /// cut stairs) plus a single `crafting_table_waxed_copper_door.json`. Four of
 /// the 25 are the copper bulbs, which want a blaze rod and are Nether and
-/// therefore out of scope, leaving **21 in scope**. Of those 21:
+/// therefore out of scope, leaving **21 in scope**.
+///
+/// **RE-MEASURED 2026-08-19 15:30, after `Block.hpp` landed the 40 waxed ids.
+/// 17 of the 21 are now live and 4 remain blocked** - the paragraph that used
+/// to sit here said 8 live and 13 blocked and was true only until those ids
+/// arrived. Of the 21:
 ///
 ///  - **8 are here**, and they are the two families this table drives: waxed
 ///    cut copper (2x2 -> 4) and the waxed grate (diamond -> 4), four stages
 ///    each. Shapes and yields read off `crafting_table_waxed_cut_copper.json`
 ///    and `crafting_table_waxed_copper_grate.json`, which are identical to the
 ///    unwaxed files beside them and differ only in the block named.
-///  - **13 cannot be written at all**, because their output has no `BlockId`.
-///    Four waxed cut copper **slabs** and four waxed cut copper **stairs**:
-///    `kStairFamilies` and `kSlabFamilies` in `Block.hpp` carry the four
-///    *bare* cut coppers as parents and nothing waxed. Four waxed **chiselled**
-///    coppers: only stage 0 exists (`WaxedChiseledCopper`), and even that one
-///    cannot use the reference's shape because its input is a waxed cut copper
-///    slab. One waxed copper **door**: there is no copper door in this game in
-///    any form, waxed or bare.
+///  - **8 more came for free and cost this file nothing**, exactly as the
+///    paragraph below predicted: `Block.hpp` appended `WaxedCutCopperStairsRun`
+///    and `WaxedCutCopperSlabRun` as a tail run and added the four waxed cut
+///    coppers to `kStairFamilies` and `kSlabFamilies`, and the two family loops
+///    in `buildRecipes` walk `kStairFamilyCount` and `kSlabFamilyCount`, which
+///    are totals including the tail. **Verified rather than assumed** - both
+///    tables were counted declared-against-literal (56 == 56, 59 == 59), which
+///    is what catches the failure mode that would look like a bug in this file:
+///    ids appended without a family row have no parent, generate no recipe, and
+///    report nothing anywhere.
+///  - **1 more was landed by hand today**, and only because its *input* finally
+///    existed: waxed chiselled copper stage 0, two waxed cut copper slabs
+///    stacked, added as a row in `kChiselledFromSlabs` below. It is the worked
+///    example of the rule that a recipe is blocked by its inputs as well as its
+///    output - `WaxedChiseledCopper` has had an id all along and the recipe was
+///    still unwritable.
+///  - **4 remain blocked, all for want of a `BlockId`.** Three waxed chiselled
+///    coppers: only oxidation stage 0 exists, so exposed, weathered and
+///    oxidised have no output at all. One waxed copper **door**: there is no
+///    copper door in this game in any form, waxed or bare, so that one needs an
+///    id *and* a new door family.
 ///
 /// **A missing id is a `Block.hpp` finding, not a recipe waiting to be typed.**
 /// Do not stand a different block in for a missing output - that is inventing a
 /// recipe, and the honeycomb route already reaches `WaxedChiseledCopper`
 /// anyway, so nothing here is unobtainable for want of these rows.
 ///
-/// **AND WHEN THOSE IDS DO ARRIVE, DO NOT COME BACK HERE AND TYPE THIRTEEN
-/// ROWS.** That is the whole point of the paragraph above and it is easy to
-/// miss: the blocker is upstream, so the *fix* is upstream too, and this file
-/// should need no new rows at all. `Copper.hpp` already exports `waxedForm`
-/// and `unwaxedForm`, they already cover derived stairs and slabs, and the
-/// stair and slab families in `Block.hpp` are what gain the new parents. Once
-/// a waxed cut copper stair has an id, it is a stair whose parent is a waxed
-/// cut copper, and the loop below already emits a recipe for every family
-/// member it is given. **Thirteen hand-written waxed rows would be a second
-/// answer to a question `waxedForm` already answers** - bug shape #1, and
-/// precisely what collapsing the oxidation matrix into one table was built to
-/// prevent. If landing the ids does not make these recipes appear by itself,
-/// the bug is that the new ids were not put in the families, and the repair is
-/// there rather than a table of literals here.
+/// **AND WHEN THOSE IDS DO ARRIVE, DO NOT COME BACK HERE AND TYPE ROWS FOR THE
+/// DERIVED SHAPES.** That is the whole point of the paragraph above and it is
+/// easy to miss: the blocker is upstream, so the *fix* is upstream too, and
+/// this file needed no new rows for the stairs and slabs when they landed.
+/// `Copper.hpp` already exports `waxedForm` and `unwaxedForm`, they already
+/// cover derived stairs and slabs, and the stair and slab families in
+/// `Block.hpp` are what gain the new parents. Once a waxed cut copper stair has
+/// an id, it is a stair whose parent is a waxed cut copper, and the loop below
+/// already emits a recipe for every family member it is given. **Hand-written
+/// waxed stair and slab rows would be a second answer to a question
+/// `waxedForm` already answers** - bug shape #1, and precisely what collapsing
+/// the oxidation matrix into one table was built to prevent. If landing an id
+/// does not make its recipe appear by itself, the bug is that the new id was
+/// not put in its family, and the repair is there rather than a table of
+/// literals here. **The chiselled row is the one exception and is not one:**
+/// chiselled copper is not a derived shape, it has no family table, and the
+/// four rows in `kChiselledFromSlabs` are already the only place that shape
+/// lives.
 ///
 /// The stock block each cut form and each grate is cut from, both families and
 /// all eight oxidation stages in one table, because the rows differ by exactly
@@ -654,6 +729,22 @@ constexpr ChiselledFromSlabs kChiselledFromSlabs[] = {
     // Chiselled copper had no recipe at all, so the only chiselled block in the
     // game that a honeycomb can seal was itself unobtainable.
     {BlockId::CutCopper, BlockId::ChiseledCopper},
+    // **Landed 2026-08-19, the moment the waxed cut copper slab got an id.**
+    // `crafting_table_waxed_chiseled_copper.json` is two `waxed_cut_copper_slab`
+    // stacked, and until today its *input* had no `BlockId` even though its
+    // *output* did - the exact trap the note above `kCopperCuts` warns about,
+    // where counting only outputs says a recipe is writable when it is not.
+    // `kSlabFamilies` now carries `WaxedCutCopper` in its tail run, so
+    // `slabFamilyOf` finds it and the assert below covers this row like the
+    // other four. Only oxidation stage 0 exists; the exposed, weathered and
+    // oxidised waxed chiselled coppers still have no id at all, which is a
+    // `Block.hpp` gap and not a row waiting to be typed here.
+    //
+    // **This is a second route to a block a honeycomb already reaches, and the
+    // reference has both** - so it is not a duplicate. It is a different shape
+    // over different ingredients, which is what `noRecipeSharesAGrid` and
+    // `patternsUnique` below actually test; a shared *output* is not a clash.
+    {BlockId::WaxedCutCopper, BlockId::WaxedChiseledCopper},
 };
 
 constexpr bool everyChiselledParentHasASlab() {
@@ -722,9 +813,24 @@ constexpr std::vector<Recipe> buildRecipes() {
                    {itemForBlock(BlockId::Sand), itemForBlock(BlockId::Sand), itemForBlock(BlockId::Sand),
                     itemForBlock(BlockId::Sand)},
                    itemForBlock(BlockId::Sandstone), 1),
-            // The reference grows moss from vines, which do not exist here yet;
-            // tall grass is the stand-in and is a deliberate divergence.
-            shapeless({itemForBlock(BlockId::Cobblestone), itemForBlock(BlockId::TallGrass)}, 2,
+            // Cobblestone and a vine, which is the reference's own shapeless
+            // recipe. This was tall grass until 2026-08-19, under a note saying
+            // vines "do not exist here yet". They do, and had for some time:
+            // `isVine` covers a sixteen-id run, worldgen hangs them, the player
+            // places them, and `shearsHarvests` in `BlockDrops.hpp` gives one
+            // back. **The file already contradicted itself** - the shears row
+            // below calls them "the only thing that collects a vine", so both
+            // sentences could not be true at once. Nothing revisited the note
+            // when vines landed, which is the measured direction: a claim that
+            // something is ABSENT rots, because the world only has to move once.
+            //
+            // **Spelled the way `dropForBlock` spells it**, rather than by
+            // naming an id. A vine is one id per combination of sides it clings
+            // to, and the one that reaches an inventory is the all-sides form;
+            // deriving the ingredient from the same expression the drop uses is
+            // what stops this asking for an id no drop ever produces. Falsifier:
+            // `Item.hpp`'s `isVine` arm returning anything but `vineWith`.
+            shapeless({itemForBlock(BlockId::Cobblestone), itemForBlock(vineWith(ConnectAll))}, 2,
                       itemForBlock(BlockId::MossyCobblestone), 1),
             // Coarse dirt is the reference's own 2x2 checker of dirt and gravel.
             shaped(2, 2,
@@ -766,7 +872,12 @@ constexpr std::vector<Recipe> buildRecipes() {
             square4(BlockId::DeepslateBricks, BlockId::DeepslateTiles, 4),
             square4(BlockId::Prismarine, BlockId::PrismarineBricks, 4),
             square4(BlockId::Sandstone, BlockId::CutSandstone, 4),
-            shapeless({itemForBlock(BlockId::StoneBricks), itemForBlock(BlockId::TallGrass)}, 2,
+            // The mossy cobblestone rule above, on stone bricks - the reference
+            // moss-grows both the same way. **This one carried no comment at
+            // all**, so it inherited the vine premise silently and a sweep for
+            // the note would never have found it: one recipe was documented as
+            // a divergence and its twin just looked like a recipe.
+            shapeless({itemForBlock(BlockId::StoneBricks), itemForBlock(vineWith(ConnectAll))}, 2,
                       itemForBlock(BlockId::MossyStoneBricks), 1),
 
             // Nine into one, the storage-block shape, **and back out again** -

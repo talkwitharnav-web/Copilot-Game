@@ -265,6 +265,7 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
      .patch = BlockId::Air, .patchThreshold = kNoPatch, .steep = BlockId::Air, .treeDensity = 0.04f,
      .treeShape = TreeShape::Round, .grassDensity = 0.34f, .flowerShare = 0.55f,
+     .beeNestChance = 1.0f,
      .tags = BiomeTag::Grassland | BiomeTag::Highland,
      .temperature = {kColdT, 1.0f}, .humidity = kAny, .continentalness = {kCoastC, 1.0f},
      .erosion = {-1.0f, kUplandE}, .ridges = {kValleyPV, kPeakPV},
@@ -361,6 +362,7 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
      .patch = BlockId::Air, .patchThreshold = kNoPatch, .steep = BlockId::Air, .treeDensity = 0.80f,
      .treeShape = TreeShape::Round, .grassDensity = 0.30f, .flowerShare = 0.06f,
+     .beeNestChance = 0.00035f,
      .tags = BiomeTag::Forest | BiomeTag::Wet,
      .temperature = {kColdT, kTemperateT}, .humidity = {kWetH, 1.0f}, .continentalness = {kCoastC, 1.0f},
      .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
@@ -465,6 +467,7 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
      .patch = BlockId::Air, .patchThreshold = kNoPatch, .steep = BlockId::Air, .treeDensity = 0.45f,
      .treeShape = TreeShape::Round, .grassDensity = 0.34f, .flowerShare = 0.12f,
+     .beeNestChance = 0.00035f,
      .tags = static_cast<std::uint32_t>(BiomeTag::Forest),
      .temperature = {kFrozenT, kWarmT}, .humidity = {kDryH, kWetH}, .continentalness = {kCoastC, 1.0f},
      .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f}},
@@ -473,6 +476,7 @@ constexpr std::array<Biome, static_cast<std::size_t>(BiomeId::Count)> kBiomes{{
      .top = BlockId::Grass, .filler = BlockId::Dirt, .fillerDepth = 4,
      .patch = BlockId::Air, .patchThreshold = kNoPatch, .steep = BlockId::Air, .treeDensity = 0.10f,
      .treeShape = TreeShape::Round, .grassDensity = 0.32f, .flowerShare = 0.16f,
+     .beeNestChance = 0.05f,
      .tags = static_cast<std::uint32_t>(BiomeTag::Grassland),
      .temperature = {kFrozenT, kWarmT}, .humidity = {-1.0f, kDryH}, .continentalness = {kCoastC, 1.0f},
      .erosion = {kUplandE, 1.0f}, .ridges = {kValleyPV, 1.0f},
@@ -638,6 +642,28 @@ constexpr bool snowPairsAreOrdered() {
     return true;
 }
 
+/// The leafiest row's `treeDensity`, so the tree pass's early rejection is
+/// derived from the table rather than written down beside it. Read by
+/// `maxTreeDensity` below, which is what `Structures.cpp` calls.
+constexpr float highestTreeDensity() {
+    float best = 0.0f;
+    for (const Biome& row : kBiomes) {
+        best = row.treeDensity > best ? row.treeDensity : best;
+    }
+    return best;
+}
+constexpr float kMaxTreeDensity = highestTreeDensity();
+
+// A zero here would silently *accept* every cell in the world rather than
+// reject one, because the test in `Structures.cpp` is
+// `presence >= maxTreeDensity()` against a unit hash - so the early-out that
+// exists to answer "most cells are empty" in one hash would answer "yes" every
+// time and the pass would sample the biome and the surface for all of them.
+// The control is that a value-initialised table is exactly what this rejects.
+static_assert(kMaxTreeDensity > 0.0f,
+              "no kBiomes row has any tree density at all, which turns the tree pass's early "
+              "rejection into an accept-everything rather than into a treeless world");
+
 // **One cell, and this is the assert that says so.** `World.cpp` writes a
 // drift into a single block position, and `snowLayerAt` runs out at eight -
 // deeper than that needs the cell above and a rule for stacking, which does not
@@ -672,6 +698,99 @@ static_assert(rowsThatAccumulateSnow() == 14,
 // silently draw nothing rather than fail.
 static_assert(snowPairsAreOrdered(),
               "a snow_accumulation pair runs [min, max] and neither end may be negative");
+
+/// The bee-nest column, and where its numbers came from.
+///
+/// **Read off the reference's own table, not reproduced from memory.**
+/// minecraft.wiki [[Bee Nest]] carries a per-biome table with separate Java and
+/// Bedrock columns; it is stripped by every markdown conversion of the page, so
+/// it was pulled as **raw wikitext** through the wiki's own API
+/// (`action=parse&prop=wikitext`) on 2026-08-19. The **Bedrock** column reads:
+/// meadow 100%; plains, sunflower plains and cherry grove 5%; mangrove swamp
+/// 1%; flower forest 3% (Java 2%); and forest, birch forest, old growth birch
+/// forest, wooded hills, birch forest hills and tall birch hills 0.035% (Java
+/// 0.2%). The footnote on the column says it is "the chance for each
+/// naturally-generated oak, birch, mangrove tree, or cherry tree to have a bee
+/// nest", which is where the oak-family gate in `Structures.cpp`'s `treeInCell`
+/// comes from.
+///
+/// **Corroborated a second time on the same page and independently of the
+/// table**, by the Bedrock history section: beta 1.16.0.57 gives flower forest
+/// 3%, plains and sunflower plains 5%, and "forest, wooded hills, birch forest,
+/// tall birch forest, birch forest hills, and tall birch hills" 0.035%. Two
+/// readings, one of them a changelog, agreeing on the three numbers that
+/// matter here. Meadow's 100% is table-only - it spans both editions in one
+/// cell - and is the one row to re-check first if the table is ever re-read.
+///
+/// **`Mojang/bedrock-samples` cannot settle it and it was asked**: worldgen
+/// chances are engine-side, and its `behavior_pack/` has no `blocks/` directory
+/// at all. Searching that repo for `bee_nest` returns textures, `blocks.json`
+/// and `entities/bee.json`, and nothing about generation.
+///
+/// Our biome list has no flower forest, cherry grove, sunflower plains or
+/// mangrove swamp, and birch is a *variant roll inside oak* rather than a
+/// biome, so **four rows carry a rate and there are three distinct rates**:
+/// Meadow 1.0, Plains 0.05, and Forest and Dense Forest sharing 0.00035.
+/// `Dense Forest` reads the forest rate, and that is safe from either
+/// direction: every Bedrock biome in the 0.035% row is a forest of some kind,
+/// so whichever of them it stands for, the number is the same.
+///
+/// **CONTROL, and it is the mistake this table invites.** Java's column sits
+/// beside Bedrock's on the same wiki page, one cell to the left, and its forest
+/// rate is 0.2% - nearly six times ours. Reading the wrong column produces a
+/// table that looks exactly as deliberate as the right one and puts roughly six
+/// times as many nests in every forest in the world. This is deliberately still
+/// a `switch` rather than a second column: it is not data the game may read, it
+/// is the wrong answer kept alive so the assert below can tell the two apart.
+constexpr float beeNestChanceJava(BiomeId biome) {
+    switch (biome) {
+    case BiomeId::Meadow:
+        return 1.0f;
+    case BiomeId::Plains:
+        return 0.05f;
+    case BiomeId::Forest:
+    case BiomeId::DenseForest:
+        return 0.002f;
+    default:
+        return 0.0f;
+    }
+}
+
+/// The column as the rows actually hold it, so the asserts below test the
+/// **table** rather than a restatement of it.
+constexpr float rowBeeNestChance(BiomeId id) {
+    return kBiomes[static_cast<std::size_t>(id)].beeNestChance;
+}
+
+static_assert(rowBeeNestChance(BiomeId::Forest) != beeNestChanceJava(BiomeId::Forest) &&
+                  rowBeeNestChance(BiomeId::Meadow) == beeNestChanceJava(BiomeId::Meadow),
+              "the forest rate must be Bedrock's 0.035%, not Java's 0.2% - and the two editions "
+              "genuinely agree on meadow, so a control that differed everywhere would be "
+              "proving nothing about which column was read");
+
+// The four rows that carry a rate, listed rather than counted, because the set
+// is small and a count is what got this wrong before: finding 9702 recorded a
+// comment in `Structures.cpp` saying "three nest-bearing biomes" three times,
+// which came from three `return` statements in the switch this column replaced
+// while four enumerators reached them. All four carry `TreeShape::Round`, which
+// is what makes the oak-family gate in `treeInCell` safe without a species
+// test - checked against the table on 2026-08-19, not assumed.
+static_assert(rowBeeNestChance(BiomeId::Meadow) == 1.0f &&
+                  rowBeeNestChance(BiomeId::Plains) == 0.05f &&
+                  rowBeeNestChance(BiomeId::Forest) == 0.00035f &&
+                  rowBeeNestChance(BiomeId::DenseForest) == 0.00035f,
+              "a bee-nest rate moved off the row it belongs to; the four rows that carry one are "
+              "named in the comment above this assert and need updating with it");
+
+// The negative half. Zero is what a row that was never filled in also reads,
+// so this on its own would be vacuous - it is the assert above that makes these
+// four mean "the reference gives them none" rather than "nobody wrote them".
+static_assert(rowBeeNestChance(BiomeId::Desert) == 0.0f &&
+                  rowBeeNestChance(BiomeId::Jungle) == 0.0f &&
+                  rowBeeNestChance(BiomeId::Swamp) == 0.0f &&
+                  rowBeeNestChance(BiomeId::Taiga) == 0.0f,
+              "a biome the reference gives no nest chance must get none here - the default on the "
+              "column is the whole of that rule and this is what stops a row being given one");
 
 /// A `constexpr` text compare. `std::strcmp` is not usable in a constant
 /// expression and this is the only place in the file that needs one.
@@ -865,27 +984,29 @@ bool biomeHasAny(BiomeId id, std::uint32_t mask) {
 /// any of them. 3 is the *capacity* (`Beehive/Usage -> Bee housing`), not the
 /// spawn count.
 ///
-/// **One thing landed in the place this comment argued against, and it is
-/// filed rather than fixed here because the file is not mine:**
-/// `Structures.cpp` now carries `beeNestChance(BiomeId)` and
-/// `beeNestChanceJava(BiomeId)` as switches over biome names. That is a second
-/// per-biome number living outside the per-biome table, which is the shape
-/// `treeDensity` and `maxTreeDensity` are here to avoid - a new biome silently
-/// gets no nests and nothing says so. The rates themselves are right and
-/// sourced; only their address is wrong. Filed as `fx-worldgap` against
-/// `Structures.cpp`; when it moves, it becomes a column on `Biome` beside
-/// `treeDensity` and this paragraph goes.
+/// **The rate itself now lives where this comment argued it should**, as of
+/// 2026-08-19: `Biome::beeNestChance`, filled on four rows, with the source
+/// note and the Java control beside `rowBeeNestChance` above. It spent part of
+/// one day as a pair of switches in `Structures.cpp` - findings 9620 and 9685 -
+/// and the paragraph describing that arrangement has gone with it, on its own
+/// instruction, because a negative aged past its fix reads as a defect report.
 float maxTreeDensity() {
     // Derived rather than written down, so adding a leafier biome cannot
     // silently make the placement rejection wrong.
-    static const float highest = [] {
-        float best = 0.0f;
-        for (const Biome& biome : kBiomes) {
-            best = std::max(best, biome.treeDensity);
-        }
-        return best;
-    }();
-    return highest;
+    //
+    // **`constexpr`, and that is not tidiness.** `Structures.cpp` asks this
+    // once per tree placement cell, which is the hottest early-out in the tree
+    // pass. A function-local `static` answers the same number, but every one of
+    // those calls pays the thread-safe-initialisation guard - a real atomic, on
+    // a value that is a pure function of a `constexpr` table and could never
+    // have differed between runs, let alone between threads. It was written
+    // that way until 2026-08-19.
+    //
+    // Written as a named function rather than an immediately-invoked lambda so
+    // it is the same shape as `deepestSnowLayers` and the other three table
+    // sweeps in this file, all of which are already proven `constexpr` over
+    // `kBiomes`.
+    return kMaxTreeDensity;
 }
 
 BiomeId biomeFor(const Climate& climate) {

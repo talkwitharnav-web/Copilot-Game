@@ -464,33 +464,60 @@ struct CreatureSpecies {
     /// Collision box. Deliberately narrower than the body looks, so a creature
     /// never wedges in a gap the player can walk through.
     ///
-    /// **`height` is `minecraft:collision_box.height` from `Mojang/bedrock-samples`,
-    /// raw and unscaled. `modelScale` is `minecraft:scale`. The two are
-    /// INDEPENDENT and neither is ever folded into the other** (2026-08-19).
+    /// **`height` is the EFFECTIVE world-space box: `minecraft:collision_box`
+    /// times `minecraft:scale`, both from `Mojang/bedrock-samples`.**
+    /// `modelScale` is the reference's `minecraft:scale` again, kept separately
+    /// **for drawing only** (2026-08-19, rewritten the same day it was written
+    /// backwards - see below).
     ///
-    /// That is measured rather than asserted stylistically: `height` is read by
-    /// the collision box, the eye at `height * 0.85f`, `kUnstickReach`, the
-    /// cramming span and the light sample - always against `creature.scale`, the
-    /// per-entity baby factor, and **never against `modelScale`**. `modelScale`
-    /// appears only inside the model builder, on `netW/netH/netD * kTexel`
-    /// geometry. **Villager is the proof they are independent**: height 1.9 with
-    /// modelScale 0.92, and 1.9 is Bedrock's box exactly, so the scale plainly
-    /// is not baked in.
+    /// That is forced by what the code consumes, which is measurable rather
+    /// than a matter of taste: `height` is read by the collision box, the eye at
+    /// `height * 0.85f`, `kUnstickReach`, the cramming span and the light
+    /// sample - always against `creature.scale`, the per-entity BABY factor,
+    /// and **never against `modelScale`**. `modelScale` has exactly two roots
+    /// in `Creature.cpp`, `species.modelScale * creature.scale` inside
+    /// `buildMesh` and inside the icon builder, and everything downstream of
+    /// both is `netW/netH/netD * kTexel` geometry. **Since no reader ever forms
+    /// the product, whatever is stored here IS the hitbox** - so storing the
+    /// reference's pre-divided box makes the body wrong by exactly the scale.
     ///
-    /// **Two rows had the scale multiplied into `height` and both were wrong**,
-    /// found and fixed 2026-08-19: pufferfish carried 0.96 = 0.8 x 1.2 and
-    /// tropical fish 0.52 = 0.4 x 1.3, against JSON boxes of 0.8 and 0.4. It is
-    /// `CLAUDE.md` bug shape #3 - a number ported into a field measured in a
-    /// different unit - and it is invisible, because a slightly tall hitbox
-    /// looks like nothing at all. **Both rows' `halfWidth` was already correct
-    /// (0.28 and 0.20), which is what made the pair diagnosable**: a scale folded
-    /// into one axis and not the other cannot be a deliberate choice.
+    /// The table proves the same thing internally: a large slime stores 2.08
+    /// with `modelScale` 4.16, and 2.08 x 4.16 is 8.65 m, which is nothing. Its
+    /// stored 2.08 is the reference's actual size.
     ///
-    /// So when adding or checking a row, read `collision_box` out of that
-    /// entity's JSON and put it here unmultiplied. What would make this note
-    /// false: a reader of `height` appearing that also multiplies by
-    /// `modelScale`, at which point the fields are no longer independent and
-    /// every row wants revisiting together.
+    /// **This paragraph said the opposite for part of 2026-08-19, and three
+    /// rows were edited to match it before it was caught.** The sentence, which
+    /// is RETRACTED and quoted rather than asserted here: "raw and unscaled ...
+    /// put it here unmultiplied" - RETRACTED. Blackbone went 2.412 -> 2.01,
+    /// pufferfish 0.96 -> 0.80, tropical fish 0.52 -> 0.40; all three are
+    /// reverted. The diagnosis that did it was that a value which is a clean
+    /// product of two published figures must be bug shape #3, a render scale
+    /// multiplied into a collision field. **That inference is not safe in
+    /// either direction**: `collision_box x scale` is equally the signature of
+    /// a CORRECT effective box, and Mojang annotate the division in their own
+    /// files - `rabbit.json` carries `"width": 0.81666666, // 0.49/0.6` beside
+    /// `"scale": 0.6`, and `squid.json`'s baby group carries `"height": 1, //
+    /// 0.5/0.5` beside `"scale": 0.5`. Decide the direction from what the
+    /// engine consumes, never from the arithmetic looking tidy.
+    ///
+    /// **And do not reuse the "villager is the proof" argument that stood
+    /// here** - it was vacuous. Bedrock's villager has no adult
+    /// `minecraft:scale`, so 1.9 is 1.9 under either convention and the row
+    /// discriminates nothing. The rows that actually discriminate are the four
+    /// with a non-unit reference scale: rabbit, blackbone, pufferfish and
+    /// tropical fish. Rabbit is the cleanest of them, because Mojang annotate
+    /// the answer - its **adult** group reads `"scale": 0.6` beside
+    /// `"height": 1.0 // 0.6/0.6`, so the effective box is 0.6 and ours reads
+    /// 0.60, already correct (re-fetched 2026-08-19 16:45). Read the ADULT
+    /// group: the baby beside it is `"scale": 0.4` with `// 0.4/0.4`, and a
+    /// first-match regex over the file answers with the baby.
+    ///
+    /// So when adding or checking a row: read `collision_box` AND
+    /// `minecraft:scale` out of that entity's JSON - from the same block, since
+    /// a baby group's scale is not the adult's - and store the product. What
+    /// would make this note false: a reader of `height` appearing that also
+    /// multiplies by `modelScale`, at which point the fields stop being
+    /// independent and every row wants revisiting together.
     ///
     /// **Widths are NOT all Bedrock and that is a separate, open gap** - sheep
     /// is 0.64 against 0.9, pufferfish 0.56 against 0.8, Blackbone 0.60 against
@@ -957,6 +984,70 @@ struct CreatureSpecies {
     /// Claims a bed and a job site, keeps a daily schedule, and gains a trade
     /// from whatever block it claimed. The villager alone.
     bool keepsHouse = false;
+
+    // --- Powder snow. Three columns rather than one, because the reference
+    // --- keeps three genuinely different rules here and folding them into an
+    // --- "affected by snow" bit would make each of them wrong somewhere.
+
+    /// Takes no freezing damage at all, however long it stands in it.
+    ///
+    /// **The reference's own named list, and it is short**: snow golem, stray,
+    /// polar bear, wither, ender dragon, and the bogged in Bedrock. Of those we
+    /// have the stray, the polar bear and the bogged; the other three are not
+    /// on the roster.
+    ///
+    /// **The Blackbone is deliberately not on it.** That list names the
+    /// *wither*, which is a boss we do not have - our Blackbone is the wither
+    /// **skeleton**, a different mob that shares half a name, and giving it the
+    /// boss's immunity because the words overlap is exactly how a wrong row
+    /// gets written. Its own `wither_skeleton.json` publishes no freezing
+    /// exemption.
+    ///
+    /// **Sourcing, stated because it is weaker than this file's usual.**
+    /// minecraft.wiki *Powder Snow*, **secondary**, by way of
+    /// `Survival.hpp`'s freezing block which names all four unimplemented halves
+    /// as this file's. A code search of `Mojang/bedrock-samples`
+    /// `behavior_pack/entities/*.json` for `freezing` on 2026-08-19 returns four
+    /// files and not one of them exempts a mob we have - polar_bear, panda and
+    /// wolf list it only as a `behavior.panic` damage source, and sulfur_cube's
+    /// damage sensor is the sole JSON exemption in the pack - so these
+    /// exemptions live in Bedrock's native code and the wiki is the only source
+    /// there is. **What would make this false:** a `damage_sensor` with
+    /// `"cause": "freezing"` appearing in `stray.json`, `polar_bear.json` or
+    /// `bogged.json` upstream.
+    bool immuneToFreezing = false;
+
+    /// Whether the body ends up **inside** a powder snow block at all - which is
+    /// a different question from whether the cold hurts it, and the reason this
+    /// is a second column.
+    ///
+    /// minecraft.wiki (*Powder Snow*, **secondary**) names rabbits, endermites,
+    /// silverfish, shulkers, vexes and foxes as the entities that do not fall
+    /// through; of those we have the rabbit, the Voidmite, the silverfish and
+    /// the fox. They are not freeze-*immune* in the reference - they simply
+    /// never get in, and one dropped into a hole full of the stuff would freeze
+    /// like anything else.
+    ///
+    /// **Only the freezing clock reads this today, and the other half is
+    /// another file's.** `Block.hpp` gives powder snow no collision box for
+    /// anybody, so ours still sink into it visually and are still slowed by it;
+    /// making these four stand on the lid is a per-entity collision rule that
+    /// `Block.hpp` explicitly says belongs to the mover. Filed rather than
+    /// faked here. What this column buys meanwhile is the reference's
+    /// **outcome** - a fox does not freeze to death in a snow drift - with a
+    /// name that says why rather than pretending they are immune.
+    bool sinksInPowderSnow = true;
+
+    /// Five points a freezing tick instead of one.
+    ///
+    /// The reference's fire mobs - blaze, magma cube and strider - of which
+    /// only the magma cube is on this roster. **Not derived from `fireImmune`,
+    /// which is the tempting one-liner and is wrong**: that predicate also
+    /// covers the Blackbone and the Zombie Princepin, neither of which is on
+    /// the reference's five-a-tick list, so deriving it would be a fiction that
+    /// merely *looks* like a coupling (`CLAUDE.md`: a column that is only
+    /// coincidentally equal).
+    bool freezesHarder = false;
 };
 
 const CreatureSpecies& speciesInfo(CreatureKind kind);
@@ -1198,6 +1289,10 @@ enum class DeathCause : std::uint8_t {
     /// player rares, which is correct: `LootFlag::PlayerKill` fires only on
     /// `DeathCause::Player`.
     ///
+    /// **Appended below rather than filed beside the other hazards**, because
+    /// the order of this enum is the order it is written down, and nothing
+    /// gains from renumbering a value another file may already hold.
+    ///
     /// **Staged, and unreferenced apart from this line as of 2026-08-19** - a
     /// bare-name search finds exactly one hit, which is this definition. That is
     /// deliberate and is not the "one call site short of existing" shape three
@@ -1209,6 +1304,17 @@ enum class DeathCause : std::uint8_t {
     /// reading this because a pig survived an anvil, the gap is there and not
     /// here.
     CrushedByBlock,
+
+    /// Frozen solid standing in powder snow. **The world's, not a killer's** -
+    /// it goes through `hazardDamage` on its own two-second cadence exactly as
+    /// burning, drowning and suffocation do, so `killerId` is cleared and no
+    /// player rare drops.
+    ///
+    /// Distinct from `Suffocation` even though powder snow is a full cube:
+    /// `Block.hpp` gives it no collision box at all, so a body inside one is
+    /// **not** buried and the suffocation clock never starts. Two different
+    /// deaths inside the same block, and a reader should not have to guess.
+    Freezing,
 };
 
 /// The facts about a death that are gone by the time it pays out.
@@ -1603,13 +1709,60 @@ struct Creature {
     /// only a burial that persists across the interval should ever land a hit.
     float suffocateTimer = 0.0f;
 
+    /// **Bedrock's `TicksFrozen` in this file's unit**, and the pair below is
+    /// the player's rule adopted rather than a second copy of it: `Player`
+    /// carries `freezeSeconds` and `freezeTimer` with the same meanings, spends
+    /// the same `survival::` constants, and the comment at each of them is the
+    /// source. A creature freezing at a different rate to the player standing
+    /// beside it would be the "rule that did not travel" shape twice over.
+    ///
+    /// Rises at real time while the body is inside powder snow, falls at
+    /// `survival::kFreezeRecoveryRate` times real time once it is out, and caps
+    /// at `survival::kFreezeOnsetSeconds`. Damage begins **at** the cap, so
+    /// stepping out and back in resumes rather than restarts.
+    float freezeSeconds = 0.0f;
+
+    /// Seconds accumulated toward the next point of freezing damage, once the
+    /// onset is reached.
+    ///
+    /// **Rests at `survival::kFreezeInterval` and not at zero**, for the reason
+    /// written at `Player::freezeTimer`: the published 140 ticks is when damage
+    /// *begins*, not when a fresh 40-tick wait begins, so zeroing this would
+    /// quietly turn a seven-second onset into a nine-second one.
+    float freezeTimer = 0.0f;
+
+    /// **Unbroken** seconds spent inside powder snow, which is a different
+    /// quantity from `freezeSeconds` and cannot be derived from it: that one
+    /// caps at seven and decays, this one has no cap and **resets** the moment
+    /// the body is clear.
+    ///
+    /// It exists for one mechanic - a skeleton turns into a stray after twenty
+    /// seconds in the snow - and that shape is the reference's own: Bedrock
+    /// hangs a non-looping `minecraft:timer` on the entity while it is in the
+    /// block and *removes the whole component group* when it gets out, which is
+    /// a reset and not a decay (`Mojang/bedrock-samples`,
+    /// `behavior_pack/entities/skeleton.json`, `in_powder_snow`).
+    float powderSnowSeconds = 0.0f;
+
     /// Struck by lightning, in the reference. **Doubles the blast power and
     /// nothing else** - a charged creeper has the same twenty health as any
     /// other, which is worth stating because the obvious guess is that it is
     /// tougher. It is not; it is louder.
     ///
-    /// We have no weather until M27, so for now a small share of Brambles
-    /// arrive this way instead of being made by a storm.
+    /// **Lightning is the primary source and has been since M27.** `Weather`
+    /// runs the storm, `Main.cpp` hands each bolt to `Creatures::applyLightning`
+    /// and that is what charges a Bramble standing under it. The spawn-time
+    /// `kChargedChance` roll is the *secondary* source and is deliberate: it
+    /// keeps a few charged Brambles in the world between storms.
+    ///
+    /// RETRACTED WORDING, quoted not asserted: "we have no weather until M27,
+    /// so for now a small share of Brambles arrive this way instead of being
+    /// made by a storm" - every clause of which was false by the time it was
+    /// read, and it argued for deleting the spawn roll. Corrected 2026-08-19
+    /// against finding 10370, and flagged on the quote's own line because a
+    /// token sweep cannot tell a claim from a quotation of a withdrawn one.
+    /// **What would make the new wording wrong:** `Weather.cpp` ceasing
+    /// to emit bolts, or `applyLightning` losing its `Main.cpp` caller.
     bool charged = false;
 
     /// Built by a player out of iron and a carved pumpkin, rather than found in
@@ -1624,6 +1777,45 @@ struct Creature {
     /// **This one has to be saved.** A golem that forgot who made it and
     /// started hitting you after a reload is not a cosmetic bug.
     bool playerBuilt = false;
+
+    /// Kept alive but not simulated, because the player has walked out of
+    /// range and this is one of the creatures that must not be forgotten.
+    ///
+    /// **Transient and deliberately not saved.** It is recomputed from
+    /// `position` against the active radius on the first `manage` after a load,
+    /// and saving it would mean a villager restored from disk while the player
+    /// stood beside it started the session frozen.
+    ///
+    /// **Why it exists at all.** `manage` used to retire *everything* past the
+    /// active radius, villagers and player-built golems included, and
+    /// `populateChunks` never repopulates a column it has already visited - so
+    /// walking ninety metres from your village deleted every villager (with the
+    /// profession, bed, job site and meeting point that `kCreatureVersion` was
+    /// bumped to 4 to carry) and every golem you built, permanently, at the
+    /// next autosave. Those two now survive the distance test; this flag is
+    /// what stops surviving it from costing anything.
+    ///
+    /// **What honours it, as of 2026-08-20.** `update`, `separate` and
+    /// `buildMesh` skip a dormant creature and the spawn caps do not count one;
+    /// `census` and `hunting` skip it; and so, since this date, do
+    /// `creatureById`, `think`'s avoid and hunt scans, `findAimed`,
+    /// `alertNeighbours`, `applyLightning`, `hurtInBox`, `provokeNear` and
+    /// `applyExplosion` - nine loops that were still paying for a record nobody
+    /// could see, four of them every frame, which is why keeping a village used
+    /// to get measurably worse with every village the player had visited. The
+    /// list is a fact about today rather than a promise; the rule behind it is
+    /// stated once on `Creatures::creatureById`.
+    ///
+    /// **The one scan that must NOT skip a dormant record is `alreadyClaimed`**,
+    /// which is the only record of a villager's bed, job site and bell - see the
+    /// note at its definition in `Creature.cpp` before "finishing the job".
+    ///
+    /// **A dormant creature is by construction outside the drawn world**: the
+    /// active radius is the render distance floored at `kBaseRadius`, so
+    /// anything past it is beyond the chunks on screen. Skipping the mesh is
+    /// therefore invisible, and it is exactly what the player saw before -
+    /// they were deleted.
+    bool dormant = false;
 
     /// What trade this villager took, or 0 for none. 1..13 index the job-site
     /// table; 14 is the nitwit, which can never take one.
@@ -1818,9 +2010,15 @@ public:
     /// > `beeHomeAtLevel(id, level + 1)`. A cell that no longer holds a hive is
     /// > simply dropped.
     ///
-    /// **THAT CALL SITE NOW EXISTS: `Main.cpp:10247`, `for (const glm::ivec3&
-    /// cell : creatures.takePollinated())`, landed 2026-08-19.** Verified by
-    /// reading the call site rather than by trusting this note, and recorded
+    /// **THAT CALL SITE NOW EXISTS: `for (const glm::ivec3& cell :
+    /// creatures.takePollinated())` in `Main.cpp`, landed 2026-08-19.** Cited
+    /// by the line it is written on rather than by a line *number*, which is
+    /// the rule `Survival.hpp` and `Player.hpp` both state and which this note
+    /// broke: the number here read 10247, the loop was at 10593 twenty minutes
+    /// later and at 10732 the same evening. A quoted line is greppable for ever;
+    /// a number in a file thirty agents are editing is wrong by tea time.
+    /// Verified by reading the call site rather than by trusting this note, and
+    /// recorded
     /// here because a spec that does not say it has been met is how a second
     /// writer gets built: the reader arrives, finds a requirement written in
     /// the imperative and no statement that anyone honoured it, and honours it
@@ -1848,12 +2046,17 @@ public:
     std::vector<CreatureVoiceEvent> takeVoices();
 
     /// How far creatures live, appear and are retired, in blocks.
+    /// **"Retired" stopped being universal on 2026-08-19**: a creature `manage`
+    /// judges persistent - a villager, anything `playerBuilt`, an iron golem -
+    /// is put to sleep past this radius instead of deleted, because deleting it
+    /// emptied your village permanently. See `Creature::dormant`.
     /// **Follows the render distance rather than a number of its own.** A fixed
     /// 90 m meant an animal blinked out well inside the world you could see,
     /// which is the one place the illusion is easiest to break. Safe to change
     /// mid-session: the next `manage` places or retires the difference, and the
     /// population cap scales with the *area* so a wider world is not a thinner
-    /// one.
+    /// one. The cap counts only the awake, so remembered villages cannot eat
+    /// the spawn budget.
     void setActiveRadius(float blocks);
 
     /// Strikes the first creature the aim ray reaches. Returns true if one was
@@ -1987,8 +2190,20 @@ public:
     ///
     /// `range` is a **drawing** limit and must never be confused with
     /// `setActiveRadius`, which is the simulation one. A creature outside this
-    /// still walks, still paths, still hunts, still despawns on its own terms
-    /// and is still saved - it is only not built into triangles this frame.
+    /// but inside the active radius still walks, still paths, still hunts,
+    /// still despawns on its own terms and is still saved - it is only not
+    /// built into triangles this frame.
+    ///
+    /// **Outside the *active* radius is a third state, and this paragraph used
+    /// to deny it existed** - corrected 2026-08-19, hours after dormancy
+    /// landed, and it is the reason that rule is written down: a premise stays
+    /// true only until something changes underneath it. A villager, anything
+    /// `playerBuilt` and an iron golem are *kept* out there rather than
+    /// retired, with `Creature::dormant` set, and a dormant creature does none
+    /// of the first three - `update`, `separate`, `census`, `hunting`, this
+    /// function and, since 2026-08-20, every targeting, aim and area-damage
+    /// scan in the file all skip it. It is still saved, which is the entire
+    /// point of keeping it. Falsified the day `dormant` gains a walker.
     ///
     /// `sprites` is the silhouette of every item picture, needed for the same
     /// reason a dropped item needs it: anything held in a hand is that picture
@@ -2119,6 +2334,12 @@ private:
                           std::uint32_t ignoreId = 0, float* entryDistance = nullptr) const;
     /// The live creature carrying this id, or null. Linear across a population
     /// capped in the tens, which is cheaper than keeping a map in step.
+    ///
+    /// **A dormant record answers to nobody**, so this returns null for one -
+    /// see the note on the definition. The population is capped in the tens
+    /// only while it is; the kept records of every village the player has
+    /// visited are not counted by any cap, and this is called about three times
+    /// per creature per tick.
     const Creature* creatureById(std::uint32_t id) const;
     Creature* creatureById(std::uint32_t id);
 
@@ -2181,6 +2402,31 @@ private:
     /// **This is what makes the budget a rate rather than a per-frame quota** -
     /// see `kPathsPerSecond`.
     float m_pathCredit = 0.0f;
+
+    /// How many of `m_creatures` are `dormant`, recomputed in full by every
+    /// `manage` so it cannot drift from the flags it counts.
+    ///
+    /// **The spawn caps are the reason it exists.** `capacityFor` tops out at
+    /// `kCreatureCeiling` - forty-four for the whole active radius - so a
+    /// village's ten villagers and a couple of golems, kept for ever, would
+    /// have silently eaten a quarter of the world's spawn budget and then
+    /// starved it as more villages were visited. Every cap test subtracts this,
+    /// which keeps "how many creatures may live around the player" a question
+    /// about the ones actually around the player.
+    std::size_t m_dormant = 0;
+
+    /// The population the spawn caps are about: everything except the dormant
+    /// records being kept for the player's sake.
+    ///
+    /// **Guarded against an underflow that could only ever be a bug**, because
+    /// the failure mode is not a wrong number - `std::size_t` wraps to about
+    /// eighteen quintillion, every cap test passes for ever, and the world
+    /// fills with creatures until the frame dies. Zero is the honest answer to
+    /// a tally that has drifted, and it fails in the direction that spawns
+    /// nothing rather than everything.
+    std::size_t activeCount() const {
+        return m_dormant < m_creatures.size() ? m_creatures.size() - m_dormant : 0;
+    }
 };
 
 } // namespace game

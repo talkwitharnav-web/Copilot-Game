@@ -151,7 +151,11 @@ constexpr FarmCrops kFarmCrops[] = {
     {{{BlockId::CarrotCrop0, 0.1f}, {BlockId::PotatoCrop0, 0.8f}}, 2},
 };
 
-static_assert(std::size(kFarmCrops) == static_cast<std::size_t>(VillageType::Snowy) + 1,
+// **`VillageType::Count`, not `Snowy + 1`, and `Biome.hpp` spells out why against
+// the enumerator itself**: a type appended after `Snowy` leaves `Snowy` at 5, so
+// this assert would still read 6 == 6 and pass while `kFarmCrops[6]` ran off the
+// end of the array. Identical value today, and the whole difference tomorrow.
+static_assert(std::size(kFarmCrops) == static_cast<std::size_t>(VillageType::Count),
               "one farm table per VillageType, None included");
 
 /// The share of a field no rule claims, which is the share that stays wheat.
@@ -373,7 +377,15 @@ constexpr Palette kPalettes[] = {
      BlockId::Dirt, kSpruceOpening, 0, 3, false, true},
 };
 
-static_assert(std::size(kPalettes) == 6, "one palette per VillageType, None included");
+// **A bare `6` was the weakest rung of the three available and this table is the
+// one that could least afford it.** `paletteFor` below indexes straight into
+// `kPalettes` with no clamp, so a seventh `VillageType` with no row here is not
+// a wrong palette, it is a read past the end of a `constexpr` array - a village
+// built out of whatever block ids happen to follow it in `.rdata`. A literal
+// cannot see the enum grow; `VillageType::Count` is exactly the sentinel added
+// for this, and `Biome.hpp` argues the case beside it.
+static_assert(std::size(kPalettes) == static_cast<std::size_t>(VillageType::Count),
+              "one palette per VillageType, None included");
 
 const Palette& paletteFor(VillageType type) {
     return kPalettes[static_cast<std::size_t>(type)];
@@ -970,6 +982,50 @@ constexpr PlotWeight kPlotWeights[] = {
     {Design::AnimalPen, 3},
 };
 
+/// Whether a weight table offers **every** `Design` exactly once, `TownCentre`
+/// excepted because it is placed outright rather than rolled for.
+///
+/// Reference-to-array rather than pointer-and-count, so the bound is in the
+/// function's type and the caller cannot disagree with it.
+template <std::size_t N>
+constexpr bool everyDesignIsRolled(const PlotWeight (&rows)[N]) {
+    for (int d = 0; d < static_cast<int>(Design::Count); ++d) {
+        const auto design = static_cast<Design>(d);
+        int found = 0;
+        for (const PlotWeight& row : rows) {
+            found += row.design == design ? 1 : 0;
+        }
+        if (found != (design == Design::TownCentre ? 0 : 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// **A `Design` with no row here is a building the game contains and can never
+// generate**, and nothing else in the tree says so: `pickDesign` walks this
+// table alone, so an unweighted design produces no warning, no assert and no
+// visible gap short of counting buildings across a hundred villages. That is
+// bug shape #15 in its quietest form, and this file has eleven designs to lose
+// one from.
+//
+// A count would have been the cheap version and it is not enough: it passes a
+// table that names one design twice and drops another, which is precisely what
+// a copy-paste row does.
+static_assert(everyDesignIsRolled(kPlotWeights),
+              "a Design enumerator is missing from kPlotWeights, duplicated in it, or TownCentre "
+              "has been given a weight - pickDesign draws from this table and nothing else, so "
+              "the first two make a building type unreachable and the third puts a second bell "
+              "in a village");
+
+// The control, because a predicate that cannot say no proves nothing. This
+// table fails for both of the reasons the real one must not: it names
+// `TownCentre`, and it is missing everything else.
+constexpr PlotWeight kNotAPlotTable[] = {{Design::TownCentre, 1}};
+static_assert(!everyDesignIsRolled(kNotAPlotTable),
+              "everyDesignIsRolled must reject a table that weights TownCentre and omits the "
+              "rest, or the assert above is vacuous");
+
 Design pickDesign(Roll& roll) {
     int total = 0;
     for (const PlotWeight& row : kPlotWeights) {
@@ -990,10 +1046,88 @@ struct Step {
     int dz;
 };
 
-constexpr Step kSteps[4] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
-
+/// Which way each of the four streets runs, in the order the arm loop walks
+/// them. This is the authority; the step table below is derived from it.
 constexpr FaceDirection kOutward[4] = {FaceDirection::NegZ, FaceDirection::PosX,
                                        FaceDirection::PosZ, FaceDirection::NegX};
+
+/// The one place in this file that turns a horizontal `FaceDirection` into a
+/// step on the grid.
+///
+/// `Unknown` deliberately yields a zero step rather than a plausible-looking
+/// direction, because a zero step is exactly what the assert below catches and
+/// a plausible one is exactly what it could not.
+constexpr Step stepFor(FaceDirection direction) {
+    switch (direction) {
+    case FaceDirection::PosX:
+        return {1, 0};
+    case FaceDirection::NegX:
+        return {-1, 0};
+    case FaceDirection::PosZ:
+        return {0, 1};
+    case FaceDirection::NegZ:
+        return {0, -1};
+    case FaceDirection::Unknown:
+        break;
+    }
+    return {0, 0};
+}
+
+/// **Derived from `kOutward`, not written out beside it.**
+///
+/// These were two parallel arrays indexed by the same `arm` with *nothing*
+/// binding them - no assert, no shared row type, not even a comment saying they
+/// were a pair. Reorder or edit one and the streets keep running the old way
+/// while every direction read off the other names the new one, on a clean
+/// build. That is bug shape #5, a derivation applied to one of a pair and not
+/// the other, and it is the shape that mirrored every shaped block in the game
+/// for four milestones.
+///
+/// Deriving makes the disagreement inexpressible, which is a rung above
+/// asserting it: there is now one statement of the compass order and one
+/// function that reads it.
+///
+/// It also closed a smaller hole. `kOutward` had **no reader at all** - one
+/// occurrence in the file, its own declaration - so it was a table that could
+/// have said anything at all without any effect, sitting one index away from a
+/// table that steers every street in every village. An unread `constexpr` array
+/// at namespace scope draws no warning at `/W4`.
+constexpr Step kSteps[4] = {stepFor(kOutward[0]), stepFor(kOutward[1]), stepFor(kOutward[2]),
+                            stepFor(kOutward[3])};
+
+/// Whether a step table gives genuinely different directions and no zero.
+///
+/// Reference-to-array so the bound travels with the argument.
+template <std::size_t N>
+constexpr bool areDistinctSteps(const Step (&steps)[N]) {
+    for (std::size_t a = 0; a < N; ++a) {
+        if (steps[a].dx == 0 && steps[a].dz == 0) {
+            return false;
+        }
+        for (std::size_t b = a + 1; b < N; ++b) {
+            if (steps[a].dx == steps[b].dx && steps[a].dz == steps[b].dz) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// A repeated direction is not a subtle fault. The arm loop lays a street, then
+// hangs plots off it at a fixed pitch; two arms sharing a direction would build
+// the same street twice, roll a second set of plots along it, and every one of
+// them would clash against the first set and be dropped - so the village comes
+// out with three arms and one bare road.
+static_assert(areDistinctSteps(kSteps),
+              "the four village streets must run four different ways - a duplicate builds one "
+              "street twice and loses an arm, and a zero step (which is what "
+              "FaceDirection::Unknown yields) collapses an arm into the town square");
+
+// The control, and it fails for both of the reasons the real table must not.
+constexpr Step kNotDistinctSteps[3] = {{1, 0}, {1, 0}, {0, 0}};
+static_assert(!areDistinctSteps(kNotDistinctSteps),
+              "areDistinctSteps must reject a repeated step and a zero one, or the assert above "
+              "is vacuous");
 
 /// The stream a cell's whole layout is drawn from.
 using LayoutRoll = Roll;
@@ -1310,20 +1444,43 @@ Plan solve(std::uint32_t seed, int cellX, int cellZ) {
             }
         }
 
-        // Lamp posts down each street, on alternating sides.
+        // Street furniture, on alternating sides. Every village gets lamp
+        // posts; a taiga village gets campfires among them.
         for (int along = 5; along <= length - 2; along += 9) {
             if (plan.decorCount >= kMaxDecor) {
                 break;
             }
-            const int outward = (along / 9) % 2 == 0 ? 1 : -1;
-            Decor& lamp = plan.decor[plan.decorCount++];
-            lamp.x = plan.originX + step.dx * along + step.dz * outward * 2;
-            lamp.z = plan.originZ + step.dz * along - step.dx * outward * 2;
-            lamp.kind = 0;
+            const int site = along / 9;
+            const int outward = site % 2 == 0 ? 1 : -1;
+            Decor& piece = plan.decor[plan.decorCount++];
+            piece.x = plan.originX + step.dx * along + step.dz * outward * 2;
+            piece.z = plan.originZ + step.dz * along - step.dx * outward * 2;
+            // **Campfires generate in taiga and snowy taiga villages**, and in
+            // *Bedrock* the snowy taiga half is Bedrock's alone - Java has it in
+            // plain taiga only (minecraft.wiki/w/Campfire, "Campfires can
+            // generate in taiga and snowy taiga[Bedrock Edition only] villages",
+            // read 2026-08-19). Both of those biomes carry
+            // `VillageType::Taiga`, so the reference's rule comes out as a test
+            // against one enumerator with nothing left over, and `Snowy` -
+            // which is the reference's `ice` type and belongs to Snowy Plains -
+            // correctly gets none.
+            //
+            // **Derived from the layout rather than rolled**, deliberately: a
+            // `roll` here would consume from the same stream that lays out the
+            // three arms after this one, so every plot, design and resident in
+            // them would shift. This way a non-taiga village is bit-identical
+            // to what it generated before campfires existed, and the change is
+            // confined to the biomes the reference puts them in.
+            //
+            // `+ arm` staggers them, so the four streets do not all light their
+            // first, fourth and seventh posts.
+            const bool campfire = plan.type == VillageType::Taiga && (site + arm) % 3 == 1;
+            piece.kind = campfire ? kDecorCampfire : kDecorLampPost;
             // A plinth on the ground, three fence sections, the light on top,
-            // and room for snow above that.
-            const int lampGround = surfaceHeightAt(seed, lamp.x, lamp.z);
-            reaches(lampGround, lampGround + 5);
+            // and room for snow above that. A campfire is shorter and fits
+            // inside the same envelope.
+            const int pieceGround = surfaceHeightAt(seed, piece.x, piece.z);
+            reaches(pieceGround, pieceGround + 5);
         }
     }
 
@@ -2440,7 +2597,7 @@ void buildDecor(const Writer& w, const Palette& palette, const Decor& item) {
     }
     const int fences = fenceFamilyOf(palette.wall);
     switch (item.kind) {
-    case 0: {
+    case kDecorLampPost: {
         // A lamp post: three fence sections and a light on top, which is the
         // reference's `<type>_lamp_1` in every village it has.
         w.put(item.x, ground, item.z, palette.stone);
@@ -2450,7 +2607,30 @@ void buildDecor(const Writer& w, const Palette& palette, const Decor& item) {
         w.put(item.x, ground + 4, item.z, palette.lamp);
         break;
     }
+    case kDecorCampfire: {
+        // A campfire on the bare ground, which is where the reference puts it -
+        // no plinth, unlike the lamp post beside it. Light 15, so it lights the
+        // street on its own, and it is the only source of one in the world
+        // outside a crafting table: `Recipe.cpp` can make one and nothing at
+        // all placed one until now (finding 9947).
+        //
+        // **The ground block is deliberately left as it is.** A lamp post
+        // stamps a stone plinth because a fence post standing in grass reads as
+        // dropped rather than built; a campfire standing in grass, snow or
+        // podzol reads as exactly right, and stamping stone under it would make
+        // the one piece of taiga street furniture that has no stone in it look
+        // like a fire pit somebody paved.
+        w.box(item.x, ground + 1, item.z, item.x, ground + 4, item.z, BlockId::Air);
+        w.put(item.x, ground + 1, item.z, BlockId::Campfire);
+        break;
+    }
     default:
+        // **Silent, and that is the risk this switch carries.** A `Decor::kind`
+        // the layout emits and this switch does not name builds nothing at all
+        // and warns about nothing at all - the kinds are a `std::uint8_t`, so
+        // there is no enumeration for `/W4` to check and C4062 is off anyway.
+        // The two constants live in `Village.hpp` beside `Decor::kind` for that
+        // reason: adding one there is meant to put you here.
         break;
     }
 }

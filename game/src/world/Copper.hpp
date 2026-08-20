@@ -373,9 +373,36 @@ constexpr int kWeatheredFactorPercent = 100;
 /// per million so the caller can compare it against a single integer roll and
 /// never touch a float.
 ///
-///  - `nearby` is `a`: every non-waxed copper block within `kScanReach`,
-///    including the one being ticked.
-///  - `higher` is `b`: how many of those are at a **more** oxidised stage.
+///  - `nearby` is the **raw scan count**: every non-waxed copper block within
+///    `kScanReach`, *including the one being ticked*, which is what a loop over
+///    the 129-cell octahedron naturally produces. It is therefore always at
+///    least 1.
+///  - `higher` is the reference's `b`: how many of those are at a **more**
+///    oxidised stage. The ticked block is never one of them.
+///
+/// **The reference's `a` is the neighbour count and does NOT include the block
+/// being ticked, so this subtracts one before applying the formula.** That
+/// correction is the whole of finding r2-entity/copper-a: the wiki's own worked
+/// example is "an unweathered copper block **surrounded by** 6 unweathered and
+/// 6 exposed copper blocks ... a = 12, b = 6, m = 0.75" for 21.7%, and twelve
+/// surrounding blocks plus the one in the middle is thirteen. Java's
+/// `applyChangeOverTime` says the same thing structurally - it skips
+/// `blockpos.equals(pos)` before counting - and this file's own comment used to
+/// assert the opposite as fact ("**This block counts itself**, which is why an
+/// isolated block's `c` is one half rather than one"), which is what
+/// `World.cpp`'s scan was written against.
+///
+/// The cost of getting it wrong was not subtle: an isolated copper block came
+/// out at `0.75 * (1/2)^2` = **18.75% where the reference gives 0.75 * 1^2 =
+/// 75%**, so a lone block weathered four times too slowly, and every group was
+/// short by one in the denominator on top. Nothing could catch it, because the
+/// asserts below were written from the same wrong sentence as the code.
+///
+/// **The subtraction lives here rather than in the caller's loop**, and that is
+/// deliberate: a `continue` on `dx == dy == dz == 0` over there would be a
+/// second place that has to know the convention, in a file that cannot see this
+/// one. One owner, and the parameter is documented as the raw count so there is
+/// nothing for a caller to remember.
 ///
 /// **The caller must already have checked that no nearby copper is at a lower
 /// stage** - the reference aborts outright in that case, which is what makes a
@@ -383,25 +410,55 @@ constexpr int kWeatheredFactorPercent = 100;
 /// rather than a `c` of zero.
 constexpr int oxidationChancePpm(int nearby, int higher, int stage) {
     const int factor = stage == 0 ? kUnoxidizedFactorPercent : kWeatheredFactorPercent;
+    // The reference's `a`, recovered from the raw scan count. Clamped at zero so
+    // a caller that somehow passes a count of nothing gets `c = 1` rather than a
+    // division by zero; the real caller cannot, since the block it is ticking is
+    // itself non-waxed copper sitting at taxicab zero.
+    const int a = nearby > 0 ? nearby - 1 : 0;
     // c^2 = ((b+1)/(a+1))^2, scaled by a million before the divide so that the
     // integer arithmetic keeps four significant figures rather than collapsing
     // to 0 or 1.
     const long long num = static_cast<long long>(higher + 1) * static_cast<long long>(higher + 1);
-    const long long den = static_cast<long long>(nearby + 1) * static_cast<long long>(nearby + 1);
+    const long long den = static_cast<long long>(a + 1) * static_cast<long long>(a + 1);
     return static_cast<int>(num * 1000000LL * static_cast<long long>(factor) / (den * 100LL));
 }
 
-/// A lone copper block with nothing near it: `a = 1` (itself), `b = 0`, so
-/// `c = 1/2` and `m * c^2` is 0.75/4 = 18.75%.
-static_assert(oxidationChancePpm(1, 0, 0) == 187500,
-              "an isolated unoxidized copper block is the reference's 0.75 * (1/2)^2");
-static_assert(oxidationChancePpm(1, 0, 1) == 250000,
-              "an isolated exposed copper block is the reference's 1.0 * (1/2)^2");
+/// **The reference's own worked example, and it is the assert that fixed this.**
+/// minecraft.wiki [[Oxidation]]: *"an unweathered copper block surrounded by 6
+/// unweathered copper blocks and 6 exposed copper blocks has a 21.7% chance to
+/// oxidize if it enters the pre-oxidation state. In this case, a = 12, b = 6,
+/// and m = 0.75."*
+///
+/// Thirteen is the raw scan count for that arrangement - twelve neighbours and
+/// the block in the middle - so this is the whole expression the real caller
+/// evaluates, checked against a figure published by somebody else. The three
+/// asserts that stood here before were each a restatement of *our* sentence
+/// about `a`, and all three passed while the sentence was wrong (`CLAUDE.md`
+/// bug shape #11).
+static_assert(oxidationChancePpm(13, 6, 0) == 217455,
+              "the reference publishes 21.7% for a = 12, b = 6, m = 0.75 - if this no longer "
+              "matches, either the formula or the self-count correction has moved");
+
+/// A lone copper block: the scan finds only itself, so `a = 0`, `b = 0`, `c` is
+/// **one**, and the whole of the answer is the stage multiplier. This is the
+/// case that was four times too slow.
+static_assert(oxidationChancePpm(1, 0, 0) == 750000,
+              "an isolated unoxidized copper block is the reference's 0.75 * 1^2, not 0.75/4");
+static_assert(oxidationChancePpm(1, 0, 1) == 1000000,
+              "an isolated exposed copper block has nothing holding it back at all");
 /// Surrounded by copper that is all *more* oxidised, `c` goes to 1 and the
 /// stage multiplier is the whole answer - which is the reference's "oxidation
-/// spreads from oxidised neighbours".
-static_assert(oxidationChancePpm(8, 8, 1) == 1000000,
+/// spreads from oxidised neighbours". Nine raw, so eight neighbours and self.
+static_assert(oxidationChancePpm(9, 8, 1) == 1000000,
               "copper amongst nothing but more-oxidised copper weathers at the full rate");
+/// **The negative twin: `b` may never reach `a`+1.** A raw count of nine can
+/// carry at most eight higher neighbours, so this pins the two parameters to
+/// the same population - it is what fails if somebody "fixes" the subtraction
+/// by moving it into `higher` instead, which would make a fully-surrounded
+/// block exceed certainty and start clamping silently.
+static_assert(oxidationChancePpm(9, 7, 1) < 1000000 && oxidationChancePpm(9, 7, 1) == 790123,
+              "one same-stage neighbour must still slow a block down; if this reads 1000000 the "
+              "raw count and the higher count are being measured against different populations");
 
 // ---------------------------------------------------------------------------
 // The compile-time sweep. Same shape as `mining::MiningSweep`: strided so no

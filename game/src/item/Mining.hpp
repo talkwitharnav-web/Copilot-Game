@@ -90,10 +90,61 @@ struct ToolRule {
     ToolProperties properties;
 };
 
-/// Speeds and durabilities are the reference's own, looked up rather than
-/// invented: mining speed 2 / 4 / 6 / 8 / 9 and durability 59 / 131 / 250 /
-/// 1561 / 2031 by rising tier. Wood and stone were written as 60 and 132 before
-/// the table was checked and are left alone - one use either way is noise.
+/// Mining speeds are the reference's own, looked up rather than invented:
+/// 2 / 4 / 6 / 8 / 9 by rising tier. <https://minecraft.wiki/w/Tiers>
+///
+/// **The durability column is a MIXTURE OF EDITIONS, and this paragraph used to
+/// point the wrong way about which half was which. Corrected 2026-08-19 15:49.**
+/// It read: *"durability 59 / 131 / 250 / 1561 / 2031 by rising tier. Wood and
+/// stone were written as 60 and 132 before the table was checked and are left
+/// alone - one use either way is noise."* Both halves of that are backwards.
+/// **59 / 131 are JAVA's numbers, and 60 / 132 are BEDROCK's** - so the two rows
+/// it dismissed as unchecked leftovers are the only two in the column that are
+/// right, and the three it presented as "the reference's own, looked up" are
+/// Java's.
+///
+/// | tier | in this table | Bedrock | Java |
+/// |---|---|---|---|
+/// | wood | 60 | **60** | 59 |
+/// | stone | 132 | **132** | 131 |
+/// | iron | 250 | **251** | 250 |
+/// | diamond | 1561 | **1562** | 1561 |
+/// | emberite | 2031 | **2032** | 2031 |
+///
+/// **Bedrock is +1 on every tier**, and it is a long-standing Bedrock bug that
+/// lets a tool be used one extra time rather than a designed difference - which
+/// is exactly why it reads like a rounding slip and got written off as noise.
+/// **The armour rows below have the same +1 and the same mixture**: ours are
+/// Java's 363 / 528 / 495 / 429 and 407 / 592 / 555 / 481, where Bedrock is
+/// 364 / 529 / 496 / 430 and 408 / 593 / 556 / 482.
+///
+/// > **THE NUMBERS ARE DELIBERATELY LEFT AS THEY ARE, and this is the note
+/// > rather than the edit, because the column is PINNED FROM ANOTHER FILE.**
+/// > `Inventory.hpp` asserts
+/// > `toolProperties(ItemId::DiamondPickaxe).durability == 1561` as the live
+/// > control in its armour tripwire, and that same tripwire pins the diamond
+/// > helmet at `== 363`. Moving diamond to 1562 or the helmet to 364 fails that
+/// > `static_assert` in a file this agent does not own, and under the current
+/// > no-build throttle nobody could compile to discover it. **Land all of it in
+/// > one batch or none of it** - the +1s here, the two pins in `Inventory.hpp`,
+/// > and the two `1561` references further down this file - and do not
+/// > part-apply it to "make progress".
+/// >
+/// > **Cited by SYMBOL, not by line, deliberately.** This note first read
+/// > `Inventory.hpp:557` and `lines 171 and 240 below`. Line citations into
+/// > files under concurrent edit go stale within the hour - three of the four
+/// > in this agent's files had already drifted by 15:57 on the day they were
+/// > written, one of them by 155 lines. Find the pin by searching
+/// > `DiamondPickaxe` in `Inventory.hpp`, word-bounded; it appears in the
+/// > tripwire and nowhere else.
+///
+/// > **Source tier: SECONDARY, and it cannot be raised.** These are wiki
+/// > infobox `durability` values. Durability is **not** in the behaviour-pack
+/// > JSON at all - `bedrock-samples` has no `blocks/` directory and publishes
+/// > no durability data for tools or armour - so there is no primary source of
+/// > record to cite the way the smelting rows cite `furnace_*.json`. **Do not
+/// > spend an hour looking for that JSON; it does not exist.**
+/// > <https://minecraft.wiki/w/Durability>
 ///
 /// **A sword and a hoe are the two rows this paragraph used to describe
 /// wrongly.** The reference gives a sword a flat 1.5x whatever it is made of -
@@ -164,6 +215,21 @@ constexpr std::array<ToolRule, 52> kTools{{
     // of values is the reference's own doing, not a copy-paste.
     // <https://minecraft.wiki/w/Armor>
     //
+    // > **These are JAVA's numbers, and Bedrock is +1 on every piece.
+    // > Established 2026-08-19 15:49, and left as they are deliberately.**
+    // > Ours are 363 / 528 / 495 / 429 for diamond and 407 / 592 / 555 / 481
+    // > for emberite; Bedrock is 364 / 529 / 496 / 430 and 408 / 593 / 556 /
+    // > 482. It is the same +1 the tool tiers carry - a long-standing Bedrock
+    // > bug granting one extra use, not a designed difference - and the full
+    // > picture is tabulated in the `kTools` comment above.
+    // >
+    // > **Do not correct these in isolation.** The tripwire quoted immediately
+    // > below pins the diamond helmet at `== 363` from `Inventory.hpp`, a file
+    // > outside this agent's ownership, so a piece moved here without that pin
+    // > moving in the same batch is a build failure nobody can compile to find
+    // > under the current throttle. All of it in one batch, or none of it.
+    // > <https://minecraft.wiki/w/Durability>
+    //
     // > **THIS HALF IS NOT SAFE ALONE AND MUST NOT BE BUILT ALONE.**
     // > `Inventory.hpp` carries a `static_assert` claiming
     // > `mining::toolProperties(ItemId::DiamondHelmet).durability == 0`. It is
@@ -211,6 +277,90 @@ constexpr std::array<ToolRule, 52> kTools{{
     // say one: a row is a single number for all `kBlockIdCount` blocks there are.
     {ItemId::Shears, {ToolKind::Shears, kHandTier, 1.0f, 238}},
 }};
+
+/// **The tail of this table was guarded only by coincidence until 2026-08-19
+/// 16:05, and the coincidence is worth naming because `kTools` grew 27 -> 52
+/// rows today and the armour durabilities above are still open.**
+///
+/// **What the old tail guard actually proved.** The nearest thing to a check on
+/// the last row was `publishedTicks(BlockId::Stone, ItemId::Shears) == 150`,
+/// which reads as a guard because `Shears` happens to be the last row. It is
+/// not one, and its own message says so: *"shears and a sword are worth a bare
+/// hand on rock"*. It proves that **no `toolSpeedOverride` entry wrongly reaches
+/// stone** - real coverage, worth keeping, and about overrides rather than about
+/// this table.
+///
+/// **What it did not prove, and could not.** Compare the row against what a
+/// lookup miss returns:
+///
+/// | | `Shears` row | `ToolProperties{}` |
+/// |---|---|---|
+/// | `kind` | `Shears` | `None` |
+/// | `tier` | `kHandTier` | `kHandTier` |
+/// | `speed` | `1.0f` | `1.0f` |
+/// | `durability` | `238` | **`0`** |
+///
+/// On **stone** those two are behaviourally identical: the tiers are equal, the
+/// speeds are equal, and the kinds do not matter because stone's row names a
+/// pickaxe, so neither `Shears` nor `None` matches it. **The one field that
+/// differs is `durability`, and `publishedTicks` never reads `durability`.** So
+/// the assert's value is the same whether this row is present or absent - not a
+/// weak guard on the tail but a **zero-information** one. `238` appears exactly
+/// once in this file, in the row itself: nothing pinned it.
+///
+/// **Why that matters more here than in most tables: the miss and the hole are
+/// the same value.** `toolProperties` below is a linear search ending in
+/// `return ToolProperties{}`, and a short initialiser value-initialises the
+/// trailing element to `{ItemId::None, ToolProperties{}}` - so a lost row and a
+/// zero-filled row degrade to **the identical properties**, and `durability = 0`
+/// is documented in `Tool.hpp` as *"Zero means it never wears."* **A row lost
+/// off this table makes that item indestructible**, which is exactly the bug
+/// findings 9625 and 9660 closed when the armour rows landed - a full diamond
+/// set was permanent free protection for the life of the project. `std::array`
+/// makes too *long* an initialiser a hard error and too *short* one silent.
+///
+/// **The replacement is derived rather than sited or commented**, per the rung
+/// order: it loops over the array's own contents, so a newly appended last row
+/// is automatically the row under test and there is nothing to keep in step.
+/// It is derived from **intent**, not from a size tautology - the invariant is
+/// that *a row must change something*, because a row equal to the fall-through
+/// is indistinguishable from having no row at all and does literally nothing.
+/// Both clauses were measured before being asserted, not assumed: all 52 keys
+/// are distinct and none is `ItemId::None`, and all 52 durabilities are
+/// non-zero (28 distinct values, the only named one being `kBowDurability`,
+/// which is 385).
+///
+/// > **This is stronger than a last-element test**, which would also catch a
+/// > short initialiser, because it additionally catches a **mis-typed** row -
+/// > someone writing `0` for a durability they did not know, which for an
+/// > armour piece is silently the "never wears" bug again. Every armour row
+/// > here is the default with **one** field changed, so `durability` is the
+/// > only thing making those rows exist at all.
+/// >
+/// > **If a genuinely unbreakable item is ever wanted, it cannot be spelled as
+/// > a row with `durability == 0`** - that row is indistinguishable from
+/// > absence. Give `ToolProperties` an explicit flag and change this assert
+/// > deliberately; do not delete it to make room.
+constexpr bool everyToolRuleChangesSomething() {
+    for (const ToolRule& rule : kTools) {
+        if (rule.item == ItemId::None) {
+            return false;
+        }
+        if (rule.properties.durability == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyToolRuleChangesSomething(),
+              "a kTools row is indistinguishable from having no row at all: either its key is "
+              "ItemId::None or its durability is 0, both of which are what `toolProperties` "
+              "already returns on a miss. The usual cause is a SHORT INITIALISER - the array is "
+              "declared with a fixed size and std::array silently value-initialises the trailing "
+              "elements, which is not an error the way too many rows would be. The consequence is "
+              "not cosmetic: durability 0 means `never wears`, so the affected tool or armour "
+              "piece becomes indestructible, which is findings 9625 and 9660 all over again");
 
 /// **The armour rows LANDED in the table above on 2026-08-19 11:41, and the
 /// fall-through no longer covers armour at all.** Until that edit, nothing in
@@ -970,6 +1120,27 @@ constexpr float derivedHardness(BlockId block) {
     }
     if (isChest(block) || block == BlockId::SmithingTable) {
         return 2.5f;
+    }
+    // **A nest is half a hive, and `isBeehive` answers for both.** The crafted
+    // hive is the reference's 0.6; the *found* nest is 0.3, and all 24 nest ids
+    // were paying the hive's number - 0.9 s to a bare hand against the
+    // reference's 0.45 s, and 0.45 s to a wooden axe against 0.25 s.
+    // <https://minecraft.wiki/w/Bee_Nest>, <https://minecraft.wiki/w/Beehive>
+    //
+    // **`isBeeNest` is asked first rather than `isBeehive` being narrowed** -
+    // it is `Block.hpp`'s predicate and it has fifteen other readers there.
+    // This is `CLAUDE.md` bug shape #2 read the right way round: the family
+    // predicate has **two** readers in this file, and only one of them wants
+    // the split. `derivedTool` below asks `isLogBlock(block) || isBeehive(block)`
+    // and is correct for both halves - the reference gives a nest and a hive
+    // the same axe - so it is deliberately left alone.
+    //
+    // > **The same split is owed by `blastResistance` in `Explosion.hpp`**,
+    // > which is another file's: the reference gives a nest 0.3 and a hive 0.6
+    // > there too, and that file has no `isBeeNest` branch today. Filed rather
+    // > than reached for. **Falsified by** `Explosion.hpp` gaining one.
+    if (isBeeNest(block)) {
+        return 0.3f;
     }
     if (isBeehive(block)) {
         return 0.6f;
@@ -2539,18 +2710,59 @@ static_assert(kMiningChunkCount <= kMiningChunkCapacity,
 /// because the compiler is already known to do exactly this here.
 ///
 /// It catches both failures the capacity split could have introduced:
-///   - **a null slot** - dereferencing one is ill-formed in a constant
-///     expression, so raising `kMiningChunkCapacity` without adding the
-///     matching pointer stops the build instead of going quiet until the enum
-///     grows into it;
+///   - **a null slot** - raising `kMiningChunkCapacity` without adding the
+///     matching `kMiningChunkNN` pointer leaves a value-initialised null in the
+///     array, and the walk below indexes every slot the capacity claims, so it
+///     names the null and fails rather than going quiet until the enum grows
+///     into it;
 ///   - **a mis-wired slot** - a pointer to the wrong chunk yields the wrong
 ///     base's row and the comparison fails.
 ///
-/// Non-vacuous by construction: `kMiningChunkCount` is `ceil(kBlockIdCount /
-/// 256)`, so `(chunk * 256) < kBlockIdCount` for every chunk it walks and row 0
-/// of each is a genuinely derived row, never a value-initialised hole. All four
-/// fields are compared rather than one, because `tier` alone collides freely -
-/// most blocks share a handful of tiers, so a wrong chunk would often match.
+/// Non-vacuous at both ends: `kMiningChunkCount` is `ceil(kBlockIdCount / 256)`
+/// so row 0 of every counted chunk is a genuinely derived row and never a
+/// value-initialised hole, while a spare chunk's row 0 is a hole *and is
+/// asserted to be one*, which is a claim that fails if a spare is ever silently
+/// wired to a live base. All four fields are compared rather than one, because
+/// `tier` alone collides freely - most blocks share a handful of tiers, so a
+/// wrong chunk would often match.
+///
+/// > **The null-slot bullet above was a FALSE CLAIM until 2026-08-19, and
+/// > repairing it is why this walk is bounded by the CAPACITY rather than the
+/// > count.** The bullet promised the guard and the paragraph below leans on
+/// > the promise in as many words. It did not hold. The loop ran to
+/// > `kMiningChunkCount`, which is `ceil(kBlockIdCount / 256)` and stands at 13,
+/// > so slots 13 and up were never indexed and a null in one of them was never
+/// > dereferenced. Raising the capacity to 15 with fourteen pointers passed the
+/// > `<=` assert (13 <= 15), passed this one, and went **exactly as quiet as
+/// > the comment said it would not** - until the enum grew into the hole, at
+/// > which point `makeMiningRows` dereferences null inside a constant
+/// > expression and the build dies on a cast-and-index expression naming
+/// > nothing. A comment claiming a guard that does not exist is worse than no
+/// > comment, because the next agent to raise the capacity trusts it, so the
+/// > repair is the guard rather than the wording.
+///
+/// **The two ends are checked differently on purpose.** A slot whose base is
+/// inside the enum holds a derived row and is compared against
+/// `derivedRow(base)`, as before. A spare slot past the enum - chunk 13 today -
+/// holds what `makeMiningChunk` leaves when its loop does not execute, which is
+/// a value-initialised `MiningRow`, so that is what it is compared against.
+/// **Both branches dereference the pointer**, which is what makes a null
+/// reachable; the explicit `nullptr` test in front of them exists only so the
+/// failure arrives as this assert's own message rather than as a hard "not a
+/// constant expression".
+///
+/// **The constexpr cost did not change**, which matters because this chunking
+/// exists to dodge MSVC's step budget: the extra iterations derive nothing. Only
+/// bases below `kBlockIdCount` call `derivedRow`, so the number of derivations
+/// is `kMiningChunkCount`, exactly as it was, and each spare slot costs one
+/// pointer test and four field comparisons.
+///
+/// > Walking the capacity here is **not** the forbidden "add a caller to
+/// > `kMiningChunk13`". That prohibition is about the answer path -
+/// > `makeMiningRows` must keep indexing by `id / kMiningChunkSize` so the
+/// > spare chunk stays self-activating. This is the control, it runs only at
+/// > compile time, and checking the spare slot is the entire point of having a
+/// > capacity distinct from a count.
 ///
 /// **If this ever fails to compile** (as opposed to failing the assertion):
 /// delete this function and its `static_assert`, keep the `kMiningChunkCount <=
@@ -2561,15 +2773,20 @@ static_assert(kMiningChunkCount <= kMiningChunkCapacity,
 /// this exists to prevent.
 /// **This has exactly one caller - the `static_assert` immediately below - and
 /// it must never gain a runtime one.** It is a control, not a service: calling
-/// it at run time would walk thirteen chunks to re-establish something the
+/// it at run time would walk fourteen chunks to re-establish something the
 /// compiler has already proved, and every answer it computes is available for
 /// free from `miningRow`. If a sweep reports it as having no callers, that
 /// report is wrong in the way a bare-name search is always wrong about a
 /// compile-time consumer, and this comment is the refutation.
 constexpr bool chunkPointersMapToTheirBases() {
-    for (std::size_t chunk = 0; chunk < kMiningChunkCount; ++chunk) {
+    for (std::size_t chunk = 0; chunk < kMiningChunkCapacity; ++chunk) {
+        if (kMiningChunks[chunk] == nullptr) {
+            return false;
+        }
+        const std::size_t base = chunk * kMiningChunkSize;
         const MiningRow got = (*kMiningChunks[chunk])[0];
-        const MiningRow want = derivedRow(static_cast<BlockId>(chunk * kMiningChunkSize));
+        const MiningRow want =
+            base < kBlockIdCount ? derivedRow(static_cast<BlockId>(base)) : MiningRow{};
         if (got.hardness != want.hardness || got.tool != want.tool || got.tier != want.tier ||
             got.toolRequired != want.toolRequired) {
             return false;
@@ -2579,7 +2796,7 @@ constexpr bool chunkPointersMapToTheirBases() {
 }
 
 static_assert(chunkPointersMapToTheirBases(),
-              "a kMiningChunks slot does not hold the chunk for its own base - either "
+              "a kMiningChunks slot is null or does not hold the chunk for its own base - either "
               "kMiningChunkCapacity was raised without adding the matching kMiningChunkNN "
               "pointer, or two pointers are out of order");
 
@@ -2795,13 +3012,41 @@ constexpr bool breaksInstantly(BlockId block, ItemId item, bool underwater, bool
 // ---------------------------------------------------------------------------
 
 /// Matches `kNameSweepStride` in `Block.hpp` for the same reason it is 512
-/// there: seven of them cover the enum with room to spare.
+/// there: the *stride* is what MSVC's constexpr step budget cares about, so it
+/// stays fixed however many ids arrive and only the pass count grows.
+///
+/// > **The stride parity is the only parity left, and the old wording implied
+/// > another that has gone stale.** This used to end "seven of them cover the
+/// > enum with room to spare", which read as a claim about `Block.hpp`'s *pass*
+/// > count as well. That file's is a ceiling division now, not a seven, so a
+/// > reader reconciling the two would have found the exemplar had moved on.
+/// > Corrected 2026-08-19 when this file followed it.
 constexpr int kMiningSweepStride = 512;
 
 /// How many strides the generated sweep below instantiates. **One number, not
 /// a hand-written list plus a literal that restates its length** - see
 /// `mining::MiningSweep`.
-constexpr int kMiningSweepPasses = 7;
+///
+/// **Derived rather than written by hand, 2026-08-19.** It was the last
+/// hand-written pass count in the tree bar one, and the one beside it -
+/// `kDropSweepPasses` in `BlockDrops.hpp` - moved in the same batch; a census
+/// that found only this one had missed that file. `Block.hpp`, `Copper.hpp` and
+/// `ItemEntity.cpp` all took this form first and its own note says why: a sweep
+/// whose passes come from a `make_integer_sequence` can compute them, and
+/// deriving gives up nothing. Rounding is **up**; rounding down under-covers
+/// silently, which is the exact failure the sweep exists to catch.
+///
+/// > **This knowingly retires the coverage assert below into a form-guard, and
+/// > the assert is KEPT anyway.** With a literal it was load-bearing - it
+/// > hard-failed the build the day the enum passed 3,584 ids. With a ceiling
+/// > division `ceil(N/S) * S >= N` is true for every `N >= 0`, so it can no
+/// > longer fire. That is the trade and it is the right way round: the failure
+/// > it used to catch is now impossible rather than merely detected.
+/// > `ChunkMesher.cpp` and `ItemEntity.cpp` both kept theirs through the same
+/// > conversion, and it still documents the invariant for a reader who changes
+/// > the shape back.
+constexpr int kMiningSweepPasses =
+    (static_cast<int>(kBlockIdCount) + kMiningSweepStride - 1) / kMiningSweepStride;
 
 namespace mining {
 

@@ -4,6 +4,13 @@
 // enough for the live one. Nothing else here reads it.
 #include "world/Effects.hpp"
 
+// For `kSmeltSeconds` alone, which bounds a furnace's cook timer coming off a
+// disk. It already arrives transitively through `Campfire.hpp` - which is also
+// where `kCampfireCookSeconds` comes from - and is named here anyway, because a
+// clamp that silently depends on somebody else's include is one edit away from
+// not compiling for a reason that has nothing to do with it.
+#include "item/Smelting.hpp"
+
 #include <engine/core/Log.hpp>
 
 #include <algorithm>
@@ -351,8 +358,9 @@ static_assert(sizeof(LegacyPlayerV7) ==
 static_assert(sizeof(LegacyPlayerV6) ==
                   sizeof(LegacyPlayerV7) - sizeof(SavedPlayer::absorptionSeconds) -
                       sizeof(SavedPlayer::armour),
-              "version 7 is version 6 plus the absorption clock and the worn armour and nothing "
-              "else");
+              "version 7 is version 6 plus a reserved absorption clock - a field that is always "
+              "zero, derived on load and deliberately never populated, see SavedPlayer - plus "
+              "the worn armour, and nothing else");
 static_assert(sizeof(LegacyPlayerV5) == sizeof(LegacyPlayerV6) - sizeof(SavedPlayer::effects) -
                                             sizeof(SavedPlayer::absorption),
               "version 6 is version 5 plus the effect list and the absorption pool and nothing "
@@ -493,6 +501,29 @@ static_assert(kFormatVersion == kPlayerVersionV7 + 1 &&
 /// session note 7 is this bug verbatim, and merely standing near water is
 /// enough to have written chunks to disk, so "I have not built anything yet" is
 /// not a reason to think `saves/` is empty.
+///
+/// **The same 8 also carries the lava, and this paragraph exists so that nobody
+/// bumps it to 9 for that.** `TerrainGenerator.cpp` now fills carver-emptied
+/// cells at or below `kLavaLevel` (6) with `BlockId::Lava0`, which is the same
+/// class of change as the bee nests - the file format is untouched, and what
+/// moved is what the generator emits - so it wants a regenerate and one
+/// regenerate is enough for both. A second bump would be a bump that changes
+/// nothing, which is the exact mistake the paragraphs above are written against,
+/// and it would cost the player a second world reset for no gain.
+///
+/// **Measured on the bytes rather than reasoned about, because that is what
+/// this project's session note 7 demands.** Every chunk file under `build/` on
+/// 2026-08-19 reads `VXCH` with version **1, 3 or 4** - the newest written
+/// 2026-08-11, days before either change - so there is no version 8 chunk
+/// anywhere for the lava change to have missed, and there cannot be one: the
+/// hardware throttle means no build has been produced since the bee-nest bump
+/// landed, so no executable that writes an 8 has ever run.
+///
+/// > **Falsified by** a `*.chunk` file whose bytes 4..7 read 8 and whose
+/// > modified time predates the lava landing. Read the header rather than
+/// > trusting this note - four bytes of magic, then the version - and if one
+/// > turns up, 9 is correct after all. Re-run that check rather than believing
+/// > this paragraph; it read 0 such files on 2026-08-19.
 constexpr std::uint32_t kChunkFormatVersion = 8;
 
 /// Everything `save` writes after the header, and everything `load` reads after
@@ -571,16 +602,45 @@ static_assert(sizeof(Chunk) == kChunkPayloadBytes + Chunk::kBlockCount,
 /// treat that as proof of the roll - overwrite the marker with
 /// `plainChestFor(id)` and do **not** call `rollInto`.
 ///
-/// **That is still only two thirds of a fix, measured**: `Main.cpp` writes a
-/// chest only `if (!chest.empty())`, so a chest the player emptied completely
-/// has no record either, and is indistinguishable from one never opened. It
-/// rolls again and refills - which is the ordinary way a chest gets looted, so
-/// it is the common case rather than the corner. Closing that needs the roll
-/// recorded somewhere a chunk discard cannot reach, which is a real design
-/// change to the contract `Chest.hpp` sets out and belongs to whoever owns it.
+/// **That was two thirds of a fix when it was written, and the last third
+/// landed on 2026-08-19 - so what follows is a correction, not a request.**
+/// The gap was real: `Main.cpp` wrote a chest only `if (!chest.empty())`, so a
+/// chest the player had emptied completely had no record either, was
+/// indistinguishable from one never opened, and rolled again on the next chunk
+/// discard. That is the *ordinary* way a chest gets looted, so it was the
+/// common case rather than the corner, and it was measured at a full 11 items
+/// handed back after a single bump.
 ///
-/// Filed for `Main.cpp`'s owner with both halves. Until then the developer's
-/// standing position applies: nothing in any save is precious, and worlds
+/// > **What closed it, named by symbol, because a negative claim in a header
+/// > outlives every ledger entry and this one nearly did.** `Main.cpp` keeps a
+/// > `rolledLoot` set of cells (:3545), seeds it at load from the saved records
+/// > (:3553), consults it in the roll gate as
+/// > `chests.find(at) == chests.end() && rolledLoot.count(at) == 0` (:3834),
+/// > and writes a **deliberately empty** `PlacedChest` for every rolled cell
+/// > with nothing left to carry - both for cells still in the map (:4963) and
+/// > for cells whose entry is gone entirely because the chest was broken
+/// > (:5007). The empty record *is* the roll flag, and unlike the block id it
+/// > survives a chunk discard. Proved on real bytes rather than assumed: two
+/// > records in, two out, the empty one seeding `rolledLoot` on the next
+/// > launch, with three controls firing.
+/// >
+/// > **So `saveChests` writes whatever it is handed and must keep doing so.**
+/// > Adding an `if (!chest.empty())` here - which looks like an obvious saving,
+/// > since an empty chest is nothing - silently reopens finding 1262 from the
+/// > other end, because it would strip exactly the records that carry no items
+/// > by design. `Chest.hpp` documents the same exception from its side.
+/// >
+/// > **Falsified by** `rolledLoot` disappearing from `Main.cpp`, or by
+/// > `saveChests` growing a per-record emptiness test.
+///
+/// **What is still open here is the orphan, not the duplicate.** Chest and
+/// furnace records outlive the chunk they belong to; `Main.cpp`'s
+/// `stillHasItsBlock` drops an entry whose block is gone, but only where the
+/// column is loaded, since an absent chunk reads as air and dropping on that
+/// would delete every container the player has walked away from. So a record
+/// orphaned by a bump in terrain nobody has revisited is still written out on
+/// every save. That is bloat rather than loss, and the developer's standing
+/// position covers the rest: nothing in any save is precious, and worlds
 /// regenerate freely.
 
 /// Versioned separately from chunks and the player, because they store
@@ -697,8 +757,8 @@ constexpr std::uint32_t kCreatureVersion = 6;
 constexpr std::uint32_t kDropVersion = 1;
 
 /// Sanity bound on a file the game did not write this run. Far more furnaces
-/// than anyone would place, and small enough that a corrupt length cannot ask
-/// for an enormous allocation.
+/// than anyone would place. It bounds what a header may *claim*, not what gets
+/// allocated - that is `reserveFor`, and the difference is measured there.
 constexpr std::uint32_t kMaxFurnaces = 1u << 20;
 constexpr std::uint32_t kMaxChests = 1u << 20;
 /// Its own bound for the reason `kMaxStowboxes` has its own: campfires and
@@ -710,15 +770,15 @@ constexpr std::uint32_t kMaxCampfires = 1u << 20;
 /// blocks a player places and the other by how many box *items* exist. The day
 /// either is retuned the borrowed name silently retunes the other table too.
 constexpr std::uint32_t kMaxStowboxes = 1u << 20;
-/// Far more than the population cap could ever reach, and small enough that a
-/// corrupt count cannot ask for a huge allocation.
+/// Far more than the population cap could ever reach. Like the bounds above it
+/// limits what a header may claim; `reserveFor` limits what is allocated.
 constexpr std::uint32_t kMaxCreatures = 1u << 16;
 /// A column is 32 blocks square, so this is every column inside a world some
-/// sixty-five thousand blocks across - far more than a player will ever walk -
-/// and still small enough that a corrupt count cannot ask for a huge
-/// allocation. (2048 columns to a side at 32 blocks each; the comment this
-/// replaces said forty thousand, which was the arithmetic done once and never
-/// checked.)
+/// sixty-five thousand blocks across - far more than a player will ever walk.
+/// (2048 columns to a side at 32 blocks each; the comment this replaces said
+/// forty thousand, which was the arithmetic done once and never checked - and
+/// it also claimed this bound kept the allocation small, which it does not: see
+/// `reserveFor`, where that arithmetic is finally done.)
 constexpr std::uint32_t kMaxPopulatedColumns = 1u << 22;
 /// **Its own bound, and a much tighter one than the block tables above.**
 ///
@@ -728,15 +788,67 @@ constexpr std::uint32_t kMaxPopulatedColumns = 1u << 22;
 /// player emptying a double chest makes 54) while still bounding the read.
 constexpr std::uint32_t kMaxDrops = 1u << 16;
 
+/// **How many records to reserve up front, whatever the header claims - which
+/// is a different question from how many are allowed.**
+///
+/// The bounds above are *acceptance* limits: a file claiming more than one of
+/// them is rejected whole. Three of them additionally claimed to be "small
+/// enough that a corrupt length cannot ask for an enormous allocation", and
+/// that was arithmetic nobody had done. Measured against the record sizes this
+/// file already asserts: 1<<20 chests at 336 bytes each is **352 MB**, 1<<20
+/// stowboxes at 328 is **344 MB**, 1<<20 campfires at 76 is 80 MB, 1<<20
+/// furnaces at 60 is 63 MB, and 1<<22 populated columns at 8 is 34 MB. A single
+/// flipped bit in a four-byte header therefore asked for a third of a gigabyte
+/// - on the one path whose entire purpose is surviving a file this build did
+/// not write.
+///
+/// **And if that allocation throws it does not cost the table, it costs the
+/// session**: `reserve` throws `std::bad_alloc`, no loader here catches it, and
+/// unwinding out of a load is not something this game is written to survive. A
+/// bad four bytes should degrade to "that file is ignored", which is what every
+/// other check in these loaders already achieves.
+///
+/// So the bound gates acceptance and this gates the *guess*. `reserve` is a
+/// capacity hint and nothing more, so clamping it cannot change what is read or
+/// how much: a table genuinely larger than this simply grows the way any vector
+/// does, at the cost of a few reallocations on a path that already touches the
+/// disk. 4096 is far past every population these files hold in practice and
+/// costs 1.4 MB at the widest record.
+constexpr std::uint32_t kReserveCeiling = 4096;
+
+/// The number of records a loader should reserve for a header claiming `count`.
+///
+/// A free function rather than `std::min` spelled out at seven call sites,
+/// because seven copies of a clamp is seven chances for one of them to be
+/// written against the wrong ceiling - and because the name says *why* at the
+/// point of use, where `std::min` would only say what.
+constexpr std::size_t reserveFor(std::uint32_t count) {
+    return count < kReserveCeiling ? static_cast<std::size_t>(count)
+                                   : static_cast<std::size_t>(kReserveCeiling);
+}
+
 // These records are written and read as raw bytes. If anything in `Furnace`
 // ever gains a pointer, a string or a virtual, that stops being valid and this
 // is where it will be caught rather than in a corrupt save.
+//
+// **The list is the six records the loaders `file.read` into, and it was five
+// until 2026-08-19.** `PlacedCampfire` was missing, which is the one direction
+// this can fail in silently: the *writing* side is covered wherever it goes,
+// because `AtomicSave::writeValue` carries its own trivially-copyable assert,
+// but every loader here reads with a bare
+// `file.read(reinterpret_cast<char*>(&record), sizeof(record))` and there is no
+// assert inside a `reinterpret_cast`. A record that stopped being trivially
+// copyable would therefore still fail the build - on the writer - and a reader
+// that had *no* writer would not. Counted rather than eyeballed: six record
+// types are read raw here, six are named below.
 static_assert(std::is_trivially_copyable_v<PlacedFurnace>,
               "PlacedFurnace is written as raw bytes and must stay trivially copyable");
 static_assert(std::is_trivially_copyable_v<SavedCreature>,
               "SavedCreature is written as raw bytes and must stay trivially copyable");
 static_assert(std::is_trivially_copyable_v<PlacedChest>,
               "PlacedChest is written as raw bytes and must stay trivially copyable");
+static_assert(std::is_trivially_copyable_v<PlacedCampfire>,
+              "PlacedCampfire is written as raw bytes and must stay trivially copyable");
 static_assert(std::is_trivially_copyable_v<StowedBox>,
               "StowedBox is written as raw bytes and must stay trivially copyable");
 static_assert(std::is_trivially_copyable_v<SavedItem>,
@@ -1052,6 +1164,20 @@ bool removeTable(const std::filesystem::path& path) {
     return true;
 }
 
+/// Whether a path names something that is actually there.
+///
+/// **The `error_code` overload, never the throwing one.** A loader that threw
+/// out of a `std::filesystem` call would abort the load of a world that is
+/// merely unreadable for a moment, and the whole point of asking is to be
+/// careful. An error answers "not present", which routes to the ordinary
+/// absent-file path rather than to a refusal - the direction that cannot make
+/// a bad situation worse, since the refusal path is the one that writes.
+bool filePresent(const std::filesystem::path& path) {
+    std::error_code error;
+    const bool present = std::filesystem::exists(path, error);
+    return present && !error;
+}
+
 /// Whether every float in a record is a real number.
 ///
 /// A NaN on disk is not a transient fault, it is a permanent one: it is read
@@ -1113,6 +1239,103 @@ WorldStore::WorldStore(std::filesystem::path root, std::uint32_t seed)
 std::filesystem::path WorldStore::pathFor(const ChunkCoord& coord) const {
     return m_directory / ("c" + std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_" +
                           std::to_string(coord.z) + ".chunk");
+}
+
+std::filesystem::path WorldStore::tablePath(Table table) const {
+    // Seven enumerators declared, seven names written down. **The assert is not
+    // decoration.** A `std::array` with too few initialisers is not an error -
+    // it zero-fills - so a table added to the enum and forgotten here would get
+    // a null name, and every path built from it would silently be the save
+    // directory itself. Too *many* is a hard error the compiler already
+    // catches, which is why only the short direction needs saying, and why the
+    // last row is the one worth asserting on.
+    static constexpr std::array<const char*, static_cast<std::size_t>(Table::Count)> kNames{
+        {"furnaces.dat", "chests.dat", "campfires.dat", "stowboxes.dat", "drops.dat",
+         "creatures.dat", "player.dat"}};
+    static_assert(kNames[static_cast<std::size_t>(Table::Count) - 1] != nullptr,
+                  "every Table enumerator needs a file name in kNames; a short initialiser "
+                  "zero-fills rather than failing to build, so the last row is the tell");
+    return m_directory.parent_path() / kNames[static_cast<std::size_t>(table)];
+}
+
+void WorldStore::refuseTable(Table table, const std::filesystem::path& path) const {
+    const auto slot = static_cast<std::size_t>(table);
+    if (m_refused[slot]) {
+        // Already recorded, already copied. `creatures.dat` has two loaders
+        // applying the same header test, so without this the player would be
+        // told twice about one file.
+        return;
+    }
+    m_refused[slot] = true;
+
+    // Keep the bytes. This file is about to spend a session in front of a build
+    // that cannot read it, and both of the things that happen to such a file
+    // are destructive: the autosave deletes it thirty seconds later when the
+    // live table is empty, or the first container the player places overwrites
+    // it with a table holding one entry. A copy costs a few hundred kilobytes,
+    // once, and is the only thing between the player and a world's worth of
+    // chests.
+    //
+    // **A copy rather than a rename, and the direction is the whole point.**
+    // Renaming would hide the original from the build that *can* read it - run
+    // yesterday's exe once and today's would find nothing where the world used
+    // to be - so the original stays exactly where it is and the spare takes the
+    // new name. Nothing in `game/src` enumerates this directory (checked, not
+    // assumed: zero uses of `directory_iterator` anywhere in the game), so an
+    // extra file here is inert - every reader opens a fixed name.
+    //
+    // **`skip_existing`, never `overwrite_existing`, and this is the one line
+    // here most worth arguing about.** Alternating builds can walk a world
+    // through refuse, overwrite, accept, refuse - and the second refusal would
+    // then be copying the *thinner* file over the rich snapshot the first one
+    // saved. A thing built to stop silent data loss must not be capable of it,
+    // so this can only ever create and never destroy: the first snapshot wins,
+    // and the log says plainly when an older one was kept instead.
+    std::error_code error;
+    const std::filesystem::path keep = path.string() + ".rejected";
+    const bool copied = std::filesystem::copy_file(
+        path, keep, std::filesystem::copy_options::skip_existing, error);
+    if (error) {
+        engine::logError("Could not keep a copy of the unreadable " + path.string() + " as " +
+                         keep.string() + ": " + error.message() +
+                         "; the original is still there and will not be deleted");
+        return;
+    }
+    if (!copied) {
+        engine::logWarn("Could not read " + path.string() + ", and " + keep.string() +
+                        " already exists from an earlier refusal - keeping the older copy, "
+                        "which is the richer one. The original is untouched");
+        return;
+    }
+    engine::logWarn("Kept a copy of the unreadable " + path.string() + " as " + keep.string() +
+                    "; the original is untouched and this build will not delete it");
+}
+
+void WorldStore::acceptTable(Table table) const {
+    m_refused[static_cast<std::size_t>(table)] = false;
+}
+
+bool WorldStore::removeTableUnlessRefused(Table table, const std::filesystem::path& path) const {
+    if (!m_refused[static_cast<std::size_t>(table)]) {
+        return removeTable(path);
+    }
+    // **The emptiness is this build's ignorance, not an empty world.** Deleting
+    // here is how a single launch of a binary with older version constants used
+    // to erase every container, every stowbox, every dropped item and the whole
+    // creature roster thirty seconds after startup - on the autosave timer, not
+    // at quit - while the log line read "saved 0 chests" and called it a
+    // success.
+    //
+    // Returning false rather than true is deliberate: the caller's `wrote`
+    // lambda collects the name into `unwritten`, `saveEverything` returns
+    // false, and the frame loop's `saveFailing` hands the retry to the autosave
+    // timer instead of the next frame. So the player gets one honest error line
+    // per interval naming the table, which is exactly the cadence that error
+    // machinery was built for.
+    engine::logError("Not deleting " + path.string() +
+                     ": this build refused to read that file, so an empty table means it was "
+                     "never loaded rather than emptied. Nothing was written for it");
+    return false;
 }
 
 std::optional<Chunk> WorldStore::load(const ChunkCoord& coord) const {
@@ -1230,10 +1453,22 @@ bool WorldStore::save(const ChunkCoord& coord, const Chunk& chunk) const {
 std::optional<SavedPlayer> WorldStore::loadPlayer() const {
     // Sits beside the chunks directory, not inside it, so a chunk sweep never
     // has to filter it out.
-    const std::filesystem::path path = m_directory.parent_path() / "player.dat";
+    const std::filesystem::path path = tablePath(Table::Player);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        // **The worst payload of the whole refusal family, so it is recorded
+        // even though `player.dat` is never deleted.** There is no empty case
+        // here for an autosave to mistake - `savePlayer` always writes - which
+        // is exactly the problem: `Main.cpp:2661` takes `has_value()` and
+        // otherwise keeps the freshly constructed spawn character, and the next
+        // autosave writes *that* over the real one. Inventory, position,
+        // health, food, XP, ender chest, bed, effects and armour, thirty
+        // seconds after a file this build could not open.
+        if (filePresent(path)) {
+            engine::logError("Player file exists but could not be opened: " + path.string());
+            refuseTable(Table::Player, path);
+        }
         return std::nullopt;
     }
 
@@ -1252,6 +1487,7 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
          version != kPlayerVersionV4 && version != kPlayerVersionV3 &&
          version != kPlayerVersionV2)) {
         engine::logWarn("Player file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Player, path);
         return std::nullopt;
     }
 
@@ -1560,11 +1796,32 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.respawnBed = glm::ivec3{0, -1, 0};
     }
 
+    // Read through, every rung of the ladder taken, the record handed back. Any
+    // refusal recorded against this file belonged to a previous load.
+    acceptTable(Table::Player);
     return player;
 }
 
 bool WorldStore::savePlayer(const SavedPlayer& player) const {
-    AtomicSave out(m_directory.parent_path() / "player.dat");
+    const std::filesystem::path path = tablePath(Table::Player);
+
+    // **The one write in this file that cannot be skipped and cannot be
+    // deferred**, so the refusal is announced rather than acted on. There is no
+    // empty case here to hold back: the game always has a player, and refusing
+    // to write would mean a session that can never be saved at all - worse than
+    // the loss it would be preventing, since the bytes it is protecting have
+    // already been copied aside by `refuseTable`.
+    //
+    // So the honest thing is to say what is about to happen and where the old
+    // record went. Once: the successful write clears the flag, because after it
+    // the file is one this build wrote.
+    if (m_refused[static_cast<std::size_t>(Table::Player)]) {
+        engine::logError("Overwriting the unreadable " + path.string() +
+                         " with this session's player. The old record was kept as " +
+                         path.string() + ".rejected - restore it with the build that wrote it");
+    }
+
+    AtomicSave out(path);
     if (!out.open()) {
         engine::logError("Could not open player file for writing: " + out.temporary().string());
         return false;
@@ -1590,14 +1847,28 @@ bool WorldStore::savePlayer(const SavedPlayer& player) const {
     out.writeValue(m_seed);
     out.writeValue(clean);
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Player);
+    return true;
 }
 
 std::vector<PlacedFurnace> WorldStore::loadFurnaces() const {
-    const std::filesystem::path path = m_directory.parent_path() / "furnaces.dat";
+    const std::filesystem::path path = tablePath(Table::Furnaces);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        // **Absent and unopenable are different answers and used to share a
+        // return.** No file is the ordinary case - a world that has never had a
+        // furnace - and the empty vector is the truth. A file that is *there*
+        // and will not open is a virus scanner, a cloud sync, a backup agent or
+        // a permissions change, all of which pass; answering "empty world" to
+        // that is what let the next autosave delete it.
+        if (filePresent(path)) {
+            engine::logWarn("Furnace file exists but could not be opened: " + path.string());
+            refuseTable(Table::Furnaces, path);
+        }
         return {};
     }
 
@@ -1616,17 +1887,21 @@ std::vector<PlacedFurnace> WorldStore::loadFurnaces() const {
                       kFurnaceLegacyItemVersion);
     if (!file || magic != kFurnaceMagic || seed != m_seed || !era.has_value()) {
         engine::logWarn("Furnace file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Furnaces, path);
         return {};
     }
-    // A corrupt count must not be trusted into a reserve; the file is small and
-    // bounded by how many furnaces a player could plausibly place.
+    // A corrupt count is not trusted, but note that this check is not what
+    // protects the allocation: `kMaxFurnaces` records is 63 MB. What protects
+    // it is `reserveFor` below. This bounds what the file may *claim*.
     if (count > kMaxFurnaces) {
         engine::logWarn("Furnace file claims " + std::to_string(count) + " entries, ignoring: " + path.string());
+        refuseTable(Table::Furnaces, path);
         return {};
     }
+    acceptTable(Table::Furnaces);
 
     std::vector<PlacedFurnace> furnaces;
-    furnaces.reserve(count);
+    furnaces.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         PlacedFurnace placed;
         file.read(reinterpret_cast<char*>(&placed), sizeof(placed));
@@ -1649,6 +1924,45 @@ std::vector<PlacedFurnace> WorldStore::loadFurnaces() const {
             placed.furnace.burnTotal = 0.0f;
             placed.furnace.cookElapsed = 0.0f;
         }
+        // **The range half of the same rule, which lived in `loadCampfires`
+        // alone until 2026-08-19.** That reader states it in full - "a timer out
+        // of a file is as suspect as a count out of one", a NaN or a negative or
+        // an enormous value all reset to zero - and this one only ever checked
+        // the NaN. A rule that exists, is correct, is commented, and is in only
+        // one of the two places that need it is this project's most expensive
+        // recurring shape; this was the other place.
+        //
+        // Written as the campfire writes it rather than as a third variant, so
+        // the two cannot drift: out of range means back to zero.
+        //
+        // What it costs when it fires is at most ten seconds of cooking. What it
+        // buys is that a `cookElapsed` of 1e30 cannot survive the load - such a
+        // furnace stays past its threshold after every `-= kSmeltSeconds`, so it
+        // smelts one item per *frame* for the rest of the world's life, which
+        // reads as "smelting is instant here" and never resolves itself.
+        //
+        // **`burnRemaining` is deliberately only floored, not capped against
+        // `burnTotal`.** An over-long burn out of a corrupt file is free fuel,
+        // which is not a loss, and a cap computed from a second field on the
+        // same suspect record could destroy a legitimately burning furnace's
+        // fuel to protect against something that costs the player nothing. Only
+        // the sign is unambiguous: a negative one draws a negative flame and can
+        // never light.
+        // **`kSmeltSeconds` is the right ceiling for every cooker, not just the
+        // slow one**, and that is worth saying because it looks like a bug.
+        // `Smelting.hpp` gives a smoker and a blast furnace
+        // `cookSeconds = kSmeltSeconds / cookSpeed`, so their thresholds are
+        // *below* this, and a legitimate record from one can never approach it.
+        // Using the per-cooker figure would need the block id, which a
+        // `PlacedFurnace` does not carry and which this file could not read
+        // anyway - `WorldStore` cannot see the world, by design. So the bound is
+        // deliberately the loosest of the three, which is the safe direction: it
+        // clamps nothing legitimate and still catches the value that matters.
+        if (placed.furnace.cookElapsed < 0.0f || placed.furnace.cookElapsed > kSmeltSeconds) {
+            placed.furnace.cookElapsed = 0.0f;
+        }
+        placed.furnace.burnRemaining = std::max(0.0f, placed.furnace.burnRemaining);
+        placed.furnace.burnTotal = std::max(0.0f, placed.furnace.burnTotal);
         // A block entity outside the world is attached to nothing: invisible,
         // unbreakable, and written back out on every save for the life of the
         // world. Dropping it is the only way it ever goes away.
@@ -1662,12 +1976,14 @@ std::vector<PlacedFurnace> WorldStore::loadFurnaces() const {
 }
 
 bool WorldStore::saveFurnaces(const std::vector<PlacedFurnace>& furnaces) const {
-    const std::filesystem::path path = m_directory.parent_path() / "furnaces.dat";
+    const std::filesystem::path path = tablePath(Table::Furnaces);
 
     // Nothing to keep: remove the file rather than leaving a stale one that
-    // would restore furnaces the player has already broken.
+    // would restore furnaces the player has already broken - unless the load
+    // refused it, in which case "nothing to keep" is a statement about this
+    // build rather than about the world.
     if (furnaces.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Furnaces, path);
     }
 
     AtomicSave out(path);
@@ -1689,14 +2005,27 @@ bool WorldStore::saveFurnaces(const std::vector<PlacedFurnace>& furnaces) const 
         out.writeValue(clean);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    // **The file on disk is now one this build wrote.** Whatever made the old
+    // one unreadable is gone, so a later delete of it is safe again - and
+    // without this a refusal recorded at startup would block the legitimate
+    // deletion of a table the player really has emptied, leaving a stale file
+    // to restore a furnace they broke.
+    acceptTable(Table::Furnaces);
+    return true;
 }
 
 std::vector<PlacedChest> WorldStore::loadChests() const {
-    const std::filesystem::path path = m_directory.parent_path() / "chests.dat";
+    const std::filesystem::path path = tablePath(Table::Chests);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        if (filePresent(path)) {
+            engine::logWarn("Chest file exists but could not be opened: " + path.string());
+            refuseTable(Table::Chests, path);
+        }
         return {};
     }
 
@@ -1714,15 +2043,18 @@ std::vector<PlacedChest> WorldStore::loadChests() const {
         version, kChestVersion, kChestDuplicateRunVersion, kChestLegacyItemVersion);
     if (!file || magic != kChestMagic || seed != m_seed || !era.has_value()) {
         engine::logWarn("Chest file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Chests, path);
         return {};
     }
     if (count > kMaxChests) {
         engine::logWarn("Chest file claims " + std::to_string(count) + " entries, ignoring: " + path.string());
+        refuseTable(Table::Chests, path);
         return {};
     }
+    acceptTable(Table::Chests);
 
     std::vector<PlacedChest> chests;
-    chests.reserve(count);
+    chests.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         PlacedChest placed;
         file.read(reinterpret_cast<char*>(&placed), sizeof(placed));
@@ -1744,12 +2076,13 @@ std::vector<PlacedChest> WorldStore::loadChests() const {
 }
 
 bool WorldStore::saveChests(const std::vector<PlacedChest>& chests) const {
-    const std::filesystem::path path = m_directory.parent_path() / "chests.dat";
+    const std::filesystem::path path = tablePath(Table::Chests);
 
     // An empty table deletes its file rather than leaving a stale one, which
-    // would restore chests the player has already broken.
+    // would restore chests the player has already broken - unless the load
+    // refused it, in which case the emptiness is not the player's doing.
     if (chests.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Chests, path);
     }
 
     AtomicSave out(path);
@@ -1769,14 +2102,22 @@ bool WorldStore::saveChests(const std::vector<PlacedChest>& chests) const {
         out.writeValue(clean);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Chests);
+    return true;
 }
 
 std::vector<PlacedCampfire> WorldStore::loadCampfires() const {
-    const std::filesystem::path path = m_directory.parent_path() / "campfires.dat";
+    const std::filesystem::path path = tablePath(Table::Campfires);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        if (filePresent(path)) {
+            engine::logWarn("Campfire file exists but could not be opened: " + path.string());
+            refuseTable(Table::Campfires, path);
+        }
         return {};
     }
 
@@ -1796,16 +2137,19 @@ std::vector<PlacedCampfire> WorldStore::loadCampfires() const {
     // does not exist.
     if (!file || magic != kCampfireMagic || seed != m_seed || version != kCampfireVersion) {
         engine::logWarn("Campfire file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Campfires, path);
         return {};
     }
     if (count > kMaxCampfires) {
         engine::logWarn("Campfire file claims " + std::to_string(count) +
                         " entries, ignoring: " + path.string());
+        refuseTable(Table::Campfires, path);
         return {};
     }
+    acceptTable(Table::Campfires);
 
     std::vector<PlacedCampfire> campfires;
-    campfires.reserve(count);
+    campfires.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         PlacedCampfire placed;
         file.read(reinterpret_cast<char*>(&placed), sizeof(placed));
@@ -1842,10 +2186,10 @@ std::vector<PlacedCampfire> WorldStore::loadCampfires() const {
 }
 
 bool WorldStore::saveCampfires(const std::vector<PlacedCampfire>& campfires) const {
-    const std::filesystem::path path = m_directory.parent_path() / "campfires.dat";
+    const std::filesystem::path path = tablePath(Table::Campfires);
 
     if (campfires.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Campfires, path);
     }
 
     AtomicSave out(path);
@@ -1867,14 +2211,22 @@ bool WorldStore::saveCampfires(const std::vector<PlacedCampfire>& campfires) con
         out.writeValue(clean);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Campfires);
+    return true;
 }
 
 std::vector<StowedBox> WorldStore::loadStowboxes() const {
-    const std::filesystem::path path = m_directory.parent_path() / "stowboxes.dat";
+    const std::filesystem::path path = tablePath(Table::Stowboxes);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        if (filePresent(path)) {
+            engine::logWarn("Stowbox file exists but could not be opened: " + path.string());
+            refuseTable(Table::Stowboxes, path);
+        }
         return {};
     }
 
@@ -1892,16 +2244,19 @@ std::vector<StowedBox> WorldStore::loadStowboxes() const {
                                                      kStowboxDuplicateRunVersion, kNoSuchVersion);
     if (!file || magic != kStowboxMagic || seed != m_seed || !era.has_value()) {
         engine::logWarn("Stowbox file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Stowboxes, path);
         return {};
     }
     if (count > kMaxStowboxes) {
         engine::logWarn("Stowbox file claims " + std::to_string(count) +
                         " entries, ignoring: " + path.string());
+        refuseTable(Table::Stowboxes, path);
         return {};
     }
+    acceptTable(Table::Stowboxes);
 
     std::vector<StowedBox> boxes;
-    boxes.reserve(count);
+    boxes.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         StowedBox stowed;
         file.read(reinterpret_cast<char*>(&stowed), sizeof(stowed));
@@ -1933,10 +2288,10 @@ std::vector<StowedBox> WorldStore::loadStowboxes() const {
 }
 
 bool WorldStore::saveStowboxes(const std::vector<StowedBox>& boxes) const {
-    const std::filesystem::path path = m_directory.parent_path() / "stowboxes.dat";
+    const std::filesystem::path path = tablePath(Table::Stowboxes);
 
     if (boxes.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Stowboxes, path);
     }
 
     AtomicSave out(path);
@@ -1956,14 +2311,22 @@ bool WorldStore::saveStowboxes(const std::vector<StowedBox>& boxes) const {
         out.writeValue(clean);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Stowboxes);
+    return true;
 }
 
 std::vector<SavedItem> WorldStore::loadDrops() const {
-    const std::filesystem::path path = m_directory.parent_path() / "drops.dat";
+    const std::filesystem::path path = tablePath(Table::Drops);
 
     std::ifstream file(path, std::ios::binary);
     if (!file) {
+        if (filePresent(path)) {
+            engine::logWarn("Drop file exists but could not be opened: " + path.string());
+            refuseTable(Table::Drops, path);
+        }
         return {};
     }
 
@@ -1982,16 +2345,19 @@ std::vector<SavedItem> WorldStore::loadDrops() const {
     // own.
     if (!file || magic != kDropMagic || seed != m_seed || version != kDropVersion) {
         engine::logWarn("Drop file does not match this world, ignoring: " + path.string());
+        refuseTable(Table::Drops, path);
         return {};
     }
     if (count > kMaxDrops) {
         engine::logWarn("Drop file claims " + std::to_string(count) +
                         " entries, ignoring: " + path.string());
+        refuseTable(Table::Drops, path);
         return {};
     }
+    acceptTable(Table::Drops);
 
     std::vector<SavedItem> drops;
-    drops.reserve(count);
+    drops.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         SavedItem saved;
         file.read(reinterpret_cast<char*>(&saved), sizeof(saved));
@@ -2052,13 +2418,16 @@ std::vector<SavedItem> WorldStore::loadDrops() const {
 }
 
 bool WorldStore::saveDrops(const std::vector<SavedItem>& drops) const {
-    const std::filesystem::path path = m_directory.parent_path() / "drops.dat";
+    const std::filesystem::path path = tablePath(Table::Drops);
 
     // **An empty floor removes the file rather than writing a header with zero
     // in it**, which is what every table here does - and it matters more for
     // this one than for the others, because an empty floor is the common case.
+    //
+    // Which is also why the refusal guard matters most here: the common case is
+    // indistinguishable from the failure case by looking at the list alone.
     if (drops.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Drops, path);
     }
 
     AtomicSave out(path);
@@ -2067,13 +2436,52 @@ bool WorldStore::saveDrops(const std::vector<SavedItem>& drops) const {
         return false;
     }
 
-    const auto count = static_cast<std::uint32_t>(drops.size());
+    // **The loader's ceiling, honoured on the writing side - because without
+    // this the whole floor is lost rather than the tail of it.** `loadDrops`
+    // refuses a count above `kMaxDrops` and returns *nothing at all*, so a world
+    // with 70,000 items on the ground would write a perfectly well-formed file
+    // that the next load discards whole. That is the failure `saveCreatures`
+    // already warns about for its own bound, in the same words: a reader's
+    // ceiling that is invisible from the writer is a rule living in one of the
+    // two places that need it.
+    //
+    // **Trimmed here where `saveCreatures` only warns, and the difference is
+    // the record rather than a change of mind.** A populated-column marker is
+    // one of a set that is only meaningful whole - dropping the tail there is
+    // the same silent loss one level earlier, which is what that function says.
+    // Drops are independent of each other, so keeping 65,536 of 70,000 is
+    // strictly better for the player than keeping none, and the warning is what
+    // stops it being silent.
+    //
+    // `kMaxDrops` is the only ceiling here a real world can reach: it is 65,536
+    // against 1,048,576 for the four block-entity tables, and it bounds
+    // *transient entities* rather than blocks somebody placed by hand. Nothing
+    // caps the live list - `ItemEntities` has no population limit - so a mass
+    // break, a settling collapse or a long chain of explosions is the way there.
+    //
+    // > **Falsified by** `kMaxFurnaces`, `kMaxChests`, `kMaxCampfires` or
+    // > `kMaxStowboxes` being lowered to anything a player could reach by
+    // > placing blocks, at which point those four writers need this too.
+    const std::size_t kept = std::min<std::size_t>(drops.size(), kMaxDrops);
+    if (kept < drops.size()) {
+        engine::logWarn("Saving " + std::to_string(kept) + " of " +
+                        std::to_string(drops.size()) +
+                        " dropped items, which is all the loader will accept (" +
+                        std::to_string(kMaxDrops) + "); the rest are lost on the next load: " +
+                        path.string());
+    }
+
+    const auto count = static_cast<std::uint32_t>(kept);
     out.write(kDropMagic.data(), kDropMagic.size());
     out.writeValue(kDropVersion);
     out.writeValue(m_seed);
     out.writeValue(count);
-    for (const SavedItem& saved : drops) {
-        SavedItem clean = saved;
+    // Indexed rather than ranged, because the count in the header has to be the
+    // number of records that follow it and a ranged loop over `drops` would
+    // write more of them than the header claims - which reads back as a table
+    // with rubbish appended.
+    for (std::size_t i = 0; i < kept; ++i) {
+        SavedItem clean = drops[i];
         // `ItemStack` has two bytes of compiler-owned hole between `item` and
         // `count`; blanked on the way out so two identical saves are byte
         // identical. See `blankStackPadding`.
@@ -2081,10 +2489,28 @@ bool WorldStore::saveDrops(const std::vector<SavedItem>& drops) const {
         out.writeValue(clean);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Drops);
+    return true;
 }
 
 namespace {
+
+/// What `openCreatureTable` found - because "no" used to mean two different
+/// things and the difference decides whether the file gets deleted.
+enum class TableOpen {
+    /// There is no file. A world that has never saved a creature, which is not
+    /// a fault and whose honest answer is an empty roster.
+    Absent,
+    /// There is a file and this build will not read it: wrong magic, wrong
+    /// version, wrong seed, an impossible count, or it would not open at all.
+    /// **This is the answer that must never reach a delete.**
+    Refused,
+    /// Header accepted, stream sitting on the first byte after it.
+    Ready,
+};
 
 /// Opens `creatures.dat` and validates its header, leaving the stream sitting on
 /// the first creature.
@@ -2098,11 +2524,19 @@ namespace {
 /// The count in the header is the **populated-column** count as of version 6,
 /// because that section now comes first. Both readers need it: one to read the
 /// columns, the other to step over them.
-bool openCreatureTable(const std::filesystem::path& path, std::ifstream& file,
-                       std::uint32_t expectedSeed, std::uint32_t& populatedCount) {
+TableOpen openCreatureTable(const std::filesystem::path& path, std::ifstream& file,
+                            std::uint32_t expectedSeed, std::uint32_t& populatedCount) {
     file.open(path, std::ios::binary);
     if (!file) {
-        return false;
+        // Absent is ordinary; present-and-unopenable is a refusal. Answering
+        // "no creatures" to a locked file is what let the autosave delete the
+        // roster **and every populated-column marker with it**, which is the
+        // one loss in this file that re-breeds the whole explored world.
+        if (filePresent(path)) {
+            engine::logWarn("Creature file exists but could not be opened: " + path.string());
+            return TableOpen::Refused;
+        }
+        return TableOpen::Absent;
     }
 
     std::array<char, 4> magic{};
@@ -2121,26 +2555,31 @@ bool openCreatureTable(const std::filesystem::path& path, std::ifstream& file,
     // gets no exemption.
     if (!file || magic != kCreatureMagic || version != kCreatureVersion || seed != expectedSeed) {
         engine::logWarn("Creature file does not match this world, ignoring: " + path.string());
-        return false;
+        return TableOpen::Refused;
     }
     if (populatedCount > kMaxPopulatedColumns) {
         engine::logWarn("Creature file claims " + std::to_string(populatedCount) +
                         " populated columns, ignoring: " + path.string());
-        return false;
+        return TableOpen::Refused;
     }
-    return true;
+    return TableOpen::Ready;
 }
 
 } // namespace
 
 std::vector<SavedCreature> WorldStore::loadCreatures() const {
-    const std::filesystem::path path = m_directory.parent_path() / "creatures.dat";
+    const std::filesystem::path path = tablePath(Table::Creatures);
 
     std::ifstream file;
     std::uint32_t populatedCount = 0;
-    if (!openCreatureTable(path, file, m_seed, populatedCount)) {
+    const TableOpen opened = openCreatureTable(path, file, m_seed, populatedCount);
+    if (opened == TableOpen::Refused) {
+        refuseTable(Table::Creatures, path);
+    }
+    if (opened != TableOpen::Ready) {
         return {};
     }
+    acceptTable(Table::Creatures);
 
     // Straight past the markers. Seeking rather than reading them a second
     // time: `PopulatedColumn` is fixed-width and the assert beside it says so,
@@ -2161,16 +2600,18 @@ std::vector<SavedCreature> WorldStore::loadCreatures() const {
         // Only this build's version reaches here, and it always writes the
         // count - so the file ending at this point is damage, never age.
         engine::logWarn("Creature file ends before its creatures: " + path.string());
+        refuseTable(Table::Creatures, path);
         return {};
     }
     if (count > kMaxCreatures) {
         engine::logWarn("Creature file claims " + std::to_string(count) +
                         " entries, ignoring: " + path.string());
+        refuseTable(Table::Creatures, path);
         return {};
     }
 
     std::vector<SavedCreature> creatures;
-    creatures.reserve(count);
+    creatures.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         SavedCreature saved;
         file.read(reinterpret_cast<char*>(&saved), sizeof(saved));
@@ -2192,13 +2633,28 @@ std::vector<SavedCreature> WorldStore::loadCreatures() const {
 }
 
 std::vector<PopulatedColumn> WorldStore::loadPopulatedColumns() const {
-    const std::filesystem::path path = m_directory.parent_path() / "creatures.dat";
+    const std::filesystem::path path = tablePath(Table::Creatures);
 
     std::ifstream file;
     std::uint32_t count = 0;
-    if (!openCreatureTable(path, file, m_seed, count)) {
+    const TableOpen opened = openCreatureTable(path, file, m_seed, count);
+    if (opened == TableOpen::Refused) {
+        // **The refusal that costs the most in this file.** An empty marker set
+        // is indistinguishable from a world nobody has explored, so the next
+        // save writes a roster with zero markers and every column the player
+        // has ever visited breeds a fresh herd - the exact loss the markers
+        // were added to prevent, applied to the whole world at once.
+        refuseTable(Table::Creatures, path);
+    }
+    if (opened != TableOpen::Ready) {
         return {};
     }
+    // **No `acceptTable` here, and the omission is the point.** This function
+    // validates the header and stops; `loadCreatures` reads the file through to
+    // its end, so it is the only one of the two entitled to say the file is
+    // sound. Clearing the flag here would let a header-good, tail-damaged file
+    // cancel the refusal `loadCreatures` had just recorded, and which of the
+    // two happened to run first would decide whether the file survived.
 
     // **No seek, and that absence is the whole point of version 6.** The marker
     // count is the header's own field and the markers start at the very next
@@ -2207,7 +2663,7 @@ std::vector<PopulatedColumn> WorldStore::loadPopulatedColumns() const {
     // alongside every other header field, which is the one place that owns it.
 
     std::vector<PopulatedColumn> populated;
-    populated.reserve(count);
+    populated.reserve(reserveFor(count));
     for (std::uint32_t i = 0; i < count; ++i) {
         PopulatedColumn column;
         file.read(reinterpret_cast<char*>(&column), sizeof(column));
@@ -2226,7 +2682,7 @@ std::vector<PopulatedColumn> WorldStore::loadPopulatedColumns() const {
 
 bool WorldStore::saveCreatures(const std::vector<SavedCreature>& creatures,
                                const std::vector<PopulatedColumn>& populated) const {
-    const std::filesystem::path path = m_directory.parent_path() / "creatures.dat";
+    const std::filesystem::path path = tablePath(Table::Creatures);
 
     // An empty population removes the file rather than leaving a stale one, the
     // same reasoning the furnaces use: a leftover would repopulate a world the
@@ -2238,8 +2694,14 @@ bool WorldStore::saveCreatures(const std::vector<SavedCreature>& creatures,
     // creature list and a hundred markers; deleting the file there throws the
     // markers away and every one of those columns breeds a fresh herd on the
     // next load - which is precisely what this record was added to stop.
+    //
+    // **And a third way into that same loss, which no test of the two lists can
+    // see: both are empty because the load REFUSED the file.** One launch of a
+    // binary whose `kCreatureVersion` differs empties both, and thirty seconds
+    // later the autosave deleted the roster and every marker with it. That is
+    // the same damage as the two-list bug above, arriving from the other side.
     if (creatures.empty() && populated.empty()) {
-        return removeTable(path);
+        return removeTableUnlessRefused(Table::Creatures, path);
     }
 
     AtomicSave out(path);
@@ -2300,7 +2762,11 @@ bool WorldStore::saveCreatures(const std::vector<SavedCreature>& creatures,
         out.writeValue(saved);
     }
 
-    return out.commit();
+    if (!out.commit()) {
+        return false;
+    }
+    acceptTable(Table::Creatures);
+    return true;
 }
 
 } // namespace game

@@ -18,106 +18,106 @@
   - **445** &middot; 1.7 Entity-versus-entity collision — the architectural fact
   - **453** &middot; 1.8 Item entity physics
   - **477** &middot; 1.9 Hitbox table (Bedrock first)
-  - **504** &middot; 1.10 Fall damage
-  - **528** &middot; 1.11 Water and lava
-- **566** &middot; 2. Combat
-  - **572** &middot; 2.1 Attack cooldown — Java only
-  - **581** &middot; 2.2 Attack damage — Bedrock
-  - **598** &middot; 2.3 Knockback
-  - **616** &middot; 2.4 Invulnerability — the rule that makes melee work
-  - **628** &middot; 2.5 Targeting and aggro
-  - **660** &middot; 2.6 Reach
-  - **675** &middot; 2.7 Difficulty scaling
-- **732** &middot; 3. Health, hunger and food
-  - **739** &middot; 3.1 Health and damage
-  - **758** &middot; 3.2 Hunger — three values, one visible
-  - **791** &middot; 3.3 Food
-  - **810** &middot; 3.4 Armour
-  - **852** &middot; 3.5 Absorption — the only padding in the game
-- **892** &middot; 4. Mob spawning and despawning
-  - **899** &middot; 4.1 Bedrock spawning
-  - **914** &middot; 4.2 Spawning at chunk generation — `[JE]` only, and the biggest gap for us
-  - **924** &middot; 4.3 Despawning — Bedrock
-- **943** &middot; 5. Mob drops, breeding and babies
-  - **949** &middot; 5.1 Drop rules
-  - **958** &middot; 5.2 The table for our roster
-  - **975** &middot; 5.3 Breeding and growth
-- **1008** &middot; 6. Mob behaviour — the species we have
-  - **1016** &middot; 6.1 Master table
-  - **1038** &middot; 6.2 Per-species behaviour worth implementing
-  - **1068** &middot; 6.3 Creeper — our Bramble's source
-- **1125** &middot; 7. Mob behaviour — what we could add
-  - **1132** &middot; 7.1 Archetype A — land quadrupeds *(reuses everything we have)*
-  - **1157** &middot; 7.2 Archetype B — flying
-  - **1171** &middot; 7.3 Archetype C — swimming ✅ **built, M20i (2026-08-05)**
-  - **1210** &middot; 7.4 Archetype D — bipedal
-  - **1218** &middot; 7.5 Naming
-- **1229** &middot; 8. The Bedrock AI architecture
-  - **1238** &middot; 8.1 The shape
-  - **1255** &middot; 8.2 A real vanilla ordering — the chicken
-  - **1273** &middot; 8.3 Key component parameters worth knowing
-  - **1290** &middot; 8.4 Navigation versus movement — the idea most worth stealing
-  - **1311** &middot; 8.5 Pathfinding node costs
-  - **1342** &middot; 8.6 Spawn rules — the cleanest thing in the whole design
-  - **1366** &middot; 8.7 What to take, and what to skip
-  - **1382** &middot; 8.8 The migration path — every step compiles and runs
-- **1418** &middot; 9. Blocks, fluids and plants
-  - **1425** &middot; 9.1 Fluid mechanics - BUILT; this is now a pointer
-  - **1464** &middot; 9.2 Gravity blocks
-  - **1476** &middot; 9.3 Crop growth — the exact formula
-  - **1498** &middot; 9.4 Random ticks — the clock everything runs on
-  - **1511** &middot; 9.5 Leaf decay
-  - **1520** &middot; 9.6 Grass spread
-  - **1534** &middot; 9.7 Solid vs opaque vs full block — six independent properties
-  - **1557** &middot; 9.8 Stairs and slabs
-  - **1567** &middot; 9.9 Fire
-- **1590** &middot; 10. Mining, tools, smelting, XP
-  - **1601** &middot; 10.1 The mining formula
-  - **1636** &middot; 10.2 Smelting
-  - **1651** &middot; 10.3 Ore drops
-  - **1672** &middot; 10.4 Experience
-- **1685** &middot; 11. Crafting and recipes
-  - **1691** &middot; 11.1 Matching rules
-  - **1701** &middot; 11.2 Core recipes
-- **1740** &middot; 12. Light
-- **1777** &middot; 13. Time, weather and sky
-  - **1783** &middot; 13.1 The day
-  - **1796** &middot; 13.2 The sky angle formula
-  - **1811** &middot; 13.3 Weather — two flags, two timers
-  - **1831** &middot; 13.4 Burning in sunlight
-- **1850** &middot; 14. Ticking, chunks and persistence
-  - **1858** &middot; 14.1 Per-tick order (Java, and the ordering is the point)
-  - **1883** &middot; 14.2 Scheduled versus random ticks
-  - **1896** &middot; 14.3 Block updates — depth-first, not queued
-  - **1909** &middot; 14.4 Chunk load levels
-  - **1926** &middot; 14.5 Region files
-- **1949** &middot; 15. World generation
-  - **1966** &middot; 15.1 The shape of the system
-  - **1996** &middot; 15.2 Climate parameters and how a biome is chosen
-  - **2146** &middot; 15.3 Seed, noise and sampling resolution
-  - **2204** &middot; 15.4 Terrain shaping: splines, density, and the Y geometry
-  - **2326** &middot; 15.5 Surface rules — which block goes on top
-  - **2450** &middot; 15.6 Caves and aquifers
-  - **2571** &middot; 15.7 Ores, features and the placement RNG
-  - **2721** &middot; 15.8 What else a biome carries
-  - **2784** &middot; 15.9 ▶ Where we stand
-  - **2869** &middot; 15.10 The rules that keep a generated world sane
-- **2988** &middot; 16. Priority list
-- **3020** &middot; 17 · Projectiles, the bow and the arrow
-  - **3030** &middot; 17.1 The numbers, and their units
-  - **3056** &middot; 17.2 The five things that are not obvious
-  - **3068** &middot; 17.3 Collision
-  - **3076** &middot; 17.4 The model
-  - **3088** &middot; 17.5 What we deliberately do not have
-  - **3092** &middot; 17.6 How a mob decides to shoot — `minecraft:behavior.ranged_attack`
-  - **3118** &middot; 17.7 The witch, which is far more specified than the skeleton
-  - **3148** &middot; 17.8 The drowned's trident, gated three ways
-- **3167** &middot; 18. Thrown items: the pearl and the egg
-  - **3175** &middot; 18.1 The table, and what is shared
-  - **3192** &middot; 18.2 What is genuinely undocumented
-  - **3197** &middot; 18.3 The rest
-  - **3209** &middot; 19. Villages, villagers and the iron golem
-  - **3354** &middot; Sources
+  - **533** &middot; 1.10 Fall damage
+  - **557** &middot; 1.11 Water and lava
+- **595** &middot; 2. Combat
+  - **601** &middot; 2.1 Attack cooldown — Java only
+  - **610** &middot; 2.2 Attack damage — Bedrock
+  - **627** &middot; 2.3 Knockback
+  - **645** &middot; 2.4 Invulnerability — the rule that makes melee work
+  - **657** &middot; 2.5 Targeting and aggro
+  - **689** &middot; 2.6 Reach
+  - **704** &middot; 2.7 Difficulty scaling
+- **761** &middot; 3. Health, hunger and food
+  - **768** &middot; 3.1 Health and damage
+  - **787** &middot; 3.2 Hunger — three values, one visible
+  - **820** &middot; 3.3 Food
+  - **839** &middot; 3.4 Armour
+  - **881** &middot; 3.5 Absorption — the only padding in the game
+- **921** &middot; 4. Mob spawning and despawning
+  - **928** &middot; 4.1 Bedrock spawning
+  - **943** &middot; 4.2 Spawning at chunk generation — `[JE]` only, and the biggest gap for us
+  - **953** &middot; 4.3 Despawning — Bedrock
+- **972** &middot; 5. Mob drops, breeding and babies
+  - **978** &middot; 5.1 Drop rules
+  - **987** &middot; 5.2 The table for our roster
+  - **1004** &middot; 5.3 Breeding and growth
+- **1037** &middot; 6. Mob behaviour — the species we have
+  - **1045** &middot; 6.1 Master table
+  - **1067** &middot; 6.2 Per-species behaviour worth implementing
+  - **1097** &middot; 6.3 Creeper — our Bramble's source
+- **1179** &middot; 7. Mob behaviour — what we could add
+  - **1186** &middot; 7.1 Archetype A — land quadrupeds *(reuses everything we have)*
+  - **1211** &middot; 7.2 Archetype B — flying
+  - **1225** &middot; 7.3 Archetype C — swimming ✅ **built, M20i (2026-08-05)**
+  - **1264** &middot; 7.4 Archetype D — bipedal
+  - **1272** &middot; 7.5 Naming
+- **1283** &middot; 8. The Bedrock AI architecture
+  - **1292** &middot; 8.1 The shape
+  - **1309** &middot; 8.2 A real vanilla ordering — the chicken
+  - **1327** &middot; 8.3 Key component parameters worth knowing
+  - **1344** &middot; 8.4 Navigation versus movement — the idea most worth stealing
+  - **1365** &middot; 8.5 Pathfinding node costs
+  - **1396** &middot; 8.6 Spawn rules — the cleanest thing in the whole design
+  - **1420** &middot; 8.7 What to take, and what to skip
+  - **1436** &middot; 8.8 The migration path — every step compiles and runs
+- **1472** &middot; 9. Blocks, fluids and plants
+  - **1479** &middot; 9.1 Fluid mechanics - BUILT; this is now a pointer
+  - **1518** &middot; 9.2 Gravity blocks
+  - **1530** &middot; 9.3 Crop growth — the exact formula
+  - **1552** &middot; 9.4 Random ticks — the clock everything runs on
+  - **1565** &middot; 9.5 Leaf decay
+  - **1574** &middot; 9.6 Grass spread
+  - **1588** &middot; 9.7 Solid vs opaque vs full block — six independent properties
+  - **1611** &middot; 9.8 Stairs and slabs
+  - **1621** &middot; 9.9 Fire
+- **1644** &middot; 10. Mining, tools, smelting, XP
+  - **1655** &middot; 10.1 The mining formula
+  - **1705** &middot; 10.2 Smelting
+  - **1720** &middot; 10.3 Ore drops
+  - **1741** &middot; 10.4 Experience
+- **1754** &middot; 11. Crafting and recipes
+  - **1760** &middot; 11.1 Matching rules
+  - **1770** &middot; 11.2 Core recipes
+- **1809** &middot; 12. Light
+- **1846** &middot; 13. Time, weather and sky
+  - **1852** &middot; 13.1 The day
+  - **1865** &middot; 13.2 The sky angle formula
+  - **1880** &middot; 13.3 Weather — two flags, two timers
+  - **1900** &middot; 13.4 Burning in sunlight
+- **1919** &middot; 14. Ticking, chunks and persistence
+  - **1927** &middot; 14.1 Per-tick order (Java, and the ordering is the point)
+  - **1952** &middot; 14.2 Scheduled versus random ticks
+  - **1965** &middot; 14.3 Block updates — depth-first, not queued
+  - **1978** &middot; 14.4 Chunk load levels
+  - **1995** &middot; 14.5 Region files
+- **2018** &middot; 15. World generation
+  - **2035** &middot; 15.1 The shape of the system
+  - **2065** &middot; 15.2 Climate parameters and how a biome is chosen
+  - **2215** &middot; 15.3 Seed, noise and sampling resolution
+  - **2273** &middot; 15.4 Terrain shaping: splines, density, and the Y geometry
+  - **2395** &middot; 15.5 Surface rules — which block goes on top
+  - **2519** &middot; 15.6 Caves and aquifers
+  - **2640** &middot; 15.7 Ores, features and the placement RNG
+  - **2790** &middot; 15.8 What else a biome carries
+  - **2853** &middot; 15.9 ▶ Where we stand
+  - **2938** &middot; 15.10 The rules that keep a generated world sane
+- **3057** &middot; 16. Priority list
+- **3089** &middot; 17 · Projectiles, the bow and the arrow
+  - **3099** &middot; 17.1 The numbers, and their units
+  - **3125** &middot; 17.2 The five things that are not obvious
+  - **3137** &middot; 17.3 Collision
+  - **3145** &middot; 17.4 The model
+  - **3157** &middot; 17.5 What we deliberately do not have
+  - **3161** &middot; 17.6 How a mob decides to shoot — `minecraft:behavior.ranged_attack`
+  - **3187** &middot; 17.7 The witch, which is far more specified than the skeleton
+  - **3217** &middot; 17.8 The drowned's trident, gated three ways
+- **3236** &middot; 18. Thrown items: the pearl and the egg
+  - **3244** &middot; 18.1 The table, and what is shared
+  - **3261** &middot; 18.2 What is genuinely undocumented
+  - **3266** &middot; 18.3 The rest
+  - **3278** &middot; 19. Villages, villagers and the iron golem
+  - **3423** &middot; Sources
 
 <!-- /INDEX -->
 
@@ -475,6 +475,35 @@ Two facts worth having:
 **Experience orbs** attract from **7.25 blocks**, speeding up as they approach, and are collected **one at a time at 10 orbs/second** regardless of how many are in range. Values are drawn from {1, 3, 7, 17, 37, 73, 149, 307, 617, 1237, 2477} by greedy change-making.
 
 ## 1.9 Hitbox table (Bedrock first)
+
+> ⛔ **Read this before porting any figure below into `CreatureSpecies::height`, because getting
+> it backwards cost a regression on 2026-08-19 that shipped three wrong hitboxes and was
+> documented in the code as a *fix*.**
+>
+> **The reference stores `minecraft:collision_box` PRE-DIVIDED by `minecraft:scale`. The real
+> box is the PRODUCT of the two: `actual = collision_box × scale`.**
+>
+> **Mojang writes the division out in their own JSON, which is the primary proof:**
+> `entities/squid.json` baby group carries `"scale": 0.5` beside `"height": 1, // 0.5/0.5`, and
+> `entities/rabbit.json` carries `"width": 0.81666666 // 0.49/0.6`. So a bare `collision_box`
+> **is not the hitbox** and the numbers in the table below are the *products* — the sizes the
+> wiki infoboxes publish, which is what a player actually collides with.
+>
+> **Our `CreatureSpecies::height` stores the EFFECTIVE box** — the product — because
+> **nothing in the engine ever multiplies it by `modelScale`.** Verified 2026-08-19: `height`
+> is read at ~20 sites and every collision and AI site reads `species.height * creature.scale`,
+> where `creature.scale` is the **per-instance baby scale** (`kBabyScale = 0.55f`, default 1.0),
+> **not** `modelScale`. `modelScale` is read at exactly two roots, both rendering.
+> The rest of the table agrees: squid stores `0.80` with `modelScale 0.80` where a raw value
+> would be 1.0; the slimes store 0.52 / 1.04 / 2.08; spider stores 0.90.
+>
+> ⚠️ **`modelScale` is NOT `minecraft:scale`, so never derive one from the other mechanically.**
+> Ours has ~23 non-unit rows; the reference has an *adult* `scale` on about four mobs
+> (rabbit 0.6, pufferfish 1.2, tropical fish 1.3, wither skeleton 1.2) — nearly all of the 47
+> JSON hits are **baby component groups**. **Rabbit is the disproof: ours 0.48, reference 0.6.**
+>
+> ⚠️ **The "villager proves they are independent" argument is vacuous** — villager has no adult
+> `minecraft:scale`, so 1.9 is 1.9 under either rule. It distinguishes nothing.
 
 | Entity | H × W | Baby H × W |
 |---|---|---|
@@ -1102,6 +1131,31 @@ damage = 7 · power · (impact² + impact) + 1
 
 Point-blank damage, **Bedrock**: 14.75 / 27.5 / 41.25 by difficulty. `[JE]` is much harsher: 22.5 / 43 / 64.5.
 
+> ⛔ **`kBedrockDamageScale = 27.5 / 43` is almost certainly the wrong instrument, and this is an
+> OPEN QUESTION for the playtester rather than a number to port — analysed 2026-08-19.**
+>
+> **The tell is that the ratio is not constant.** 27.5/43 = **0.640** at power 3, but
+> 68.5/85 = **0.806** at power 6. **A genuine edition-level damage scale must be
+> power-independent, and this is not.**
+>
+> **What the numbers actually are.** Java's 43 and 85 are exactly `14·power + 1` — the analytic
+> maximum at `impact = 1`, i.e. **distance 0**. Bedrock's 27.5 and 68.5 are *not* of that form,
+> and inverting the *same* published formula for them yields a consistent centre-to-target
+> distance of **≈1.62 m at power 3 and ≈1.63–1.65 m at power 6**. One raised origin, two powers,
+> the same answer. **The leading hypothesis is that Bedrock's published figures are measured from
+> the creeper's BODY, not its feet** — so our code applies its own distance term and *then*
+> multiplies by a constant that already encodes a distance, making every explosion ~36% weak at
+> every range.
+>
+> ⚠️ **The arithmetic is derived and reproducible; the MECHANISM is inference, not published.**
+> The same figures are equally consistent with the wiki's Bedrock numbers having been measured
+> empirically at a typical standing distance, or with Bedrock's exposure term differing.
+>
+> ⚠️ **Do NOT simply delete the constant.** That alone makes contact explosions ~56% *stronger*.
+> The matching change is raising the blast origin — `Creature.cpp` pushes `creature.position`,
+> the **feet**, into `CreatureExplosion` — and that is a model-shape judgement, which is why it
+> belongs to the playtester.
+
 > **▶ Where we stand.** **Built 2026-08-04.** The Bramble detonates: `world/Explosion.hpp` carries the 1352-ray block algorithm, the exposure test and the damage formula above, and `blastResistance` is kept strictly apart from mining hardness. Damage is scaled by `27.5 / 43` to land on Bedrock's point-blank figure rather than Java's.
 >
 > **Its stats were wrong in four places until they were checked against this section**, all of them defaults or guesses that looked plausible: health 10 against 20, follow range 14 against 16, and the two swell distances. **Run speed** went 2.4 → 4.25, converting the 0.25 attribute at the low end of §1.4's documented ×17-19 band, which finally makes the "can be strolled away from" note below untrue.
@@ -1599,6 +1653,21 @@ where *i* = the max ignite-odds among the candidate's neighbours, *d* = difficul
 > Re-verified 2026-08-19. **§10.4 experience is `ACTIVE` and does not exist at all.**
 
 ## 10.1 The mining formula
+
+> **Tool durability, Bedrock — and Bedrock is +1 on the top three tiers, which is a real
+> divergence and not a rounding artefact.** Wood **60**, stone **132**, iron **251**,
+> diamond **1562**, netherite **2032**. Java's are 250 / 1561 / 2031, and those three are
+> what our `kTools` carried when this was measured on 2026-08-19.
+>
+> ⚠️ **Source tier: SECONDARY (wiki infobox `durability`), and it cannot be raised.**
+> `Mojang/bedrock-samples` publishes **no `blocks/` directory and no durability data at all**,
+> so there is no primary JSON to check this against. Recorded here so nobody spends an hour
+> hunting for a file that does not exist.
+>
+> ⚠️ **Armour durability was never re-checked against Bedrock.** Diamond 363/528/495/429 and
+> netherite 407/592/555/481 in `Mining.hpp` are **Java's numbers**, carried over unexamined.
+> **And `Inventory.hpp` holds a tripwire pinned to `== 363`, so changing any armour durability
+> means moving that tripwire in the same edit** — half of that pair is a silent break.
 
 $$\text{seconds} = \frac{\text{hardness} \times (\text{canHarvest} \;?\; 1.5 : 5.0)}{\text{toolMultiplier}}$$
 

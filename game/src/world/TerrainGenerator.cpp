@@ -432,6 +432,34 @@ constexpr float surfaceAtOrAbove(int y) {
     return kSurfaceAtOrAbove[i] + (kSurfaceAtOrAbove[i + 1] - kSurfaceAtOrAbove[i]) * t;
 }
 
+// **The `y >= kWorldHeight` line above is the array bounds check, and nothing
+// said so.** The interpolation reads `[i + 1]`, so the highest `y` it may be
+// handed is `stride * (knots - 1) - 1`, which is 95 - and it is the world
+// ceiling that keeps it there, not any property of the table. Those are three
+// separately hand-written numbers in two files: `kWorldHeightChunks` (3, in the
+// header), `Chunk::kSize` (32, in a file this one does not own) and the pair
+// `kSurfaceCdfStride` (4) and `kSurfaceAtOrAbove.size()` (25). 4 * 24 == 3 * 32
+// is exact today and is held together by nothing at all.
+//
+// Raise `kWorldHeightChunks` to 4 and the guard lets `y` reach 127, `i` reaches
+// 31 and this reads sixteen floats off the end of a 25-element array. It would
+// not even fail immediately: every caller today is `oreBlockCeiling`, which
+// walks `[minY, maxY]` and the deepest band tops out at coal's 70, so the fault
+// would lie dormant until somebody raised an ore band above 95 - and then
+// surface as "expression did not evaluate to a constant" against a
+// `static_assert` lambda two hundred lines below the table that is actually
+// wrong.
+//
+// > Fails if: the world gets taller, or the CDF is re-measured at a different
+// > stride or knot count. The cure in the first case is to extend the table
+// > with the zeros it already ends in, and re-measuring is not needed - a
+// > taller ceiling does not move a surface the splines already clamp at 90.
+static_assert(kSurfaceCdfStride * static_cast<int>(kSurfaceAtOrAbove.size() - 1) == kWorldHeight,
+              "kSurfaceAtOrAbove must have a knot exactly at the world ceiling - it is the "
+              "y >= kWorldHeight guard in surfaceAtOrAbove that keeps the [i + 1] read inside "
+              "the array, so the table's span and the world's height are the same fact and one "
+              "of them has moved");
+
 /// The share of `veinHeight`'s draws that land in cell `y`.
 ///
 /// `veinHeight` is the inverse of a triangular CDF applied to a uniform draw,
@@ -893,6 +921,312 @@ void placeVein(Chunk& chunk, const ChunkCoord& coord, const OreVein& vein, int o
 }
 
 // ---------------------------------------------------------------------------
+// Amethyst geodes
+// ---------------------------------------------------------------------------
+
+/// **The missing call site that made two craftable items unreachable.**
+///
+/// `ItemId::AmethystShard` has exactly one producer in the whole game - mining
+/// an `AmethystCluster` - and until this pass existed **nothing anywhere placed
+/// one**, so the spyglass and the block of amethyst were dead recipes standing
+/// on live ids. Every other link in the chain was already built and idle:
+/// `Block.hpp` declares all seven blocks with textures, `BlockDrops.hpp` gives a
+/// cluster four shards to a pickaxe and two without, and `World.cpp`'s random
+/// tick already grows `BuddingAmethyst` -> small -> medium -> large -> cluster.
+/// That growth code's own comment - *"Budding amethyst is never consumed, so a
+/// geode keeps paying"* - was written about a geode that did not exist. This is
+/// bug shape #15, a complete feature one call site short of being reachable, and
+/// worldgen was the one place holding it.
+///
+/// Geodes are an overworld feature, so the Nether/End scope ruling does not
+/// reach them.
+constexpr std::uint32_t kGeodeSalt = 0x5a7e13u;
+
+// A geode drawing the same stream as an ore would put the two in lockstep: the
+// same columns would hold both, forever, and neither table says a word about
+// the other. `kOreVeins` is above, so this is checkable rather than hopeful.
+static_assert([] {
+    for (const OreVein& vein : kOreVeins) {
+        if (vein.salt == kGeodeSalt) {
+            return false;
+        }
+    }
+    return true;
+}(),
+              "kGeodeSalt collides with an ore vein's salt, so geodes and that ore would be rolled "
+              "from the same stream and land in the same columns.");
+
+/// **Areal density carried over from the reference exactly, and derived rather
+/// than guessed.** The reference attempts one geode per 24 chunks, and its
+/// chunk is 16x16; ours is 32x32, which is four of them. 24 / 4 = 6, so one
+/// column in six carries an attempt and the blocks-per-geode figure is
+/// identical on both sides - 6144 either way. Writing it as a division means a
+/// future `Chunk::kSize` cannot silently change how rare amethyst is, which a
+/// hand-written `6` would have done in complete silence.
+constexpr int kGeodeReferencePerChunks = 24;
+constexpr int kGeodeReferenceChunkSide = 16;
+constexpr int kGeodeOneInColumns = (kGeodeReferencePerChunks * kGeodeReferenceChunkSide *
+                                    kGeodeReferenceChunkSide) /
+                                   (Chunk::kSize * Chunk::kSize);
+static_assert(kGeodeReferencePerChunks * kGeodeReferenceChunkSide * kGeodeReferenceChunkSide %
+                      (Chunk::kSize * Chunk::kSize) ==
+                  0,
+              "The reference's geode spacing no longer divides evenly by our column area, so "
+              "kGeodeOneInColumns has silently rounded and geodes are no longer at the reference's "
+              "density. Work out the intended figure rather than letting integer division pick.");
+static_assert(kGeodeOneInColumns > 0,
+              "A rarity of zero would make range() return 0 always and put a geode under every "
+              "single column.");
+
+/// The reference's `outer_wall_distance` is 4-6; ours is 4-5, trimmed at the
+/// top for the same reason the vein sizes were shrunk about a quarter - a geode
+/// is measured against the player, but this world's rock column is a third of
+/// the reference's depth and the widest one would breach the surface far more
+/// often than it buries.
+constexpr int kGeodeOuterMin = 4;
+constexpr int kGeodeOuterMax = 5;
+
+/// `distribution_points` 3-4 and `point_offset` up to 2, both the reference's
+/// own. This is what makes a geode a lumpy several-lobed cavity rather than a
+/// billiard ball, and it is the whole of the shape.
+constexpr int kGeodePointsMin = 3;
+constexpr int kGeodePointsMax = 4;
+constexpr int kGeodePointOffset = 2;
+
+/// The reference's `use_alternate_layer0_chance` 0.083 and
+/// `use_potential_placements_chance` 0.35, as one-in-N and percent.
+constexpr int kGeodeBuddingOneIn = 12;
+constexpr int kGeodeClusterPercent = 35;
+
+/// **Derived from the shape, not chosen.** A distribution point sits up to
+/// `kGeodePointOffset` from the origin and its shell reaches `kGeodeOuterMax`
+/// beyond that, so this is exactly how far a geode can write - the same role
+/// `kVeinReach` plays for veins, and the same failure if it is ever short: the
+/// far chunk stops finding the geode and it comes out as two mismatched halves
+/// either side of a chunk border.
+constexpr int kGeodeReach = kGeodeOuterMax + kGeodePointOffset;
+
+/// The height at or above which half of all columns stand, read straight off
+/// the measured CDF rather than restated.
+constexpr int medianSurfaceHeight() {
+    int knot = 0;
+    for (std::size_t i = 0; i < kSurfaceAtOrAbove.size(); ++i) {
+        if (kSurfaceAtOrAbove[i] >= 0.5f) {
+            knot = static_cast<int>(i);
+        }
+    }
+    return knot * kSurfaceCdfStride;
+}
+
+/// **Both ends of the band are derived from constants that already own the
+/// answer, so no edit can quietly strand a geode.**
+///
+/// The floor clears the lava fill: a geode centred at `kGeodeMinY` reaches
+/// `kGeodeReach` below itself, and putting that one block above `kLavaLevel`
+/// means the shell can never open into the lava sheet. The ceiling is the
+/// median surface less the same reach, so at least half of all columns bury a
+/// geode at the very top of the band completely.
+constexpr int kGeodeMinY = kLavaLevel + kGeodeReach + 1;
+constexpr int kGeodeMaxY = medianSurfaceHeight() - kGeodeReach;
+static_assert(kGeodeMinY <= kGeodeMaxY,
+              "The geode band has inverted, so range() would be handed a non-positive count and "
+              "every geode in the world would sit at exactly kGeodeMinY.");
+static_assert(kGeodeMinY - kGeodeReach > kBedrockTop,
+              "A geode can now reach into the bedrock floor, where its shell would be cut off flat "
+              "against blocks the player cannot mine.");
+static_assert(kGeodeMinY - kGeodeReach > kLavaLevel,
+              "A geode can now open into the lava sheet at kLavaLevel, which would drain into the "
+              "hollow and destroy the crystals it exists to hold.");
+
+// The layout is built in local codes rather than block ids because "not part of
+// this geode" and "the hollow middle" are different answers and `BlockId::Air`
+// cannot say both.
+constexpr std::uint8_t kGeodeNone = 0;
+constexpr std::uint8_t kGeodeHollow = 1;
+constexpr std::uint8_t kGeodeAmethyst = 2;
+constexpr std::uint8_t kGeodeBudding = 3;
+constexpr std::uint8_t kGeodeCalcite = 4;
+constexpr std::uint8_t kGeodeBasalt = 5;
+constexpr std::uint8_t kGeodeBudSmall = 6;
+constexpr std::uint8_t kGeodeBudMedium = 7;
+constexpr std::uint8_t kGeodeBudLarge = 8;
+constexpr std::uint8_t kGeodeClusterCode = 9;
+
+constexpr BlockId geodeBlockFor(std::uint8_t code) {
+    switch (code) {
+    case kGeodeHollow:
+        return BlockId::Air;
+    case kGeodeAmethyst:
+        return BlockId::AmethystBlock;
+    case kGeodeBudding:
+        return BlockId::BuddingAmethyst;
+    case kGeodeCalcite:
+        return BlockId::Calcite;
+    case kGeodeBasalt:
+        return BlockId::SmoothBasalt;
+    case kGeodeBudSmall:
+        return BlockId::SmallAmethystBud;
+    case kGeodeBudMedium:
+        return BlockId::MediumAmethystBud;
+    case kGeodeBudLarge:
+        return BlockId::LargeAmethystBud;
+    case kGeodeClusterCode:
+        return BlockId::AmethystCluster;
+    default:
+        return BlockId::Air;
+    }
+}
+
+// The four growth stages in the order `World.cpp` advances them, so a bud
+// placed here is always somewhere on the same ladder the random tick walks.
+constexpr std::array<std::uint8_t, 4> kGeodeInnerPlacements{kGeodeBudSmall, kGeodeBudMedium,
+                                                            kGeodeBudLarge, kGeodeClusterCode};
+static_assert(geodeBlockFor(kGeodeInnerPlacements[0]) == BlockId::SmallAmethystBud &&
+                  geodeBlockFor(kGeodeInnerPlacements[1]) == BlockId::MediumAmethystBud &&
+                  geodeBlockFor(kGeodeInnerPlacements[2]) == BlockId::LargeAmethystBud &&
+                  geodeBlockFor(kGeodeInnerPlacements[3]) == BlockId::AmethystCluster,
+              "The inner placements no longer name the four stages World.cpp grows, so a bud "
+              "generated here may sit on no growth ladder at all and could never mature.");
+
+constexpr int kGeodeSpan = 2 * kGeodeReach + 1;
+
+constexpr std::size_t geodeIndex(int dx, int dy, int dz) {
+    return (static_cast<std::size_t>(dz + kGeodeReach) * kGeodeSpan +
+            static_cast<std::size_t>(dy + kGeodeReach)) *
+               kGeodeSpan +
+           static_cast<std::size_t>(dx + kGeodeReach);
+}
+
+/// One geode, hollowed and dressed.
+///
+/// **The whole shape is built into a local buffer before a single cell is
+/// written to the chunk, and that is a purity decision rather than a tidiness
+/// one.** Deciding where a crystal goes needs to know whether the cell beside it
+/// is budding amethyst, and reading that off the *chunk* would be reading a
+/// neighbour that may not be in this chunk at all - so the answer would depend
+/// on which chunk happened to be asking and the geode would come out different
+/// from either side of a border. Built here, the layout is a pure function of
+/// the rolls, every chunk computes the identical buffer, and each chunk copies
+/// out only the cells it owns.
+///
+/// This is stronger than the rule `placeVein` follows next door. That one keeps
+/// its rolls in step by rolling before every bounds test; this one has no
+/// chunk-dependent branch to get wrong in the first place.
+void placeGeode(Chunk& chunk, const ChunkCoord& coord, int originX, int originY, int originZ,
+                noise::Stream& roll) {
+    const int outer = kGeodeOuterMin + roll.range(kGeodeOuterMax - kGeodeOuterMin + 1);
+    const int points = kGeodePointsMin + roll.range(kGeodePointsMax - kGeodePointsMin + 1);
+
+    // Rolled for every slot the array can hold, not for the `points` actually
+    // used, so that adding a lobe later cannot shift the crystals of every
+    // geode already in the world.
+    std::array<int, static_cast<std::size_t>(kGeodePointsMax) * 3> lobes{};
+    for (std::size_t i = 0; i < lobes.size(); ++i) {
+        lobes[i] = roll.range(2 * kGeodePointOffset + 1) - kGeodePointOffset;
+    }
+
+    std::array<std::uint8_t, static_cast<std::size_t>(kGeodeSpan) * kGeodeSpan * kGeodeSpan>
+        layout{};
+
+    const int hollowRadius = outer - 3;
+    const int amethystRadius = outer - 2;
+    const int calciteRadius = outer - 1;
+
+    for (int dz = -kGeodeReach; dz <= kGeodeReach; ++dz) {
+        for (int dy = -kGeodeReach; dy <= kGeodeReach; ++dy) {
+            for (int dx = -kGeodeReach; dx <= kGeodeReach; ++dx) {
+                int best = kGeodeReach * kGeodeReach * 4;
+                for (int p = 0; p < points; ++p) {
+                    const int ox = dx - lobes[static_cast<std::size_t>(p) * 3 + 0];
+                    const int oy = dy - lobes[static_cast<std::size_t>(p) * 3 + 1];
+                    const int oz = dz - lobes[static_cast<std::size_t>(p) * 3 + 2];
+                    best = std::min(best, ox * ox + oy * oy + oz * oz);
+                }
+
+                std::uint8_t code = kGeodeNone;
+                if (best <= hollowRadius * hollowRadius) {
+                    code = kGeodeHollow;
+                } else if (best <= amethystRadius * amethystRadius) {
+                    // Rolled for every amethyst cell whether or not it becomes
+                    // budding, so the budding blocks of one geode do not depend
+                    // on how many cells happened to precede them.
+                    code = roll.range(kGeodeBuddingOneIn) == 0 ? kGeodeBudding : kGeodeAmethyst;
+                } else if (best <= calciteRadius * calciteRadius) {
+                    code = kGeodeCalcite;
+                } else if (best <= outer * outer) {
+                    code = kGeodeBasalt;
+                }
+                layout[geodeIndex(dx, dy, dz)] = code;
+            }
+        }
+    }
+
+    // **Crystals go only on a face of budding amethyst**, which is not
+    // decoration: `World.cpp` advances a bud only while it is attached to
+    // budding amethyst, so one placed anywhere else would be frozen at whatever
+    // stage it was born at, forever. Seeding the ladder where the tick can
+    // reach it is what makes these grow back after they are harvested.
+    for (int dz = -kGeodeReach; dz <= kGeodeReach; ++dz) {
+        for (int dy = -kGeodeReach; dy <= kGeodeReach; ++dy) {
+            for (int dx = -kGeodeReach; dx <= kGeodeReach; ++dx) {
+                if (layout[geodeIndex(dx, dy, dz)] != kGeodeHollow) {
+                    continue;
+                }
+                const bool attached =
+                    (dx > -kGeodeReach && layout[geodeIndex(dx - 1, dy, dz)] == kGeodeBudding) ||
+                    (dx < kGeodeReach && layout[geodeIndex(dx + 1, dy, dz)] == kGeodeBudding) ||
+                    (dy > -kGeodeReach && layout[geodeIndex(dx, dy - 1, dz)] == kGeodeBudding) ||
+                    (dy < kGeodeReach && layout[geodeIndex(dx, dy + 1, dz)] == kGeodeBudding) ||
+                    (dz > -kGeodeReach && layout[geodeIndex(dx, dy, dz - 1)] == kGeodeBudding) ||
+                    (dz < kGeodeReach && layout[geodeIndex(dx, dy, dz + 1)] == kGeodeBudding);
+                if (!attached) {
+                    continue;
+                }
+                if (roll.range(100) >= kGeodeClusterPercent) {
+                    continue;
+                }
+                layout[geodeIndex(dx, dy, dz)] =
+                    kGeodeInnerPlacements[static_cast<std::size_t>(
+                        roll.range(static_cast<int>(kGeodeInnerPlacements.size())))];
+            }
+        }
+    }
+
+    const int baseX = coord.x * Chunk::kSize;
+    const int baseY = coord.y * Chunk::kSize;
+    const int baseZ = coord.z * Chunk::kSize;
+
+    for (int dz = -kGeodeReach; dz <= kGeodeReach; ++dz) {
+        for (int dy = -kGeodeReach; dy <= kGeodeReach; ++dy) {
+            for (int dx = -kGeodeReach; dx <= kGeodeReach; ++dx) {
+                const std::uint8_t code = layout[geodeIndex(dx, dy, dz)];
+                if (code == kGeodeNone) {
+                    continue;
+                }
+
+                const int lx = originX + dx - baseX;
+                const int ly = originY + dy - baseY;
+                const int lz = originZ + dz - baseZ;
+                if (!Chunk::contains(lx, ly, lz)) {
+                    continue;
+                }
+
+                // Only ever replaces plain rock, exactly as a vein does, so a
+                // geode cannot eat the surface, a cave wall, an ore or a
+                // village. Where a cave already cuts through, the shell simply
+                // stops - which is the reference's behaviour too, and is how a
+                // player finds one without digging blind.
+                const BlockId here = chunk.at(lx, ly, lz);
+                if (here != BlockId::Stone && here != BlockId::Deepslate) {
+                    continue;
+                }
+                chunk.set(lx, ly, lz, geodeBlockFor(code));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plants
 // ---------------------------------------------------------------------------
 
@@ -998,11 +1332,23 @@ PlantColumn plantAt(std::uint32_t seed, int worldX, int worldZ, int surface, Bio
             // its midpoint, so mapping one across the list handed most of the
             // world whichever species happened to sit in the middle of it. A
             // hash is flat, so all of them are equally likely.
-            constexpr std::array<BlockId, 12> kFlowers{
+            //
+            // **Eleven, and it was twelve with `Cornflower` written twice.**
+            // The reference has twelve small flowers; the twelfth is the blue
+            // orchid, which is the swamp's alone and is set below rather than
+            // rolled for, so eleven is every species this list may offer. The
+            // duplicate made cornflowers *twice* as common as anything else -
+            // 2/12 against 1/12 - three lines under a comment promising that
+            // "all of them are equally likely", which is the shape where the
+            // prose is right and the table quietly is not. **Do not pad this to
+            // a round number**: the size is the count of species, and `%
+            // kFlowers.size()` below reads it off the array rather than from a
+            // literal, so removing a row cannot leave an index behind.
+            constexpr std::array<BlockId, 11> kFlowers{
                 BlockId::Dandelion,  BlockId::Poppy,          BlockId::Cornflower,
                 BlockId::OxeyeDaisy, BlockId::AzureBluet,     BlockId::Allium,
                 BlockId::RedTulip,   BlockId::OrangeTulip,    BlockId::PinkTulip,
-                BlockId::WhiteTulip, BlockId::LilyOfTheValley, BlockId::Cornflower};
+                BlockId::WhiteTulip, BlockId::LilyOfTheValley};
             const int cellX = worldX >> kFlowerRegionShift;
             const int cellZ = worldZ >> kFlowerRegionShift;
             std::size_t index = noise::hash2D(seed ^ 0x1f0e9a3u, cellX, cellZ) % kFlowers.size();
@@ -1429,6 +1775,43 @@ Chunk generateChunk(std::uint32_t seed, ChunkCoord coord) {
         return open(wx - 1, wy, wz) || open(wx + 1, wy, wz) || open(wx, wy, wz - 1) ||
                open(wx, wy, wz + 1) || open(wx, wy + 1, wz) || open(wx, wy - 1, wz);
     };
+
+    // **Geodes run before the veins, and the order is load-bearing.**
+    // `placeVein` writes only into `Stone` and `Deepslate`, and every block a
+    // geode leaves behind is neither - so running first is what stops an ore
+    // appearing embedded in a calcite shell or floating in the hollow. The
+    // reverse order would also let a vein's cell block a shell cell, cutting a
+    // hole in the geode wherever the two met.
+    //
+    // Same neighbour-search shape as the vein loop below and for the same
+    // reason: a geode centred in the next chunk still reaches into this one.
+    {
+        const int geodeSpan = (kGeodeReach + Chunk::kSize - 1) / Chunk::kSize;
+        for (int nz = -geodeSpan; nz <= geodeSpan; ++nz) {
+            for (int nx = -geodeSpan; nx <= geodeSpan; ++nx) {
+                const int columnX = coord.x + nx;
+                const int columnZ = coord.z + nz;
+
+                noise::Stream site{noise::hash2D(seed ^ kGeodeSalt, columnX, columnZ)};
+                if (site.range(kGeodeOneInColumns) != 0) {
+                    continue;
+                }
+
+                const int originX = columnX * Chunk::kSize + site.range(Chunk::kSize);
+                const int originZ = columnZ * Chunk::kSize + site.range(Chunk::kSize);
+                const int originY = kGeodeMinY + site.range(kGeodeMaxY - kGeodeMinY + 1);
+
+                // Drawn before the range test, so a geode nowhere near this
+                // chunk can be dropped without shifting the one after it.
+                noise::Stream shape{site.next()};
+                if (originY + kGeodeReach < baseY ||
+                    originY - kGeodeReach >= baseY + Chunk::kSize) {
+                    continue;
+                }
+                placeGeode(chunk, coord, originX, originY, originZ, shape);
+            }
+        }
+    }
 
     // **The vein loop is outermost, so "rarest first" is a fact about the world
     // rather than about one column.** With columns outside, a neighbouring

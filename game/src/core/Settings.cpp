@@ -275,8 +275,21 @@ Settings loadSettings(const std::filesystem::path& file) {
             if (parseUnsigned(value, limit, parsed)) {
                 target = parsed;
             } else {
+                // **Name the bound, and name the value actually kept.** "Keeping
+                // the default" does not tell a player who walked render_distance
+                // up to 40 with F7 that they are about to be given 12 - not the
+                // 32 this key tops out at, but the whole way back to the struct
+                // initialiser, because a rejected value leaves the field
+                // untouched. That reset is silent everywhere except here, so
+                // this line is the only instrument the player has.
+                //
+                // Both halves earn their place: `parseUnsigned` fails on a
+                // non-number *and* on anything above `limit`, so the range is
+                // phrased as what was expected rather than as what was wrong,
+                // and stays true for either cause.
                 engine::logWarn(std::string("settings: ") + name + " '" + forLog(value) +
-                                "' is not usable; keeping the default");
+                                "' is not usable (expected 0.." + std::to_string(limit) +
+                                "); keeping " + std::to_string(target));
             }
         };
 
@@ -288,8 +301,8 @@ Settings loadSettings(const std::filesystem::path& file) {
         read("tone_map", Settings::kToneMapperCount - 1, settings.toneMapper);
         read("shadows", Settings::kShadowQualityCount - 1, settings.shadows);
         read("clouds", Settings::kCloudQualityCount - 1, settings.clouds);
-        read("rain_distance", 48, settings.rainDistance);
-        read("start_weather", 3, settings.startWeather);
+        read("rain_distance", Settings::kMaxRainDistance, settings.rainDistance);
+        read("start_weather", Settings::kStartWeatherCount - 1, settings.startWeather);
         read("input_mode", Settings::kInputModeCount - 1, settings.inputMode);
 
         const auto readInt = [&](const char* name, int& target) {
@@ -421,8 +434,11 @@ Settings loadSettings(const std::filesystem::path& file) {
     settings.controllerLookSensitivity = std::clamp(settings.controllerLookSensitivity, 0.1f, 5.0f);
     settings.controllerCursorSensitivity = std::clamp(settings.controllerCursorSensitivity, 0.1f, 5.0f);
     // Never the whole stick: a dead zone of one would leave the pad inert with
-    // nothing on screen to say why.
-    settings.controllerDeadzone = std::clamp(settings.controllerDeadzone, 0.0f, 0.6f);
+    // nothing on screen to say why. **The bound is `Settings`' own**, because
+    // `Gamepad.cpp` clamps this a second time and used to carry a different
+    // number for it.
+    settings.controllerDeadzone =
+        std::clamp(settings.controllerDeadzone, 0.0f, Settings::kMaxControllerDeadzone);
     settings.controllerRumble = std::clamp(settings.controllerRumble, 0.0f, 1.0f);
 
     return settings;
@@ -462,8 +478,8 @@ bool saveSettings(const std::filesystem::path& file, const Settings& settings) {
         << "#\n"
         << "# drop_showcase: 1 throws one of every awkward block on the floor in\n"
         << "#   front of you at startup, so what a dropped item looks like can be\n"
-        << "#   judged without mining for it. Dropped items are never saved, so\n"
-        << "#   this leaves nothing behind.\n"
+        << "#   judged without mining for it. The world's own dropped items are\n"
+        << "#   neither loaded nor saved while it is on. Reviewing models only.\n"
         << "#\n"
         << "# creative_mode: 1 starts you with a full hotbar and placing never\n"
         << "#   runs a stack down. 0 starts you empty-handed. Blocks drop when\n"

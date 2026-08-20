@@ -235,12 +235,33 @@ static_assert(kCoverageLeadSeconds * kCoverageRampPerSecond > 0.75f &&
 /// The seeded `precipitationFor` overload also tests `== Precipitation::None`,
 /// but only to forward its dry answer, so it needs nothing.
 ///
+/// **Three more sites in `Main.cpp` that this list did not name, added
+/// 2026-08-19 after sweeping for them.** None of them changes the assert, and
+/// two are harmless, but the middle one decides a *sound*:
+///
+///   - the `falls` local tests `!= Precipitation::None`, which is generic and
+///     wants nothing;
+///   - the rain **sound** is gated on `kind == Precipitation::Snow` being
+///     false, so a fourth fall type would be given the rain recording rather
+///     than silence - which is the one of the three worth visiting;
+///   - the splash particles test `== Precipitation::Rain`, so a fourth type
+///     gets none, matching the farmland rule above.
+///
 /// **Do not trust that list to stay complete - re-run the search.** The set is
 /// "every comparison against a `Precipitation::` enumerator"; a bare-name sweep
 /// for `Precipitation` over comment-stripped source finds it in seconds, and a
 /// list written here rots while a search does not. **This paragraph was itself
 /// wrong within an hour of being written** - it claimed `strike` was wholly
 /// agnostic, and the sweep is what caught it.
+///
+/// **And the obvious sweep has a measured blind spot: a single-line regex for
+/// `(==|!=)\s*Precipitation::` misses `Weather::strike`'s own lightning test**,
+/// because clang-format puts the `!=` at the end of one line and
+/// `Precipitation::Rain` at the start of the next. Run it over the file as one
+/// string, or sweep the bare word `Precipitation` and read the hits - the
+/// stricter pattern is the one that looks more careful and quietly drops the
+/// site this list exists to protect. Measured here on 2026-08-19: the
+/// single-line form returned every site above except that one.
 enum class Precipitation : std::uint8_t {
     None,
     Rain,
@@ -339,6 +360,10 @@ public:
     /// Clear, rain, storm - what the debug key steps through. **Rain first**,
     /// because the whole point of the key is seeing weather on demand and a
     /// first press that produces clear skies is a wasted one.
+    ///
+    /// **It also outranks `restore`**, which skips its two flag assignments
+    /// while `m_forced` is non-zero - see there for why that had to be spelled
+    /// out in code rather than left to call order.
     void force(int state);
     int forced() const { return m_forced; }
 
@@ -388,6 +413,30 @@ public:
     ///
     /// The flags are taken as given. There is no invalid pair: all four
     /// combinations are states `update` can reach on its own.
+    ///
+    /// **A `start_weather` override outranks the save, and the two flags are
+    /// the only things it outranks.** `m_forced` is not weather, it is an
+    /// instruction from the settings file, and `restore` skips the two flag
+    /// assignments while one is in effect. Three files already promised this -
+    /// `Settings.hpp`'s "anything but 0 holds until V is pressed",
+    /// `WorldStore.hpp` naming `m_forced` the `settings.startWeather` override,
+    /// and `Main.cpp`'s own call site - and none of them described the code,
+    /// because "`restore` does not touch `m_forced`" was never sufficient:
+    /// `Main.cpp` forces first and restores second, so the flags were
+    /// overwritten while `m_forced` went on freezing the cycle. **The override
+    /// did not merely fail, it froze the state it had failed to change** - a
+    /// `start_weather=1` over a clear save gave clear skies that could never
+    /// change, and `start_weather=3` over a stormy one gave a storm that could
+    /// never end. The countdowns are still restored, because they are simulated
+    /// state rather than an instruction and `update` ignores them for as long
+    /// as anything is forced; that is what lets the cycle resume from the save
+    /// the moment V returns `m_forced` to 0.
+    ///
+    /// **`m_flash` is cleared with `m_strikes`, not merely alongside them.**
+    /// The list is what produces the flash and the flash is what is seen, so
+    /// clearing one without the other carried the previous world's last bolt
+    /// into the sky of the one being loaded for a frame. It heals itself on the
+    /// next `update`, which is why it survived being read.
     void restore(bool raining, bool thundering, float rainSeconds, float thunderSeconds);
 
     /// The thunder flag on its own. **This is the half of the pair `storming()`
@@ -580,6 +629,10 @@ private:
     float m_windSpeed = 1.0f;
     float m_flash = 0.0f;
     /// 0 follows the cycle, 1 forces rain, 2 forces a storm, 3 forces clear.
+    ///
+    /// **Read by `restore` as well as by `update`**, because it is an
+    /// instruction from the settings file rather than weather, and an
+    /// instruction has to survive a world being loaded under it.
     int m_forced = 0;
     std::vector<Strike> m_strikes;
 };

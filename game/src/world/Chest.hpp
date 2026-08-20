@@ -9,7 +9,7 @@
 namespace game {
 
 /// How many slots a chest holds. Three rows of nine, which is the reference's
-/// and — not by accident — exactly the shape of the player's own storage, so
+/// and - not by accident - exactly the shape of the player's own storage, so
 /// one panel layout serves both halves of the screen.
 constexpr std::size_t kChestSlots = 27;
 
@@ -43,11 +43,11 @@ static_assert(kHopperTransferSeconds * tick::kPerSecond == 8.0f,
 /// **A generated chest has no entry in this map at all until someone touches
 /// it.** Village chests are placed by the generator as `LootChest` ids, and
 /// `loot::rollInto` fills one the first time it is opened, broken or blown up -
-/// at which point the block becomes a plain chest and the entry appears. That
-/// is why `empty()` can still honestly mean "forget me" below: an unrolled
-/// chest is not an empty entry, it is *no* entry, and its contents are a pure
-/// function of the world seed and its own position until the moment they are
-/// not.
+/// at which point the block becomes a plain chest and the entry appears.
+/// That is why emptiness can still honestly mean "forget me" for an ordinary
+/// chest: an unrolled chest is not an empty entry, it is *no* entry, and its
+/// contents are a pure function of the world seed and its own position until
+/// the moment they are not.
 ///
 /// It is also what closes a duplication exploit that would otherwise be
 /// unavoidable. Loot living only in this map would be dropped by `saveChests`
@@ -70,7 +70,22 @@ static_assert(kHopperTransferSeconds * tick::kPerSecond == 8.0f,
 struct Chest {
     std::array<ItemStack, kChestSlots> slots{};
 
-    /// Nothing in it, so it can be forgotten rather than written to disk.
+    /// Nothing in it.
+    ///
+    /// **This is a question, not permission to drop the entry - and it is the
+    /// exact sentence the exception above contradicts, so read that first.**
+    /// It used to end "so it can be forgotten rather than written to disk",
+    /// which is true of an ordinary chest and false of a rolled loot cell: that
+    /// one is saved *as an empty record on purpose*, because the record is the
+    /// only copy of "already paid for" that survives a `kChunkFormatVersion`
+    /// bump. `Main.cpp` measured the cost of the old reading at 11 items handed
+    /// back per bump, and filed it against this comment rather than editing a
+    /// file it does not own, on 2026-08-19. This is that edit.
+    ///
+    /// So: this answers whether there is anything in here, and **the caller
+    /// decides what that is worth.** `Main.cpp`'s save path asks it and then
+    /// asks `rolledLoot` as a second, separate question; `WorldStore`'s
+    /// `saveChests` deliberately does not ask it at all.
     bool empty() const {
         for (const ItemStack& slot : slots) {
             if (!slot.empty()) {

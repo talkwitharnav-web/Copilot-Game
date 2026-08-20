@@ -178,87 +178,20 @@ struct Tree {
     bool beeNest = false;
 };
 
-/// Chance that a tree in this biome carries a bee nest, as a fraction of 1.
+/// The bee-nest rate is a **column on `Biome`**, not a table here.
 ///
-/// **Read off the reference's own table, not reproduced from memory.**
-/// minecraft.wiki [[Bee Nest]] carries a per-biome table with separate Java and
-/// Bedrock columns; it is stripped by every markdown conversion of the page, so
-/// it was pulled as **raw wikitext** through the wiki's own API
-/// (`action=parse&prop=wikitext`) on 2026-08-19. The **Bedrock** column reads:
-/// meadow 100%; plains, sunflower plains and cherry grove 5%; mangrove swamp
-/// 1%; flower forest 3% (Java 2%); and forest, birch forest, old growth birch
-/// forest, wooded hills, birch forest hills and tall birch hills 0.035% (Java
-/// 0.2%). The footnote on the column says it is "the chance for each
-/// naturally-generated oak, birch, mangrove tree, or cherry tree to have a bee
-/// nest", which is where the oak-family gate in `treeInCell` comes from.
+/// It was two `constexpr` switches over `BiomeId` in this file until
+/// 2026-08-19, and findings 9620 and 9685 both asked for the move: a per-biome
+/// number living in a generator's translation unit cannot be reached by
+/// `Biome.cpp`'s `constexpr` validators, cannot be covered by
+/// `everyRowIsFilledIn`, and `C4062` is off at `/W4`, so a biome nobody wrote a
+/// case label for answers 0 through a `default:` with nothing saying so.
 ///
-/// **Corroborated a second time on the same page and independently of the
-/// table**, by the Bedrock history section: beta 1.16.0.57 gives flower forest
-/// 3%, plains and sunflower plains 5%, and "forest, wooded hills, birch forest,
-/// tall birch forest, birch forest hills, and tall birch hills" 0.035%. Two
-/// readings, one of them a changelog, agreeing on the three numbers that
-/// matter here. Meadow's 100% is table-only - it spans both editions in one
-/// cell - and is the one row to re-check first if the table is ever re-read.
-///
-/// **`Mojang/bedrock-samples` cannot settle it and it was asked**: worldgen
-/// chances are engine-side, and its `behavior_pack/` has no `blocks/` directory
-/// at all - the same wall `Farming.hpp`'s dripstone hits. Searching that repo
-/// for `bee_nest` returns textures, `blocks.json` and `entities/bee.json`, and
-/// nothing about generation.
-///
-/// Our biome list has no flower forest, cherry grove, sunflower plains or
-/// mangrove swamp, and birch is a *variant roll inside oak* rather than a biome,
-/// so the three rows below are every row we can express. `DenseForest` reads the
-/// forest rate, and that is safe from either direction: every Bedrock biome in
-/// the 0.035% row is a forest of some kind, so whichever of them it stands for,
-/// the number is the same.
-///
-/// **This table's proper home is a column on `Biome`**, beside `treeDensity`,
-/// and `Biome.cpp` says so in the note above `maxTreeDensity`. It is here
-/// because `Biome.*` belongs to another owner; move it rather than copying it,
-/// or this becomes the two-places-one-rule shape `CLAUDE.md` calls #14.
-constexpr float beeNestChance(BiomeId biome) {
-    switch (biome) {
-    case BiomeId::Meadow:
-        return 1.0f;
-    case BiomeId::Plains:
-        return 0.05f;
-    case BiomeId::Forest:
-    case BiomeId::DenseForest:
-        return 0.00035f;
-    default:
-        return 0.0f;
-    }
-}
-
-/// **CONTROL for the row above, and it is the mistake this table invites.**
-/// Java's column sits beside Bedrock's on the same wiki page, one cell to the
-/// left, and its forest rate is 0.2% - nearly six times ours. Reading the wrong
-/// column produces a table that looks exactly as deliberate as the right one
-/// and puts roughly six times as many nests in every forest in the world.
-constexpr float beeNestChanceJava(BiomeId biome) {
-    switch (biome) {
-    case BiomeId::Meadow:
-        return 1.0f;
-    case BiomeId::Plains:
-        return 0.05f;
-    case BiomeId::Forest:
-    case BiomeId::DenseForest:
-        return 0.002f;
-    default:
-        return 0.0f;
-    }
-}
-
-static_assert(beeNestChance(BiomeId::Forest) != beeNestChanceJava(BiomeId::Forest) &&
-                  beeNestChance(BiomeId::Meadow) == beeNestChanceJava(BiomeId::Meadow),
-              "the forest rate must be Bedrock's 0.035%, not Java's 0.2% - and the two editions "
-              "genuinely agree on meadow, so a control that differed everywhere would be "
-              "proving nothing about which column was read");
-static_assert(beeNestChance(BiomeId::Desert) == 0.0f && beeNestChance(BiomeId::Jungle) == 0.0f &&
-                  beeNestChance(BiomeId::Swamp) == 0.0f && beeNestChance(BiomeId::Taiga) == 0.0f,
-              "a biome the reference gives no nest chance must get none here - the `default` is "
-              "the whole of that rule and this is what stops a case label being added to it");
+/// `Biome.cpp` now carries the wikitext source note, the Java control that pins
+/// which of the wiki's two adjacent columns was read, and three asserts that
+/// read the rows themselves rather than a restatement of them. Read it as
+/// `biomeInfo(id).beeNestChance`, or straight off the `Biome&` a caller already
+/// holds.
 
 bool treeInCell(std::uint32_t seed, int cellX, int cellZ, Tree& out) {
     const float presence = noise::hashUnit2D(seed ^ 0x7ee50001u, cellX, cellZ);
@@ -400,18 +333,28 @@ bool treeInCell(std::uint32_t seed, int cellX, int cellZ, Tree& out) {
     // advance the shared sequence and change the variant, height and shape of
     // every tree in every existing world - so the salt is a fresh one and this
     // runs after the last rejection, where it cannot be reached by a cell that
-    // grows nothing. With `beeNestChance` returning 0 for every biome but three,
-    // a world's trees are byte-for-byte what they were before this field
-    // existed everywhere else, and the three that change were nestless anyway.
+    // grows nothing. With the column reading 0 for every biome but four, a
+    // world's trees are byte-for-byte what they were before this field existed
+    // everywhere else, and the four that change were nestless anyway.
+    //
+    // **Four, not three - finding 9702.** This comment said "three" three
+    // times, because the switch it was written against had three `return`
+    // statements while `Forest` and `DenseForest` shared the 0.035% label. The
+    // third use was the one that mattered: it was the argument for not writing
+    // a species check, so a miscount here was one row away from putting a nest
+    // on a tree the reference never gives one. Checked rather than re-counted -
+    // the four rows are named in the assert under `rowBeeNestChance` in
+    // `Biome.cpp`, which fails if one is added or lost.
     //
     // **Oak family only.** The reference puts nests on oak, birch, cherry and
     // mangrove; of those we have oak, and birch is a *shapeSeed* roll inside it
     // rather than a variant of its own. The biome gate already implies this
-    // today, because all three nest-bearing biomes carry `TreeShape` default -
-    // the variant test is here so that giving `Forest` a tall shape later moves
-    // a nest off a spruce instead of silently putting one on it.
+    // today, because **all four** nest-bearing biomes carry `TreeShape::Round`
+    // - read off `kBiomes` on 2026-08-19, not assumed - the variant test is
+    // here so that giving `Forest` a tall shape later moves a nest off a spruce
+    // instead of silently putting one on it.
     if (out.variant == TreeVariant::Oak || out.variant == TreeVariant::Branching) {
-        const float chance = beeNestChance(sample.dominant);
+        const float chance = biome.beeNestChance;
         out.beeNest = chance > 0.0f && noise::hashUnit2D(seed ^ 0x7ee50003u, cellX, cellZ) < chance;
     }
     return true;

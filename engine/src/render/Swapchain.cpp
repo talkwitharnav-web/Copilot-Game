@@ -139,17 +139,40 @@ void Swapchain::create(VkExtent2D desiredExtent) {
     }
 
     // **`COLOR_ATTACHMENT` is the only usage the spec guarantees a surface
-    // supports, and it is the only one used.** This asked for `TRANSFER_DST`
-    // as well, left over from the milestone that filled the image with
-    // `vkCmdClearColorImage` - there is no such call anywhere now, and the one
-    // `vkCmdCopyImage` copies the scene into its own copy, never the swapchain.
-    // Demanding it could refuse to start the game on a surface where nothing is
-    // actually wrong, with an error naming the swapchain rather than this
-    // stale constant. The same value is handed to `imageUsage` below, so a
-    // usage the game does not need is no longer requested either.
+    // supports, and it is the only one this refuses to start without.** This
+    // asked for `TRANSFER_DST` as well, left over from the milestone that
+    // filled the image with `vkCmdClearColorImage` - there is no such call
+    // anywhere now, and the one `vkCmdCopyImage` copies the scene into its own
+    // copy, never the swapchain. Demanding a usage the game does not need could
+    // refuse to start on a surface where nothing is actually wrong, with an
+    // error naming the swapchain rather than a stale constant.
     constexpr VkImageUsageFlags requiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if ((capabilities.supportedUsageFlags & requiredUsage) != requiredUsage) {
         throw std::runtime_error("Swapchain does not support the required image usage flags");
+    }
+
+    // **`TRANSFER_SRC` is *asked* for, and going without it is not a failure.**
+    //
+    // Copying a finished frame back to the CPU - which is what taking a photo
+    // in-game is - runs `vkCmdCopyImageToBuffer` with a swapchain image as its
+    // source, and Vulkan requires that image to have been **created** with
+    // `TRANSFER_SRC`. A usage bit cannot be added to an image later, so the
+    // decision is made here or not at all: with `COLOR_ATTACHMENT` alone the
+    // copy is undefined behaviour, which the validation layers report and a
+    // driver is free to turn into garbage pixels or a crash.
+    //
+    // It is requested rather than required because the spec promises only
+    // `COLOR_ATTACHMENT`. Every desktop driver offers this one, but a surface
+    // that does not must still run the game - with the photo key doing nothing
+    // and saying so - rather than refusing to start over a convenience.
+    m_supportsTransferSrc = (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+
+    VkImageUsageFlags imageUsage = requiredUsage;
+    if (m_supportsTransferSrc) {
+        imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    } else if (!m_transferSrcWarningIssued) {
+        logWarn("Surface cannot be copied from (no TRANSFER_SRC usage); in-game photos are unavailable");
+        m_transferSrcWarningIssued = true;
     }
 
     VkSwapchainCreateInfoKHR createInfo{};
@@ -160,7 +183,7 @@ void Swapchain::create(VkExtent2D desiredExtent) {
     createInfo.imageColorSpace = surfaceFormat.colorSpace;
     createInfo.imageExtent = m_extent;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = requiredUsage;
+    createInfo.imageUsage = imageUsage;
     createInfo.preTransform = capabilities.currentTransform;
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     createInfo.presentMode = presentMode;
