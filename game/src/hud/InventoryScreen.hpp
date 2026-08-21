@@ -407,6 +407,58 @@ struct CatalogueState {
     /// catalogue because there it is a *source*, and a survival player who has
     /// made nothing yet wants an empty one.
     bool restrictToKnown = false;
+
+    /// Every result unlocked because **one** of its ingredients has ever been
+    /// held, which is a strictly wider rule than `known` above.
+    ///
+    /// `known` asks "could you make this, at least once, with what you were
+    /// carrying at the time" - so a player who mined a log and immediately put
+    /// it in a chest was never shown planks at all, and the book stayed empty
+    /// through most of a first evening. The user's rule is the other one:
+    /// *"the recipe for the item will show up if at least one item needed for
+    /// crafting has been obtained... say I picked up a log then dropped it -
+    /// the array should remember I had a log, and recipes that include a log
+    /// must still show, obviously with a red backdrop"*. That red backdrop is
+    /// the `CellState::Uncraftable` tile the catalogue already draws, so the
+    /// only thing this set changes is which rows exist at all.
+    ///
+    /// **Recomputed by the owner rather than accumulated here**, unlike
+    /// `known`, which is a set that is inserted into. `recipesUnlockedBySeen`
+    /// answers for the whole table at once and its answer depends on the grid
+    /// the open screen has - a 3x3 recipe is not listed to a player standing at
+    /// their own 2x2 - so it cannot be a running total, and `Main.cpp` keys the
+    /// recompute on `(seen ledger revision, grid size)`. The ledger it is
+    /// derived from is append-only, so this only ever grows for a fixed grid.
+    std::unordered_set<ItemId> unlockedBySeen;
+
+    /// The catalogue row last clicked in survival, ghosted into the crafting
+    /// grid until something reconciles it away.
+    ///
+    /// **A preview and nothing more: no item moves.** Clicking a row in
+    /// creative conjures the item, because there the catalogue is a source;
+    /// in survival it is a recipe book, so the click answers "how is this
+    /// made" by drawing the pattern over the empty grid. Nothing is taken from
+    /// the inventory and nothing is written into `craftSlots`, which is what
+    /// keeps this free of the "empty the grid first" problem - the player's own
+    /// items are never displaced by a picture.
+    ///
+    /// **`std::optional` rather than `ItemId::None` as a sentinel**, because
+    /// "no recipe is being previewed" and "a recipe for the empty item" are
+    /// different statements and only one of them is representable this way.
+    ///
+    /// **Only ever set to a row this screen can actually lay out.** The book
+    /// lists more than it can show: `known` is built at the full 3x3, so the
+    /// inventory's own 2x2 card lists recipes that need a table. `Main.cpp`
+    /// resolves the click through `previewFor` before assigning here and drops
+    /// the ones that come back empty, because storing one of those would draw
+    /// nothing *and* discard whatever ghost was already up - a click that
+    /// silently erases the screen reads as the feature being broken.
+    ///
+    /// A stale ghost from another tab is the obvious bug here, so every place
+    /// that already reconciles the card - a tab click, a tab cycled on the
+    /// stick, an edit to the search query and the screen closing - clears this
+    /// too.
+    std::optional<ItemId> preview;
 };
 
 /// How many armour cells the open screen shows.

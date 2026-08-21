@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -2302,6 +2303,383 @@ std::unordered_set<ItemId> craftableItems(const Inventory& inventory, int gridSi
         }
     }
     return makeable;
+}
+
+std::unordered_set<ItemId> recipesUnlockedBySeen(const SeenItems& seen, int gridSize) {
+    std::unordered_set<ItemId> unlocked;
+    for (const Recipe& recipe : recipes()) {
+        // The same grid filter `craftableItems` applies, and taken off the
+        // recipe rather than recomputed here for the reason the field's own
+        // comment gives: `fitsInTwoByTwo` already knows that a shapeless row
+        // keeps its ingredient *count* in `width`, and reading that number as
+        // a rectangle is precisely the mistake it exists to prevent.
+        if (gridSize < kMaxCraftSize && !recipe.fitsInTwoByTwo) {
+            continue;
+        }
+        // Several rows make the same item - eleven woods make planks, and a
+        // shapeless row frequently shadows a shaped one - and the answer is a
+        // set of items, so the first row to name something seen settles it.
+        if (unlocked.count(recipe.result.item) != 0) {
+            continue;
+        }
+
+        // **`craftableItems`' own cell count, copied rather than reinvented.**
+        // A shapeless recipe stores its ingredient count in `width` and pins
+        // `height` to 1, so `width * height` happens to agree with it today;
+        // the branch is here because the two numbers mean different things, and
+        // writing the product would be a silent bug the moment a shapeless row
+        // stores anything else in `height`.
+        const int cells = recipe.shapeless ? recipe.width : recipe.width * recipe.height;
+        for (int c = 0; c < cells; ++c) {
+            const ItemId ingredient = recipe.pattern[static_cast<std::size_t>(c)];
+            // `None` is a shaped pattern's must-be-empty cell and never an
+            // ingredient. `seenHas` refuses it as well - see its comment about
+            // bit 0 - but skipping it here is what keeps the hole in an
+            // L-shaped pattern from being read as a thing the player has met.
+            if (ingredient != ItemId::None && seenHas(seen, ingredient)) {
+                unlocked.insert(recipe.result.item);
+                break;
+            }
+        }
+    }
+    return unlocked;
+}
+
+namespace {
+
+/// Where every cell of a pattern lands once it is re-indexed to the grid a
+/// screen actually draws.
+///
+/// **Pulled out on its own so that it can be proved at compile time**, because
+/// it is the one piece of arithmetic a preview cannot get wrong quietly.
+/// `Recipe::pattern` is stored tight at the recipe's own width, so a cell's
+/// index inside it says nothing about where that cell sits in a wider grid: the
+/// stick recipe is two entries at `width = 1, height = 2`, and those two are
+/// *rows*. Copying the array across draws two planks side by side - a recipe
+/// nobody can craft - and it builds, it validates, and it is only wrong on
+/// screen.
+///
+/// `span` is the width of the destination grid. Every write is clamped to it
+/// rather than trusting the caller, so this cannot run off the end of the
+/// returned array for any recipe at all; `previewFor` still rejects a recipe
+/// too big for `span` beforehand, because silently cropping one would draw a
+/// different recipe rather than none.
+constexpr std::array<ItemId, kMaxCraftSlots> layOutAtGridWidth(const Recipe& recipe, int span) {
+    std::array<ItemId, kMaxCraftSlots> cells{};
+    if (span <= 0 || span > kMaxCraftSize) {
+        return cells;
+    }
+    if (recipe.shapeless) {
+        // Position means nothing here and `width` is a count rather than a row
+        // length, so the ingredients simply fill the grid from the top left in
+        // the order they were declared. Reading them as a rectangle is the
+        // shapeless half of the bug described above.
+        const int slots = span * span;
+        for (int i = 0; i < recipe.width && i < slots; ++i) {
+            cells[static_cast<std::size_t>(i)] = recipe.pattern[static_cast<std::size_t>(i)];
+        }
+        return cells;
+    }
+    // Two strides, and they are deliberately different: the source advances a
+    // row by the recipe's own width, the destination by the screen's.
+    for (int row = 0; row < recipe.height && row < span; ++row) {
+        for (int col = 0; col < recipe.width && col < span; ++col) {
+            cells[static_cast<std::size_t>(row * span + col)] =
+                recipe.pattern[static_cast<std::size_t>(row * recipe.width + col)];
+        }
+    }
+    return cells;
+}
+
+/// **A compile-time proof that the re-indexing is a re-indexing and not a
+/// copy.** Worth an assert rather than a test because the wrong version
+/// compiles, fills entirely plausible cells, and is wrong only in the one place
+/// none of us can look.
+///
+/// The values are not transcribed from the implementation: a 1x2 pattern in a
+/// 3x3 grid occupies cells 0 and 3 because a row of that grid is three cells
+/// wide, which is arithmetic anybody can redo without reading the function.
+constexpr bool previewLaysPatternsOutByRow() {
+    Recipe tall; // the stick recipe's shape - one column, two rows
+    tall.width = 1;
+    tall.height = 2;
+    tall.pattern[0] = ItemId::Stick;
+    tall.pattern[1] = ItemId::Stick;
+
+    // On a table the two sit one above the other, so the second is cell 3.
+    // Cell 1 is where a straight copy of `pattern` would put it, and that is
+    // the failure being excluded.
+    const std::array<ItemId, kMaxCraftSlots> onATable = layOutAtGridWidth(tall, 3);
+    if (onATable[0] != ItemId::Stick || onATable[3] != ItemId::Stick) {
+        return false;
+    }
+    if (onATable[1] != ItemId::None) {
+        return false;
+    }
+
+    // The same pattern in the player's own 2x2 lands in cells 0 and 2, which is
+    // the half of this a hard-coded 3-wide stride would get wrong.
+    const std::array<ItemId, kMaxCraftSlots> inTheInventory = layOutAtGridWidth(tall, 2);
+    if (inTheInventory[0] != ItemId::Stick || inTheInventory[2] != ItemId::Stick ||
+        inTheInventory[1] != ItemId::None) {
+        return false;
+    }
+
+    // The transpose has to come out differently, or everything above would pass
+    // on a function that ignored the pattern's shape and filled cells in order.
+    Recipe wide;
+    wide.width = 2;
+    wide.height = 1;
+    wide.pattern[0] = ItemId::Stick;
+    wide.pattern[1] = ItemId::Stick;
+    const std::array<ItemId, kMaxCraftSlots> sideBySide = layOutAtGridWidth(wide, 3);
+    if (sideBySide[0] != ItemId::Stick || sideBySide[1] != ItemId::Stick ||
+        sideBySide[3] != ItemId::None) {
+        return false;
+    }
+
+    // And a shapeless row fills the grid in declaration order however wide it
+    // is, because its `width` is an ingredient count: four ingredients fill a
+    // 2x2 exactly, where reading `width` as a rectangle would place one.
+    Recipe loose;
+    loose.shapeless = true;
+    loose.width = 4;
+    loose.height = 1;
+    loose.pattern[0] = ItemId::Stick;
+    loose.pattern[1] = ItemId::Coal;
+    loose.pattern[2] = ItemId::Stick;
+    loose.pattern[3] = ItemId::Coal;
+    const std::array<ItemId, kMaxCraftSlots> scattered = layOutAtGridWidth(loose, 2);
+    return scattered[0] == ItemId::Stick && scattered[1] == ItemId::Coal &&
+           scattered[2] == ItemId::Stick && scattered[3] == ItemId::Coal;
+}
+
+static_assert(previewLaysPatternsOutByRow(),
+              "a pattern is stored tight at its own width and has to be re-indexed into the "
+              "screen's grid: the 1x2 stick recipe belongs in cells 0 and 3 of a 3x3 and in cells 0 "
+              "and 2 of a 2x2, while a straight copy of Recipe::pattern puts both of them in 0 and "
+              "1. Change the destination stride in layOutAtGridWidth from `span` to `recipe.width` "
+              "to watch this fire.");
+
+/// One candidate recipe, laid out at `span`, with every cell it cannot fill
+/// already marked against `owned`.
+///
+/// **Spends a copy of the count map rather than the map itself**, and that is
+/// the whole reason this is a function rather than a loop body: `previewFor`
+/// measures several rows producing the same item before it picks one, and a map
+/// spent in place would answer the second row with the first row's leftovers -
+/// silently, because a half-spent map still produces a perfectly plausible
+/// picture. The copy costs one small map per candidate row and nothing per
+/// frame, since only rows whose result is the clicked item ever reach here.
+///
+/// **`gridSlots` is read for what is already laid out, never counted.** The
+/// caller has already added those stacks to `owned` - the grid is storage like
+/// the bag is - so counting them again here would double every ingredient the
+/// player has placed. What the two passes below want from them is a different
+/// question entirely: which cells are *already correct*. Indices match
+/// `preview.cells` because both are row-major at the screen's own width, and
+/// the pointer may be null with a count of zero for a caller with no grid; a
+/// count shorter than `slots` is read as "the rest are empty" rather than
+/// walked off the end.
+RecipePreview measureAgainstOwned(const Recipe& recipe, int span,
+                                  const std::unordered_map<ItemId, int>& owned,
+                                  const ItemStack* gridSlots, std::size_t gridSlotCount) {
+    RecipePreview preview;
+    preview.result = recipe.result;
+    preview.cells = layOutAtGridWidth(recipe, span);
+    preview.craftable = true;
+
+    // Bounded by the destination array rather than by the recipe or by the
+    // number the caller handed over, so no span can walk off the end of the
+    // nine cells a `RecipePreview` actually has.
+    const int slots = std::min(span > 0 ? span * span : 0, static_cast<int>(kMaxCraftSlots));
+
+    // **Decremented as each cell is assigned, and that is the whole of the
+    // multiplicity question.** Asking `owned` whether it holds a stick, once
+    // per cell and without spending anything, marks all three cells of a ladder
+    // green while the player holds a single stick; marking every cell of a
+    // short ingredient instead paints all three red when they hold two. Taking
+    // one out of the map per filled cell is what leaves exactly the third cell
+    // red, which is the number the player needs to see.
+    //
+    // Reading order - row-major across the cells the first pass below did not
+    // settle - so the red cell is the last one that is not already correctly
+    // filled rather than an arbitrary one, and two runs on the same inventory
+    // and the same grid always mark the same cell.
+    std::unordered_map<ItemId, int> remaining = owned;
+
+    // **First pass: cells the player has already filled in correctly, so that
+    // the shortfall lands on a cell the screen can honestly mark.** A single
+    // row-major walk spends the count on whichever cell it reaches first, and
+    // that cell is not necessarily an empty one: holding exactly one plank,
+    // placed by hand into cell 3 of the stick recipe, the walk spends it on
+    // cell 0 and marks cell **3** - the cell the plank is sitting in. The
+    // screen then has a red mark it cannot honestly draw (there is a real plank
+    // there) and an empty cell 0 wearing a ghost with nothing behind it, which
+    // reads as "you have this" when the player has nothing of the sort.
+    //
+    // Taking the correctly-filled cells first fixes that at the source rather
+    // than at the draw call: a cell holding the right item is demonstrably
+    // satisfiable, so settling it here pushes the shortfall onto the empty
+    // cells wherever there are any - and an empty cell is exactly where a wash
+    // and a ghost both mean what they say.
+    //
+    // **This cannot change how many cells come back missing, only which ones.**
+    // For one ingredient the shortfall is `cells wanting it - owned`, and a
+    // greedy spend of a count map produces that number whatever order the cells
+    // are visited in. So `craftable` - which is what `previewFor` picks rows
+    // with - is untouched by this pass, and the change is confined to the
+    // picture.
+    std::array<bool, kMaxCraftSlots> settled{};
+    for (int i = 0; i < slots; ++i) {
+        const ItemId ingredient = preview.cells[static_cast<std::size_t>(i)];
+        if (ingredient == ItemId::None || gridSlots == nullptr ||
+            static_cast<std::size_t>(i) >= gridSlotCount) {
+            continue;
+        }
+        const ItemStack& occupant = gridSlots[static_cast<std::size_t>(i)];
+        if (occupant.empty() || occupant.item != ingredient) {
+            continue;
+        }
+        // Settled whether or not the map had anything left to spend, because
+        // the item is physically in the cell: `owned` counted it on the way in,
+        // so the find always succeeds here, and if some future caller builds
+        // the map differently the honest answer is still that this cell is
+        // filled with the right thing.
+        const auto held = remaining.find(ingredient);
+        if (held != remaining.end() && held->second > 0) {
+            --held->second;
+        }
+        settled[static_cast<std::size_t>(i)] = true;
+    }
+
+    // Second pass: everything the first one did not settle, in the same
+    // row-major reading order as before.
+    for (int i = 0; i < slots; ++i) {
+        const ItemId ingredient = preview.cells[static_cast<std::size_t>(i)];
+        if (ingredient == ItemId::None || settled[static_cast<std::size_t>(i)]) {
+            continue;
+        }
+        const auto held = remaining.find(ingredient);
+        if (held != remaining.end() && held->second > 0) {
+            --held->second;
+            continue;
+        }
+        preview.missing[static_cast<std::size_t>(i)] = true;
+        preview.craftable = false;
+    }
+    return preview;
+}
+
+} // namespace
+
+std::optional<RecipePreview> previewFor(ItemId item, const Inventory& inventory,
+                                        const ItemStack* gridSlots, std::size_t gridSlotCount,
+                                        const ItemStack& held, int gridSize) {
+    if (item == ItemId::None || gridSize <= 0) {
+        return std::nullopt;
+    }
+    // Every write below is bounded by this and never by the recipe, which is
+    // the rule that keeps a 3x3 pattern out of a 2x2 preview. Clamping to
+    // `kMaxCraftSize` as well means `span * span` cannot exceed `kMaxCraftSlots`
+    // even if a caller one day asks for a grid larger than any recipe.
+    const int span = gridSize < kMaxCraftSize ? gridSize : kMaxCraftSize;
+    const int slots = span * span;
+
+    // **Everything the player can reach, which is emphatically not what
+    // `inventory` holds.** The bag, the crafting grid and the cursor stack are
+    // three separate stores, and laying an ingredient into a cell *takes it out
+    // of the bag* - so counting the bag alone made this feature fail on every
+    // successful use of it. Holding exactly two planks, the stick row previews
+    // clean; placing the first plank reddens the second cell, and placing the
+    // second reddens both, at the very moment the result is sitting in the
+    // output slot waiting to be taken. `gridSlots` may be null with a count of
+    // zero, for a caller with no grid to read.
+    //
+    // Past that it is the count map `craftableItems` builds, sharing its
+    // `empty()` test - an item that is not `None` with a count above zero -
+    // rather than restating it, and it carries the same caveat: counting is the
+    // right answer for exactly as long as every ingredient is one concrete
+    // `ItemId` rather than a set. That argument is written out in full over
+    // there and applies to this function word for word.
+    std::unordered_map<ItemId, int> owned;
+    const auto countStack = [&owned](const ItemStack& stack) {
+        if (!stack.empty()) {
+            owned[stack.item] += stack.count;
+        }
+    };
+    for (std::size_t i = 0; i < Inventory::size(); ++i) {
+        countStack(inventory.slot(i));
+    }
+    if (gridSlots != nullptr) {
+        for (std::size_t i = 0; i < gridSlotCount; ++i) {
+            countStack(gridSlots[i]);
+        }
+    }
+    countStack(held);
+
+    // **The first row the player can actually satisfy, and only failing that
+    // the first row that fits at all.**
+    //
+    // Declaration order is still display order (`INTERFACE.md` section 4.6) -
+    // neither edition sorts recipes and neither has a display-order field - so
+    // it survives here as the tie-break, and a player holding none of the
+    // ingredients sees exactly the row the book would have shown. What it
+    // cannot be is the whole rule, because `craftableItems` colours the
+    // catalogue tile from **any** row producing the item while this function
+    // draws one of them, so stopping at the first makes one screen contradict
+    // itself for every item with more than one recipe.
+    //
+    // The example that makes the rule necessary: torches are declared
+    // `Charcoal + Stick` and then `Coal + Stick`, and coal is the first fuel a
+    // survival player finds. Taking the first row hands somebody holding coal
+    // and sticks a *charcoal* ghost behind a red backdrop, telling them they
+    // cannot make the thing the tile beside it has just told them they can -
+    // on the most-crafted item in the game, so this is the common case rather
+    // than an edge one. Planks (a log row before the stripped-log row) and
+    // sticks (eleven plank rows, oak first) fail the same way.
+    std::optional<RecipePreview> firstThatFits;
+    for (const Recipe& recipe : recipes()) {
+        if (recipe.result.item != item) {
+            continue;
+        }
+        // The catalogue's own filter, taken off the recipe exactly as
+        // `craftableItems` and `recipesUnlockedBySeen` take it.
+        if (gridSize < kMaxCraftSize && !recipe.fitsInTwoByTwo) {
+            continue;
+        }
+        // ...and separately, whether the rectangle about to be filled can hold
+        // the pattern. These are two different questions that happen to agree
+        // at both grid sizes that exist today: the one above is a fact about
+        // the player's own 2x2, this one is a fact about `span`, and only this
+        // one is what stops a pattern being cropped into a recipe that is not
+        // the recipe. A shapeless row is counted against the whole grid because
+        // its ingredients have no shape to respect.
+        if (recipe.shapeless ? recipe.width > slots
+                             : recipe.width > span || recipe.height > span) {
+            continue;
+        }
+
+        // Measured rather than merely accepted, because `craftable` is what
+        // chooses between rows. Every candidate is measured against the same
+        // untouched map - `measureAgainstOwned` spends a copy - so the answer
+        // for one row never depends on the rows tried before it. The grid goes
+        // over as well as into `owned`, because *which* cells are already right
+        // decides where the marks land even though it cannot decide how many
+        // there are.
+        RecipePreview candidate = measureAgainstOwned(recipe, span, owned, gridSlots, gridSlotCount);
+        if (candidate.craftable) {
+            return candidate;
+        }
+        if (!firstThatFits.has_value()) {
+            firstThatFits = candidate;
+        }
+    }
+    // Nothing satisfiable, so the earliest-declared row that fits is what gets
+    // drawn, in red where it has to be: an empty optional here means no recipe
+    // makes `item` at this grid size at all, which is a different answer and
+    // the caller draws it differently.
+    return firstThatFits;
 }
 
 /// One brewing step: what goes in, what is stirred into it, and what comes out.

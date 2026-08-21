@@ -6,6 +6,7 @@
 #include "world/Chest.hpp"
 #include "world/TerrainGenerator.hpp"
 #include "item/Inventory.hpp"
+#include "item/SeenItems.hpp"
 
 #include <glm/glm.hpp>
 
@@ -89,7 +90,7 @@ struct SavedEffect {
 /// and writes both to disk with no diagnostic from any tool this project runs.
 ///
 /// **If you add a member you must also**: update `static_assert(sizeof(
-/// SavedPlayer) == 1268)` below to the new size, add the next `kPlayerVersion`
+/// SavedPlayer) == 1908)` below to the new size, add the next `kPlayerVersion`
 /// rung in `WorldStore.cpp`, and give the previous layout a `LegacyPlayer`
 /// struct - the rung asserts are written so that bumping the version fails to
 /// build until you do. That chain is deliberate and is the only part of this
@@ -411,6 +412,45 @@ struct SavedPlayer {
     std::int32_t weatherThundering = 0;
     float weatherRainSeconds = 0.0f;
     float weatherThunderSeconds = 0.0f;
+    /// **Every item the player has ever held** - the ledger the recipe book is
+    /// listed from, and the whole reason it is here is that it must survive a
+    /// quit. It is append-only and nothing anywhere clears a bit, so a ledger
+    /// that did not persist would silently reset to "you have met nothing" on
+    /// every launch and hide recipes the player had already earned. That is the
+    /// same shape as the bed and the ender chest before it: a value that lived
+    /// only in memory, invisible until it had already cost the player the
+    /// session.
+    ///
+    /// **A bitset over the raw `ItemId` space and not over the catalogue** -
+    /// `SeenItems.hpp` owns that argument, and the short version is that the
+    /// display list's *positions* shift every time a block is added while the
+    /// raw id does not, so only the raw id is a fact that can be written down.
+    ///
+    /// **`std::uint32_t` words, and do not widen them to `std::uint64_t`.**
+    /// This record is a trivially-copyable blob whose padding assert below is
+    /// the only thing stopping uninitialised stack bytes reaching a disk;
+    /// 8-byte words would raise the whole struct's alignment to 8 and open a
+    /// 4-byte hole at the tail. `SeenItems.hpp` carries a `static_assert` for
+    /// the same constraint from its own side.
+    ///
+    /// **Its width is reserved rather than derived from the item roster**, so
+    /// adding items does not change `sizeof(SavedPlayer)` and therefore does
+    /// not change what is on a player's disk. `SeenItems.hpp` tells the story
+    /// of what the derived version would have cost; the short form is that a
+    /// record whose size follows `Item.hpp` invites a one-literal "fix" that
+    /// compiles clean and silently overwrites every save in the world.
+    ///
+    /// Appended at the tail like every field before it, so version 8 stays a
+    /// stated prefix-free record of its own (`LegacyPlayerV8`) and the
+    /// rung-difference asserts in `WorldStore.cpp` measure this addition rather
+    /// than describe it.
+    ///
+    /// **A version 8 file has no bits to give, so the rung seeds them from what
+    /// the record demonstrably contains** - see `seedSeenFromCarried` in
+    /// `WorldStore.cpp`. An existing player opening this build with an empty
+    /// recipe book, holding a chest of diamond tools, would read as the game
+    /// having lost track rather than as a rule.
+    SeenItems seenItems{};
 };
 
 static_assert(std::is_trivially_copyable_v<SavedPlayer>,
@@ -615,7 +655,7 @@ static_assert(sizeof(Campfire) == 64 &&
 /// subset by name and leaves the rest to their declared defaults - which is
 /// what each of those rungs already says in its own words, that `timeOfDay`
 /// "stays at 0.18" and that the worn set "stays empty". Those sentences are
-/// true only because all twenty members are declared with an initialiser.
+/// true only because all twenty-one members are declared with an initialiser.
 ///
 /// So a member added *without* one is not merely untidy: it is indeterminate
 /// stack memory handed back as player state on every legacy load, and then
@@ -625,20 +665,28 @@ static_assert(sizeof(Campfire) == 64 &&
 ///
 /// This comment sits here rather than beside the struct because **this is where
 /// the breaking edit is already guaranteed to stop.** Adding a member changes
-/// `sizeof(SavedPlayer)`, the assert below fails, and whoever is updating 1268
+/// `sizeof(SavedPlayer)`, the assert below fails, and whoever is updating 1908
 /// has to read this. There is no trait that can test the invariant directly -
 /// a struct whose other members have initialisers is not trivially default
 /// constructible either way - so the existing tripwire is the whole mechanism.
 ///
 /// **Falsified by** any member declared in `SavedPlayer` as a bare
 /// `type name;`. Re-run that search rather than trusting this paragraph; it
-/// read 20 with an initialiser and 0 without on 2026-08-19 11:57.
+/// read 21 with an initialiser and 0 without on 2026-08-20, when `seenItems`
+/// joined and the tripwire above did its job.
 ///
 /// Fails on: narrowing `selectedSlot` to `std::int16_t`, and on spelling
 /// `respawnBed` as a `glm::ivec3` plus a `bool`, which opens three bytes at the
 /// tail. Fails too on spelling either weather flag as a `bool`, which opens
-/// three bytes in the middle of the new tail.
-static_assert(sizeof(SavedPlayer) == 1268 &&
+/// three bytes in the middle of the new tail, and on widening `SeenItems`'
+/// words to `std::uint64_t`, which raises the whole struct's alignment to 8 and
+/// opens a four-byte hole after `seenItems`.
+///
+/// **Does NOT fail on adding an item**, and that is a property somebody paid
+/// for rather than a happy accident - see `kSeenWordsOnDisk` in
+/// `SeenItems.hpp`, which reserves the ledger's 640 bytes with 531 ids of
+/// headroom precisely so that `Item.hpp` cannot move this number.
+static_assert(sizeof(SavedPlayer) == 1908 &&
                   sizeof(SavedPlayer) ==
                       sizeof(SavedPlayer::position) + sizeof(SavedPlayer::yaw) +
                           sizeof(SavedPlayer::pitch) + sizeof(SavedPlayer::health) +
@@ -651,14 +699,22 @@ static_assert(sizeof(SavedPlayer) == 1268 &&
                           sizeof(SavedPlayer::weatherRaining) +
                           sizeof(SavedPlayer::weatherThundering) +
                           sizeof(SavedPlayer::weatherRainSeconds) +
-                          sizeof(SavedPlayer::weatherThunderSeconds),
-              "SavedPlayer must have no padding, or uninitialised bytes go to disk");
+                          sizeof(SavedPlayer::weatherThunderSeconds) +
+                          sizeof(SavedPlayer::seenItems),
+              "SavedPlayer must have no padding, or uninitialised bytes go to disk. The 1908 is "
+              "version 8's 1268 bytes plus the 640-byte seen-item ledger, and it also moves if "
+              "the ledger's RESERVED width (kSeenWordsOnDisk in SeenItems.hpp) is ever changed. "
+              "If that is why you are here, this literal is the wrong thing to update on its "
+              "own: a different ledger width is a different on-disk layout, so it costs a "
+              "kFormatVersion bump and a LegacyPlayerV9 rung - without them loadPlayer asks a "
+              "1908-byte file for the new size, short-reads, hands back nullopt, and the next "
+              "autosave writes a fresh spawn character over the real save");
 
 /// **The order-sensitive half of the same guard, and the assert above cannot do
 /// this job.** Written 2026-08-19.
 ///
 /// That one is a SUM, so it is blind to order: insert a member in the middle,
-/// add its name to the sum, update 1268, and it passes - while `Main.cpp`'s
+/// add its name to the sum, update 1908, and it passes - while `Main.cpp`'s
 /// positional brace-init (see the warning above `SavedPlayer`) silently hands
 /// every value after the insertion to the wrong member. Every one of them is a
 /// `float`, so nothing else in the toolchain says a word.

@@ -1,9 +1,11 @@
 #pragma once
 
 #include "item/Item.hpp"
+#include "item/SeenItems.hpp"
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -83,6 +85,94 @@ void consumeIngredients(ItemStack* slots, int size);
 /// Answered for the whole table at once rather than per item, because the
 /// catalogue asks about 126 cells every frame a screen is open.
 std::unordered_set<ItemId> craftableItems(const Inventory& inventory, int gridSize);
+
+/// Every result the player has been *shown how to make* on a grid this wide.
+///
+/// The recipe book's other question, and deliberately not the one
+/// `craftableItems` answers: **meeting an ingredient unlocks a row for good,
+/// while holding enough of one only decides what colour it is drawn.** Someone
+/// who mined a log, spent every plank on a hut and has none left has still met
+/// logs, and taking the plank recipe away again reads as the game forgetting
+/// rather than as a rule. `SeenItems` is append-only by construction, which is
+/// what makes that promise keepable.
+///
+/// **One ingredient is enough**, rather than all of them - a row appears the
+/// moment any filled cell names something seen. That is what makes the book a
+/// trail worth following, and it is exactly why the ingredients still missing
+/// have to be drawn as missing; `previewFor` is what says which those are.
+///
+/// `gridSize` filters exactly as `craftableItems` does, because a 3x3 recipe is
+/// not worth listing to a player standing at their own 2x2.
+std::unordered_set<ItemId> recipesUnlockedBySeen(const SeenItems& seen, int gridSize);
+
+/// One recipe resolved into the grid a screen actually draws, with the cells
+/// the player cannot fill already marked.
+///
+/// **Laid out at the screen's width rather than the recipe's**, which is the
+/// whole reason this exists instead of the caller reading `Recipe::pattern`
+/// itself: a pattern is stored tight at its own size - the stick recipe is two
+/// entries at `width = 1, height = 2` - so copying the array across puts those
+/// two planks side by side and draws a recipe that does not exist.
+struct RecipePreview {
+    /// Row-major at the **screen's** grid width. `ItemId::None` is an empty cell.
+    std::array<ItemId, kMaxCraftSlots> cells{};
+
+    /// Parallel to `cells`: the inventory cannot supply this particular cell.
+    ///
+    /// Per cell rather than per ingredient, because multiplicity is something
+    /// the player reads off the picture: three sticks wanted against two held
+    /// marks exactly **one** cell, so counting the red ones says how many more
+    /// are needed. `previewFor` spends the count map as it walks the cells,
+    /// which is what makes that true.
+    ///
+    /// **Which cell of several carries the mark is chosen, not incidental**:
+    /// cells the grid has already filled with the right item are settled first,
+    /// so a shortfall lands on an *empty* cell wherever the recipe still has
+    /// one. That is what the caller needs, because a mark on a cell holding a
+    /// real stack is a mark it cannot draw without covering the player's own
+    /// item. A marked cell is therefore either empty or holding the wrong
+    /// thing, and both of those are honest to paint red.
+    std::array<bool, kMaxCraftSlots> missing{};
+
+    ItemStack result{};
+
+    /// Nothing is missing, so laying this out and taking the result would work.
+    ///
+    /// **`previewFor` reads this itself**, and that is what decides which of
+    /// several rows the player is shown, so it is load-bearing rather than
+    /// merely a colour for the caller to draw with.
+    bool craftable = false;
+};
+
+/// A recipe making `item` that fits `gridSize`, laid out top-left, with each
+/// cell measured against everything the player can reach.
+///
+/// **The first row the player can actually satisfy, and only failing that the
+/// first row that fits.** Declaration order is display order throughout this
+/// project (`INTERFACE.md` section 4.6) - neither edition sorts recipes and
+/// neither has a display-order field - so it survives as the tie-break, and a
+/// player holding none of the ingredients still sees exactly the row the book
+/// would have shown. What it cannot be is the *whole* rule, because
+/// `craftableItems` colours the catalogue tile from **any** row producing the
+/// item while this function draws one of them, so stopping at the first would
+/// make two halves of one screen contradict each other.
+///
+/// **`inventory` is not everything the player owns**, which is the other half
+/// of getting this right: the crafting grid and the cursor stack are separate
+/// storage, so moving an ingredient into a cell takes it out of the bag and a
+/// preview measured against the bag alone reddens as the player completes the
+/// recipe. `gridSlots` and `gridSlotCount` are the cells already laid out and
+/// `held` is the cursor stack; `gridSlots` may be null with a count of zero
+/// where a caller has no grid to read. The grid answers two questions rather
+/// than one - what the player owns, and which cells are already right - and the
+/// second is what decides where `RecipePreview::missing` lands.
+///
+/// Empty when nothing makes `item` at this grid size - which includes the case
+/// where the only recipe for it wants a crafting table and the player is at
+/// their own 2x2.
+std::optional<RecipePreview> previewFor(ItemId item, const Inventory& inventory,
+                                        const ItemStack* gridSlots, std::size_t gridSlotCount,
+                                        const ItemStack& held, int gridSize);
 
 /// What a smithing table makes of a tool and a material, or nothing.
 ///

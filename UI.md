@@ -9,17 +9,17 @@
   - **41** &middot; 0.1 How to use this file
   - **60** &middot; 0.2 The verdict
   - **74** &middot; 0.3 What was found while writing this
-  - **93** &middot; 0.4 The rules — read these before writing any UI code
-  - **316** &middot; 0.5 What this pass deliberately cut
-  - **330** &middot; 0.6 The build order
-  - **356** &middot; 0.7 What this pass did not do
-  - **372** &middot; 1. The UI we have, and how it works
-  - **1111** &middot; 2. The extracted sprite atlas
-  - **1324** &middot; 3. The UI palette, measured
-  - **1817** &middot; 4. Cell and screen geometry
-  - **2358** &middot; 5. The screens we do not have
-  - **3494** &middot; 6. The HUD we do not have
-  - **4580** &middot; 7. Constructed mockups
+  - **94** &middot; 0.4 The rules — read these before writing any UI code
+  - **325** &middot; 0.5 What this pass deliberately cut
+  - **339** &middot; 0.6 The build order
+  - **365** &middot; 0.7 What this pass did not do
+  - **381** &middot; 1. The UI we have, and how it works
+  - **1145** &middot; 2. The extracted sprite atlas
+  - **1358** &middot; 3. The UI palette, measured
+  - **1851** &middot; 4. Cell and screen geometry
+  - **2392** &middot; 5. The screens we do not have
+  - **3528** &middot; 6. The HUD we do not have
+  - **4614** &middot; 7. Constructed mockups
 
 <!-- /INDEX -->
 
@@ -86,7 +86,8 @@ known this morning.
 
 Two more were found by the menu specification and belong to other systems: **save folders are named
 `world_<seed>` with nothing else**, so two worlds created on the same seed silently share one save
-(`WorldStore.cpp:139`); and **there are zero UI sounds** despite 60 loaded sound events.
+(`WorldStore.cpp:139`); and **there were zero UI sounds** despite 60 loaded sound events — closed
+2026-08-19, see R7: every press that lands on a screen now plays `SoundEvent::Click`.
 
 ---
 
@@ -218,9 +219,17 @@ and gets away with it only because the others are empty.
 
 ### R7 · UI sound: one event, two pitches
 
-`SoundEvent::Click` exists (`Sounds.hpp:66`), its stem is loaded (`Sounds.cpp:23`), there is a non-positional
-path (`Sounds.cpp:359` `playGlobal`), and it is referenced **nowhere**. It is a fully loaded, entirely
-unspent event — and zero UI sounds is the largest single "feels wrong" gap in the whole interface.
+`SoundEvent::Click` exists (`Sounds.hpp:66`), its stem is loaded (`Sounds.cpp:23`), and there is a non-positional
+path (`Sounds.cpp:359` `playGlobal`).
+
+> ⚠️ **This section used to end "and it is referenced **nowhere**". That went stale on 2026-08-19 and was
+> corrected on 2026-08-20.** Repo-wide grep for `SoundEvent::Click` now returns three hits: the decode case in
+> `Sounds.cpp`, a **one-line owner at the top of the screen-click block in `Main.cpp`** that plays it globally at
+> 0.35 for *every* press that lands on a screen — slots, tabs, the recipe book and the search field alike — and a
+> positional one in the world. So the list-row selection this section asks for **already sounds**, which is why
+> the recipe-book preview click added no call of its own: a second `playGlobal` there would layer a second click
+> over the first rather than supply a missing one. What is still unbuilt is the **0.8-pitch half** below, because
+> nothing yet has a back, cancel or confirm button to attach it to.
 
 > **Play `Click` at pitch 1.0** on button activation (release-inside), cycler step, tab change, list-row
 > selection and dialog confirm. **Play `Click` at pitch 0.8** on back, cancel, Escape-pop and the cross
@@ -749,7 +758,7 @@ Triggers: `Esc` (`:3199-3207`), `E` again, pad `B`, pad `Start` (`:3391`).
 
 #### 1.4.6 Depth bands — the master table
 
-Smaller = nearer = drawn later. `game/src/hud/InventoryScreen.cpp:21-43` unless noted.
+Smaller = nearer = drawn later. `game/src/hud/InventoryScreen.cpp:21-51` unless noted, with any band that lives beside the thing it belongs to cited individually.
 
 | Depth | Constant | What |
 |---:|---|---|
@@ -762,14 +771,23 @@ Smaller = nearer = drawn later. `game/src/hud/InventoryScreen.cpp:21-43` unless 
 | 0.0036 | `kCellDepth` | catalogue cell backgrounds |
 | 0.0035 | `kLabelDepth` | tab-name label; also `kTextDepth` in the overlay |
 | 0.003570 / 0.003560 | `kSearchBorderDepth` / `kSearchFieldDepth` | search box border, then recess |
+| 0.0034 | `kScrollbarReservedDepth` (`:43`) | **nothing — held free for the scrollbar that slice 4 never shipped.** A named constant since 2026-08-20 precisely because it is empty; see §1.10 slice 4 |
+| 0.0033 | `kMissingIngredientDepth` (`:366`) | the missing-ingredient wash, over the panel's slot art and under everything that stands in the slot |
 | 0.0032 / 0.0031 | `kCatalogueIconDepth` / `kCatalogueCountDepth` | catalogue icons and counts |
+| 0.00305 | `kSlotHighlightBackDepth` (`:80`) | hover highlight, back half — between the cell art and the icon, so a full slot still reads as full |
 | 0.0030 / 0.0026 | `kIconDepth` / `kCountDepth` | slot icons and counts |
+| 0.0029 | *(free)* | held by nothing — see the note below before taking it |
+| 0.0020 | `kSlotHighlightFrontDepth` (`:81`) | hover highlight, front half — over the icon, so the brightening lands on the picture |
 | 0.0012 / 0.0008 | `kHeldIconDepth` / `kHeldCountDepth` | the cursor stack |
 | 0.0006 | `kTooltipDepth` | tooltip |
 | 0.0004 | (local) `kPointerDepth` (`Main.cpp:2953`) | gamepad pointer |
 | 0.00098 | `kIconDepth` (`StatusBars.cpp:85`) | status icons (no screen open) |
 | 0.00095…0.00060 | `Hotbar.cpp:51-60` | hotbar frames, tints, icons, counts |
 | 0.0001 / 0.0 | `Crosshair.cpp:23-24` | crosshair border, then inner |
+
+> **0.0029 is free, and it is the tightest slot in the ladder — 8e-5.** A slot icon is handed 0.0030 and `appendBlockIcon` reaches `hud::kIconDepthSpan` = 2e-5 in front of whatever it is handed (`HudPrimitives.hpp:85`), so a block drawn as boxes occupies down to **0.00298**; anything that has to sit in front of a whole icon has 8e-5 to land in, against the catalogue's 6e-5 (0.00318 against 0.00312) which is the only tighter one of that kind. **Do not read that as the floor for a new band.** Two pairs in this very table are closer — `kSearchBorderDepth` 0.003570 to `kSearchFieldDepth` 0.003560 is **1e-5**, and `kSlotHighlightBackDepth` 0.00305 to `kIconDepth` 0.0030 is **5e-5** — and both are legal precisely because they are flat quads with no span to clear. **The number that matters is the *reach* of whatever sits in front, not the spacing of the rows.** Five rows were added on 2026-08-20, three of them live bands nobody had listed, one edit away from colliding with the reservation above them — exactly what happened to 0.0034 the week before: *a band nothing can check is a band the next element parks in*.
+
+> **0.0029 held a "ghost veil" for one afternoon and no longer does (2026-08-20).** A previewed ingredient the player can afford was drawn and then knocked back with a translucent slot-grey quad, so a filled-looking grid could not be mistaken for one the player had actually filled. The player rejected it in play — *"objects that user DOES have are like too light and hard to see and they have a different grey backdrop for no reason. objects that exist in user inv should look like what they look like if user drags and drops the object into the right card grid."* It is worth recording why the argument for it lost, because it sounded good: the veil dimmed the **affordable** state, which is the half of the feature that needs no mark at all, and it did so with a second grey nothing else on screen uses. **The red wash carries the whole distinction.** An affordable cell looking identical to a placed item is the point. If a "this is only a preview" cue is ever wanted again it belongs on the **output slot**, which `INTERFACE.md` §3.1b already specifies turning red when the selected recipe cannot be made — one mark, on the slot that answers the question.
 
 > Note the overlay's 0.0050/0.0045 are *behind* `kDimDepth` — which is exactly why `rebuildHud` puts the overlay in the **`top`** mesh rather than the main one (`game/src/Main.cpp:2967-2971`): *"with a screen open the panel was covered and only the text survived; drawn last it sits over everything."* A perfect illustration of §1.1.5.
 
@@ -855,7 +873,20 @@ In **creative** the catalogue is not a recipe book; it is an item source (`game/
 | Shift + click | straight into the inventory |
 | Left click on empty list space | **destroys** the cursor stack (left button only) |
 
-In **survival** `catalogue.restrictToKnown = true` and the list is the learned recipe book. Learning is one-way: `craftableItems(inventory, kMaxCraftSize)` is unioned into `catalogue.known` whenever `hudDirty` (`game/src/Main.cpp:4010-4017`) — *"the full grid, so a recipe you could only make at a table is still learned by holding its ingredients."*
+In **survival** `catalogue.restrictToKnown = true` and the list is **`known` ∪ `unlockedBySeen`** — not `known` alone, which is what this line said until 2026-08-20. Measured against `catalogueItems` in `game/src/hud/InventoryScreen.cpp` (search `restrictToKnown &&`: one call site, and both sets are tested on the same condition).
+
+- **`known`** is the floor, and learning into it is one-way: `craftableItems(inventory, kMaxCraftSize)` is unioned in whenever `hudDirty` (`game/src/Main.cpp`, search `catalogue.known.insert`) — *"the full grid, so a recipe you could only make at a table is still learned by holding its ingredients."*
+- **`unlockedBySeen`** is the wider half, landed 2026-08-20: every recipe **one** of whose filled cells names an item the player has **ever held**, from the append-only ledger in `game/src/item/SeenItems.hpp`. A log picked up and dropped still lists planks, drawn red because the ingredient is gone. It is *recomputed* rather than accumulated, keyed on `(ledger revision, grid size)`, because it is filtered by the open screen's grid — so **the same world lists more rows at a crafting table than in the inventory**. That is the first thing on this card whose length depends on which screen is open, which is why `scrollRow` is clamped wherever the set is rebuilt (`Main.cpp`, search `catalogueMaxScroll`: two call sites, the wheel and the rebuild).
+
+**And a survival click is no longer inert** (2026-08-20). It sets `catalogue.preview`, and `build()` ghosts that recipe into the crafting grid: the pattern laid out at *the screen's* width, each ingredient the player cannot supply backed by a red wash, each ghost icon veiled so it cannot be mistaken for a stack that is really there. **Nothing moves** — no slot is written, so there is no "empty the grid first" step and no way for a click to strand an item.
+
+**The two halves are gated separately, and that is deliberate** (`game/src/hud/InventoryScreen.cpp:1317-1318` the wash, `:1363` the ghost, `:1389` the veil). A **ghost** is drawn only into an **empty** cell, because a preview painted over a real stack hides what is actually in the grid. A **wash** is drawn on an empty cell *or* on one holding the **wrong** item, because that cell is exactly the one the player needs marked — a cobblestone sitting where a plank belongs is otherwise unremarked beside an output slot that will not fill. And the **veil is skipped wherever the wash is drawn**: a red cell already reads as a preview, and the veil sits nearer than the wash over 65.6% of it, so drawing both spent most of the wash's contrast on cells that exist only to show it. Which cells carry the mark is decided in `previewFor`, not here — `measureAgainstOwned` settles correctly-filled cells before it spends anything, so a shortfall lands on an empty cell wherever the recipe still has one (`game/src/item/Recipe.hpp`, `RecipePreview::missing`).
+
+| Input on a catalogue cell, in survival | Result |
+|---|---|
+| Any click on a listed row | ghost that recipe into the grid, if this screen's grid can lay it out |
+| Any click on a listed row that needs a bigger grid | **nothing, and the click is still swallowed** — the book lists rows the inventory's 2x2 cannot show, because `known` is built at the full 3x3 on purpose. The previous ghost is left alone rather than replaced by one that would draw nothing |
+| Click on empty list space | falls through to whatever else claims that point |
 
 #### 1.5.7 Craftable colouring
 
@@ -1046,7 +1077,7 @@ This is the section a new screen is built from. All in `game/src/hud/HudPrimitiv
 | **D5** **NEW** | **The loading screen's four untextured quads are ~22 % too dark.** `LoadingScreen.cpp:38, 40-42, 47-48` pass `kHudLayer` with `textured = false`. `appendQuad` then sets uv `(0.5, 0.5)` (`HudPrimitives.cpp:50`), which on the 185×1687 sheet is pixel (92, 843) — inside the smithing panel — and I measured it: **`#C6C6C6`**. Since `outColor = texel.rgb * fragColor.rgb` (`hud.frag:46`), the background, frame, track and fill all come out at 198/255 = **0.776** of their authored colour. Every other untextured quad in the codebase correctly uses `TextureLayer::White` (`Crosshair.cpp:31`, `DebugOverlay.cpp:14`, `Hotbar.cpp:124`, `HudPrimitives.cpp:368,394`, `InventoryScreen.cpp:457,718`). The uv is constant across the quad, so the derivative is zero and mip 0 is sampled — the value is exactly `#C6C6C6`, not a mip average. | `game/src/hud/LoadingScreen.cpp:38-48` | **certain** (state) / **likely** (that it is visible) — **[unconfirmable visually]** |
 | **D6** **NEW** | **A UI element built with 6 indices per quad instead of 12 will silently vanish.** Back-face culling is on (`GraphicsPipeline.hpp:48-52`) and the UI pass applies no projection, so winding is decided purely by the sign of the half-extents. Every existing helper emits both windings, so this has never bitten — but nothing enforces it, there is no assert, and it is not written down anywhere except in the index literal itself. | `game/src/hud/HudPrimitives.cpp:58-59` | **certain** (the state) / **likely** (that it will eventually bite) |
 | **D7** **NEW** | **The catalogue's clipped mesh is scissored to a rectangle computed from `catalogueListBounds()` regardless of `Kind`** — `Main.cpp:2988` calls the no-argument overload, while `insideCatalogueList` takes a `Kind`. They agree today because only the two catalogue kinds ever fill `clipped`, and the book card's position does not depend on kind. It is a latent disagreement of exactly the shape `toScreen` exists to prevent. | `game/src/Main.cpp:2988` vs `game/src/hud/InventoryScreen.cpp:676,684` | **worth checking** |
-| **D8** **NEW** | **Slice 4 shipped without its scrollbar and slice 7 without its clear button**, and neither omission is recorded in `GAPS.md` §2 — `INTERFACE.md` §7 lists both as part of a slice marked ✅. The scrollbar's depth is still reserved and unused. See §1.10. | `game/src/hud/InventoryScreen.cpp:35` (the reserved depth) vs `INTERFACE.md:511-515` | **certain** |
+| **D8** **NEW** | **Slice 4 shipped without its scrollbar and slice 7 without its clear button**, and neither omission is recorded in `GAPS.md` §2 — `INTERFACE.md` §7 lists both as part of a slice marked ✅. The scrollbar's depth is still reserved and unused. See §1.10. | `game/src/hud/InventoryScreen.cpp:43` (the reserved depth, named `kScrollbarReservedDepth` since 2026-08-20 — it was `:35` when this row was written) vs `INTERFACE.md:511-515` | **certain** |
 
 #### 1.9.3 What I could not check without running the game
 
@@ -1070,26 +1101,29 @@ This is the section a new screen is built from. All in `game/src/hud/HudPrimitiv
 | **1** Typed text in `Window` | built | **confirmed** | `consumeTypedText()` declared `engine/include/engine/platform/Window.hpp:170`; consumed at `game/src/Main.cpp:3162-3181` |
 | **2** Enumerate items and recipes | built | **confirmed** | `catalogueItems` (`InventoryScreen.cpp:538`) walks `allItems()`; per-recipe `category` is what it filters on |
 | **3** The second card, static | built | **confirmed** | `kBookPanelMin{0,555}` (`InventoryScreen.cpp:95`), five tabs at `:239-256`, `appendCatalogue` at `:432` |
-| **4** Scrolling | built | **confirmed, minus the scrollbar.** The wheel scrolls a row at a time (`Main.cpp:3930-3958`), the tab reset and `catalogueMaxScroll` (`InventoryScreen.cpp:629`) both exist, and the clipped row is cut by a **real scissor** (`Renderer.cpp:2201-2218`). **No scrollbar is drawn** — `InventoryScreen.cpp:35` still reads `// 0.0034 is left free for the scrollbar.` and nothing else in the repo mentions one. | as cited |
+| **4** Scrolling | built | **confirmed, minus the scrollbar.** The wheel scrolls a row at a time (`Main.cpp:3930-3958`), the tab reset and `catalogueMaxScroll` (`InventoryScreen.cpp:629`) both exist, and the clipped row is cut by a **real scissor** (`Renderer.cpp:2201-2218`). **No scrollbar is drawn**, and the band is still held for one. As of 2026-08-20 `InventoryScreen.cpp` names it — `constexpr float kScrollbarReservedDepth = 0.0034f` — rather than stating it in a comment, after the missing-ingredient wash was given that exact number by an author who had read none of the three places claiming it. The wash sits on 0.0033 and a `static_assert` beside it fails if anything drifts back in. Nothing else in the repo draws one. | as cited |
 | **5** Craftable colouring | built | **confirmed, with four states not six** — `CellState` (`InventoryScreen.cpp:111-136`) and the comment there explains why: three of vanilla's six are groups (slice 9) and the fourth was built and removed |
-| **6** Filter toggle | **not built** | **confirmed absent.** Repo-wide grep for `showCraftable`, `craftableOnly`, `filterCraftable`, `"All recipes"`, `"Craftable recipes"` across `game/src/hud/*` and `Main.cpp` returns **nothing**, and `CatalogueState` (`InventoryScreen.hpp:135-166`) has no such flag among its six fields |
+| **6** Filter toggle | **not built** | **confirmed absent.** Repo-wide grep for `showCraftable`, `craftableOnly`, `filterCraftable`, `"All recipes"`, `"Craftable recipes"` across `game/src/hud/*` and `Main.cpp` returns **nothing**, and `CatalogueState` (search `struct CatalogueState`) has no such flag among its ten fields (re-counted 2026-08-20) |
 | **7** Search tab | built | **confirmed, minus the clear button.** Field, caret, focus rule and beginning-of-word matching all exist (`InventoryScreen.cpp:457-490`, `:538`, `InventoryScreen.hpp:149-152`). §7's *"and the clear button"* has **no implementation** — grep finds nothing |
-| **8** Click to fill the grid | **not built** | **confirmed absent.** The catalogue click is creative-only and gives the item straight to the cursor or the inventory (`Main.cpp:3722-3766`); nothing writes `craftSlots` from a recipe. `InventoryScreen.cpp:116` says so explicitly: *"slice 8 fills the grid on the click rather than remembering it"* — written about a feature that does not exist yet |
+| **8** Click to fill the grid | **built as a ghost, 2026-08-20** | **superseded.** This row read "not built — the catalogue click is creative-only"; that stopped being true when the preview landed. A survival click now sets `catalogue.preview` and `build()` draws the recipe over the grid (§1.5.6). It still **writes nothing** into `craftSlots`, which is the deliberate difference from vanilla's slice 8: a picture cannot displace, consume or duplicate an item, and there is no "empty the grid first" step to get wrong. The comment `InventoryScreen.cpp` quotes — *"slice 8 fills the grid on the click rather than remembering it"* — is now describing a road not taken rather than a feature that does not exist |
 | **9** Groups | **not built** | **confirmed absent.** No group state anywhere; the only mention is the comment at `InventoryScreen.cpp:113-114` explaining why `CellState` has four members instead of six |
 
-**So the status box is accurate**, with two refinements worth recording: **slice 4 shipped without its scrollbar** and **slice 7 shipped without its clear button**. Both are small, both are invisible in a code grep unless you know to look, and neither is currently logged in `GAPS.md` §2.
+**So the status box was accurate when it was written**, with three refinements worth recording: **slice 4 shipped without its scrollbar**, **slice 7 shipped without its clear button**, and **slice 8 has since shipped in a different shape** — a ghost preview that draws the recipe rather than filling the grid (2026-08-20, §1.5.6). The first two are small, both are invisible in a code grep unless you know to look, and neither is currently logged in `GAPS.md` §2.
 
-`CatalogueState` (`game/src/hud/InventoryScreen.hpp:135-166`) is the whole of the catalogue's mutable state, and the caller owns it so that `build()` stays a pure function:
+`CatalogueState` (`game/src/hud/InventoryScreen.hpp`, search `struct CatalogueState`) is the whole of the catalogue's mutable state, and the caller owns it so that `build()` stays a pure function. **Ten fields, counted 2026-08-20**; this table listed seven and was wrong before this session's two additions as well, because `caret` was never in it:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `tab` | `CatalogueTab` | which of the five |
-| `scrollRow` | `int` | **whole rows**, never pixels — a fractional offset "would only make the clipped last row ambiguous" |
+| `scrollRow` | `int` | **whole rows**, never pixels — a fractional offset "would only make the clipped last row ambiguous". Clamped on the wheel *and* wherever `unlockedBySeen` is rebuilt, because the list length now depends on the open screen's grid |
 | `query` | `std::string` | read by the Search tab only |
 | `caretVisible` | `bool` | driven by the caller's clock |
 | `searchFocused` | `bool` | set by a click on the field, cleared by a click anywhere else |
+| `caret` | `std::size_t` | a **byte offset into `query`**; `clampCaret()` is its one owner and every mutator ends there |
 | `known` | `unordered_set<ItemId>` | the recipe book; **only ever grows** |
 | `restrictToKnown` | `bool` | *"An empty book and no book are different things"* |
+| `unlockedBySeen` | `unordered_set<ItemId>` | **NEW 2026-08-20.** The wider half of the book (§1.5.6): recipes reachable because one ingredient has ever been held. Recomputed, not accumulated — its answer depends on the grid |
+| `preview` | `optional<ItemId>` | **NEW 2026-08-20.** The row last clicked in survival, ghosted into the crafting grid. Set only when `previewFor` can actually lay it out on *this* screen, and cleared by every path that reconciles the card |
 
 ---
 

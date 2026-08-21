@@ -23,6 +23,7 @@
 #include "item/Inventory.hpp"
 #include "item/Mining.hpp"
 #include "item/Recipe.hpp"
+#include "item/SeenItems.hpp"
 #include "item/SlotOps.hpp"
 #include "item/Smelting.hpp"
 #include "item/Tool.hpp"
@@ -3777,6 +3778,39 @@ int main() {
         // The catalogue card's own state. Kept out here rather than inside the
         // screen module, so `build` stays a pure function of what it is given.
         game::inventoryScreen::CatalogueState catalogue;
+
+        // **Every item the player has ever held**, and it never forgets one.
+        // The recipe book is listed from this rather than from what is in the
+        // bag right now: the user's rule is *"we need an array that is append
+        // only, updated every time you pick up an item... say I picked up a log
+        // then dropped it - the array should remember I had a log, and recipes
+        // that include a log must still show, obviously with a red backdrop"*.
+        // `SeenItems.hpp` owns the bitset; this is the one live copy of it, and
+        // it rides out to disk in `SavedPlayer::seenItems` so a quit does not
+        // reset the book to "you have met nothing".
+        game::SeenItems seenItems{};
+
+        // **How many times the ledger above has actually changed**, which is
+        // the whole reason the recompute below it is affordable.
+        // `recipesUnlockedBySeen` scans every recipe in the game against every
+        // bit, so calling it once a frame would be a table scan per frame for
+        // an answer that changes a few dozen times in a session. Bumped only
+        // when a bit that was *not* already set gets set, so the steady state -
+        // walking around with a full inventory of things you have seen before -
+        // costs nothing but the compare.
+        //
+        // Starts at 1 against a `lastUnlocked` of 0 so the first frame is
+        // always a miss and the set is computed once before anything can read
+        // it; a shared starting value would leave an empty book on screen until
+        // the player happened to pick something up.
+        std::uint64_t seenRevision = 1;
+        std::uint64_t lastUnlockedRevision = 0;
+        // **And the grid the last recompute was made for.** The answer is not a
+        // property of the ledger alone: a 3x3 recipe is not listed to a player
+        // standing at their own 2x2, so walking from the inventory screen to a
+        // crafting table has to re-ask even though nothing was picked up. -1 is
+        // "never asked", which no real grid width can be.
+        int lastUnlockedGridSize = -1;
         // Free-running clock for anything on screen that pulses. The caret is
         // the only user so far, on the reference's own six-tick cadence: three
         // tenths of a second on, three off.
@@ -4635,6 +4669,36 @@ int main() {
         // review mode ends up half-sealed.
         const bool showcasing = settings.dropShowcase || settings.creatureShowcase > 0;
         const bool dropsPersist = !showcasing;
+        // **Say out loud that the world is not being saved.** `saveEverything`
+        // refuses its whole body while `showcasing` and deliberately returns
+        // *true* when it does - nothing failed, nothing was attempted - so the
+        // shutdown line still reads "Saving world." and not one existing
+        // message tells the player that the player record, the chests, the
+        // furnaces, the stowboxes and the creatures all went nowhere. The
+        // drop_showcase warning above names the items on the floor, which reads
+        // as the whole of what the setting does.
+        //
+        // That silence is fine for the five-minute review the mode was built
+        // for and expensive for anyone who leaves it on: the setting survives
+        // in `settings.cfg`, so a world can be played for hours and lose every
+        // session, with the save folder's timestamps the only tell. It also
+        // silently defeats anything whose whole promise is persistence - the
+        // seen-item ledger behind the recipe book is append-only *and* saved,
+        // and under this gate it starts empty every launch.
+        //
+        // Named by cause rather than by flag, because the two settings are
+        // spelled differently from the predicate that reads them and a player
+        // searching their config for the culprit needs the key, not `showcasing`.
+        if (showcasing) {
+            engine::logWarn(std::string("review mode is on (") +
+                            (settings.dropShowcase ? "drop_showcase=1" : "") +
+                            (settings.dropShowcase && settings.creatureShowcase > 0 ? ", " : "") +
+                            (settings.creatureShowcase > 0 ? "creature_showcase=" + std::to_string(settings.creatureShowcase)
+                                                           : "") +
+                            "): NOTHING will be saved this session - not the player, the recipe "
+                            "book, chests, furnaces, stowboxes or creatures. Set it to 0 in "
+                            "settings.cfg to play for keeps.");
+        }
         if (dropsPersist) {
             // Counted off the roster rather than off the loop, matching the
             // creature restore: `loadDrops` already dropped whatever it refused,
@@ -4818,7 +4882,34 @@ int main() {
             for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
                 inventory.armourAt(i) = savedPlayer->armour[i];
             }
+            // **The recipe book's ledger, and it is the one field here that
+            // must not be merged.** Everything above is assigned rather than
+            // OR-ed because a slot deliberately emptied has to stay empty; this
+            // one is assigned because the live copy is still all zeroes at this
+            // point - nothing has run a sweep yet - so assignment and a merge
+            // are the same operation today and assignment is the one that stays
+            // correct if a starting kit ever marks something first.
+            //
+            // **No sanitise, and that is a decision rather than an omission.**
+            // `WorldStore::loadPlayer` runs `seenTrimToRoster` at the trust
+            // boundary, which is where the same rule is applied to the stacks -
+            // a file written by a build with a longer roster can carry bits
+            // this build has no name for, and `seenHas` must not be asked about
+            // them. A second trim here would be a second owner of one rule.
+            //
+            // A version 8 file has no bits at all; `WorldStore.cpp`'s
+            // `seedSeenFromCarried` fills them from what the record
+            // demonstrably contained, so an existing player does not open this
+            // build with an empty book while standing in a house they built.
+            seenItems = savedPlayer->seenItems;
+            // The ledger changed under the recompute's feet, so say so. It
+            // would in fact be caught anyway - `lastUnlockedRevision` starts a
+            // step behind - but a wholesale replacement that did not bump the
+            // revision is precisely the edit that would break that, and it is
+            // one line to make the invariant hold locally instead of by luck.
+            ++seenRevision;
         }
+
         bool hudDirty = true;
         /// Whether the camera itself is inside a water cell, which is a
         /// different question from `Player::inWater` - that one asks about the
@@ -4863,6 +4954,36 @@ int main() {
         const auto blurSearch = [&] {
             catalogue.searchFocused = false;
             catalogue.clampCaret();
+        };
+
+        // **One owner of "the ghosted recipe no longer applies".**
+        //
+        // `catalogue.preview` is the row last clicked in survival, drawn as a
+        // picture over the crafting grid. It is not a fact about the world, it
+        // is a fact about what the player last asked - so every place that
+        // already reconciles the card has to let it go, or the obvious bug
+        // here is a ghost left over from a tab, a search or a screen the player
+        // has moved on from. Four callers today: the screen closing, a tab
+        // clicked, a tab cycled on the stick, and the search query changing
+        // what is listed.
+        //
+        // A named function rather than four copies of `catalogue.preview
+        // .reset()`, for the reason `blurSearch` above gives in full: a fifth
+        // caller is then free, and the day this has to do something *else* as
+        // well it is one edit instead of four, three of which would be missed.
+        //
+        // **Guarded on `has_value`, and here is what that guard actually
+        // buys.** It is not saving a rebuild: all four callers today set
+        // `hudDirty` themselves a line or two later, so the flag would be
+        // raised either way. What it buys is that this function only ever
+        // reports a change it really made, so the fifth caller - a path that
+        // does *not* otherwise dirty the HUD - gets the right behaviour for
+        // free instead of dirtying every frame it runs on.
+        const auto clearRecipePreview = [&] {
+            if (catalogue.preview.has_value()) {
+                catalogue.preview.reset();
+                hudDirty = true;
+            }
         };
 
         // Hands back everything the screen was holding: the cursor stack, then
@@ -4915,6 +5036,12 @@ int main() {
                 furnaceOutput = game::ItemStack{};
             }
             blurSearch();
+            // **And the ghosted recipe, which is the screen's state and not the
+            // world's.** A preview left set outlives the screen it was asked in
+            // - `catalogue` is a long-lived local, not something the screen owns
+            // - so reopening the inventory would show a ghost the player last
+            // clicked on in a completely different session of the card.
+            clearRecipePreview();
             // A lid closing is placed at the chest, not at the ear: you hear it
             // from wherever you walked off to.
             if (openScreen == game::inventoryScreen::Kind::Chest ||
@@ -5368,6 +5495,28 @@ int main() {
                 for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
                     saved.armour[i] = inventory.armourAt(i);
                 }
+                // **The recipe book's ledger, written by name like everything
+                // else in this block and never as an eighth positional
+                // initialiser.** `WorldStore.hpp` asserts this record's field
+                // order and its freedom from padding, and the designated
+                // initialiser above deliberately stops at `exhaustion`;
+                // appending a value positionally there would bind it to
+                // whichever field happens to sit eighth today and go silently
+                // wrong the next time a field is inserted.
+                //
+                // **From the live `seenItems`, not from `carried`.** The two
+                // are not the same fact: `carried` is a copy of the bag with
+                // the cursor and the crafting grid folded in, so it answers
+                // "what have you got", while this answers "what have you ever
+                // had" - and the whole point of the ledger is that the second
+                // survives the first going to zero. Deriving it from `carried`
+                // here would quietly turn the book back into a snapshot of the
+                // inventory, which is the bug the ledger exists to fix.
+                //
+                // A straight copy of the array, because the sweep in the frame
+                // loop has already folded the cursor and the worn set into it -
+                // there is nothing left here that has not been marked.
+                saved.seenItems = seenItems;
                 // **The hour, and it is world state living in the player record
                 // on purpose.** `WorldStore.hpp` argues that above the field:
                 // there is exactly one such fact today, and a `level.dat`
@@ -6466,6 +6615,16 @@ int main() {
             const auto searchChanged = [&](bool contentChanged) {
                 if (contentChanged) {
                     catalogue.scrollRow = 0;
+                    // **And the ghosted recipe, on the same gate as the
+                    // scroll.** New text is a new result set, so the row the
+                    // preview was picked from may no longer be listed at all -
+                    // and a picture in the grid with nothing on screen to
+                    // explain it is the stale-ghost bug. Moving the caret is
+                    // deliberately *not* included: it changes nothing about
+                    // what matches, so throwing the preview away for it would
+                    // be a loss the player did not ask for, exactly as
+                    // resetting the scroll would be.
+                    clearRecipePreview();
                 }
                 uiSeconds = 0.0f;
                 hudDirty = true;
@@ -6859,6 +7018,11 @@ int main() {
                             // at the top and does not hold the keyboard.
                             catalogue.scrollRow = 0;
                             blurSearch();
+                            // And drops the ghosted recipe with it, for the same
+                            // reason the click path does: the row it came from
+                            // is not in this tab's list, so the picture in the
+                            // grid would have nothing on screen explaining it.
+                            clearRecipePreview();
                             hudDirty = true;
                         }
                     }
@@ -7324,8 +7488,107 @@ int main() {
                             // would open a short list scrolled past its end.
                             catalogue.scrollRow = 0;
                             blurSearch();
+                            // And the ghosted recipe goes with the tab it was
+                            // picked in. A picture of a recipe whose row is no
+                            // longer on screen is the stale-ghost bug, and it
+                            // reads as the grid having filled itself in.
+                            clearRecipePreview();
                             hudDirty = true;
                             continue;
+                        }
+
+                        // **Survival: the catalogue is a recipe book, so a click
+                        // asks how something is made rather than conjuring it.**
+                        // The user's rule - *"if a crafting recipe is clicked in
+                        // survival, the recipe shows up in the grids"* - and the
+                        // ghost `build` draws from `catalogue.preview` is the
+                        // whole of the answer.
+                        //
+                        // **Nothing is moved, and that is the design rather
+                        // than a shortcut.** No stack leaves the inventory, no
+                        // cell of `craftSlots` is written, so there is no
+                        // "empty the grid first" step, no way for a click to
+                        // strand or duplicate an item, and no interaction at
+                        // all with the drag sweep or the autosave's fold of the
+                        // grid into the carried inventory. The player lays the
+                        // recipe out themselves; this only shows them what it
+                        // is, and marks the cells they cannot fill.
+                        //
+                        // **No sound is played here on purpose.** Every press
+                        // that lands on a screen already plays
+                        // `SoundEvent::Click` at pitch 1.0, once, at the top of
+                        // this block - which is exactly what `UI.md` R7 asks
+                        // for on a list-row selection. R7 still says the event
+                        // is "referenced nowhere"; that sentence went stale
+                        // when the one-line owner above landed, and a second
+                        // `playGlobal` here would layer a second click over the
+                        // first rather than add a missing one.
+                        if (!creative && game::inventoryScreen::showsCatalogue(*openScreen)) {
+                            if (const auto cell = game::inventoryScreen::catalogueCellAt(
+                                    *openScreen, cursorX, cursorY, catalogue.scrollRow);
+                                cell.has_value()) {
+                                const std::vector<game::ItemId> listed =
+                                    game::inventoryScreen::catalogueItems(catalogue);
+                                // **A cell past the end of the list falls
+                                // through rather than swallowing the click** -
+                                // the trap `INTERFACE.md` 4.5b records, and the
+                                // same one the creative branch below guards
+                                // with its `tookEntry` flag. The empty cells
+                                // under the last entry are the list's blank
+                                // space, not entries, so a click there has to
+                                // go on to whatever else claims that point.
+                                if (*cell < listed.size()) {
+                                    // **Resolved before it is stored, because a
+                                    // listed row is not always a showable
+                                    // one.** `catalogue.known` is built at the
+                                    // full 3x3 on purpose - holding the
+                                    // ingredients teaches you the recipe
+                                    // whether or not you are standing at a
+                                    // table - so the inventory's own 2x2 book
+                                    // lists rows only a crafting table can lay
+                                    // out. Clicking one used to store it
+                                    // anyway; `previewFor` then correctly
+                                    // answered nothing, so the click drew no
+                                    // ghost **and silently wiped whichever
+                                    // ghost was already on screen**. That reads
+                                    // as the preview being broken rather than
+                                    // as the recipe wanting a bench.
+                                    //
+                                    // Asked with exactly what the screen will
+                                    // ask with, so the two cannot disagree
+                                    // about what is showable. `craftSlotCount`
+                                    // is what `build` calls `slotsFor`, and
+                                    // they are the same number for every screen
+                                    // that shows the book - they differ only
+                                    // for the furnace and the smithing table,
+                                    // neither of which has one. (The
+                                    // stonecutter differs from the pair in
+                                    // `resultSlotCount` instead, and likewise
+                                    // shows no book.)
+                                    //
+                                    // Replaced rather than accumulated: one
+                                    // recipe is being asked about at a time,
+                                    // and clicking a second row is a new
+                                    // question rather than an addition to the
+                                    // old one.
+                                    //
+                                    // The click is swallowed either way. It
+                                    // landed on a real entry, so falling
+                                    // through to the "clicked outside a slot"
+                                    // bin below would be a worse answer than
+                                    // doing nothing.
+                                    const std::optional<game::RecipePreview> showable =
+                                        game::previewFor(listed[*cell], inventory, craftSlots.data(),
+                                                         game::inventoryScreen::craftSlotCount(*openScreen),
+                                                         heldStack,
+                                                         game::inventoryScreen::craftSize(*openScreen));
+                                    if (showable.has_value()) {
+                                        catalogue.preview = listed[*cell];
+                                        hudDirty = true;
+                                    }
+                                    continue;
+                                }
+                            }
                         }
 
                         // The catalogue is a *source*, not a container: an entry
@@ -7333,9 +7596,10 @@ int main() {
                         // click takes a full stack, right click takes one, and
                         // shift sends a stack straight to the inventory.
                         //
-                        // Survival gets nothing from it yet - there it is a
-                        // recipe book, and clicking a recipe fills the grid
-                        // rather than conjuring the item.
+                        // **Creative only, and survival is handled directly
+                        // above rather than not at all** - this comment used to
+                        // end "survival gets nothing from it yet", which stopped
+                        // being true the moment the preview branch landed.
                         if (creative && game::inventoryScreen::showsCatalogue(*openScreen)) {
                             // A cell past the end of the list is not an entry,
                             // it is part of the list's empty space - so it falls
@@ -7770,6 +8034,67 @@ int main() {
                 for (const game::ItemId made : game::craftableItems(inventory, game::kMaxCraftSize)) {
                     catalogue.known.insert(made);
                 }
+            }
+
+            // **And the wider half of the book, keyed on
+            // `(ledger revision, grid size)`.** `recipesUnlockedBySeen` walks
+            // every recipe in the game, so it is asked only when one of the two
+            // things its answer depends on has actually moved: a bit that was
+            // not set becoming set, or the player walking from their own 2x2 to
+            // a table's 3x3. Both keys are needed and neither is enough -
+            // gating on the revision alone leaves a table showing the
+            // inventory's shorter list, and gating on the grid alone never
+            // notices a pickup.
+            //
+            // **Only while a screen that shows the book is open**, because that
+            // is the only thing that reads the answer, and the grid size the
+            // answer is keyed on is a property of that screen. A width of 0
+            // means "no book on screen"; it is not a grid any `Kind` states,
+            // which is what lets it double as the resting value.
+            //
+            // Skipped in creative for the same reason `restrictToKnown` is
+            // false there: the filter short-circuits before it reaches this set,
+            // so computing it would be a table scan whose result nothing reads.
+            const int bookGrid =
+                openScreen.has_value() && game::inventoryScreen::showsCatalogue(*openScreen)
+                    ? game::inventoryScreen::craftSize(*openScreen)
+                    : 0;
+            if (!creative && bookGrid > 0 &&
+                (seenRevision != lastUnlockedRevision || bookGrid != lastUnlockedGridSize)) {
+                catalogue.unlockedBySeen = game::recipesUnlockedBySeen(seenItems, bookGrid);
+                lastUnlockedRevision = seenRevision;
+                lastUnlockedGridSize = bookGrid;
+                // **Belt and braces rather than the thing that makes it
+                // appear**, and worth saying plainly because the tempting
+                // comment here is false: the rebuild below already runs on
+                // every frame a screen is open - `openScreen.has_value()` is
+                // one of its terms - so the new list is on screen next frame
+                // with or without this line. What it buys is that the *reason*
+                // is stated locally: if that term is ever narrowed, a list that
+                // changed under an open screen still asks for the frame it
+                // changed on. It can only fire on the frames the key moved, so
+                // it costs nothing.
+                hudDirty = true;
+
+                // **And the scroll offset, clamped against the list that has
+                // just changed length.** `scrollRow` is reset on a tab change
+                // and on a search edit and clamped on the wheel, and until this
+                // session that was every way the list could shorten. It is not
+                // any more: the book is **screen-dependent** now, because
+                // `unlockedBySeen` is keyed on the grid, so a table's list is
+                // far longer than the inventory's. Scroll a table's book to the
+                // bottom, close it, open the inventory, and `first` starts past
+                // the end of the shorter list - the card draws completely empty
+                // and the only way out is to scroll up, which looks like the
+                // book having lost everything the player learned.
+                //
+                // Sited here rather than in `closeScreen` so a scroll position
+                // survives a screen being reopened at the same grid, which is
+                // the common case; this is the one place the length can drop
+                // without the offset already being reset.
+                const int maxScroll = game::inventoryScreen::catalogueMaxScroll(
+                    game::inventoryScreen::catalogueItems(catalogue).size());
+                catalogue.scrollRow = std::clamp(catalogue.scrollRow, 0, maxScroll);
             }
 
             if (hudDirty || overlayDue || openScreen.has_value() || breakProgress > 0.0f || bowHeld) {
@@ -11898,6 +12223,104 @@ int main() {
                 sounds.playGlobal(audio, game::SoundEvent::Pop, 0.25f);
                 hudDirty = true;
                 break; // Indices shift as drops are removed.
+            }
+
+            // **The ledger of everything ever held, swept once a frame from
+            // what is being held right now.**
+            //
+            // **A sweep rather than a hook at the pickup sites, and that is the
+            // load-bearing decision here.** There are roughly fifteen ways an
+            // item arrives in a player's hands and `Inventory::add` covers only
+            // about half of them: `slots::leftClick` and `rightClick` swap a
+            // stack onto the cursor, `quickMove` shifts one across, the drag
+            // sweep distributes one, a double click gathers a stack together,
+            // taking a craft result builds one on the cursor, the furnace hands
+            // its output over, a chest or a stowbox gives one back, and the
+            // creative kit simply writes the slots. Hooking each of those is
+            // `CLAUDE.md` bug shape #14 - a rule that exists, is correct, and
+            // is present in only some of the places that need it - and the one
+            // that got missed would be invisible, because a missing bit looks
+            // exactly like a recipe the player has not earned yet.
+            //
+            // **Last thing in the frame, and that is a fix rather than a
+            // preference.** It used to stand four thousand lines above, beside
+            // the status strip, under a comment claiming the only losable item
+            // was one that arrived and left inside a single frame and that no
+            // path does that. The claim was false by inspection: the two
+            // collectable loops directly above this line are *below* where the
+            // sweep stood, so a pickup was first seen on frame N+1 - and every
+            // input handler in this file runs earlier still, so anything picked
+            // up on frame N and then thrown, eaten, placed or moved into a
+            // chest by a click on frame N+1 was never marked at all. Down here
+            // the mark happens in the same frame as the acquisition, with
+            // nothing in between. The bookshelf take and the creative
+            // catalogue's `add` are also above this, so every acquisition path
+            // in the file is upstream of it.
+            //
+            // **What that costs is one frame of latency in the book**, because
+            // the `unlockedBySeen` recompute keyed on `seenRevision` now sits
+            // above rather than below: a bit set here is read on the next
+            // frame's pass. That is the same one-frame delay the old placement
+            // already had for anything picked up off the floor, moved onto the
+            // rarer case, and it is invisible - `hudDirty` is set by everything
+            // that can change the ledger anyway.
+            //
+            // **Sweeping what is currently held is otherwise equivalent to
+            // hooking every site**, and the proof is short: the set is
+            // append-only and `seenMark` is idempotent, so the only thing that
+            // can be lost is an item that arrives and leaves again *between two
+            // sweeps* without ever being in a slot, the cursor or the worn set.
+            // With the sweep here that window is the tail of the frame - the
+            // mesh builds and the draw - and nothing there touches the
+            // inventory.
+            //
+            // **Not inside `Inventory::add`.** That function is `constexpr` and
+            // is constant-evaluated by the proofs in `Inventory.hpp`; a side
+            // effect on a global ledger is not something a constant expression
+            // may do, so the hook that looks like the tidy one does not build.
+            //
+            // **Survival only, and creative is the case this gate exists to
+            // refuse.** This comment used to argue the opposite - that "have
+            // you ever held this" is the same question in both modes - which is
+            // true of the question and worthless as an answer: creative grants
+            // a full hotbar for the asking, so an unconditional sweep marks
+            // whatever was conjured, **permanently**, because `SeenItems` is
+            // append-only and nothing anywhere clears a bit. A world flown
+            // around in creative for ten minutes and then played in survival
+            // would open with a book that has learned almost everything, and
+            // there is no way back from that. The asymmetry is the whole
+            // argument and it is this project's own: `WorldStore.cpp`'s
+            // `seedSeenFromCarried` says it in one line - it "under-counts on
+            // purpose and cannot over-count". Under-marking heals itself the
+            // first time the item is genuinely held in survival; over-marking
+            // destroys what the book means and heals never.
+            if (!creative) {
+                const auto noteHeld = [&](const game::ItemStack& stack) {
+                    // The `seenHas` test is not an optimisation of `seenMark`,
+                    // which is idempotent on its own - it is what makes the
+                    // revision below mean "the ledger changed" rather than
+                    // "a frame happened".
+                    if (stack.empty() || game::seenHas(seenItems, stack.item)) {
+                        return;
+                    }
+                    game::seenMark(seenItems, stack.item);
+                    ++seenRevision;
+                };
+                for (std::size_t i = 0; i < game::kInventorySlots; ++i) {
+                    noteHeld(inventory.slot(i));
+                }
+                // The worn set is a separate array with a separate restore, so
+                // it needs its own line here for the same reason it needs its
+                // own line in the save: a helmet is held, and nothing in the
+                // thirty-six slots above knows about it.
+                for (std::size_t i = 0; i < game::kArmourSlots; ++i) {
+                    noteHeld(inventory.armourAt(i));
+                }
+                // The cursor, which lives nowhere else at all - it is not in
+                // the inventory and it is not on the floor, and a stack picked
+                // straight out of a chest onto the cursor and then thrown away
+                // would otherwise never be seen.
+                noteHeld(heldStack);
             }
 
             // Rebuilt rather than transformed: world meshes are drawn with an

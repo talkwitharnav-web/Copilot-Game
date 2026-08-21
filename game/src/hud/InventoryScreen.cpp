@@ -32,7 +32,15 @@ constexpr float kCellDepth = 0.0036f;
 constexpr float kSearchBorderDepth = 0.003570f;
 constexpr float kSearchFieldDepth = 0.003560f;
 constexpr float kLabelDepth = 0.0035f;
-// 0.0034 is left free for the scrollbar.
+/// Held free for the scrollbar, which does not exist yet.
+///
+/// **A named constant rather than a line of prose**, because this reservation
+/// was spelled as the bare literal 0.0034 in three places - here, the assert
+/// below and `UI.md` - and the missing-ingredient wash was then given exactly
+/// that number by an author who had read none of them. A band nothing can check
+/// is a band the next element parks in, so anything sited nearby now asserts
+/// against this name instead of against a number somebody has to notice.
+constexpr float kScrollbarReservedDepth = 0.0034f;
 constexpr float kCatalogueIconDepth = 0.0032f;
 constexpr float kCatalogueCountDepth = 0.0031f;
 constexpr float kIconDepth = 0.0030f;
@@ -48,14 +56,15 @@ constexpr float kTooltipDepth = 0.0006f;
 // block drawn as boxes, and a count's shadow spends `hud::kFontShadowDepth`
 // behind its own - so the real gap is smaller than these lines look.
 //
-// The catalogue's is the tight one at 6e-5, and it is tight on purpose: 0.0034
-// is held free above it for the scrollbar. **Downstream of five blocks moving
+// The catalogue's is the tight one at 6e-5, and it is tight on purpose:
+// `kScrollbarReservedDepth` is held free above it for the scrollbar.
+// **Downstream of five blocks moving
 // from flat sprites to models this session** - a flat sprite spends none of the
 // icon budget and a model spends all of it, so this band went from unused to
 // nearly spent without a line of it changing.
 static_assert(hud::iconStaysBehindItsMarks(kCatalogueIconDepth, kCatalogueCountDepth),
-              "a catalogue icon now reaches in front of its own count - the free 0.0034 band "
-              "above is where to take the room from");
+              "a catalogue icon now reaches in front of its own count - the band named by "
+              "kScrollbarReservedDepth above is where to take the room from");
 static_assert(hud::iconStaysBehindItsMarks(kIconDepth, kCountDepth),
               "a grid icon now reaches in front of its own stack count and durability bar");
 static_assert(hud::iconStaysBehindItsMarks(kHeldIconDepth, kHeldCountDepth),
@@ -161,11 +170,19 @@ constexpr float kCellSheetTop = 773.0f;
 ///
 /// **Four, where `INTERFACE.md` S3.1 describes six.** Three of vanilla's six are
 /// expandable groups, which are slice 9 and do not exist. The fourth is a
-/// *selected recipe*, and that one was built and taken back out: nothing sets
-/// it - slice 8 fills the grid on the click rather than remembering it - so it
-/// was a highlight that meant nothing and stayed lit behind an item already
+/// *selected recipe*, and that one was built and taken back out: at the time
+/// nothing set it - the click filled the grid rather than remembering it - so
+/// it was a highlight that meant nothing and stayed lit behind an item already
 /// taken. What is left is the answer this slice exists to give, plus the cell
 /// under the pointer.
+///
+/// **That reasoning expired on 2026-08-20 and the state is still absent.** A
+/// survival click now *does* remember its row, in `CatalogueState::preview`,
+/// so a selected-recipe tile would have something true to say and would be
+/// cleared by everything that already reconciles the card. It is an unbuilt
+/// option rather than an impossible one; what it needs is a fifth strip in
+/// `tools/make-hud-sheet.ps1` and a judgement about whether the ghost now
+/// standing in the grid has already said it.
 ///
 /// Order is the order the strip is written in, and nothing else may reorder it.
 enum class CellState : std::uint8_t {
@@ -291,6 +308,91 @@ static_assert(kSlotHighlightPixels == kSlotPitchPixels - 2.0f,
 constexpr float kSlotHighlightHalf = kSlotHighlightPixels * kPixel * 0.5f;
 constexpr glm::vec4 kSlotHighlightBack{1.0f, 1.0f, 1.0f, 96.0f / 255.0f};
 constexpr glm::vec4 kSlotHighlightFront{1.0f, 1.0f, 1.0f, 32.0f / 255.0f};
+
+/// **The "you have not got this one" wash over a previewed grid cell**, and it
+/// is deliberately the same red the catalogue's blocked cell already uses -
+/// 243, 74, 63, the colour `INTERFACE.md` 3.1b records for
+/// `CellState::Uncraftable`. One red in the interface means one thing, and a
+/// second red mixed by eye beside it would read as a different state.
+///
+/// **Flat colour rather than a sprite, for the same reason the hover highlight
+/// above is.** There is no art for this and none is needed: it is a plain quad
+/// over the slot's 16x16 interior, so it costs nothing in
+/// `tools/make-hud-sheet.ps1` and cannot fall out of step with a sheet.
+///
+/// **The alpha is the whole design and it is a taste call, so here is the
+/// arithmetic rather than a bare number.** The user asked for *"a very slight
+/// red backdrop in that cell - instead of the cell being grey like normal it'll
+/// be red"*, which is a wash over the panel's own grey rather than the solid
+/// tile the catalogue paints. The panel's slot interior is `kSlotInteriorGrey`,
+/// so this composites to `0.38 * (243, 74, 63) + 0.62 * 139` = roughly
+/// (179, 114, 110): unmistakably red beside an untouched grey cell, and far
+/// short of the catalogue's flat 243. 0.55 was the first number tried and read
+/// as a warning rather than a hint; below about 0.3 the difference stops
+/// surviving the panel's own shading. **This has not been judged on screen by
+/// anybody** - it is the one value here a playtester should retune, and it is a
+/// single literal precisely so they can.
+///
+/// **That arithmetic is only true because the quad is drawn on
+/// `TextureLayer::White`**, and the first cut was not: see the trap named at
+/// the draw site below, where passing 0.0f produced (133, 100, 98) - a red
+/// channel *below* the untouched grey it was meant to stand out against.
+///
+/// **It is also only true where nothing is composited on top of it.** A grey
+/// "veil" quad used to knock previewed icons back and covered 65.6% of this
+/// wash, taking the middle of the mark to (157, 128, 126); it was removed on
+/// 2026-08-20 at the player's request, so a missing cell now draws a bare wash
+/// and this figure holds across the whole 16x16. Anybody laying a new quad over
+/// a previewed cell has to retune this alpha, or restate it.
+constexpr glm::vec4 kMissingIngredient{243.0f / 255.0f, 74.0f / 255.0f, 63.0f / 255.0f, 0.38f};
+
+/// The panel's own slot interior, measured off the art at about 139 grey.
+///
+/// **The wash above states its result in these terms**, which is the whole of
+/// what this is for now that the ghost veil that also composited against it is
+/// gone.
+constexpr float kSlotInteriorGrey = 139.0f / 255.0f;
+
+/// Between the panel and the icons, which is the only band that works: the wash
+/// has to cover the slot the panel sprite drew and be covered by anything sitting
+/// in that slot, or a real item would be tinted red by a preview it has nothing
+/// to do with.
+///
+/// **0.0033 and not 0.0034**, which is the band `kScrollbarReservedDepth` holds
+/// for a scrollbar that is still unbuilt. Nothing renders wrong either way
+/// today - two elements at one depth fall back on append order, and these two
+/// are never on screen together - but a reservation that a live element sits in
+/// is not a reservation, and the assert above still tells a future reader to
+/// take room from it.
+constexpr float kMissingIngredientDepth = 0.0033f;
+static_assert(kMissingIngredientDepth < kPanelDepth && kMissingIngredientDepth > kIconDepth,
+              "the missing-ingredient wash must sit over the panel art and under every icon - "
+              "outside that band it either paints over the slot's own picture or tints the item "
+              "standing in the cell next to it");
+static_assert(kMissingIngredientDepth < kScrollbarReservedDepth,
+              "the missing-ingredient wash has moved into the band held free for the scrollbar - "
+              "either move it back out or retire the reservation everywhere it is stated, which "
+              "is here, the catalogue-icon assert above and UI.md's depth table in section 1.4.6 "
+              "(section 6.3 is the armour bar and never held this; the citation was wrong from "
+              "the day it was written, checked 2026-08-20)");
+
+/// **There is deliberately no "ghost" treatment, and the band it used is free.**
+///
+/// A previewed ingredient the player can afford is drawn by the same
+/// `hud::appendStack` as a real item, with nothing over it. A grey veil at
+/// 0.0029 used to fade those icons back so the grid could not be mistaken for
+/// one the player had filled; the player rejected it in play - *"objects that
+/// user DOES have are like too light and hard to see and they have a different
+/// grey backdrop for no reason"* - and the draw site records why the argument
+/// for it was wrong. **The red wash carries the whole distinction**, and an
+/// affordable cell looking exactly like a placed item is the point rather than
+/// a defect.
+///
+/// Left as a note rather than deleted silently because 0.0029 now has an 8e-5
+/// gap to the icon's forward reach standing empty, and the next element to want
+/// a band in front of the icons will find it - it should know the ladder there
+/// is tight and that `hud::kIconDepthSpan` is what has to be cleared, not
+/// `kIconDepth`.
 /// Eight art pixels, so the label scales with the panel rather than the window.
 constexpr float kTooltipTextHeight = 8.0f * kPixel;
 
@@ -562,6 +664,42 @@ constexpr std::size_t slotsFor(Kind kind) {
     return (kind == Kind::Furnace || kind == Kind::SmithingTable) ? 2u : craftSlotCount(kind);
 }
 
+/// Whether every screen that shows the recipe book has a grid the ghost
+/// preview can actually fill.
+///
+/// **`RecipePreview::cells` is exactly `kMaxCraftSlots` long and `slotsFor` is
+/// a different function that knows nothing about it** - the same pair of
+/// unlinked constants `everyGridFitsTheBuffer` in the header exists for, one
+/// rung down. `build` walks the preview by `slotsFor(kind)`, which is the right
+/// bound for the *screen* and says nothing about the *array*: a tenth `Kind`
+/// that showed the book and offered a 4x4 grid would read seven entries past
+/// the end of a fixed array, and a raw `std::array` index gives no diagnostic.
+///
+/// Takes the bound as a parameter so the control below can vary it, and that
+/// bound is the **one** variable between the two assertions.
+constexpr bool everyBookScreenFitsThePreview(std::size_t cells) {
+    for (int i = 0; i < static_cast<int>(Kind::Count); ++i) {
+        const auto kind = static_cast<Kind>(i);
+        if (showsCatalogue(kind) && slotsFor(kind) > cells) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(everyBookScreenFitsThePreview(game::kMaxCraftSlots),
+              "a Kind shows the recipe book with more slots than RecipePreview has cells, so the "
+              "ghost loop in build would read off the end of it - widen kMaxCraftSize in "
+              "Recipe.hpp, which resizes both, rather than narrowing the loop here");
+/// Graded negative control: the same sweep with the bound one cell short must
+/// FAIL, because the crafting table shows the book and states all nine. Without
+/// it the assertion above would pass just as cheerfully if `showsCatalogue`
+/// started answering false for everything.
+static_assert(!everyBookScreenFitsThePreview(game::kMaxCraftSlots - 1),
+              "the preview fit sweep proves nothing unless a too-small bound fails it - if this "
+              "fires, no book screen states the widest grid any more and the check above went "
+              "vacuous");
+
 /// Where the nth offered cut sits. Only the stonecutter has more than one
 /// result, which is why every other screen asks for index 0 and gets the
 /// layout's single position back.
@@ -822,7 +960,31 @@ std::vector<ItemId> catalogueItems(const CatalogueState& catalogue) {
     for (const ItemId item : allItems()) {
         // The recipe book, when there is one. Applied before the tab and the
         // search so every tab is a view of the same book.
-        if (catalogue.restrictToKnown && catalogue.known.count(item) == 0) {
+        //
+        // **`known` is now the FLOOR rather than the whole rule.** It holds
+        // what the player could actually make at the moment their inventory was
+        // last scanned, which is a strictly narrower question than the one the
+        // user asked for: *"the recipe for the item will show up if at least
+        // one item needed for crafting has been obtained... say I picked up a
+        // log then dropped it - the array should remember I had a log, and
+        // recipes that include a log must still show, obviously with a red
+        // backdrop"*. `unlockedBySeen` is that wider rule, derived from the
+        // append-only ledger of everything ever held.
+        //
+        // **Both, rather than replacing one with the other**, because they can
+        // genuinely disagree in the direction that matters: `unlockedBySeen`
+        // lists a result once any one filled cell of its pattern names a seen
+        // item, and `known` lists a result the player was carrying the whole
+        // pattern for - which the ledger also covers, since holding every
+        // ingredient means having held one. Keeping the union costs one set
+        // lookup on a row that failed the first, and means a book entry can
+        // never be *taken away* by a change to the wider rule.
+        //
+        // Neither is consulted in creative: `restrictToKnown` is false there,
+        // so this whole test short-circuits on its first term and the catalogue
+        // stays the complete source it is meant to be.
+        if (catalogue.restrictToKnown && catalogue.known.count(item) == 0 &&
+            catalogue.unlockedBySeen.count(item) == 0) {
             continue;
         }
         if (tab == CatalogueTab::Search) {
@@ -1050,6 +1212,161 @@ engine::MeshData build(Kind kind, const Inventory& inventory, const ItemStack* c
     for (std::size_t i = 0; i < armourSlotCount(kind); ++i) {
         hud::appendStack(mesh, inventory.armourAt(i), armourSlotCentre(kind, i), kSlotHalf, kIconDepth,
                          kCountDepth);
+    }
+
+    // **The clicked recipe, ghosted into the crafting grid.** This is the
+    // second half of the user's rule - *"if a crafting recipe is clicked in
+    // survival, the recipe shows up in the grids. Items the user already has
+    // show normally; items the user doesn't have show with a very slight red
+    // backdrop in that cell"* - and it draws a picture rather than moving
+    // anything, so no item can be displaced, consumed or duplicated by looking
+    // at a recipe.
+    //
+    // **Resolved once, above the loop.** `previewFor` walks the recipe table
+    // and spends a count map of the inventory as it goes, which is exactly what
+    // makes six sticks against a seven-stick ladder mark one cell rather than
+    // all seven; asking it per cell would pay for the scan nine times *and*
+    // restart the count each time, so every cell would come back affordable.
+    //
+    // **At `craftSize(kind)`, the screen's own width**, never the recipe's.
+    // A pattern is stored tight at its own size - the stick recipe is two
+    // entries at width 1 - so laying it out at anything but the screen's width
+    // puts those two planks side by side and draws a recipe that does not
+    // exist. `previewFor` owns that re-indexing and the 2x2/3x3 gate with it.
+    //
+    // **Gated on `showsCatalogue`, so a screen with no book never draws one.**
+    // `preview` is state that outlives a single screen, and a furnace or a
+    // stonecutter has a `slotsFor` of its own that is not a grid at all.
+    // `Main.cpp` clears the field when a screen closes; this is the second half
+    // of that promise, sited where the drawing happens rather than trusting the
+    // caller - the two are in different files and only one of them is mine.
+    //
+    // **Measured against the grid and the cursor as well as the bag**, which is
+    // the other half of counting honestly: a stack moved into a crafting cell
+    // has left the inventory, so a preview asked about the bag alone reddens
+    // the very cells the player has just filled in correctly. `previewFor`
+    // takes the grid pointer and the held stack for exactly that. `slotsFor`
+    // is how many cells that pointer has and `craftSize` is the width the
+    // pattern is laid out at - two different numbers, and the second is still
+    // the screen's rather than the recipe's.
+    const std::optional<RecipePreview> preview =
+        showsCatalogue(kind) && catalogue.preview.has_value()
+            ? previewFor(*catalogue.preview, inventory, craftSlots, slotsFor(kind), heldStack,
+                         craftSize(kind))
+            : std::nullopt;
+    if (preview.has_value()) {
+        // Bounded by `slotsFor(kind)` - the cells this screen actually has -
+        // and never by the recipe's own width or height, which have no
+        // relationship to the grid at all. `everyBookScreenFitsThePreview`
+        // above is what proves that bound also fits `RecipePreview::cells`.
+        for (std::size_t i = 0; i < slotsFor(kind); ++i) {
+            const glm::vec2 centre = craftSlotCentre(kind, layout, i);
+            // **The two halves of a previewed cell are gated differently, and
+            // that difference is the feature.** A ghost is a claim about what
+            // belongs here; a wash is a claim about what the player has not
+            // got. Only the first is made false by a real stack standing in
+            // the cell.
+            //
+            // So the **ghost** keeps the empty test. Drawn over a real stack it
+            // would hide what is actually in the grid and, worse, show an
+            // ingredient the player has not got sitting where their own item
+            // is - so as soon as they start filling the grid in, each ghost
+            // gives way to the real thing it was standing in for.
+            //
+            // The **wash** draws on an empty cell *or* on one holding the wrong
+            // item, because `measureAgainstOwned` counts a grid occupant under
+            // its own id and not the ingredient's: a cobblestone sitting where
+            // a plank belongs leaves `missing[i]` true, and it is exactly the
+            // cell the player needs marked. Gating the wash on emptiness alone
+            // swallowed that red and left them staring at a wrong item and an
+            // empty output with nothing to connect the two.
+            //
+            // What the wash must never do is mark a cell the player has filled
+            // in **correctly** - the item square is 12.96 art pixels inside a
+            // 16-pixel wash, so an ungated wash paints a 1.5-pixel red frame
+            // round a correct stack and shows through every transparent pixel
+            // of its icon. The `item != cells[i]` test is what excludes that,
+            // and it is belt and braces rather than the only guard:
+            // `measureAgainstOwned` settles a correctly-filled cell before it
+            // spends anything, so `missing[i]` on one is impossible rather than
+            // merely unlikely. This test costs one comparison and does not care
+            // whether that stays true.
+            const bool cellEmpty = craftSlots[i].empty();
+            if (preview->missing[i] && (cellEmpty || craftSlots[i].item != preview->cells[i])) {
+                // The same two-argument shape as the hover highlight below,
+                // over the same 16x16 slot interior, through `hud::appendQuad`
+                // rather than hand-emitted geometry - a quad whose indices are
+                // written out by hand vanishes for half of all winding
+                // combinations, and this one would vanish silently.
+                //
+                // **`TextureLayer::White`, and the trap is that 0.0f compiles
+                // and draws something plausible.** `hud.frag` ALWAYS samples
+                // the block array and multiplies: `texel.rgb * fragColor.rgb`.
+                // The `textured` flag only pins the UV to the texel centre, it
+                // does not bypass the sample - so layer 0 is not "no texture",
+                // it is `TextureLayer::Stone`, whose texel is (128, 128, 128),
+                // and every colour handed to this function comes out halved.
+                // This wash shipped that way and composited to (133, 100, 98)
+                // against a 139 grey slot: a red channel six BELOW the cell it
+                // was meant to stand out from, which reads as a dirty smudge
+                // rather than as red, and a red-green separation of 33. On
+                // White it lands on (179, 114, 110) - 0.38 of (243, 74, 63)
+                // over that same 139 grey - which separates by 65.
+                //
+                // **That figure describes the whole 16x16 quad only because
+                // the ghost veil now skips a missing cell.** Every washed cell
+                // carries a ghost as well, since `missing[i]` is only ever set
+                // where `cells[i]` names an ingredient - so while the veil was
+                // drawn here too it covered the 12.96-pixel item square, which
+                // is 65.6% of this quad's area and the part the eye actually
+                // lands on, and composited 0.55 * 139 + 0.45 * (179, 114, 110)
+                // = (157, 128, 126). That is a separation of 29 in the middle
+                // of the mark: worse, where it matters, than the layer-0 bug
+                // this paragraph opens with.
+                //
+                // **The hover highlight below still passes 0.0f and has the
+                // same defect** - it is where this line was copied from. Left
+                // alone deliberately: fixing it changes how a hovered slot
+                // looks on six screens, which is a judgement for whoever can
+                // see the screen, not a correctness fix to fold into this one.
+                hud::appendQuad(mesh, centre.x, centre.y, kSlotHighlightHalf, kSlotHighlightHalf,
+                                kMissingIngredientDepth, kMissingIngredient,
+                                static_cast<float>(TextureLayer::White), false);
+            }
+            // Drawn into `mesh` rather than `clipped`: the clipped layer is
+            // scissored to the catalogue card's rectangle, which the crafting
+            // grid is nowhere near, so a ghost put there would be cut away
+            // entirely.
+            // **Drawn exactly as a real stack, with nothing laid over it.**
+            // An earlier cut knocked the ghost back with a translucent grey
+            // "veil" so it read as a picture rather than an item. The player
+            // rejected it on sight: *"objects that user DOES have are like too
+            // light and hard to see and they have a different grey backdrop for
+            // no reason. objects that exist in user inv should look like what
+            // they look like if user drags and drops the object into the right
+            // card grid."*
+            //
+            // That is the right call and it is worth writing down, because the
+            // veil's argument was superficially good: a preview drawn like a
+            // real item makes the grid look full while the output slot sits
+            // empty. But the state it was dimming is the *affordable* one - the
+            // cell already agrees with the bag - so it spent contrast on the
+            // half of the feature that needs none, and it did it with a second
+            // grey nothing else on the screen uses. **The red wash is what
+            // distinguishes the two states**; an affordable cell needs no mark
+            // at all, because looking identical to a placed item is precisely
+            // what tells the player the recipe is within reach.
+            //
+            // Nothing replaces it. If a "this is a preview" cue is ever wanted
+            // again it belongs on the *output* slot, which `INTERFACE.md` 3.1b
+            // already specifies going red when the selected recipe cannot be
+            // made - one mark, on the slot that answers the question, rather
+            // than a second treatment on every cell.
+            if (cellEmpty && preview->cells[i] != ItemId::None) {
+                hud::appendStack(mesh, ItemStack{preview->cells[i], 1}, centre, kSlotHalf, kIconDepth,
+                                 kCountDepth);
+            }
+        }
     }
 
     for (std::size_t i = 0; i < slotsFor(kind); ++i) {

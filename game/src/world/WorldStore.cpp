@@ -156,7 +156,16 @@ static_assert(sameSignature(kMagic, kMagic) && !sameSignature(kMagic, kPlayerMag
 /// arrived at 8 together by accident, one because bee nests changed what
 /// generates and one because the player record grew five fields, and neither
 /// implies the other.
-constexpr std::uint32_t kFormatVersion = 8;
+///
+/// **Bumped to 9 on 2026-08-20, when the record grew the ledger of every item
+/// the player has ever held.** The recipe book is listed from that ledger, and
+/// it is append-only, so leaving it in memory alone meant it reset to "you have
+/// met nothing" on every launch - the same shape of gap as the bed and the
+/// ender chest before it. A version 8 file has no bits to give, so its rung
+/// *seeds* them from what the record demonstrably contains rather than handing
+/// back an empty book; see `seedSeenFromCarried`.
+constexpr std::uint32_t kFormatVersion = 9;
+constexpr std::uint32_t kPlayerVersionV8 = 8;
 constexpr std::uint32_t kPlayerVersionV7 = 7;
 constexpr std::uint32_t kPlayerVersionV6 = 6;
 constexpr std::uint32_t kPlayerVersionV5 = 5;
@@ -305,6 +314,43 @@ struct LegacyPlayerV7 {
 static_assert(sizeof(LegacyPlayerV7) == 1248,
               "the version 7 player record is a fact on disk and cannot change size");
 
+/// Version 8's field list: everything the record held before the ledger of
+/// items the player has ever held joined it.
+///
+/// Restated for the same reason as every rung above - so that the compiler
+/// holds this shape and today's shape at once, and the migration below has to
+/// name every field it carries across rather than trusting a prefix read. That
+/// matters more here than it looks: this rung is the one that is *today's*
+/// struct minus one member, which is exactly the shape a reader is most tempted
+/// to spell as a prefix read of `SavedPlayer`, and doing so would quietly turn
+/// every future insertion into a version 8 file loading as a plausible world
+/// with the wrong inventory in it.
+struct LegacyPlayerV8 {
+    glm::vec3 position{0.0f};
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    std::int32_t health = 20;
+    std::int32_t food = 20;
+    float saturation = 5.0f;
+    float exhaustion = 0.0f;
+    std::array<ItemStack, kInventorySlots> inventory{};
+    std::int32_t selectedSlot = 0;
+    Chest enderChest{};
+    glm::ivec3 respawnBed{0, -1, 0};
+    std::array<SavedEffect, kSavedEffectSlots> effects{};
+    float absorption = 0.0f;
+    float absorptionSeconds = 0.0f;
+    std::array<ItemStack, kArmourSlots> armour{};
+    float timeOfDay = 0.18f;
+    std::int32_t weatherRaining = 0;
+    std::int32_t weatherThundering = 0;
+    float weatherRainSeconds = 0.0f;
+    float weatherThunderSeconds = 0.0f;
+};
+
+static_assert(sizeof(LegacyPlayerV8) == 1268,
+              "the version 8 player record is a fact on disk and cannot change size");
+
 /// **The saved effect list has to be at least as wide as the live one.**
 ///
 /// `effects::kMaxActive` is derived from `effectInfo` and has moved before, 8
@@ -320,78 +366,93 @@ static_assert(effects::kMaxActive <= kSavedEffectSlots,
               "more live effect slots than the save format has room for; widen "
               "kSavedEffectSlots and bump the player version");
 
-/// Fails on: adding a field to `SavedPlayer` for version 7 without bumping the
+/// Fails on: adding a field to `SavedPlayer` for version 8 without bumping the
 /// version again. The current record must be strictly larger than the last one
 /// shipped, or the two are the same layout wearing different numbers - which is
 /// a bump that changes nothing, and this project has paid for one of those.
-static_assert(sizeof(SavedPlayer) > sizeof(LegacyPlayerV7),
-              "version 8 must say something version 7 could not");
+static_assert(sizeof(SavedPlayer) > sizeof(LegacyPlayerV8),
+              "version 9 must say something version 8 could not");
 
 /// **The writer and the reader, checked against each other rather than each
 /// against itself.**
 ///
-/// Nothing else here proves that the five shapes above are the *same* record at
-/// five ages. The `sizeof` assert beside each one pins it individually, and an
-/// individually-correct set of five numbers is exactly what a mis-stated legacy
+/// Nothing else here proves that the seven shapes above are the *same* record at
+/// seven ages. The `sizeof` assert beside each one pins it individually, and an
+/// individually-correct set of seven numbers is exactly what a mis-stated legacy
 /// struct looks like: `loadPlayer` would read the right number of bytes into the
 /// wrong field list, every value would be plausible, and the file would load.
 ///
 /// Each rung differs from the next by **precisely the members the migration
-/// beside it names, measured off `SavedPlayer` itself**. That is what makes
-/// this a check and not a restatement: the right-hand side is the live struct's
-/// answer and the left-hand side is a number frozen on disk, so the two cannot
-/// be wrong together. Insert a field anywhere above the tail and every line
-/// below the insertion fails at compile time, naming the rung that has stopped
-/// being true.
+/// beside it names**. That is what makes this a check and not a restatement:
+/// the chain is anchored at the top by the live struct's own answer - the first
+/// assert below measures `SavedPlayer` against `LegacyPlayerV8` - and every
+/// number below it is frozen on disk, so the two ends cannot be wrong together.
+/// Insert a field anywhere above the tail and every line below the insertion
+/// fails at compile time, naming the rung that has stopped being true.
+///
+/// **The lower rungs are measured off `LegacyPlayerV8`'s members and no longer
+/// off `SavedPlayer`'s, and that rebase is part of every bump from here on.**
+/// Naming `SavedPlayer::armour` in a sentence about the *difference between
+/// versions 6 and 7* only worked while today's struct happened to still hold
+/// that member at that size; it is a coincidence rather than a derivation, and
+/// the day a field is retyped or dropped - `absorptionSeconds` is already filed
+/// to go - every rung below it would start measuring today's shape while
+/// claiming to describe a shape on disk. Each rung now names the rung above it,
+/// which is the thing it is actually a difference from.
 ///
 /// > Fails on: adding a field to `SavedPlayer` in the middle rather than at the
 /// > tail - the one edit that makes every version 4 file on disk load as a
 /// > plausible world with the wrong inventory in it.
+static_assert(sizeof(SavedPlayer) == sizeof(LegacyPlayerV8) + sizeof(SavedPlayer::seenItems),
+              "version 9 is version 8 plus the ledger of every item the player has ever held "
+              "and nothing else");
 static_assert(sizeof(LegacyPlayerV7) ==
-                  sizeof(SavedPlayer) - sizeof(SavedPlayer::timeOfDay) -
-                      sizeof(SavedPlayer::weatherRaining) -
-                      sizeof(SavedPlayer::weatherThundering) -
-                      sizeof(SavedPlayer::weatherRainSeconds) -
-                      sizeof(SavedPlayer::weatherThunderSeconds),
+                  sizeof(LegacyPlayerV8) - sizeof(LegacyPlayerV8::timeOfDay) -
+                      sizeof(LegacyPlayerV8::weatherRaining) -
+                      sizeof(LegacyPlayerV8::weatherThundering) -
+                      sizeof(LegacyPlayerV8::weatherRainSeconds) -
+                      sizeof(LegacyPlayerV8::weatherThunderSeconds),
               "version 8 is version 7 plus the time of day and the four weather numbers and "
               "nothing else");
 static_assert(sizeof(LegacyPlayerV6) ==
-                  sizeof(LegacyPlayerV7) - sizeof(SavedPlayer::absorptionSeconds) -
-                      sizeof(SavedPlayer::armour),
+                  sizeof(LegacyPlayerV7) - sizeof(LegacyPlayerV8::absorptionSeconds) -
+                      sizeof(LegacyPlayerV8::armour),
               "version 7 is version 6 plus a reserved absorption clock - a field that is always "
               "zero, derived on load and deliberately never populated, see SavedPlayer - plus "
               "the worn armour, and nothing else");
-static_assert(sizeof(LegacyPlayerV5) == sizeof(LegacyPlayerV6) - sizeof(SavedPlayer::effects) -
-                                            sizeof(SavedPlayer::absorption),
+static_assert(sizeof(LegacyPlayerV5) == sizeof(LegacyPlayerV6) - sizeof(LegacyPlayerV8::effects) -
+                                            sizeof(LegacyPlayerV8::absorption),
               "version 6 is version 5 plus the effect list and the absorption pool and nothing "
               "else");
-static_assert(sizeof(LegacyPlayerV4) == sizeof(LegacyPlayerV5) - sizeof(SavedPlayer::respawnBed),
+static_assert(sizeof(LegacyPlayerV4) == sizeof(LegacyPlayerV5) - sizeof(LegacyPlayerV8::respawnBed),
               "version 5 is version 4 plus the bed and nothing else");
 static_assert(sizeof(LegacyPlayerV3) ==
-                  sizeof(LegacyPlayerV4) - sizeof(SavedPlayer::enderChest),
+                  sizeof(LegacyPlayerV4) - sizeof(LegacyPlayerV8::enderChest),
               "version 4 is version 3 plus the ender chest and nothing else");
-static_assert(sizeof(LegacyPlayerV2) == sizeof(LegacyPlayerV3) - sizeof(SavedPlayer::inventory) -
-                                            sizeof(SavedPlayer::selectedSlot),
+static_assert(sizeof(LegacyPlayerV2) == sizeof(LegacyPlayerV3) - sizeof(LegacyPlayerV8::inventory) -
+                                            sizeof(LegacyPlayerV8::selectedSlot),
               "version 3 is version 2 plus the inventory and the held slot and nothing else");
 
 /// **The ladder has to be contiguous, and this is what makes the next bump
 /// impossible to get wrong.**
 ///
-/// `loadPlayer` reads exactly the five numbers named here. Bump
-/// `kFormatVersion` to 8 for a new field and every one of those five still
-/// compiles, still runs, and **refuses every version 7 file on disk** - the
-/// player's inventory, ender chest and bed, gone at the next launch, with one
-/// warning line that says the file "does not match this world". The struct-size
-/// asserts do not catch it: they only ever describe the shapes that exist.
+/// `loadPlayer` reads exactly the seven numbers named here. Bump
+/// `kFormatVersion` to 10 for a new field and every one of those seven still
+/// compiles, still runs, and **refuses every version 9 file on disk** - the
+/// player's inventory, ender chest, bed and recipe ledger, gone at the next
+/// launch, with one warning line that says the file "does not match this
+/// world". The struct-size asserts do not catch it: they only ever describe the
+/// shapes that exist.
 ///
-/// So the rungs are required to run 2, 3, 4, 5, 6, 7, current with no gap.
-/// Bumping the version now fails to build until `kPlayerVersionV8 = 8` and a
-/// `LegacyPlayerV8` spelling out today's fields have been written beside it -
+/// So the rungs are required to run 2, 3, 4, 5, 6, 7, 8, current with no gap.
+/// Bumping the version now fails to build until `kPlayerVersionV9 = 9` and a
+/// `LegacyPlayerV9` spelling out today's fields have been written beside it -
 /// which is the work the bump was always supposed to include.
 ///
 /// The ladder bottoms out at 2 on purpose; version 1 predates the record having
 /// a stated field list at all and is a stranger like any other.
-static_assert(kFormatVersion == kPlayerVersionV7 + 1 &&
+static_assert(kFormatVersion == kPlayerVersionV8 + 1 &&
+                  kPlayerVersionV8 == kPlayerVersionV7 + 1 &&
                   kPlayerVersionV7 == kPlayerVersionV6 + 1 &&
                   kPlayerVersionV6 == kPlayerVersionV5 + 1 &&
                   kPlayerVersionV5 == kPlayerVersionV4 + 1 &&
@@ -933,9 +994,21 @@ constexpr ItemId migrateItemId(ItemId stored, ItemEra era) {
 /// above. See `ItemEra::kCount` for why nothing else would notice - C4062 is off
 /// at `/W4`, so a missing enumerator is silent, and the trailing `return`
 /// C4715 demands would quietly hand back every id unmigrated.
+///
+/// **It is also the tripwire for the one table no rung here can migrate.**
+/// `SavedPlayer::seenItems` is a bitset indexed by raw `ItemId`, and unlike
+/// every stack in the world it has no upgrade path at all - see the paragraph
+/// about it in `SeenItems.hpp`. A renumbering silently repoints all of those
+/// bits, and nothing anywhere clears one, so the damage is permanent and looks
+/// exactly like a recipe book that has always been that way.
 static_assert(static_cast<int>(ItemEra::kCount) == 3,
               "migrateItemId handles three eras; a fourth needs a rung of its own, not the "
-              "fall-through that would load a world's containers in the wrong numbering");
+              "fall-through that would load a world's containers in the wrong numbering. A "
+              "fourth era must ALSO remap SavedPlayer::seenItems, which nothing does today: it "
+              "is a bitset indexed by raw ItemId, so a renumbering repoints every saved bit at "
+              "whatever item now holds that id. That repair is a bit PERMUTATION - read each set "
+              "bit, pass it through migrateItemId, set it in a fresh array - and not the field "
+              "copy the player version rungs are made of");
 
 /// One stack, brought across from an older file.
 ///
@@ -1450,6 +1523,63 @@ bool WorldStore::save(const ChunkCoord& coord, const Chunk& chunk) const {
     return out.commit();
 }
 
+namespace {
+
+/// **Seeds the recipe ledger from what an older record demonstrably contains.**
+///
+/// Every player file below version 9 was written by a build with no ledger in
+/// it, so `seenItems` comes off those rungs all-zero - and all-zero means "you
+/// have met nothing", which for a player standing in a stone house beside a
+/// chest of diamond tools reads as the game having lost their progress rather
+/// than as a rule. The ledger is a record of what the player has *met*, and
+/// what they are carrying is proof that they met it, so the record answers its
+/// own question: every non-empty stack in the inventory, the worn set and the
+/// ender chest is marked.
+///
+/// **It under-counts on purpose and cannot over-count.** A player who mined a
+/// stack of logs, built a hut and has none left is not credited for logs here,
+/// because nothing on disk remembers that; neither is whatever is sitting in a
+/// stowbox, which lives in `stowboxes.dat` and is a table this function has no
+/// business opening. The ledger is append-only, so the first log they pick up
+/// in this build fixes both permanently. The other direction has no such
+/// repair: crediting an item the player never held would list a recipe they
+/// have not earned, and nothing anywhere clears a bit.
+///
+/// Called from **every** legacy rung, including the ones where it can do
+/// nothing - a version 2 file has no inventory in it at all - so that the rule
+/// lives in one place rather than in seven, and the next rung written below
+/// cannot be the one that forgets it. The current-version rung deliberately
+/// does not call it: that file carries a real ledger, and seeding over it would
+/// put a second answer beside the one on disk.
+void seedSeenFromCarried(SavedPlayer& player) {
+    const auto mark = [&player](const ItemStack& stack) {
+        // `count` is tested as well as the id because these stacks have not
+        // been through `sanitiseStack` yet - that runs once, below, for every
+        // rung at once. A row holding a real id with a count of zero is an
+        // empty slot wearing an old name, and crediting it would be crediting
+        // something the file does not actually claim.
+        if (stack.item != ItemId::None && stack.count > 0) {
+            seenMark(player.seenItems, stack.item);
+        }
+    };
+    for (const ItemStack& slot : player.inventory) {
+        mark(slot);
+    }
+    // The worn set is a second array reached by a second loop, which is exactly
+    // the shape where a rule gets written once and not twice - the sanitiser in
+    // `loadPlayer` says the same thing about the same two arrays, and for the
+    // same reason: a full set of diamond is not in `inventory`, so no amount of
+    // care over that one array would reach it.
+    for (const ItemStack& worn : player.armour) {
+        mark(worn);
+    }
+    for (const ItemStack& stored : player.enderChest.slots) {
+        mark(stored);
+    }
+}
+
+} // namespace
+
 std::optional<SavedPlayer> WorldStore::loadPlayer() const {
     // Sits beside the chunks directory, not inside it, so a chunk sweep never
     // has to filter it out.
@@ -1482,10 +1612,10 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
     file.read(reinterpret_cast<char*>(&seed), sizeof(seed));
 
     if (!file || magic != kPlayerMagic || seed != m_seed ||
-        (version != kFormatVersion && version != kPlayerVersionV7 &&
-         version != kPlayerVersionV6 && version != kPlayerVersionV5 &&
-         version != kPlayerVersionV4 && version != kPlayerVersionV3 &&
-         version != kPlayerVersionV2)) {
+        (version != kFormatVersion && version != kPlayerVersionV8 &&
+         version != kPlayerVersionV7 && version != kPlayerVersionV6 &&
+         version != kPlayerVersionV5 && version != kPlayerVersionV4 &&
+         version != kPlayerVersionV3 && version != kPlayerVersionV2)) {
         engine::logWarn("Player file does not match this world, ignoring: " + path.string());
         refuseTable(Table::Player, path);
         return std::nullopt;
@@ -1493,6 +1623,41 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
 
     if (version == kFormatVersion) {
         file.read(reinterpret_cast<char*>(&player), sizeof(player));
+    } else if (version == kPlayerVersionV8) {
+        // A world saved before the ledger of every item the player has ever
+        // held joined the record. Every field is carried across by name.
+        //
+        // The ledger is the one field that does *not* keep its default here,
+        // and it is the only rung difference in this file where the honest
+        // answer is not "leave it empty". An empty ledger is not the state such
+        // a world was in - the player of a version 8 world had met plenty, the
+        // build simply had nowhere to write it down - so handing back zero bits
+        // would show them a recipe book emptier than the one they closed the
+        // game on. `seedSeenFromCarried` reads it back off what they are
+        // carrying, which is the only evidence the file contains.
+        LegacyPlayerV8 legacy;
+        file.read(reinterpret_cast<char*>(&legacy), sizeof(legacy));
+        player.position = legacy.position;
+        player.yaw = legacy.yaw;
+        player.pitch = legacy.pitch;
+        player.health = legacy.health;
+        player.food = legacy.food;
+        player.saturation = legacy.saturation;
+        player.exhaustion = legacy.exhaustion;
+        player.inventory = legacy.inventory;
+        player.selectedSlot = legacy.selectedSlot;
+        player.enderChest = legacy.enderChest;
+        player.respawnBed = legacy.respawnBed;
+        player.effects = legacy.effects;
+        player.absorption = legacy.absorption;
+        player.absorptionSeconds = legacy.absorptionSeconds;
+        player.armour = legacy.armour;
+        player.timeOfDay = legacy.timeOfDay;
+        player.weatherRaining = legacy.weatherRaining;
+        player.weatherThundering = legacy.weatherThundering;
+        player.weatherRainSeconds = legacy.weatherRainSeconds;
+        player.weatherThunderSeconds = legacy.weatherThunderSeconds;
+        seedSeenFromCarried(player);
     } else if (version == kPlayerVersionV7) {
         // A world saved before the time of day and the weather joined the
         // record. Every field is carried across by name.
@@ -1520,6 +1685,10 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.absorption = legacy.absorption;
         player.absorptionSeconds = legacy.absorptionSeconds;
         player.armour = legacy.armour;
+        // And the ledger, which every rung from here down seeds the same way:
+        // an older file has no bits, so what the player is carrying is the only
+        // evidence of what they have met. See `seedSeenFromCarried`.
+        seedSeenFromCarried(player);
     } else if (version == kPlayerVersionV6) {
         // A world saved before the absorption clock and the worn armour joined
         // the record. Every field is carried across by name.
@@ -1549,6 +1718,10 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.respawnBed = legacy.respawnBed;
         player.effects = legacy.effects;
         player.absorption = legacy.absorption;
+        // No worn set in a version 6 file, so the ledger is seeded from the
+        // inventory and the ender chest alone. `seedSeenFromCarried` still
+        // walks `armour`, which is empty here - one rule, one place.
+        seedSeenFromCarried(player);
     } else if (version == kPlayerVersionV5) {
         // A world saved before status effects joined the record. Every field is
         // carried across by name; `effects` stays empty and `absorption` stays
@@ -1572,6 +1745,8 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.selectedSlot = legacy.selectedSlot;
         player.enderChest = legacy.enderChest;
         player.respawnBed = legacy.respawnBed;
+        // Same seeding as every rung above.
+        seedSeenFromCarried(player);
     } else if (version == kPlayerVersionV4) {
         // A world saved before the bed joined the record. Every field is
         // carried across by name and `respawnBed` keeps its default - `y` below
@@ -1596,6 +1771,8 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.inventory = legacy.inventory;
         player.selectedSlot = legacy.selectedSlot;
         player.enderChest = legacy.enderChest;
+        // Same seeding as every rung above.
+        seedSeenFromCarried(player);
     } else if (version == kPlayerVersionV3) {
         // A world saved before **both** halves of version 4: before the ender
         // chest joined the record, and before the eighteen duplicate item ids
@@ -1623,6 +1800,14 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         // The ender chest keeps its default: empty, which is the honest answer
         // for a world that never had one. So does `respawnBed`, for the same
         // reason - a file this old was written by a build with no bed in it.
+        //
+        // The ledger is seeded from the migrated inventory, so the ids it marks
+        // are this build's numbering and not the pre-4 numbering - which is the
+        // whole reason this call sits after the `migrateStack` loop rather than
+        // beside the read. Seeding from the raw ids would credit the player for
+        // eighteen items they never touched and permanently list the recipes
+        // that follow from them.
+        seedSeenFromCarried(player);
     } else {
         // An older world still: everything but what it was carrying, which it
         // never stored. The inventory and the selected slot keep their defaults,
@@ -1636,6 +1821,12 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         player.food = legacy.food;
         player.saturation = legacy.saturation;
         player.exhaustion = legacy.exhaustion;
+        // Nothing for the seeding to find - a version 2 file holds no stacks at
+        // all - and it is called anyway. The rung that omits it is the one that
+        // gets copied when the next legacy shape is written, and a ledger left
+        // silently at zero looks exactly like a ledger that was seeded and
+        // found nothing.
+        seedSeenFromCarried(player);
     }
 
     if (!file) {
@@ -1677,6 +1868,18 @@ std::optional<SavedPlayer> WorldStore::loadPlayer() const {
         sanitiseStack(worn);
     }
     sanitiseChest(player.enderChest);
+    // **The same trust boundary, for the ledger.** `seenMark` cannot set a bit
+    // above `kLastItem`, so anything this build produced is already clean - but
+    // a file written by a build with a longer roster carries bits for ids this
+    // one has no name for, and leaving them set would let `seenHas` answer for
+    // an item outside the enum. Trimmed rather than refused, for the same
+    // reason the stacks above are: an unknown bit has a safe substitute, which
+    // is not having it.
+    //
+    // It sits here rather than in the rungs because it belongs to *every* path
+    // including the current-version one, which is the only path that reads
+    // these bits off a disk at all.
+    seenTrimToRoster(player.seenItems);
     // **Forgotten rather than refused, and for a sharper reason than the rest.**
     //
     // A duration that is not a number is not merely odd, it is *permanent*:

@@ -89,75 +89,75 @@
     - **1989** &middot; Text
     - **2001** &middot; Hotbar
     - **2011** &middot; The catalogue card
-    - **2037** &middot; Transparency
-    - **2041** &middot; Startup
-  - **2069** &middot; Terrain Generation
-    - **2073** &middot; Biomes
-    - **2085** &middot; The column, top to bottom
-    - **2091** &middot; Ores
-    - **2111** &middot; Caves
-    - **2119** &middot; Structures
-    - **2133** &middot; Villages
-    - **2161** &middot; Chest loot
-    - **2183** &middot; Block shapes
-  - **2222** &middot; Water
-    - **2236** &middot; How a water surface is drawn
-  - **2256** &middot; Lava, fire and TNT
-    - **2297** &middot; Waterlogging
-    - **2312** &middot; Cutout blocks
-    - **2324** &middot; Flow
-    - **2336** &middot; Drawing it
-  - **2344** &middot; Falling blocks
-  - **2358** &middot; Cut shapes: stairs, slabs, walls, fences, gates, carpets and panes
-    - **2380** &middot; Signs and banners are the same trick
-  - **2396** &middot; Redstone components
-  - **2410** &middot; Collectibles
-  - **2423** &middot; Projectiles
-    - **2457** &middot; Two screen layers, plus a third for the cursor
-  - **2467** &middot; Ladders, vines and the third table run
-    - **2471** &middot; Glass, and where its transparency actually lives
-    - **2497** &middot; Modelled blocks
-    - **2524** &middot; Every block is checked against the reference's own model
-    - **2548** &middot; A dropped block is a miniature of the block
-    - **2567** &middot; Per-block tables are swept at compile time, and the stride is why it fits
-  - **2589** &middot; World Persistence
-    - **2625** &middot; When a save happens
-  - **2641** &middot; Rendering Statistics
-    - **2647** &middot; Diagnostics overlay
-  - **2661** &middot; Sun, moon and sky
-    - **2691** &middot; The sky is a gradient, written by the lighting pass
-    - **2711** &middot; Rain on a surface, and shafts under water
-    - **2717** &middot; Resolution scaling
-  - **2727** &middot; Clouds
-  - **2750** &middot; Weather
-    - **2760** &middot; The falling curtain
-    - **2778** &middot; Lightning
-    - **2791** &middot; Snow settling and ice forming
-  - **2805** &middot; Particles
-  - **2825** &middot; Wind and foliage
-  - **2868** &middot; Image quality
-  - **2884** &middot; Cast shadows
-  - **2915** &middot; Lighting
-    - **2937** &middot; Smooth lighting and ambient occlusion
-  - **2951** &middot; Meshing
-    - **2965** &middot; What the mesher is given
-    - **2971** &middot; The distance tier (`detail_distance`)
-    - **2990** &middot; Keeping the boundary honest while moving
-  - **3021** &middot; Culling
-  - **3033** &middot; Settings
-  - **3086** &middot; Threading
-    - **3091** &middot; What runs where
-    - **3102** &middot; Surviving the world's destruction
-    - **3108** &middot; Stale results
-  - **3123** &middot; Chunk Streaming
-    - **3145** &middot; Not stalling the GPU
-    - **3153** &middot; Watching for leaks
-    - **3166** &middot; Getting geometry onto the GPU
-  - **3182** &middot; GPU Memory Ownership
-    - **3190** &middot; Buffers are sub-allocated
-  - **3208** &middot; Runtime Behavior
-  - **3221** &middot; Current Validation Baseline
-  - **3245** &middot; Update Discipline
+    - **2051** &middot; Transparency
+    - **2055** &middot; Startup
+  - **2083** &middot; Terrain Generation
+    - **2087** &middot; Biomes
+    - **2099** &middot; The column, top to bottom
+    - **2105** &middot; Ores
+    - **2125** &middot; Caves
+    - **2133** &middot; Structures
+    - **2147** &middot; Villages
+    - **2175** &middot; Chest loot
+    - **2197** &middot; Block shapes
+  - **2236** &middot; Water
+    - **2250** &middot; How a water surface is drawn
+  - **2270** &middot; Lava, fire and TNT
+    - **2311** &middot; Waterlogging
+    - **2326** &middot; Cutout blocks
+    - **2338** &middot; Flow
+    - **2350** &middot; Drawing it
+  - **2358** &middot; Falling blocks
+  - **2372** &middot; Cut shapes: stairs, slabs, walls, fences, gates, carpets and panes
+    - **2394** &middot; Signs and banners are the same trick
+  - **2410** &middot; Redstone components
+  - **2424** &middot; Collectibles
+  - **2437** &middot; Projectiles
+    - **2471** &middot; Two screen layers, plus a third for the cursor
+  - **2481** &middot; Ladders, vines and the third table run
+    - **2485** &middot; Glass, and where its transparency actually lives
+    - **2511** &middot; Modelled blocks
+    - **2538** &middot; Every block is checked against the reference's own model
+    - **2562** &middot; A dropped block is a miniature of the block
+    - **2581** &middot; Per-block tables are swept at compile time, and the stride is why it fits
+  - **2603** &middot; World Persistence
+    - **2639** &middot; When a save happens
+  - **2655** &middot; Rendering Statistics
+    - **2661** &middot; Diagnostics overlay
+  - **2675** &middot; Sun, moon and sky
+    - **2705** &middot; The sky is a gradient, written by the lighting pass
+    - **2725** &middot; Rain on a surface, and shafts under water
+    - **2731** &middot; Resolution scaling
+  - **2741** &middot; Clouds
+  - **2764** &middot; Weather
+    - **2774** &middot; The falling curtain
+    - **2792** &middot; Lightning
+    - **2805** &middot; Snow settling and ice forming
+  - **2819** &middot; Particles
+  - **2839** &middot; Wind and foliage
+  - **2882** &middot; Image quality
+  - **2898** &middot; Cast shadows
+  - **2929** &middot; Lighting
+    - **2951** &middot; Smooth lighting and ambient occlusion
+  - **2965** &middot; Meshing
+    - **2979** &middot; What the mesher is given
+    - **2985** &middot; The distance tier (`detail_distance`)
+    - **3004** &middot; Keeping the boundary honest while moving
+  - **3035** &middot; Culling
+  - **3047** &middot; Settings
+  - **3100** &middot; Threading
+    - **3105** &middot; What runs where
+    - **3116** &middot; Surviving the world's destruction
+    - **3122** &middot; Stale results
+  - **3137** &middot; Chunk Streaming
+    - **3159** &middot; Not stalling the GPU
+    - **3167** &middot; Watching for leaks
+    - **3180** &middot; Getting geometry onto the GPU
+  - **3196** &middot; GPU Memory Ownership
+    - **3204** &middot; Buffers are sub-allocated
+  - **3222** &middot; Runtime Behavior
+  - **3235** &middot; Current Validation Baseline
+  - **3259** &middot; Update Discipline
 
 <!-- /INDEX -->
 
@@ -2027,6 +2027,20 @@ The inventory and crafting-table screens draw a **second card** to the left of t
 > ⚠️ **The recipe count here contradicts `CRAFTABLE.md` by 308 and neither is sourced — flagged 2026-08-19 10:39, not silently rewritten.** This paragraph says **1152**, the sentence below it says **1343 entries**, and `CRAFTABLE.md` says **1460 recipes** (of which 779 fit a 2×2) from a 2026-08-11 startup log. Both documents are consulted when planning, so a reader sizing a screen, a scan budget or a milestone gets a different answer depending on which one they opened. **They may be counting different things** — recipes versus catalogue entries versus craftable items, and 1343 sitting between them suggests exactly that — but no document says which, and that is the defect. **Nothing here can settle it**: it needs the game run or a compile-time probe, both unavailable under tonight's hardware throttle. *This becomes false the moment either figure is re-measured; whoever does it should say what the number counts, then delete this note rather than adding a fourth figure.* It uses the full 3×3 grid, so a recipe you could only make at a table is still learned by holding its ingredients. Until this existed the survival card listed **all 1343 entries** and merely greyed out the ones you could not make, which is a wall rather than a book.
 
 **`catalogueItems` takes the whole `CatalogueState`, not a tab and a string.** Three callers build this list — the drawing, the click that resolves a cell, and the scroll limit — and any disagreement between them lands clicks on the wrong item. One argument is one list.
+
+**The book widened on 2026-08-20: a recipe is now listed once ANY ONE of its ingredients has ever been held.** `CatalogueState::known` (everything ever *craftable*, i.e. all ingredients at once) is still there and is now a floor; the wider rule is `unlockedBySeen`, and `catalogueItems` unions the two. The player's own framing: pick up a log, drop it, and every log recipe stays visible — red, because it is not affordable, which is the state the four cell backgrounds already drew.
+
+**The ledger behind it is `game/src/item/SeenItems.hpp`**, a bitset over the **raw `ItemId` space**, append-only by construction — `seenMark` sets a bit and nothing anywhere clears one. Raw ids rather than catalogue positions, because `allItems()` is a filtered display list whose positions shift every time the roster grows, and a saved bit must not repoint. `ItemId::None` is deliberately unseeable, or a swept empty inventory would set bit 0 on the first frame of every world.
+
+> ⛔ **Its on-disk width is a FROZEN literal (`kSeenWordsOnDisk = 160`, 640 bytes, 531 ids of headroom), not derived from `kLastItem` — and that is load-bearing.** Derived, `sizeof(SavedPlayer)` became a function of `Item.hpp`: twenty more item ids would fire the size assert for somebody who added *no field*, and the doc block there explains what to do "if you add a member", which reads as inapplicable. Bumping the literal instead **compiles perfectly clean** and then makes `loadPlayer` short-read every existing save, with the next autosave overwriting it. The assert now says in its own message that widening this is a version bump with a new rung, never a new literal.
+
+**It is filled by a per-frame sweep of what the player is holding, not by a hook on pickup.** 41 compares — 36 slots, 4 worn, the cursor — at the end of the frame loop. There are roughly fifteen ways an item reaches the bag and `Inventory::add` covers about half; `slots::leftClick`, `quickMove`, drag-distribute, double-click gather, craft-to-cursor and furnace output all bypass it, so hooking each is `CLAUDE.md` bug shape #14. Because the set is append-only and idempotent, sweeping what is *currently* held is provably equivalent and has one owner. **Gated on `!creative`**: creative grants a full hotbar, marking is irreversible, and over-marking would destroy the book's meaning permanently while under-marking self-heals the first time the item is really held.
+
+**`player.dat` is at version 9 for this** (`SavedPlayer` 1268 → 1908 bytes), with a `LegacyPlayerV8` rung and the ladder still contiguous 2..9. **All seven legacy rungs seed the ledger from the record's own inventory, armour and ender chest**, so an existing world does not open with an empty book — it under-counts on purpose (items already spent are not credited) and cannot over-count, which is the same asymmetry `seedSeenFromCarried` states for itself.
+
+**Clicking a recipe in survival ghosts it into the crafting grid** (`INTERFACE.md` slice 8). `previewFor` returns the cells laid out **at the screen's grid width** — shaped patterns are stored tight at their *own* width and must be re-indexed, and a shapeless recipe stores its ingredient *count* in `width` — plus a per-cell `missing[]` measured against bag **+ grid + cursor**, so laying ingredients in does not turn their own cells red. It prefers the first recipe the player can actually satisfy and falls back to declaration order: torch is declared charcoal-then-coal, so a coal-holding player was otherwise shown a charcoal ghost the same screen had just drawn as craftable.
+
+> ⚠️ **A cell the player lacks gets the red wash and nothing else. There is no "ghost" dimming, and adding one back was tried and rejected in play.** A grey veil over affordable ghosts made them *"too light and hard to see"* with *"a different grey backdrop for no reason"* — it spent contrast on the half of the feature that needs no mark. An affordable cell is drawn by the same `appendStack` as a real item because looking identical to a placed item is what says the recipe is within reach. If a preview cue is ever wanted, `INTERFACE.md` §3.1b puts it on the **output slot**, not on every cell.
 
 **Not built yet:** the filter toggle, click-to-fill and groups - `INTERFACE.md` §7 slices 6, 8 and 9. Slices 1-5 and 7 are built.
 
